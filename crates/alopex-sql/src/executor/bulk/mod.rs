@@ -371,7 +371,12 @@ fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
         ResolvedType::Float => Ok(LogicalType::Float32),
         ResolvedType::Double => Ok(LogicalType::Float64),
         ResolvedType::Boolean => Ok(LogicalType::Bool),
-        ResolvedType::Text | ResolvedType::Blob | ResolvedType::Json => Ok(LogicalType::Binary),
+        ResolvedType::Text
+        | ResolvedType::Blob
+        | ResolvedType::Json
+        | ResolvedType::Array(_)
+        | ResolvedType::Map { .. }
+        | ResolvedType::Struct(_) => Ok(LogicalType::Binary),
         ResolvedType::Null => Err(ExecutorError::Columnar(
             "NULL column type is not supported for columnar storage".into(),
         )),
@@ -625,6 +630,41 @@ fn build_column(
                         return Err(ExecutorError::BulkLoad(format!(
                             "type mismatch for column '{}': expected Json, got {}",
                             col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Binary(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(Vec::new());
+                    }
+                    value
+                        if matches!(
+                            value,
+                            SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_)
+                        ) =>
+                    {
+                        validity.push(true);
+                        values.push(crate::storage::RowCodec::encode(std::slice::from_ref(
+                            value,
+                        )));
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected {}, got {}",
+                            col_meta.name,
+                            col_meta.data_type.type_name(),
                             other.type_name()
                         )));
                     }
@@ -923,6 +963,9 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
         | ResolvedType::Decimal { .. }
         | ResolvedType::Json => {
             crate::executor::evaluator::coerce_value(SqlValue::Text(trimmed.to_string()), ty)
+        }
+        ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+            crate::executor::evaluator::nested::parse_typed_json(trimmed, ty)
         }
         ResolvedType::Text => Ok(SqlValue::Text(trimmed.to_string())),
         ResolvedType::Blob => Ok(SqlValue::Blob(trimmed.as_bytes().to_vec())),

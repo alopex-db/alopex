@@ -178,6 +178,12 @@ fn normalize_value(value: &SqlValue) -> Result<Value, String> {
         SqlValue::Decimal(value) => Ok(json!(value.to_string())),
         SqlValue::Json(value) => serde_json::from_str(value.as_str())
             .map_err(|error| format!("invalid native JSON value: {error}")),
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => serde_json::from_str(
+            &value
+                .nested_json_text()
+                .ok_or_else(|| "nested value cannot be normalized".to_string())?,
+        )
+        .map_err(|error| format!("invalid nested JSON mapping: {error}")),
         SqlValue::Blob(_) => {
             Err("BLOB 値の正規化表現は未定義(コーパスに BLOB を含めない前提)".to_string())
         }

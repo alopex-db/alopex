@@ -188,6 +188,12 @@ pub enum PersistedType {
         scale: u8,
     },
     Json,
+    Array(Box<PersistedType>),
+    Map {
+        key: Box<PersistedType>,
+        value: Box<PersistedType>,
+    },
+    Struct(Vec<(String, PersistedType)>),
 }
 
 impl From<ResolvedType> for PersistedType {
@@ -206,6 +212,17 @@ impl From<ResolvedType> for PersistedType {
             ResolvedType::Interval => Self::Interval,
             ResolvedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
             ResolvedType::Json => Self::Json,
+            ResolvedType::Array(element) => Self::Array(Box::new((*element).into())),
+            ResolvedType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            ResolvedType::Struct(fields) => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -231,6 +248,17 @@ impl From<PersistedType> for ResolvedType {
             PersistedType::Interval => Self::Interval,
             PersistedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
             PersistedType::Json => Self::Json,
+            PersistedType::Array(element) => Self::Array(Box::new((*element).into())),
+            PersistedType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            PersistedType::Struct(fields) => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             PersistedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -3228,5 +3256,26 @@ mod tests {
         assert_eq!(alopex, "\"ALOPEX\"");
         assert_eq!(parquet, "\"PARQUET\"");
         assert_eq!(delta, "\"DELTA\"");
+    }
+
+    #[test]
+    fn nested_catalog_types_roundtrip_recursively() {
+        let data_type = ResolvedType::Struct(vec![
+            (
+                "items".into(),
+                ResolvedType::Array(Box::new(ResolvedType::Integer)),
+            ),
+            (
+                "attrs".into(),
+                ResolvedType::Map {
+                    key: Box::new(ResolvedType::Text),
+                    value: Box::new(ResolvedType::BigInt),
+                },
+            ),
+        ]);
+        let persisted = PersistedType::from(data_type.clone());
+        let bytes = bincode::serialize(&persisted).unwrap();
+        let decoded: PersistedType = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(ResolvedType::from(decoded), data_type);
     }
 }

@@ -31,7 +31,7 @@ type
     tkHnsw, tkBtree, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
-    tkStar, tkComma, tkDot, tkSemicolon
+    tkStar, tkComma, tkDot, tkColon, tkSemicolon
     tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
@@ -283,6 +283,9 @@ proc nextToken*(lex: var Lexer): Token =
   of '=':
     discard lex.advance()
     return lex.makeToken(tkEq, "=", startLine, startCol)
+  of ':':
+    discard lex.advance()
+    return lex.makeToken(tkColon, ":", startLine, startCol)
   of '<':
     discard lex.advance()
     if lex.peek() == '<':

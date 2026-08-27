@@ -88,6 +88,9 @@ fn arrow_type_for(ty: &ResolvedType) -> DfResult<DataType> {
         ResolvedType::Double => Ok(DataType::Float64),
         ResolvedType::Text => Ok(DataType::Utf8),
         ResolvedType::Json => Ok(DataType::Utf8),
+        ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+            Ok(DataType::Utf8)
+        }
         ResolvedType::Blob => Ok(DataType::Binary),
         ResolvedType::Boolean => Ok(DataType::Boolean),
         ResolvedType::Timestamp => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
@@ -135,6 +138,9 @@ impl ColumnBuilder {
             ResolvedType::Double => ColumnBuilderKind::Float64(Vec::with_capacity(row_count)),
             ResolvedType::Text => ColumnBuilderKind::Utf8(Vec::with_capacity(row_count)),
             ResolvedType::Json => ColumnBuilderKind::Utf8(Vec::with_capacity(row_count)),
+            ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+                ColumnBuilderKind::Utf8(Vec::with_capacity(row_count))
+            }
             ResolvedType::Blob => ColumnBuilderKind::Binary(Vec::with_capacity(row_count)),
             ResolvedType::Boolean => ColumnBuilderKind::Boolean(Vec::with_capacity(row_count)),
             ResolvedType::Timestamp => ColumnBuilderKind::Timestamp(Vec::with_capacity(row_count)),
@@ -183,6 +189,15 @@ impl ColumnBuilder {
             }
             (ColumnBuilderKind::Utf8(values), SqlValue::Json(v)) => {
                 values.push(Some(v.to_string()));
+                Ok(())
+            }
+            (
+                ColumnBuilderKind::Utf8(values),
+                value @ (SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_)),
+            ) => {
+                values.push(Some(value.nested_json_text().ok_or_else(|| {
+                    DataFrameError::invalid_operation("nested value cannot be mapped to Arrow UTF8")
+                })?));
                 Ok(())
             }
             (ColumnBuilderKind::Binary(values), SqlValue::Blob(v)) => {

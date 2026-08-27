@@ -212,6 +212,8 @@ pub enum FromItem {
         /// preceding FROM items either way (implicit LATERAL).
         #[serde(default)]
         lateral: bool,
+        #[serde(default)]
+        with_ordinality: bool,
         span: Span,
     },
 }

@@ -1600,7 +1600,7 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
     }
 
     match function {
-        TableFunctionKind::Unnest => {
+        TableFunctionKind::Unnest | TableFunctionKind::UnnestWithOrdinality => {
             let Some(argument) = values.into_iter().next() else {
                 return Err(ExecutorError::InvalidOperation {
                     operation: "UNNEST".into(),
@@ -1613,12 +1613,29 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                 SqlValue::Vector(elements) => Ok(elements
                     .into_iter()
                     .enumerate()
-                    .map(|(index, element)| Row::new(index as u64, vec![SqlValue::Float(element)]))
+                    .map(|(index, element)| {
+                        let mut values = vec![SqlValue::Float(element)];
+                        if function == TableFunctionKind::UnnestWithOrdinality {
+                            values.push(SqlValue::BigInt(index as i64 + 1));
+                        }
+                        Row::new(index as u64, values)
+                    })
+                    .collect()),
+                SqlValue::Array(elements) => Ok(elements
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, element)| {
+                        let mut values = vec![element];
+                        if function == TableFunctionKind::UnnestWithOrdinality {
+                            values.push(SqlValue::BigInt(index as i64 + 1));
+                        }
+                        Row::new(index as u64, values)
+                    })
                     .collect()),
                 other => Err(ExecutorError::InvalidOperation {
                     operation: "UNNEST".into(),
                     reason: format!(
-                        "UNNEST requires a VECTOR argument, found {}",
+                        "UNNEST requires an ARRAY or VECTOR argument, found {}",
                         other.type_name()
                     ),
                 }),

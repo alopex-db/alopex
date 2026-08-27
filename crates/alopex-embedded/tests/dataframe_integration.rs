@@ -87,6 +87,23 @@ fn dataframe_query_maps_native_json_to_canonical_utf8() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn dataframe_query_maps_nested_values_to_canonical_utf8() {
+    let db = Database::new();
+    let frame = db
+        .query_df("SELECT ARRAY[1, NULL] AS items, MAP(ARRAY['a'], ARRAY[1]) AS attrs")
+        .unwrap();
+
+    let items = frame.column("items").unwrap().to_arrow();
+    let items = items[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(items.value(0), "[1,null]");
+
+    let attrs = frame.column("attrs").unwrap().to_arrow();
+    let attrs = attrs[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(attrs.value(0), r#"{"a":1}"#);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn dataframe_query_join_sort_supported_types() {
     let db = Database::new();
     db.execute_sql(

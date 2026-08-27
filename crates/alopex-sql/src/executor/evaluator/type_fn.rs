@@ -38,6 +38,9 @@ fn eval_pg_typeof(values: &[SqlValue]) -> Result<SqlValue> {
         SqlValue::Decimal(_) => "numeric",
         SqlValue::Json(_) => "jsonb",
         SqlValue::Vector(_) => "vector",
+        SqlValue::Array(_) => "array",
+        SqlValue::Map(_) => "map",
+        SqlValue::Struct(_) => "struct",
         SqlValue::Null => "unknown",
     };
     Ok(SqlValue::Text(name.into()))

@@ -55,6 +55,7 @@ impl Arity {
 pub enum ReturnRule {
     Fixed(ResolvedType),
     FromArgs(fn(&[ResolvedType]) -> Result<ResolvedType, PlannerError>),
+    FromTypedArgs(fn(&[TypedExpr]) -> Result<ResolvedType, PlannerError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +192,229 @@ fn check_json_input(args: &[TypedExpr]) -> Result<(), PlannerError> {
         }
     }
     Ok(())
+}
+
+fn common_nested_type(
+    types: impl IntoIterator<Item = ResolvedType>,
+) -> Result<ResolvedType, PlannerError> {
+    let mut common = ResolvedType::Null;
+    for data_type in types {
+        common = match (&common, &data_type) {
+            (ResolvedType::Null, _) => data_type,
+            (_, ResolvedType::Null) => common,
+            (left, right) if left == right => common,
+            (ResolvedType::Integer, ResolvedType::BigInt)
+            | (ResolvedType::BigInt, ResolvedType::Integer) => ResolvedType::BigInt,
+            (
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float,
+                ResolvedType::Double,
+            )
+            | (
+                ResolvedType::Double,
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float,
+            ) => ResolvedType::Double,
+            (ResolvedType::Integer, ResolvedType::Float)
+            | (ResolvedType::Float, ResolvedType::Integer) => ResolvedType::Float,
+            (ResolvedType::BigInt, ResolvedType::Float)
+            | (ResolvedType::Float, ResolvedType::BigInt) => ResolvedType::Double,
+            _ => {
+                return Err(PlannerError::invalid_expression(
+                    "nested values require a common element type",
+                ));
+            }
+        };
+    }
+    Ok(common)
+}
+
+fn return_array_value(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type(
+        args.to_vec(),
+    )?)))
+}
+
+fn return_integer_array(_args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(ResolvedType::Integer)))
+}
+
+fn return_text_array(_args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(ResolvedType::Text)))
+}
+
+fn array_element(data_type: &ResolvedType) -> Result<ResolvedType, PlannerError> {
+    match data_type {
+        ResolvedType::Array(element) => Ok((**element).clone()),
+        ResolvedType::Null => Ok(ResolvedType::Null),
+        other => Err(PlannerError::invalid_expression(format!(
+            "expected ARRAY, found {other}"
+        ))),
+    }
+}
+
+fn check_array_first(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    array_element(&args[0].resolved_type).map(|_| ())
+}
+
+fn check_array_append(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        array_element(&args[0].resolved_type)?,
+        args[1].resolved_type.clone(),
+    ])
+    .map(|_| ())
+}
+
+fn check_array_prepend(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        args[0].resolved_type.clone(),
+        array_element(&args[1].resolved_type)?,
+    ])
+    .map(|_| ())
+}
+
+fn check_array_replace(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        array_element(&args[0].resolved_type)?,
+        args[1].resolved_type.clone(),
+        args[2].resolved_type.clone(),
+    ])
+    .map(|_| ())
+}
+
+fn check_array_slice(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_array_first(args)?;
+    for arg in &args[1..] {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+        ) {
+            return Err(PlannerError::invalid_expression(
+                "ARRAY slice bounds must be INTEGER",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_array_pair(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    let left = array_element(&args[0].resolved_type)?;
+    let right = array_element(&args[1].resolved_type)?;
+    common_nested_type([left, right]).map(|_| ())
+}
+
+fn return_array_first(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(array_element(&args[0])?)))
+}
+
+fn return_array_append(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        array_element(&args[0])?,
+        args[1].clone(),
+    ])?)))
+}
+
+fn return_array_prepend(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        args[0].clone(),
+        array_element(&args[1])?,
+    ])?)))
+}
+
+fn return_array_cat(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        array_element(&args[0])?,
+        array_element(&args[1])?,
+    ])?)))
+}
+
+fn check_map(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    array_element(&args[0].resolved_type)?;
+    array_element(&args[1].resolved_type)?;
+    Ok(())
+}
+
+fn check_array_text_tail(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_array_first(args)?;
+    check_text(&args[1..])
+}
+
+fn return_map(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Map {
+        key: Box::new(array_element(&args[0])?),
+        value: Box::new(array_element(&args[1])?),
+    })
+}
+
+fn check_struct_pack(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if !args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "STRUCT_PACK expects name/value pairs",
+        ));
+    }
+    for name in args.iter().step_by(2) {
+        if !matches!(name.kind, TypedExprKind::Literal(Literal::String(_))) {
+            return Err(PlannerError::invalid_expression(
+                "STRUCT_PACK field names must be string literals",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn return_struct(args: &[TypedExpr]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Struct(
+        args.chunks_exact(2)
+            .map(|pair| {
+                let TypedExprKind::Literal(Literal::String(name)) = &pair[0].kind else {
+                    unreachable!("checked by check_struct_pack")
+                };
+                (name.clone(), pair[1].resolved_type.clone())
+            })
+            .collect(),
+    ))
+}
+
+fn check_subscript(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    match &args[0].resolved_type {
+        ResolvedType::Array(_) => {
+            if matches!(
+                args[1].resolved_type,
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+            ) {
+                Ok(())
+            } else {
+                Err(PlannerError::invalid_expression(
+                    "ARRAY subscript must be INTEGER",
+                ))
+            }
+        }
+        ResolvedType::Map { key, .. } if args[1].resolved_type.can_cast_to(key) => Ok(()),
+        ResolvedType::Struct(_) if matches!(args[1].resolved_type, ResolvedType::Text) => Ok(()),
+        ResolvedType::Null => Ok(()),
+        other => Err(PlannerError::invalid_expression(format!(
+            "cannot subscript {other}"
+        ))),
+    }
+}
+
+fn return_subscript(args: &[TypedExpr]) -> Result<ResolvedType, PlannerError> {
+    match &args[0].resolved_type {
+        ResolvedType::Array(element) => Ok((**element).clone()),
+        ResolvedType::Map { value, .. } => Ok((**value).clone()),
+        ResolvedType::Struct(fields) => {
+            let TypedExprKind::Literal(Literal::String(name)) = &args[1].kind else {
+                return Ok(ResolvedType::Null);
+            };
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, data_type)| data_type.clone())
+                .ok_or_else(|| {
+                    PlannerError::invalid_expression(format!("unknown struct field '{name}'"))
+                })
+        }
+        ResolvedType::Null => Ok(ResolvedType::Null),
+        _ => unreachable!("checked by check_subscript"),
+    }
 }
 
 fn check_json_selector(args: &[TypedExpr]) -> Result<(), PlannerError> {
@@ -571,6 +795,102 @@ const fn sig_meta(
 }
 
 static SIGNATURES: &[ScalarSignature] = &[
+    sig(
+        "array_value",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::FromArgs(return_array_value),
+    ),
+    sig(
+        "list_value",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::FromArgs(return_array_value),
+    ),
+    sig(
+        "array_append",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_array_append),
+    ),
+    sig(
+        "array_prepend",
+        Arity::Exact(2),
+        check_array_prepend,
+        ReturnRule::FromArgs(return_array_prepend),
+    ),
+    sig(
+        "array_cat",
+        Arity::Exact(2),
+        check_array_pair,
+        ReturnRule::FromArgs(return_array_cat),
+    ),
+    sig(
+        "array_remove",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_array_first),
+    ),
+    sig(
+        "array_replace",
+        Arity::Exact(3),
+        check_array_replace,
+        ReturnRule::FromArgs(return_array_first),
+    ),
+    sig(
+        "array_length",
+        Arity::Exact(1),
+        check_array_first,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "array_position",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "array_positions",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_integer_array),
+    ),
+    sig(
+        "string_to_array",
+        Arity::Range(2, 3),
+        check_text,
+        ReturnRule::FromArgs(return_text_array),
+    ),
+    sig(
+        "array_to_string",
+        Arity::Range(2, 3),
+        check_array_text_tail,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "map",
+        Arity::Exact(2),
+        check_map,
+        ReturnRule::FromArgs(return_map),
+    ),
+    sig(
+        "struct_pack",
+        Arity::Variadic(0),
+        check_struct_pack,
+        ReturnRule::FromTypedArgs(return_struct),
+    ),
+    sig(
+        "array_subscript",
+        Arity::Exact(2),
+        check_subscript,
+        ReturnRule::FromTypedArgs(return_subscript),
+    ),
+    sig(
+        "array_slice",
+        Arity::Exact(3),
+        check_array_slice,
+        ReturnRule::FromArgs(return_array_first),
+    ),
     sig(
         "jsonb_extract",
         Arity::Exact(2),

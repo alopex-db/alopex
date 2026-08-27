@@ -7,6 +7,8 @@ use super::value::SqlValue;
 
 const MAX_INLINE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB guard for Text/Blob payloads
 const MAX_VECTOR_LEN: usize = 4 * 1024 * 1024; // 4 million elements (~16 MiB of f32)
+const MAX_NESTED_ELEMENTS: usize = 100_000;
+const MAX_NESTED_DEPTH: usize = 16;
 
 /// RowCodec converts between `Vec<SqlValue>` and a binary TLV format with a null bitmap.
 ///
@@ -174,10 +176,63 @@ fn encode_value(value: &SqlValue, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(bytes);
         }
+        SqlValue::Array(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                encode_nested(value, buf);
+            }
+        }
+        SqlValue::Map(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (key, value) in values {
+                encode_nested(key, buf);
+                encode_nested(value, buf);
+            }
+        }
+        SqlValue::Struct(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (name, value) in values {
+                buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                buf.extend_from_slice(name.as_bytes());
+                encode_nested(value, buf);
+            }
+        }
     }
 }
 
 fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
+    decode_value_depth(tag, bytes, cursor, 0)
+}
+
+fn encode_nested(value: &SqlValue, buf: &mut Vec<u8>) {
+    let mut encoded = vec![value.type_tag()];
+    encode_value(value, &mut encoded);
+    buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&encoded);
+}
+
+fn decode_nested(bytes: &[u8], depth: usize) -> Result<SqlValue> {
+    let Some((&tag, payload)) = bytes.split_first() else {
+        return Err(StorageError::CorruptedData {
+            reason: "missing nested type tag".into(),
+        });
+    };
+    let mut cursor = 0;
+    let value = decode_value_depth(tag, payload, &mut cursor, depth)?;
+    if cursor != payload.len() {
+        return Err(StorageError::CorruptedData {
+            reason: "trailing nested value bytes".into(),
+        });
+    }
+    Ok(value)
+}
+
+fn decode_value_depth(tag: u8, bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<SqlValue> {
+    if depth > MAX_NESTED_DEPTH {
+        return Err(StorageError::CorruptedData {
+            reason: "nested value exceeds depth 16".into(),
+        });
+    }
     let mut take = |len: usize, reason: &'static str| -> Result<&[u8]> {
         let end = cursor
             .checked_add(len)
@@ -320,6 +375,80 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
                 },
             )?))
         }
+        0x0f => {
+            let len =
+                u32::from_le_bytes(take(4, "truncated Array length")?.try_into().unwrap()) as usize;
+            if len > MAX_NESTED_ELEMENTS {
+                return Err(StorageError::CorruptedData {
+                    reason: format!("array length exceeds limit: {len}"),
+                });
+            }
+            let mut values = Vec::with_capacity(len);
+            for _ in 0..len {
+                let size = u32::from_le_bytes(
+                    take(4, "truncated nested value length")?
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                values.push(decode_nested(
+                    take(size, "truncated nested value")?,
+                    depth + 1,
+                )?);
+            }
+            Ok(SqlValue::Array(values))
+        }
+        0x10 => {
+            let len =
+                u32::from_le_bytes(take(4, "truncated Map length")?.try_into().unwrap()) as usize;
+            if len > MAX_NESTED_ELEMENTS {
+                return Err(StorageError::CorruptedData {
+                    reason: format!("map length exceeds limit: {len}"),
+                });
+            }
+            let mut values = Vec::with_capacity(len);
+            for _ in 0..len {
+                let key_size =
+                    u32::from_le_bytes(take(4, "truncated map key length")?.try_into().unwrap())
+                        as usize;
+                let key = decode_nested(take(key_size, "truncated map key")?, depth + 1)?;
+                let value_size =
+                    u32::from_le_bytes(take(4, "truncated map value length")?.try_into().unwrap())
+                        as usize;
+                let value = decode_nested(take(value_size, "truncated map value")?, depth + 1)?;
+                values.push((key, value));
+            }
+            Ok(SqlValue::Map(values))
+        }
+        0x11 => {
+            let len = u32::from_le_bytes(take(4, "truncated Struct length")?.try_into().unwrap())
+                as usize;
+            if len > MAX_NESTED_ELEMENTS {
+                return Err(StorageError::CorruptedData {
+                    reason: format!("struct length exceeds limit: {len}"),
+                });
+            }
+            let mut values = Vec::with_capacity(len);
+            for _ in 0..len {
+                let name_len = u32::from_le_bytes(
+                    take(4, "truncated struct field name length")?
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let name = std::str::from_utf8(take(name_len, "truncated struct field name")?)
+                    .map_err(|_| StorageError::CorruptedData {
+                        reason: "invalid UTF-8 in struct field name".into(),
+                    })?
+                    .to_string();
+                let value_size = u32::from_le_bytes(
+                    take(4, "truncated struct field length")?
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let value = decode_nested(take(value_size, "truncated struct field")?, depth + 1)?;
+                values.push((name, value));
+            }
+            Ok(SqlValue::Struct(values))
+        }
         other => Err(StorageError::CorruptedData {
             reason: format!("unknown type tag: 0x{other:02x}"),
         }),
@@ -358,6 +487,44 @@ fn ensure_type(value: SqlValue, expected: &ResolvedType) -> Result<SqlValue> {
             }
         }
         (Json, SqlValue::Json(value)) => Ok(SqlValue::Json(value)),
+        (Array(element), SqlValue::Array(values)) => values
+            .into_iter()
+            .map(|value| ensure_type(value, element))
+            .collect::<Result<Vec<_>>>()
+            .map(SqlValue::Array),
+        (
+            Map {
+                key: key_type,
+                value: value_type,
+            },
+            SqlValue::Map(values),
+        ) => values
+            .into_iter()
+            .map(|(key, value)| {
+                if key.is_null() {
+                    return Err(StorageError::TypeMismatch {
+                        expected: "non-NULL map key".into(),
+                        actual: "Null".into(),
+                    });
+                }
+                Ok((ensure_type(key, key_type)?, ensure_type(value, value_type)?))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(SqlValue::Map),
+        (Struct(fields), SqlValue::Struct(values)) if fields.len() == values.len() => values
+            .into_iter()
+            .zip(fields)
+            .map(|((name, value), (expected_name, expected_type))| {
+                if name != *expected_name {
+                    return Err(StorageError::TypeMismatch {
+                        expected: expected_name.clone(),
+                        actual: name,
+                    });
+                }
+                Ok((name, ensure_type(value, expected_type)?))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(SqlValue::Struct),
         (Vector { dimension, .. }, SqlValue::Vector(values)) => {
             if values.len() as u32 == *dimension {
                 Ok(SqlValue::Vector(values))
@@ -453,6 +620,12 @@ mod tests {
                 micros: 3,
             },
             SqlValue::Decimal(crate::storage::DecimalValue::new(-12345, 2)),
+            SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]),
+            SqlValue::Map(vec![(SqlValue::Text("a".into()), SqlValue::Integer(1))]),
+            SqlValue::Struct(vec![(
+                "items".into(),
+                SqlValue::Array(vec![SqlValue::Text("x".into())]),
+            )]),
         ];
 
         let encoded = RowCodec::encode(&row);

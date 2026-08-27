@@ -164,6 +164,9 @@ message Value {
     Interval interval_value = 12;
     Decimal decimal_value = 13;
     string json_value = 14;
+    string array_json_value = 15;
+    string map_json_value = 16;
+    string struct_json_value = 17;
   }
 }
 

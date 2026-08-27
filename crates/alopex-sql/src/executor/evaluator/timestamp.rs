@@ -40,6 +40,21 @@ pub(crate) fn try_coerce_value(value: SqlValue, target_type: &ResolvedType) -> R
 /// has executed, so the DML boundary uses this function to enforce the same
 /// storage representation as an expression-level CAST.
 pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Result<SqlValue> {
+    coerce_value_depth(value, target_type, 0)
+}
+
+fn coerce_value_depth(
+    value: SqlValue,
+    target_type: &ResolvedType,
+    depth: usize,
+) -> Result<SqlValue> {
+    if depth > 16 {
+        return cast_failure(
+            value.type_name(),
+            target_type,
+            "nested value exceeds depth 16",
+        );
+    }
     match target_type {
         ResolvedType::Timestamp => coerce_timestamp(value),
         ResolvedType::Date => coerce_date(value),
@@ -55,6 +70,57 @@ pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Resul
         ResolvedType::Blob => coerce_blob(value),
         ResolvedType::Boolean => coerce_boolean(value),
         ResolvedType::Vector { dimension, .. } => coerce_vector(value, target_type, *dimension),
+        ResolvedType::Array(element_type) => match value {
+            SqlValue::Null => Ok(SqlValue::Null),
+            SqlValue::Array(values) if values.len() <= 100_000 => values
+                .into_iter()
+                .map(|value| coerce_value_depth(value, element_type, depth + 1))
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Array),
+            SqlValue::Array(_) => {
+                cast_failure("Array", target_type, "array exceeds 100000 elements")
+            }
+            value => cast_failure(value.type_name(), target_type, "expected ARRAY"),
+        },
+        ResolvedType::Map {
+            key: key_type,
+            value: value_type,
+        } => match value {
+            SqlValue::Null => Ok(SqlValue::Null),
+            SqlValue::Map(values) if values.len() <= 100_000 => values
+                .into_iter()
+                .map(|(key, value)| {
+                    if key.is_null() {
+                        return cast_failure("Null", target_type, "map keys must not be NULL");
+                    }
+                    Ok((
+                        coerce_value_depth(key, key_type, depth + 1)?,
+                        coerce_value_depth(value, value_type, depth + 1)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Map),
+            SqlValue::Map(_) => cast_failure("Map", target_type, "map exceeds 100000 entries"),
+            value => cast_failure(value.type_name(), target_type, "expected MAP"),
+        },
+        ResolvedType::Struct(fields) => match value {
+            SqlValue::Null => Ok(SqlValue::Null),
+            SqlValue::Struct(values) if values.len() == fields.len() => values
+                .into_iter()
+                .zip(fields)
+                .map(|((name, value), (expected_name, expected_type))| {
+                    if name != *expected_name {
+                        return cast_failure("Struct", target_type, "struct field name mismatch");
+                    }
+                    Ok((name, coerce_value_depth(value, expected_type, depth + 1)?))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Struct),
+            SqlValue::Struct(_) => {
+                cast_failure("Struct", target_type, "struct field count mismatch")
+            }
+            value => cast_failure(value.type_name(), target_type, "expected STRUCT"),
+        },
         ResolvedType::Null => {
             cast_failure(value.type_name(), target_type, "NULL is not a cast target")
         }

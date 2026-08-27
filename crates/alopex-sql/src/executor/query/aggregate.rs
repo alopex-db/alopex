@@ -108,6 +108,30 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             }
             Ok(())
         }
+        SqlValue::Array(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                encode_group_value(value, buf)?;
+            }
+            Ok(())
+        }
+        SqlValue::Map(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (key, value) in values {
+                encode_group_value(key, buf)?;
+                encode_group_value(value, buf)?;
+            }
+            Ok(())
+        }
+        SqlValue::Struct(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (name, value) in values {
+                buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                buf.extend_from_slice(name.as_bytes());
+                encode_group_value(value, buf)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1855,6 +1879,63 @@ impl Accumulator for BoolAccumulator {
 }
 
 #[derive(Debug, Clone)]
+struct ArrayAccumulator {
+    values: Vec<SqlValue>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+}
+
+impl ArrayAccumulator {
+    fn new(distinct: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+        }
+    }
+}
+
+impl Accumulator for ArrayAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let value = value.unwrap_or(SqlValue::Null);
+        if !self.distinct
+            || self
+                .seen
+                .insert(encode_group_key(std::slice::from_ref(&value))?)
+        {
+            self.values.push(value);
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::Array(self.values.clone())])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("ARRAY_AGG", state, 1)?;
+        let SqlValue::Array(values) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "ARRAY_AGG",
+                "partial state must be ARRAY",
+            ));
+        };
+        for value in values {
+            self.update(Some(value.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(SqlValue::Array(self.values.clone()))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
 struct JsonArrayAccumulator {
     values: Vec<SqlValue>,
     distinct: bool,
@@ -2048,6 +2129,7 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
         AggregateFunction::JsonGroupArray => Box::new(JsonArrayAccumulator::new(distinct, false)),
+        AggregateFunction::ArrayAgg => Box::new(ArrayAccumulator::new(distinct)),
         AggregateFunction::JsonGroupObject => Box::new(JsonObjectAccumulator::new(distinct, false)),
         AggregateFunction::JsonbAgg => Box::new(JsonArrayAccumulator::new(distinct, true)),
         AggregateFunction::JsonbObjectAgg => Box::new(JsonObjectAccumulator::new(distinct, true)),
@@ -2829,6 +2911,7 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]
         }
+        AggregateFunction::ArrayAgg => vec![agg.result_type.clone()],
         AggregateFunction::JsonGroupArray
         | AggregateFunction::JsonGroupObject
         | AggregateFunction::JsonbAgg
@@ -2932,6 +3015,7 @@ pub fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::ArrayAgg => format!("array_agg_{idx}"),
             AggregateFunction::JsonGroupArray => format!("json_group_array_{idx}"),
             AggregateFunction::JsonGroupObject => format!("json_group_object_{idx}"),
             AggregateFunction::JsonbAgg => format!("jsonb_agg_{idx}"),

@@ -16,6 +16,7 @@ pub enum AggregateFunction {
     StringAgg {
         separator: Option<String>,
     },
+    ArrayAgg,
     JsonGroupArray,
     JsonGroupObject,
     JsonbAgg,

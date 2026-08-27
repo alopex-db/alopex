@@ -191,6 +191,25 @@ pub(crate) fn sql_to_json(value: &SqlValue) -> Result<Value> {
         SqlValue::Boolean(value) => Value::Bool(*value),
         SqlValue::Decimal(value) => serde_json::from_str(&value.to_string())
             .map_err(|error| invalid("JSON", format!("invalid decimal value: {error}")))?,
+        SqlValue::Array(values) => {
+            Value::Array(values.iter().map(sql_to_json).collect::<Result<Vec<_>>>()?)
+        }
+        SqlValue::Map(values) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in values {
+                let SqlValue::Text(key) = key else {
+                    return Err(invalid("JSON", "JSON object keys must be TEXT"));
+                };
+                object.insert(key.clone(), sql_to_json(value)?);
+            }
+            Value::Object(object)
+        }
+        SqlValue::Struct(values) => Value::Object(
+            values
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), sql_to_json(value)?)))
+                .collect::<Result<_>>()?,
+        ),
         SqlValue::Blob(_)
         | SqlValue::Timestamp(_)
         | SqlValue::Vector(_)

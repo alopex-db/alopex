@@ -25,7 +25,8 @@ v0.8.10 value-type family to its production owners and required evidence. Its
 release gate rejects a target version until every required surface is complete.
 The [JSON-on-TEXT contract](sql-json-text.md) defines issue #160 separately
 because those functions reuse `TEXT`; the value-type catalog tracks native JSON
-in issue #161.
+in issue #161. The [nested SQL type contract](sql-nested-types.md) records the
+ARRAY/LIST/MAP/STRUCT semantics and public mapping boundaries for issue #162.
 
 ## Artifact identity
 
@@ -49,6 +50,7 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 - [DataFrame bounded and streaming contract](dataframe-streaming.md)
 - [Python embedded-local API](../crates/alopex-py/README.md)
 - [JSON-on-TEXT SQL contract](sql-json-text.md)
+- [Nested SQL types](sql-nested-types.md)
 - [v0.7.4 to v0.8 upgrade and recovery](upgrade-v0.7.4-to-v0.8.md)
 
 Post-release verification is intentionally `not_run` in every candidate report.

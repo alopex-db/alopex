@@ -146,6 +146,8 @@ impl Default for RecursiveCteLimits {
 pub enum TableFunctionKind {
     /// `UNNEST(vector)` — one row per element.
     Unnest,
+    /// `UNNEST(array) WITH ORDINALITY` — element and one-based position.
+    UnnestWithOrdinality,
     /// `GENERATE_SERIES(start, stop [, step])` over integers.
     GenerateSeries,
     /// `JSON_EACH(json [, path])` — immediate children of JSON TEXT.
@@ -169,7 +171,7 @@ impl TableFunctionKind {
     /// Canonical uppercase spelling used in messages and plan output.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Unnest => "UNNEST",
+            Self::Unnest | Self::UnnestWithOrdinality => "UNNEST",
             Self::GenerateSeries => "GENERATE_SERIES",
             Self::JsonEach => "JSON_EACH",
             Self::JsonTree => "JSON_TREE",
@@ -180,7 +182,7 @@ impl TableFunctionKind {
     /// the lowercase function name).
     pub fn default_relation_name(self) -> &'static str {
         match self {
-            Self::Unnest => "unnest",
+            Self::Unnest | Self::UnnestWithOrdinality => "unnest",
             Self::GenerateSeries => "generate_series",
             Self::JsonEach => "json_each",
             Self::JsonTree => "json_tree",

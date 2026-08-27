@@ -119,6 +119,18 @@ pub const REMOTE_DETERMINISTIC_SCALAR_FUNCTIONS: &[&str] = &[
 /// Registered scalar identities intentionally excluded from remote execution.
 pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "age",
+    "array_append",
+    "array_cat",
+    "array_length",
+    "array_position",
+    "array_positions",
+    "array_prepend",
+    "array_remove",
+    "array_replace",
+    "array_slice",
+    "array_subscript",
+    "array_to_string",
+    "array_value",
     "current_date",
     "current_time",
     "date",
@@ -148,6 +160,10 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "make_interval",
     "make_time",
     "make_timestamp",
+    "map",
+    "list_value",
+    "string_to_array",
+    "struct_pack",
     "time",
     "to_date",
     "vector_similarity",
@@ -342,7 +358,7 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
         },
         RemoteReadCoverageEntry {
             id: "scalar.local_only",
-            public_surface: "JSON, temporal, vector, random/UUID, statistics, and cache-control scalar functions",
+            public_surface: "JSON, nested, temporal, vector, random/UUID, statistics, and cache-control scalar functions",
             identities: REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS,
             remote_status: LocalOnly,
             prerequisite: "local execution profile",
@@ -462,6 +478,21 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             prerequisite: "local execution profile",
             normal_outcome: "ordered aggregate evaluation by the local executor",
             failure_outcome: "ordered_aggregate_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.nested_aggregate",
+            public_surface: "ARRAY_AGG and JSON/JSONB collection aggregates",
+            identities: &[
+                "array_agg",
+                "json_group_array",
+                "json_group_object",
+                "jsonb_agg",
+                "jsonb_object_agg",
+            ],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "nested collection aggregation by the local executor",
+            failure_outcome: "nested_aggregate_local_only before transport",
         },
         RemoteReadCoverageEntry {
             id: "aggregate.grouping_sets",
@@ -695,6 +726,19 @@ fn validate_plan(
                 validate_expr(group_key, false, analysis)?;
             }
             for aggregate in aggregates {
+                if matches!(
+                    aggregate.function,
+                    AggregateFunction::ArrayAgg
+                        | AggregateFunction::JsonGroupArray
+                        | AggregateFunction::JsonGroupObject
+                        | AggregateFunction::JsonbAgg
+                        | AggregateFunction::JsonbObjectAgg
+                ) {
+                    return Err(RemoteReadRejection::local_only(
+                        "nested_aggregate_local_only",
+                        "JSON and nested aggregates are not in the v0.8 remote-read catalog",
+                    ));
+                }
                 if aggregate.filter.is_some() {
                     return Err(RemoteReadRejection::local_only(
                         "aggregate_filter_local_only",
@@ -1051,7 +1095,7 @@ mod tests {
 
     #[test]
     fn explicitly_excluded_scalar_and_vector_expressions_remain_local_only() {
-        for name in ["random", "json_valid", "date_add"] {
+        for name in ["random", "json_valid", "date_add", "array_length"] {
             let expression = TypedExpr::function_call(
                 name.to_string(),
                 vec![],
@@ -1227,5 +1271,30 @@ mod tests {
         assert!(descriptor.operators.group_by);
         assert!(descriptor.operators.having);
         assert!(descriptor.operators.aggregate_distinct);
+    }
+
+    #[test]
+    fn nested_aggregates_remain_local_only() {
+        let aggregate = crate::planner::AggregateExpr {
+            function: AggregateFunction::ArrayAgg,
+            arg: Some(column()),
+            extra_args: Vec::new(),
+            distinct: false,
+            result_type: ResolvedType::Array(Box::new(ResolvedType::Integer)),
+            filter: None,
+            order_by: Vec::new(),
+        };
+        let plan = LogicalPlan::aggregate(
+            scan(),
+            Vec::new(),
+            vec![aggregate],
+            None,
+            Projection::All(vec![]),
+        );
+        assert!(matches!(
+            classify(&plan, &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "nested_aggregate_local_only"
+        ));
     }
 }

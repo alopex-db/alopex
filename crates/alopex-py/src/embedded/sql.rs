@@ -426,6 +426,30 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
             }
             list.into_py_any(py)
         }
+        SqlValue::Array(values) => {
+            let list = PyList::empty(py);
+            for value in values {
+                list.append(sql_value_to_py(py, value)?.bind(py))?;
+            }
+            list.into_py_any(py)
+        }
+        SqlValue::Map(values) => {
+            let dict = PyDict::new(py);
+            for (key, value) in values {
+                dict.set_item(
+                    sql_value_to_py(py, key)?.bind(py),
+                    sql_value_to_py(py, value)?.bind(py),
+                )?;
+            }
+            dict.into_py_any(py)
+        }
+        SqlValue::Struct(values) => {
+            let dict = PyDict::new(py);
+            for (name, value) in values {
+                dict.set_item(name, sql_value_to_py(py, value)?.bind(py))?;
+            }
+            dict.into_py_any(py)
+        }
     }
 }
 
@@ -589,6 +613,30 @@ mod tests {
             assert_eq!(
                 output.bind(py).str().unwrap().extract::<String>().unwrap(),
                 "12.340"
+            );
+        });
+    }
+
+    #[test]
+    fn nested_values_map_recursively_to_python_containers() {
+        with_py(|py| {
+            let output = sql_value_to_py(
+                py,
+                SqlValue::Struct(vec![
+                    (
+                        "items".into(),
+                        SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]),
+                    ),
+                    (
+                        "attrs".into(),
+                        SqlValue::Map(vec![(SqlValue::Text("a".into()), SqlValue::Boolean(true))]),
+                    ),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(
+                output.bind(py).repr().unwrap().extract::<String>().unwrap(),
+                "{'items': [1, None], 'attrs': {'a': True}}"
             );
         });
     }

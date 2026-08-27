@@ -173,6 +173,12 @@ fn encode_index_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
                 actual: "Json".into(),
             });
         }
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: value.type_name().into(),
+            });
+        }
     }
     Ok(())
 }

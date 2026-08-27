@@ -3,8 +3,8 @@ use std::fs::File;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, StringArray,
-    Time64MicrosecondArray, TimestampMicrosecondArray,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray, ListArray,
+    MapArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -200,6 +200,76 @@ fn arrow_value_to_sql(
                 .map(SqlValue::Json)
                 .map_err(|error| ExecutorError::BulkLoad(format!("invalid JSON: {error}")))
         }
+        (
+            ArrowDataType::Utf8,
+            expected
+            @ (ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_)),
+        ) => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            crate::executor::evaluator::nested::parse_typed_json(arr.value(row_idx), expected)
+        }
+        (ArrowDataType::List(_), ResolvedType::Array(element)) => {
+            let arr = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = arr.value(row_idx);
+            (0..values.len())
+                .map(|index| {
+                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Array)
+        }
+        (ArrowDataType::LargeList(_), ResolvedType::Array(element)) => {
+            let arr = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let values = arr.value(row_idx);
+            (0..values.len())
+                .map(|index| {
+                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Array)
+        }
+        (ArrowDataType::Map(_, _), ResolvedType::Map { key, value }) => {
+            let arr = array.as_any().downcast_ref::<MapArray>().unwrap();
+            let entries = arr.value(row_idx);
+            let keys = entries.column(0);
+            let values = entries.column(1);
+            (0..entries.len())
+                .map(|index| {
+                    Ok((
+                        arrow_value_to_sql(keys.as_ref(), keys.data_type(), key, index)?,
+                        arrow_value_to_sql(values.as_ref(), values.data_type(), value, index)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Map)
+        }
+        (ArrowDataType::Struct(arrow_fields), ResolvedType::Struct(expected_fields))
+            if arrow_fields.len() == expected_fields.len() =>
+        {
+            let arr = array.as_any().downcast_ref::<StructArray>().unwrap();
+            expected_fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, data_type))| {
+                    if arrow_fields[index].name() != name {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "struct field mismatch: expected {name}, found {}",
+                            arrow_fields[index].name()
+                        )));
+                    }
+                    Ok((
+                        name.clone(),
+                        arrow_value_to_sql(
+                            arr.column(index).as_ref(),
+                            arrow_fields[index].data_type(),
+                            data_type,
+                            row_idx,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Struct)
+        }
         (ArrowDataType::Binary, ResolvedType::Blob) => {
             let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             Ok(SqlValue::Blob(arr.value(row_idx).to_vec()))
@@ -270,6 +340,32 @@ fn arrow_value_to_sql(
 mod tests {
     use super::*;
     use crate::storage::DecimalValue;
+
+    #[test]
+    fn arrow_list_maps_to_native_array_with_null_elements() {
+        let mut builder =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::Int32Builder::new());
+        builder.values().append_value(1);
+        builder.values().append_null();
+        builder.values().append_value(2);
+        builder.append(true);
+        let array = builder.finish();
+
+        assert_eq!(
+            arrow_value_to_sql(
+                &array,
+                array.data_type(),
+                &ResolvedType::Array(Box::new(ResolvedType::Integer)),
+                0,
+            )
+            .unwrap(),
+            SqlValue::Array(vec![
+                SqlValue::Integer(1),
+                SqlValue::Null,
+                SqlValue::Integer(2),
+            ])
+        );
+    }
 
     #[test]
     fn decimal128_maps_to_exact_sql_decimal() {

@@ -52,6 +52,15 @@ pub enum ResolvedType {
     Decimal { precision: u8, scale: u8 },
     /// Canonical native JSON value (`JSONB` is a dialect alias).
     Json,
+    /// Variable-length homogeneous nested values (`LIST` is a dialect alias).
+    Array(Box<ResolvedType>),
+    /// Ordered key/value entries with homogeneous key and value types.
+    Map {
+        key: Box<ResolvedType>,
+        value: Box<ResolvedType>,
+    },
+    /// Named heterogeneous nested fields.
+    Struct(Vec<(String, ResolvedType)>),
     /// Vector type with dimension and metric
     /// Metric is always populated (defaults to Cosine if omitted in AST)
     Vector {
@@ -119,6 +128,17 @@ impl ResolvedType {
                 scale: *scale,
             },
             DataType::Json => Self::Json,
+            DataType::Array { element } => Self::Array(Box::new(Self::from_ast(element))),
+            DataType::Map { key, value } => Self::Map {
+                key: Box::new(Self::from_ast(key)),
+                value: Box::new(Self::from_ast(value)),
+            },
+            DataType::Struct { fields } => Self::Struct(
+                fields
+                    .iter()
+                    .map(|field| (field.name.clone(), Self::from_ast(&field.data_type)))
+                    .collect(),
+            ),
             DataType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: metric.unwrap_or(VectorMetric::Cosine),
@@ -187,6 +207,23 @@ impl ResolvedType {
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,
             (Text, Date | Time | Interval) => true,
             (Text, Json) | (Json, Text) => true,
+            (Array(source), Array(target)) => source.can_cast_to(target),
+            (
+                Map {
+                    key: source_key,
+                    value: source_value,
+                },
+                Map {
+                    key: target_key,
+                    value: target_value,
+                },
+            ) => source_key.can_cast_to(target_key) && source_value.can_cast_to(target_value),
+            (Struct(source), Struct(target)) if source.len() == target.len() => source
+                .iter()
+                .zip(target)
+                .all(|((source_name, source_type), (target_name, target_type))| {
+                    source_name == target_name && source_type.can_cast_to(target_type)
+                }),
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,
@@ -214,6 +251,9 @@ impl ResolvedType {
             Self::Interval => "Interval",
             Self::Decimal { .. } => "Decimal",
             Self::Json => "Json",
+            Self::Array(_) => "Array",
+            Self::Map { .. } => "Map",
+            Self::Struct(_) => "Struct",
             Self::Vector { .. } => "Vector",
             Self::Null => "Null",
         }
@@ -236,6 +276,18 @@ impl std::fmt::Display for ResolvedType {
             Self::Interval => write!(f, "INTERVAL"),
             Self::Decimal { precision, scale } => write!(f, "DECIMAL({precision},{scale})"),
             Self::Json => write!(f, "JSON"),
+            Self::Array(element) => write!(f, "ARRAY<{element}>"),
+            Self::Map { key, value } => write!(f, "MAP<{key},{value}>"),
+            Self::Struct(fields) => {
+                write!(f, "STRUCT<")?;
+                for (index, (name, data_type)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{name} {data_type}")?;
+                }
+                write!(f, ">")
+            }
             Self::Vector { dimension, metric } => {
                 write!(f, "VECTOR({}, {:?})", dimension, metric)
             }

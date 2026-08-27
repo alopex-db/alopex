@@ -1231,6 +1231,11 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
         }
         SqlValue::Decimal(value) => Value::Text(value.to_string()),
         SqlValue::Json(value) => Value::Text(value.to_string()),
+        value @ (SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_)) => Value::Text(
+            value
+                .nested_json_text()
+                .expect("nested SQL value has a JSON mapping"),
+        ),
     }
 }
 

@@ -69,10 +69,26 @@ pub enum DataType {
         scale: u8,
     },
     Json,
+    Array {
+        element: Box<DataType>,
+    },
+    Map {
+        key: Box<DataType>,
+        value: Box<DataType>,
+    },
+    Struct {
+        fields: Vec<StructField>,
+    },
     Vector {
         dimension: u32,
         metric: Option<VectorMetric>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructField {
+    pub name: String,
+    pub data_type: DataType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

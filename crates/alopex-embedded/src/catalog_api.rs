@@ -1560,6 +1560,16 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Interval => "INTERVAL".to_string(),
         ResolvedType::Decimal { precision, scale } => format!("DECIMAL({precision},{scale})"),
         ResolvedType::Json => "JSON".to_string(),
+        ResolvedType::Array(element) => format!("ARRAY<{element}>"),
+        ResolvedType::Map { key, value } => format!("MAP<{key},{value}>"),
+        ResolvedType::Struct(fields) => format!(
+            "STRUCT<{}>",
+            fields
+                .iter()
+                .map(|(name, data_type)| format!("{name} {data_type}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",
@@ -1855,6 +1865,16 @@ pub enum CatalogManifestDataType {
         scale: u8,
     },
     Json,
+    Array {
+        element: Box<CatalogManifestDataType>,
+    },
+    Map {
+        key: Box<CatalogManifestDataType>,
+        value: Box<CatalogManifestDataType>,
+    },
+    Struct {
+        fields: Vec<(String, CatalogManifestDataType)>,
+    },
 }
 
 impl From<&ResolvedType> for CatalogManifestDataType {
@@ -1876,6 +1896,19 @@ impl From<&ResolvedType> for CatalogManifestDataType {
                 scale: *scale,
             },
             ResolvedType::Json => Self::Json,
+            ResolvedType::Array(element) => Self::Array {
+                element: Box::new(Self::from(element.as_ref())),
+            },
+            ResolvedType::Map { key, value } => Self::Map {
+                key: Box::new(Self::from(key.as_ref())),
+                value: Box::new(Self::from(value.as_ref())),
+            },
+            ResolvedType::Struct(fields) => Self::Struct {
+                fields: fields
+                    .iter()
+                    .map(|(name, data_type)| (name.clone(), Self::from(data_type)))
+                    .collect(),
+            },
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: (*metric).into(),
@@ -1903,6 +1936,17 @@ impl From<CatalogManifestDataType> for ResolvedType {
                 Self::Decimal { precision, scale }
             }
             CatalogManifestDataType::Json => Self::Json,
+            CatalogManifestDataType::Array { element } => Self::Array(Box::new((*element).into())),
+            CatalogManifestDataType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            CatalogManifestDataType::Struct { fields } => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             CatalogManifestDataType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),

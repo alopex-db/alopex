@@ -60,15 +60,25 @@ pub(super) fn ensure_indexable_columns(
     column_indices: &[usize],
     operation: &str,
 ) -> Result<()> {
-    if column_indices.iter().any(|column| {
+    if let Some(data_type) = column_indices.iter().find_map(|column| {
+        let data_type = &table.columns[*column].data_type;
         matches!(
-            table.columns[*column].data_type,
+            data_type,
             crate::planner::ResolvedType::Json
+                | crate::planner::ResolvedType::Array(_)
+                | crate::planner::ResolvedType::Map { .. }
+                | crate::planner::ResolvedType::Struct(_)
         )
+        .then_some(data_type)
     }) {
         return Err(ExecutorError::InvalidOperation {
             operation: operation.into(),
-            reason: "Alopex does not define a JSON sort order".into(),
+            reason: if matches!(data_type, crate::planner::ResolvedType::Json) {
+                "Alopex does not define a JSON sort order"
+            } else {
+                "Alopex does not define a nested-value sort order"
+            }
+            .into(),
         });
     }
     Ok(())

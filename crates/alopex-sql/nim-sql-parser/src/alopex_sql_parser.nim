@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.18.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.19.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -191,6 +191,9 @@ proc normalizedDataTypeName(name: string): string =
   of "TIME": "Time"
   of "INTERVAL": "Interval"
   of "JSON", "JSONB": "Json"
+  of "ARRAY", "LIST": "Array"
+  of "MAP": "Map"
+  of "STRUCT": "Struct"
   of "VECTOR": "Vector"
   else: name
 
@@ -552,7 +555,35 @@ proc writeTableConstraint(s: Stream; node: SqlNode) =
 proc writeDataType(s: Stream; node: SqlNode) =
   let rawName = node.firstIdent()
   let variant = normalizedDataTypeName(rawName)
-  if variant == "Vector":
+  if variant == "Array":
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Array")
+    s.writeKey("element")
+    s.writeDataType(node.children[1])
+  elif variant == "Map":
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Map")
+    s.writeKey("key")
+    s.writeDataType(node.children[1])
+    s.writeKey("value")
+    s.writeDataType(node.children[2])
+  elif variant == "Struct":
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Struct")
+    s.writeKey("fields")
+    s.pack_array((node.children.len - 1) div 2)
+    var fieldIndex = 1
+    while fieldIndex + 1 < node.children.len:
+      s.pack_map(2)
+      s.writeKey("name")
+      s.pack_type(node.children[fieldIndex].firstIdent())
+      s.writeKey("data_type")
+      s.writeDataType(node.children[fieldIndex + 1])
+      fieldIndex += 2
+  elif variant == "Vector":
     s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("Vector")
@@ -640,7 +671,7 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
                            columns: seq[string]; span: Span) =
   # Contract 0.14.0 (issue #151). Only the public wire carries this variant;
   # the staged continuous-aggregate validator rejects it before encoding.
-  s.pack_map(7)
+  s.pack_map(8)
   s.writeKey("variant")
   s.pack_type("Function")
   s.writeKey("name")
@@ -660,6 +691,8 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
     s.pack_type(column)
   s.writeKey("lateral")
   s.pack_type(function.lateral)
+  s.writeKey("with_ordinality")
+  s.pack_type(function.withOrdinality)
   s.writeKey("span")
   s.writeSpan(span)
 

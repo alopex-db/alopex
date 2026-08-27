@@ -168,6 +168,27 @@ def main() -> int:
                 [{"exact_amount": Decimal("12.350")}],
             ),
             (
+                "SELECT ARRAY_APPEND(ARRAY[1, NULL], 3) AS items, "
+                "MAP(ARRAY['a'], ARRAY[1]) AS attrs, "
+                "STRUCT_PACK('name', 'Ada', 'active', TRUE) AS person",
+                [
+                    {
+                        "items": [1, None, 3],
+                        "attrs": {"a": 1},
+                        "person": {"name": "Ada", "active": True},
+                    }
+                ],
+            ),
+            (
+                "SELECT u.value, u.ordinality FROM "
+                "UNNEST(ARRAY['a', 'b']) WITH ORDINALITY AS u(value, ordinality) "
+                "ORDER BY u.ordinality",
+                [
+                    {"value": "a", "ordinality": 1},
+                    {"value": "b", "ordinality": 2},
+                ],
+            ),
+            (
                 "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "
                 "AS j(k, v, t, atom, id, parent, fullkey, path) "
                 "WHERE j.atom IS NOT NULL ORDER BY j.id",

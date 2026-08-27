@@ -2226,6 +2226,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
             "json_group_array" => self.check_json_group_array(args, star, span),
+            "array_agg" => self
+                .check_json_group_array(args, star, span)
+                .map(|_| ResolvedType::Array(Box::new(args[0].resolved_type.clone()))),
             "json_group_object" => self.check_json_group_object(args, star, span),
             "jsonb_agg" => self
                 .check_json_group_array(args, star, span)
@@ -2277,6 +2280,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 match &signature.ret {
                     crate::scalar::ReturnRule::Fixed(ty) => Ok(ty.clone()),
                     crate::scalar::ReturnRule::FromArgs(rule) => rule(&types),
+                    crate::scalar::ReturnRule::FromTypedArgs(rule) => rule(args),
                 }
             }
         }
@@ -3566,6 +3570,7 @@ fn is_aggregate_name(name: &str) -> bool {
             | "group_concat"
             | "string_agg"
             | "json_group_array"
+            | "array_agg"
             | "json_group_object"
             | "jsonb_agg"
             | "jsonb_object_agg"
@@ -3707,6 +3712,7 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
             false,
             expr.arg.as_ref(),
         ),
+        AggregateFunction::ArrayAgg => ("array_agg".to_string(), None, false, expr.arg.as_ref()),
         AggregateFunction::JsonGroupArray => (
             "json_group_array".to_string(),
             None,

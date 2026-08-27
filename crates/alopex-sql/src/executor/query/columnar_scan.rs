@@ -1209,6 +1209,19 @@ fn value_from_column(
                 .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
             Ok(SqlValue::Blob(raw.clone()))
         }
+        (
+            expected
+            @ (ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_)),
+            Column::Binary(values),
+        ) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            let mut decoded =
+                crate::storage::RowCodec::decode_with_schema(raw, std::slice::from_ref(expected))
+                    .map_err(|error| ExecutorError::Columnar(error.to_string()))?;
+            Ok(decoded.remove(0))
+        }
         (ResolvedType::Vector { .. }, Column::Fixed { values, .. }) => {
             let raw = values
                 .get(row_idx)

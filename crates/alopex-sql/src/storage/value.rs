@@ -203,9 +203,19 @@ pub enum SqlValue {
     Interval { months: i32, days: i32, micros: i64 },
     Decimal(DecimalValue),
     Json(JsonValue),
+    Array(Vec<SqlValue>),
+    Map(Vec<(SqlValue, SqlValue)>),
+    Struct(Vec<(String, SqlValue)>),
 }
 
 impl SqlValue {
+    /// Canonical JSON mapping used by public surfaces for nested values.
+    pub fn nested_json_text(&self) -> Option<String> {
+        matches!(self, Self::Array(_) | Self::Map(_) | Self::Struct(_))
+            .then(|| nested_json_value(self))?
+            .and_then(|value| serde_json::to_string(&value).ok())
+    }
+
     /// Formats native temporal values for text-oriented public surfaces.
     pub fn temporal_text(&self) -> Option<String> {
         match self {
@@ -259,6 +269,9 @@ impl SqlValue {
             SqlValue::Interval { .. } => 0x0c,
             SqlValue::Decimal(_) => 0x0d,
             SqlValue::Json(_) => 0x0e,
+            SqlValue::Array(_) => 0x0f,
+            SqlValue::Map(_) => 0x10,
+            SqlValue::Struct(_) => 0x11,
         }
     }
 
@@ -285,6 +298,9 @@ impl SqlValue {
             SqlValue::Interval { .. } => "Interval",
             SqlValue::Decimal(_) => "Decimal",
             SqlValue::Json(_) => "Json",
+            SqlValue::Array(_) => "Array",
+            SqlValue::Map(_) => "Map",
+            SqlValue::Struct(_) => "Struct",
         }
     }
 
@@ -312,8 +328,102 @@ impl SqlValue {
                 scale: value.scale,
             },
             SqlValue::Json(_) => ResolvedType::Json,
+            SqlValue::Array(values) => ResolvedType::Array(Box::new(
+                values
+                    .iter()
+                    .find(|value| !value.is_null())
+                    .map(SqlValue::resolved_type)
+                    .unwrap_or(ResolvedType::Null),
+            )),
+            SqlValue::Map(values) => ResolvedType::Map {
+                key: Box::new(
+                    values
+                        .iter()
+                        .find(|(key, _)| !key.is_null())
+                        .map(|(key, _)| key.resolved_type())
+                        .unwrap_or(ResolvedType::Null),
+                ),
+                value: Box::new(
+                    values
+                        .iter()
+                        .find(|(_, value)| !value.is_null())
+                        .map(|(_, value)| value.resolved_type())
+                        .unwrap_or(ResolvedType::Null),
+                ),
+            },
+            SqlValue::Struct(values) => ResolvedType::Struct(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.resolved_type()))
+                    .collect(),
+            ),
         }
     }
+}
+
+fn nested_json_value(value: &SqlValue) -> Option<serde_json::Value> {
+    use serde_json::{Map, Number, Value};
+    Some(match value {
+        SqlValue::Null => Value::Null,
+        SqlValue::Integer(value) => Value::Number(Number::from(*value)),
+        SqlValue::BigInt(value) => Value::Number(Number::from(*value)),
+        SqlValue::Float(value) => Value::Number(Number::from_f64(f64::from(*value))?),
+        SqlValue::Double(value) => Value::Number(Number::from_f64(*value)?),
+        SqlValue::Text(value) => Value::String(value.clone()),
+        SqlValue::Boolean(value) => Value::Bool(*value),
+        SqlValue::Decimal(value) => serde_json::from_str(&value.to_string()).ok()?,
+        SqlValue::Json(value) => value.to_value(),
+        SqlValue::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(nested_json_value)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        SqlValue::Map(values) => {
+            if values
+                .iter()
+                .all(|(key, _)| matches!(key, SqlValue::Text(_)))
+            {
+                let mut output = Map::new();
+                for (key, value) in values {
+                    let SqlValue::Text(key) = key else {
+                        unreachable!()
+                    };
+                    output.insert(key.clone(), nested_json_value(value)?);
+                }
+                Value::Object(output)
+            } else {
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|(key, value)| {
+                            Some(Value::Array(vec![
+                                nested_json_value(key)?,
+                                nested_json_value(value)?,
+                            ]))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+        }
+        SqlValue::Struct(values) => Value::Object(
+            values
+                .iter()
+                .map(|(name, value)| Some((name.clone(), nested_json_value(value)?)))
+                .collect::<Option<Map<_, _>>>()?,
+        ),
+        SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. } => {
+            Value::String(value.temporal_text()?)
+        }
+        SqlValue::Timestamp(value) => Value::Number(Number::from(*value)),
+        SqlValue::Vector(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| Number::from_f64(f64::from(*value)).map(Value::Number))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        SqlValue::Blob(_) => return None,
+    })
 }
 
 impl PartialOrd for SqlValue {

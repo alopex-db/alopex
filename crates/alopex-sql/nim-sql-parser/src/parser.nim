@@ -74,6 +74,21 @@ proc expect(p: var Parser, kind: TokenKind): Token =
     p.error("expected " & $kind)
   result = p.advance()
 
+proc expectTypeClose(p: var Parser): Token =
+  if p.current.kind == tkGt:
+    return p.advance()
+  if p.current.kind == tkShiftRight:
+    result = p.current
+    result.kind = tkGt
+    result.value = ">"
+    result.endCol = result.col
+    p.previous = result
+    p.current.kind = tkGt
+    p.current.value = ">"
+    inc p.current.col
+    return
+  p.error("expected " & $tkGt)
+
 proc check(p: Parser, kind: TokenKind): bool =
   p.current.kind == kind
 
@@ -179,6 +194,19 @@ proc parseVectorLiteral(p: var Parser): SqlNode =
       p.error("expected ',' or ']' in vector literal")
   if not sawValue:
     p.error("vector literal cannot be empty")
+  discard p.expect(tkRBracket)
+
+proc parseArrayLiteral(p: var Parser; start: Token): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
+  discard p.expect(tkLBracket)
+  result = newNode(nkFunctionCall, tokenSpan(start))
+  result.children.add(newIdent("ARRAY_VALUE", tokenSpan(start)))
+  if not p.check(tkRBracket):
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
   discard p.expect(tkRBracket)
 
 proc parseSubqueryInParens(p: var Parser): SqlNode =
@@ -649,7 +677,9 @@ proc parsePrimary(p: var Parser): SqlNode =
       result = newIdent(tok.value, tokenSpan(tok))
   of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow:
     let tok = p.advance()
-    if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
+    if tok.value.cmpIgnoreCase("array") == 0 and p.check(tkLBracket):
+      result = p.parseArrayLiteral(tok)
+    elif tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
       result = p.parseCastBody(tok, nkTryCast)
     elif p.check(tkLParen):
       result = p.parseFunctionCall(tok)
@@ -680,8 +710,35 @@ proc parsePrimary(p: var Parser): SqlNode =
   else:
     p.error("unexpected token in expression")
 
-proc parseMulDiv(p: var Parser): SqlNode =
+proc nestedCall(name: string; base: SqlNode; args: varargs[SqlNode]): SqlNode =
+  result = newNode(nkFunctionCall, base.span)
+  result.children.add(newIdent(name, base.span))
+  result.children.add(base)
+  for arg in args:
+    result.children.add(arg)
+
+proc parsePostfix(p: var Parser): SqlNode =
   result = p.parsePrimary()
+  while p.check(tkLBracket):
+    let bracket = p.advance()
+    if p.check(tkColon):
+      discard p.advance()
+      let upper = if p.check(tkRBracket): newNull(tokenSpan(bracket)) else: p.parseExpr()
+      discard p.expect(tkRBracket)
+      result = nestedCall("ARRAY_SLICE", result, newNull(tokenSpan(bracket)), upper)
+    else:
+      let first = p.parseExpr()
+      if p.check(tkColon):
+        discard p.advance()
+        let upper = if p.check(tkRBracket): newNull(tokenSpan(bracket)) else: p.parseExpr()
+        discard p.expect(tkRBracket)
+        result = nestedCall("ARRAY_SLICE", result, first, upper)
+      else:
+        discard p.expect(tkRBracket)
+        result = nestedCall("ARRAY_SUBSCRIPT", result, first)
+
+proc parseMulDiv(p: var Parser): SqlNode =
+  result = p.parsePostfix()
   while p.current.kind in {tkStar, tkSlash, tkPercent}:
     let op = case p.current.kind
       of tkStar: opMul
@@ -689,7 +746,7 @@ proc parseMulDiv(p: var Parser): SqlNode =
       of tkPercent: opMod
       else: opMul
     discard p.advance()
-    result = newBinaryOp(op, result, p.parsePrimary())
+    result = newBinaryOp(op, result, p.parsePostfix())
 
 proc parseAddSub(p: var Parser): SqlNode =
   result = p.parseMulDiv()
@@ -957,6 +1014,12 @@ proc parseTableFunction(p: var Parser; name: Token; lateral: bool): SqlNode =
       discard p.advance()
       result.children.add(p.parseExpr())
   discard p.expect(tkRParen)
+  if p.check(tkWith) and p.peekNext() == tkIdent:
+    discard p.advance()
+    let ordinality = p.expectIdent("ORDINALITY")
+    if ordinality.value.cmpIgnoreCase("ordinality") != 0:
+      p.error("expected ORDINALITY after WITH")
+    result.withOrdinality = true
 
 proc parseFromItem(p: var Parser): SqlNode =
   # LATERAL is contextual: it only introduces a FROM item when a subquery or a
@@ -1514,7 +1577,27 @@ proc parseTypeName(p: var Parser): SqlNode =
   let typeTok = p.advance()
   result = newNode(nkTypeName, tokenSpan(typeTok))
   result.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
-  if p.check(tkLParen):
+  let nestedName = typeTok.value.toUpperAscii()
+  if nestedName in ["ARRAY", "LIST", "MAP", "STRUCT"] and p.check(tkLt):
+    p.enterNesting()
+    defer: p.leaveNesting()
+    discard p.advance()
+    if nestedName in ["ARRAY", "LIST"]:
+      result.children.add(p.parseTypeName())
+    elif nestedName == "MAP":
+      result.children.add(p.parseTypeName())
+      discard p.expect(tkComma)
+      result.children.add(p.parseTypeName())
+    else:
+      while true:
+        let field = p.expectIdent("struct field name")
+        result.children.add(newIdent(field.value, tokenSpan(field)))
+        result.children.add(p.parseTypeName())
+        if not p.check(tkComma):
+          break
+        discard p.advance()
+    discard p.expectTypeClose()
+  elif p.check(tkLParen):
     p.enterNesting()
     defer: p.leaveNesting()
     discard p.advance()

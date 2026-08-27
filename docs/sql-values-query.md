@@ -4,7 +4,7 @@
 
 Alopex v0.8.8 treats `VALUES` as a relational query body as well as INSERT
 syntax. The feature ships with Alopex under the single Alopex version and tag;
-parser contract `0.18.0` is internal compatibility metadata, not an independent
+parser contract `0.19.0` is internal compatibility metadata, not an independent
 release lane.
 
 Supported query positions are:

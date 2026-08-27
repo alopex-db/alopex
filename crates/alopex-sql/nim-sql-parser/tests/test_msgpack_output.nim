@@ -243,6 +243,22 @@ suite "MessagePack output - contract shape":
     check select["projection"][2]["expr"]["kind"]["variant"].getStr() == "Literal"
     check select["projection"][2]["expr"]["kind"]["literal"]["variant"].getStr() == "Interval"
 
+  test "nested data types emit recursive contract variants":
+    let create = payloadJson(
+      "CREATE TABLE nested (a ARRAY<INT>, m MAP<TEXT, BIGINT>, " &
+      "s STRUCT<x INT, labels LIST<TEXT>>)"
+      ).stmtKind()
+    let arrayType = create["columns"][0]["data_type"]
+    check arrayType["variant"].getStr() == "Array"
+    check arrayType["element"]["variant"].getStr() == "Int"
+    let mapType = create["columns"][1]["data_type"]
+    check mapType["variant"].getStr() == "Map"
+    check mapType["key"]["variant"].getStr() == "Text"
+    check mapType["value"]["variant"].getStr() == "BigInt"
+    let structType = create["columns"][2]["data_type"]
+    check structType["variant"].getStr() == "Struct"
+    check structType["fields"][1]["data_type"]["variant"].getStr() == "Array"
+
   test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
     let kind = selectKind(
       "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH FIRST 3 ROWS WITH TIES")
@@ -953,6 +969,11 @@ suite "LATERAL and table functions (issue #151, contract 0.14.0)":
     check item["columns"].len == 1
     check item["columns"][0].getStr() == "x"
     check item["lateral"].getBool() == false
+    check item["with_ordinality"].getBool() == false
+
+    let ordinal = selectKind(
+      "SELECT * FROM UNNEST(ARRAY[1, NULL]) WITH ORDINALITY AS u")["from"][0]
+    check ordinal["with_ordinality"].getBool()
 
     let lateral = selectKind(
       "SELECT * FROM t, LATERAL GENERATE_SERIES(1, t.n)")["from"][0]

@@ -2893,6 +2893,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 alias,
                 columns,
+                with_ordinality,
                 span,
                 ..
             } => self.plan_table_function(
@@ -2904,6 +2905,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 start_index,
                 lateral_scope,
                 ctes,
+                *with_ordinality,
             ),
             FromItem::Join {
                 left,
@@ -3058,12 +3060,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         start_index: usize,
         lateral_scope: &[ScopedTable],
         ctes: &CtePlans,
+        with_ordinality: bool,
     ) -> Result<PlannedRelation, PlannerError> {
-        let Some(function) = TableFunctionKind::from_name(name) else {
+        let Some(mut function) = TableFunctionKind::from_name(name) else {
             return Err(PlannerError::unknown_table_function(name, span));
         };
+        if with_ordinality {
+            if function != TableFunctionKind::Unnest {
+                return Err(PlannerError::invalid_expression(
+                    "WITH ORDINALITY is supported only for UNNEST",
+                ));
+            }
+            function = TableFunctionKind::UnnestWithOrdinality;
+        }
         let (typed_args, mut schema) = match function {
-            TableFunctionKind::Unnest => {
+            TableFunctionKind::Unnest | TableFunctionKind::UnnestWithOrdinality => {
                 if args.len() != 1 {
                     return Err(PlannerError::invalid_expression(format!(
                         "table function UNNEST takes exactly 1 argument, found {}",
@@ -3073,18 +3084,25 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let typed = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
                 if !matches!(
                     typed.resolved_type,
-                    ResolvedType::Vector { .. } | ResolvedType::Null
+                    ResolvedType::Vector { .. } | ResolvedType::Array(_) | ResolvedType::Null
                 ) {
                     return Err(PlannerError::type_mismatch(
-                        "VECTOR",
+                        "ARRAY or VECTOR",
                         typed.resolved_type.to_string(),
                         args[0].span,
                     ));
                 }
-                (
-                    vec![typed],
-                    vec![ColumnMetadata::new("unnest", ResolvedType::Float)],
-                )
+                let element_type = match &typed.resolved_type {
+                    ResolvedType::Array(element) => (**element).clone(),
+                    ResolvedType::Vector { .. } => ResolvedType::Float,
+                    ResolvedType::Null => ResolvedType::Null,
+                    _ => unreachable!(),
+                };
+                let mut schema = vec![ColumnMetadata::new("unnest", element_type)];
+                if function == TableFunctionKind::UnnestWithOrdinality {
+                    schema.push(ColumnMetadata::new("ordinality", ResolvedType::BigInt));
+                }
+                (vec![typed], schema)
             }
             TableFunctionKind::GenerateSeries => {
                 if !(2..=3).contains(&args.len()) {
@@ -4422,6 +4440,29 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     extra_args: Vec::new(),
                     distinct,
                     result_type: ResolvedType::Text,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            "array_agg" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::ArrayAgg,
+                    arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
+                    distinct,
+                    result_type: ResolvedType::Array(Box::new(arg.resolved_type.clone())),
                     filter: filter_owned,
                     order_by: retained_order_by.clone(),
                 };
@@ -6293,6 +6334,7 @@ fn is_aggregate_function(name: &str) -> bool {
             | "group_concat"
             | "string_agg"
             | "json_group_array"
+            | "array_agg"
             | "json_group_object"
             | "jsonb_agg"
             | "jsonb_object_agg"
@@ -6554,6 +6596,7 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
                 false,
                 agg.arg.as_ref(),
             ),
+            AggregateFunction::ArrayAgg => ("array_agg".to_string(), None, false, agg.arg.as_ref()),
             AggregateFunction::JsonGroupArray => (
                 "json_group_array".to_string(),
                 None,

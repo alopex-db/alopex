@@ -36,6 +36,15 @@ impl ByteSized for SqlValue {
             SqlValue::Decimal(_) => 17,
             SqlValue::Json(value) => value.as_str().len() as u64,
             SqlValue::Vector(values) => values.len() as u64 * 4,
+            SqlValue::Array(values) => values.iter().map(ByteSized::estimated_bytes).sum(),
+            SqlValue::Map(values) => values
+                .iter()
+                .map(|(key, value)| key.estimated_bytes() + value.estimated_bytes())
+                .sum(),
+            SqlValue::Struct(values) => values
+                .iter()
+                .map(|(name, value)| name.len() as u64 + value.estimated_bytes())
+                .sum(),
         }
     }
 }

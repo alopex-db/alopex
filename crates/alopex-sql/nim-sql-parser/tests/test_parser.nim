@@ -1923,6 +1923,18 @@ suite "LATERAL and table functions":
     check item.joinRight.aliasExpr.kind == nkFromFunction
     check item.joinRight.aliasExpr.lateral == false
 
+  test "UNNEST WITH ORDINALITY is retained":
+    let item = firstFromItem("SELECT * FROM UNNEST(ARRAY[1, NULL]) WITH ORDINALITY AS u")
+    check item.aliasExpr.kind == nkFromFunction
+    check item.aliasExpr.withOrdinality
+
+  test "nested types and array postfix expressions parse":
+    check parseSql(
+      "CREATE TABLE t (a ARRAY<INT>, l LIST<TEXT>, " &
+      "m MAP<TEXT, INT>, s STRUCT<x INT, labels ARRAY<TEXT>>)"
+    ).kind == nkCreateTable
+    check parseSql("SELECT ARRAY[1, 2][1], ARRAY[1, 2, 3][1:2]").kind == nkSelect
+
   test "lateral stays usable as a relation name":
     let plain = firstFromItem("SELECT * FROM lateral")
     check plain.kind == nkIdentifier

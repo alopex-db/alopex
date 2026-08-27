@@ -294,6 +294,9 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Interval => "INTERVAL".to_string(),
         ResolvedType::Decimal { precision, scale } => format!("DECIMAL({precision},{scale})"),
         ResolvedType::Json => "JSON".to_string(),
+        ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+            resolved_type.to_string()
+        }
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",

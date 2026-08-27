@@ -827,6 +827,15 @@ fn sql_value_to_proto(value: &alopex_sql::storage::SqlValue) -> proto::Value {
         alopex_sql::storage::SqlValue::Vector(values) => Some(Kind::VectorValue(proto::Vector {
             values: values.clone(),
         })),
+        value @ alopex_sql::storage::SqlValue::Array(_) => Some(Kind::ArrayJsonValue(
+            value.nested_json_text().expect("ARRAY has a JSON mapping"),
+        )),
+        value @ alopex_sql::storage::SqlValue::Map(_) => Some(Kind::MapJsonValue(
+            value.nested_json_text().expect("MAP has a JSON mapping"),
+        )),
+        value @ alopex_sql::storage::SqlValue::Struct(_) => Some(Kind::StructJsonValue(
+            value.nested_json_text().expect("STRUCT has a JSON mapping"),
+        )),
     };
     proto::Value { kind }
 }
@@ -952,5 +961,40 @@ mod temporal_wire_tests {
             value.kind,
             Some(proto::value::Kind::JsonValue(ref json)) if json == r#"{"a":2,"b":1}"#
         ));
+    }
+
+    #[test]
+    fn nested_values_use_appended_json_wire_variants() {
+        let values = [
+            (
+                SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]),
+                r#"[1,null]"#,
+                "array",
+            ),
+            (
+                SqlValue::Map(vec![(SqlValue::Text("a".into()), SqlValue::Integer(1))]),
+                r#"{"a":1}"#,
+                "map",
+            ),
+            (
+                SqlValue::Struct(vec![("name".into(), SqlValue::Text("Ada".into()))]),
+                r#"{"name":"Ada"}"#,
+                "struct",
+            ),
+        ];
+        for (input, expected, kind) in values {
+            let value = sql_value_to_proto(&input);
+            assert_eq!(
+                proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+                value
+            );
+            let actual = match value.kind {
+                Some(proto::value::Kind::ArrayJsonValue(value)) if kind == "array" => value,
+                Some(proto::value::Kind::MapJsonValue(value)) if kind == "map" => value,
+                Some(proto::value::Kind::StructJsonValue(value)) if kind == "struct" => value,
+                other => panic!("unexpected {kind} wire value: {other:?}"),
+            };
+            assert_eq!(actual, expected);
+        }
     }
 }
