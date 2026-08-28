@@ -56,6 +56,10 @@ if [[ ! -f "${parser_shared}" || ! -f "${parser_static}" || ! -f "${parser_dir}/
     bash scripts/build-nim-parser.sh --backend "${parser_backend}"
 fi
 
+if [[ "${1:-}" == "--" ]]; then
+    shift
+    exec "$@"
+fi
 if [[ $# -gt 0 ]]; then
     exec cargo test --features lane_ci "$@"
 fi

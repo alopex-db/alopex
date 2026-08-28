@@ -1,5 +1,5 @@
 .PHONY: nim-parser \
-	lane-ci test-lane-ci \
+	lane-ci lane-ci-clippy test-lane-ci \
 	verify-release \
 	act-ci act-ci-coverage act-ci-security act-clean-volumes \
 	act-compat act-compat-x86 act-compat-wasm \
@@ -11,6 +11,7 @@
 
 ACT ?= act
 PYTHON ?= python3.11
+CLIPPY_TOOLCHAIN ?= +stable
 ALOPEX_VERSION ?= 0.7.3
 ACT_ARTIFACT_SERVER ?= 127.0.0.1
 ACT_COMMON_FLAGS ?= --reuse=false --artifact-server-addr $(ACT_ARTIFACT_SERVER)
@@ -23,6 +24,9 @@ nim-parser:
 
 lane-ci test-lane-ci:
 	PYTHON="$(PYTHON)" bash scripts/run-lane-ci.sh
+
+lane-ci-clippy:
+	PYTHON="$(PYTHON)" bash scripts/run-lane-ci.sh -- cargo $(CLIPPY_TOOLCHAIN) clippy --all-targets --all-features -- -D warnings
 
 verify-release:
 	./scripts/release/verify-release/run.sh $(ALOPEX_VERSION)

@@ -5,6 +5,7 @@ use alopex_sql::{
     InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span, Statement,
     StatementKind, VectorMetric, WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -80,8 +81,52 @@ fn staged_continuous_aggregate_value() -> Value {
     })
 }
 
+struct MessagePackValue<'a>(&'a Value);
+
+impl Serialize for MessagePackValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            Value::Null => serializer.serialize_none(),
+            Value::Bool(value) => serializer.serialize_bool(*value),
+            Value::Number(value) => {
+                if let Some(value) = value.as_u64() {
+                    serializer.serialize_u64(value)
+                } else if let Some(value) = value.as_i64() {
+                    serializer.serialize_i64(value)
+                } else if let Some(value) = value.as_f64() {
+                    serializer.serialize_f64(value)
+                } else {
+                    Err(serde::ser::Error::custom("unsupported JSON number"))
+                }
+            }
+            Value::String(value) => serializer.serialize_str(value),
+            Value::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&MessagePackValue(value))?;
+                }
+                sequence.end()
+            }
+            Value::Object(values) => {
+                let mut map = serializer.serialize_map(Some(values.len()))?;
+                for (key, value) in values {
+                    map.serialize_entry(key, &MessagePackValue(value))?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+fn encode_json_messagepack(value: &Value) -> Vec<u8> {
+    rmp_serde::to_vec_named(&MessagePackValue(value)).expect("synthetic payload should encode")
+}
+
 fn encode_staged_continuous_aggregate(value: &Value) -> Vec<u8> {
-    rmp_serde::to_vec_named(value).expect("synthetic staged payload should encode")
+    encode_json_messagepack(value)
 }
 
 fn padded_sql(total_bytes: usize) -> String {
@@ -409,7 +454,7 @@ fn pre_distinct_on_payload_without_the_key_defaults_to_empty() {
         },
         "span": wire_span(1, 1, 1, 8),
     }]);
-    let payload = rmp_serde::to_vec_named(&value).expect("encode legacy payload");
+    let payload = encode_json_messagepack(&value);
     let statements: Vec<Statement> =
         rmp_serde::from_slice(&payload).expect("current Rust AST must decode the legacy payload");
     let StatementKind::Select(select) = &statements[0].kind else {
