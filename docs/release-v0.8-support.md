@@ -20,9 +20,10 @@ The exact public operation, normal outcome, rejection class, prerequisite, test
 evidence, and artifact identity must be present in the generated matrix. A
 missing row is a release-readiness blocker, not an implicit support claim.
 
-The [SQL type capability catalog](sql-type-capabilities.json) maps every planned
-v0.8.10 value-type family to its production owners and required evidence. Its
-release gate rejects a target version until every required surface is complete.
+The [SQL type capability catalog](sql-type-capabilities.json) maps every
+v0.8.10 value-type family to its production owners and required evidence. All
+required families are complete; the release gate rejects a target version if
+any required surface becomes incomplete.
 The [JSON-on-TEXT contract](sql-json-text.md) defines issue #160 separately
 because those functions reuse `TEXT`; the value-type catalog tracks native JSON
 in issue #161. The [nested SQL type contract](sql-nested-types.md) records the

@@ -26,13 +26,10 @@ class TypeCapabilityGateTests(unittest.TestCase):
 
         gate.verify(ROOT / "docs/sql-type-capabilities.json", ROOT, "0.8.9")
 
-    def test_v0810_release_rejects_every_incomplete_type_family(self) -> None:
+    def test_v0810_release_accepts_complete_type_families(self) -> None:
         gate = load_gate()
 
-        with self.assertRaisesRegex(
-            gate.GateError, "decimal.*json.*nested"
-        ):
-            gate.verify(ROOT / "docs/sql-type-capabilities.json", ROOT, "0.8.10")
+        gate.verify(ROOT / "docs/sql-type-capabilities.json", ROOT, "0.8.10")
 
     def test_complete_family_requires_evidence_for_every_surface(self) -> None:
         gate = load_gate()

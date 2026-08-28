@@ -72,7 +72,7 @@
       "id": "decimal",
       "issue": 158,
       "target_release": "0.8.10",
-      "status": "planned",
+      "status": "complete",
       "evidence": {
         "parser_ast": [
           "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim"
@@ -149,7 +149,7 @@
       "id": "json",
       "issue": 161,
       "target_release": "0.8.10",
-      "status": "planned",
+      "status": "complete",
       "evidence": {
         "parser_ast": [
           "crates/alopex-sql/nim-sql-parser/src/parser.nim",
@@ -192,7 +192,7 @@
       "id": "nested",
       "issue": 162,
       "target_release": "0.8.10",
-      "status": "planned",
+      "status": "complete",
       "evidence": {
         "parser_ast": [
           "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim",
