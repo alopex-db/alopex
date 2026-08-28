@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.10] — 2026-08-28
+
+### Added
+
+- SQL adds exact `DECIMAL`/`NUMERIC` values, native `DATE`/`TIME`/`INTERVAL`
+  values and temporal functions, and timestamp `GENERATE_SERIES` (issues
+  #158, #159, and #157).
+- SQL adds SQLite-compatible JSON-on-TEXT functions, native `JSON`/`JSONB`
+  values and operators, nested `ARRAY`/`LIST`/`MAP`/`STRUCT` values with
+  `UNNEST`, and full-text search functions (issues #160–#163).
+- The v0.8 type capability gate now records every v0.8.10 family as complete.
+  The distributed execution catalog keeps non-portable JSON, temporal,
+  nested, and full-text functions local-only.
+- The Nim parser wire contract is `0.19.0`.
+
+### Fixed
+
+- The `lane_ci` entrypoint now provisions and exports one Python 3.11 runtime
+  consistently, including its `libpython` search path, and supports rootless
+  Podman parser builds through the repository Makefile.
+
 ## [0.8.9] — 2026-08-26
 
 ### Added
