@@ -4095,22 +4095,22 @@
         "turbo_policy": "unavailable"
       },
       "lock_hash": "9589d0a31545afdae254a1f9af03834920d1086e405f11173f2e468b0a2ac3d0",
-      "measured_at": "2026-08-27T01:33:54.431325+00:00",
+      "measured_at": "2026-08-28T15:33:19.151586+00:00",
       "metrics": {
         "read_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.37055818336626395
+          "value": 0.33677479753673417
         },
         "scan_overhead_ms": {
           "direction": "lower_is_better",
           "unit": "ms",
-          "value": 0.0006410999958461619
+          "value": 0.00039869997863206766
         },
         "write_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.5309627751988457
+          "value": 0.8362792523663484
         }
       },
       "profile": "gha-ubuntu-24.04-x64-single-core-v1",
