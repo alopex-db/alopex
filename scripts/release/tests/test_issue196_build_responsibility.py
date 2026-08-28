@@ -76,7 +76,7 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v4", compatibility)
         self.assertIn("actions/download-artifact@v4", compatibility)
         self.assertNotIn("actions/cache@v3", compatibility)
-        self.assertIn("version: v0.19.0", compatibility)
+        self.assertIn("version: v0.15.0", compatibility)
         self.assertNotIn("version: latest", compatibility)
         self.assertIn(
             "CARGO_TARGET_DIR: ${{ github.workspace }}/target/historical-${{ matrix.gate }}",
