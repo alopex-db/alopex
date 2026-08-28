@@ -1,4 +1,5 @@
 .PHONY: nim-parser \
+	lane-ci test-lane-ci \
 	verify-release \
 	act-ci act-ci-coverage act-ci-security act-clean-volumes \
 	act-compat act-compat-x86 act-compat-wasm \
@@ -9,6 +10,7 @@
 	act-py-polars-latest act-py-typecheck act-py-benchmarks
 
 ACT ?= act
+PYTHON ?= python3.11
 ALOPEX_VERSION ?= 0.7.3
 ACT_ARTIFACT_SERVER ?= 127.0.0.1
 ACT_COMMON_FLAGS ?= --reuse=false --artifact-server-addr $(ACT_ARTIFACT_SERVER)
@@ -18,6 +20,9 @@ ACT_CLEAN_VOLUMES ?= docker volume ls -q --filter "label=act" | xargs -r docker 
 
 nim-parser:
 	bash scripts/build-nim-parser.sh --backend "$${NIM_PARSER_BACKEND:-auto}"
+
+lane-ci test-lane-ci:
+	PYTHON="$(PYTHON)" bash scripts/run-lane-ci.sh
 
 verify-release:
 	./scripts/release/verify-release/run.sh $(ALOPEX_VERSION)

@@ -595,10 +595,14 @@ build_docker() {
   local output_name
   local static_output_name
   local -a output_mount=()
+  local -a user_args=(--user "$(id -u):$(id -g)")
   command -v docker >/dev/null 2>&1 || {
     echo "docker is required for the Docker backend" >&2
     return 1
   }
+  if command -v podman >/dev/null 2>&1 && [[ "$(command -v docker)" -ef "$(command -v podman)" ]]; then
+    user_args=(--userns=keep-id --user "$(id -u):$(id -g)")
+  fi
   output_dir="$(dirname "${OUTPUT}")"
   output_name="$(basename "${OUTPUT}")"
   static_output_name="$(basename "${DEFAULT_STATIC_OUTPUT}")"
@@ -616,7 +620,7 @@ build_docker() {
     -e HOME=/tmp \
     -e "ALOPEX_NIM_PARSER_OUTPUT=${container_output}" \
     -e "ALOPEX_NIM_PARSER_STATIC_OUTPUT=$(dirname "${container_output}")/${static_output_name}" \
-    --user "$(id -u):$(id -g)" \
+    "${user_args[@]}" \
     "${NIM_IMAGE}" \
     -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib && nimble staticlib'
 }

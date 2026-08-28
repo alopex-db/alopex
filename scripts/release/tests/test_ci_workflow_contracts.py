@@ -114,6 +114,27 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn('(cd "${local_dir}" && sha256sum -c SHA256SUMS)', gate)
         self.assertNotIn('reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/', gate)
 
+    def test_local_lane_ci_supplies_python_and_rootless_parser_runtime(self) -> None:
+        makefile = (REPOSITORY_ROOT / "Makefile").read_text(encoding="utf-8")
+        runner = (REPOSITORY_ROOT / "scripts/run-lane-ci.sh").read_text(
+            encoding="utf-8"
+        )
+        parser_build = (REPOSITORY_ROOT / "scripts/build-nim-parser.sh").read_text(
+            encoding="utf-8"
+        )
+        python_build = (REPOSITORY_ROOT / "crates/alopex-py/build.rs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("lane-ci test-lane-ci:", makefile)
+        self.assertIn("bash scripts/run-lane-ci.sh", makefile)
+        self.assertIn('"numpy<2"', runner)
+        self.assertIn('export PYO3_PYTHON="${venv_python}"', runner)
+        self.assertIn("LD_LIBRARY_PATH", runner)
+        self.assertIn('parser_backend="${NIM_PARSER_BACKEND:-docker}"', runner)
+        self.assertIn("--userns=keep-id", parser_build)
+        self.assertIn('token.starts_with("-Wl,-rpath,")', python_build)
+
     def test_security_audit_is_fail_closed_with_a_guarded_exception(self) -> None:
         workflow = self.workflow("ci.yml")
         audit_job = workflow.split("  security-audit:", maxsplit=1)[1].split(
