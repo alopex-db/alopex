@@ -362,7 +362,9 @@ fn check_struct_pack(args: &[TypedExpr]) -> Result<(), PlannerError> {
 
 fn return_struct(args: &[TypedExpr]) -> Result<ResolvedType, PlannerError> {
     Ok(ResolvedType::Struct(
-        args.chunks_exact(2)
+        args.as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let TypedExprKind::Literal(Literal::String(name)) = &pair[0].kind else {
                     unreachable!("checked by check_struct_pack")

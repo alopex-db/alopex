@@ -287,7 +287,7 @@ fn eval_json_extract(values: &[SqlValue]) -> Result<SqlValue> {
 
 fn encode_object_pairs(values: &[SqlValue], function: &str) -> Result<String> {
     let mut output = String::from("{");
-    for (index, pair) in values.chunks_exact(2).enumerate() {
+    for (index, pair) in values.as_chunks::<2>().0.iter().enumerate() {
         let Some(key) = text(function, &pair[0])? else {
             return Err(invalid(function, "object label must not be NULL"));
         };
@@ -375,7 +375,7 @@ fn eval_update(values: &[SqlValue], function: &str, mode: UpdateMode) -> Result<
         return Ok(SqlValue::Null);
     };
     let mut root = parse_json(function, input)?;
-    for pair in values[1..].chunks_exact(2) {
+    for pair in values[1..].as_chunks::<2>().0 {
         let Some(path) = text(function, &pair[0])? else {
             return Err(invalid(function, "JSON path must not be NULL"));
         };

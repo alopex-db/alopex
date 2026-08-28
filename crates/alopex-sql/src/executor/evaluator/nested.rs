@@ -233,7 +233,7 @@ fn eval_map(values: &[SqlValue]) -> Result<SqlValue> {
 
 fn eval_struct_pack(values: &[SqlValue]) -> Result<SqlValue> {
     let mut fields = Vec::with_capacity(values.len() / 2);
-    for pair in values.chunks_exact(2) {
+    for pair in values.as_chunks::<2>().0 {
         let SqlValue::Text(name) = &pair[0] else {
             return Err(invalid("STRUCT_PACK", "field names must be TEXT"));
         };
