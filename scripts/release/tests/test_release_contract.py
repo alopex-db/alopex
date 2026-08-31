@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import textwrap
 import tomllib
 import unittest
 from pathlib import Path
@@ -220,6 +221,20 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn(
             "python scripts/release/retarget_python_parser_source.py", publish
         )
+
+    def test_crate_publish_parser_staging_python_is_valid(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        staging = release.split(
+            "- name: Bind crate source staging to freshly built parser assets",
+            maxsplit=1,
+        )[1].split("- name: Create publish helper", maxsplit=1)[0]
+        script = staging.split("python - <<'PY'\n", maxsplit=1)[1].split(
+            "\n          PY", maxsplit=1
+        )[0]
+
+        compile(textwrap.dedent(script), "release parser staging", "exec")
 
     def test_core_repair_forward_is_bound_to_the_immutable_release_tag(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
