@@ -295,6 +295,12 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
         self.assertIn("--require-all", run)
 
+    def test_v08_sql_demo_count_matches_its_declared_checks(self) -> None:
+        demo = (ROOT / "scripts/demo/v08/demo_sql_v08.py").read_text(encoding="utf-8")
+
+        self.assertIn("if completed != 81:", demo)
+        self.assertIn("81 checks passed", demo)
+
     def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
         wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v08.sh").read_text(

@@ -747,12 +747,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 73:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 73")
+        if completed != 81:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 81")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 73 checks passed")
+    print("v0.8 SQL correctness demo completed: 81 checks passed")
     return 0
 
 
