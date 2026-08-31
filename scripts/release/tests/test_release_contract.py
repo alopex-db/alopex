@@ -10,6 +10,18 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_sql_type_capability_gate_runs_in_ci_and_release(self) -> None:
+        surface_gate = (
+            ROOT / "crates/alopex-tools/v08/verify-v08-surfaces.sh"
+        ).read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/release/type_capability_gate.py", surface_gate)
+        self.assertIn(
+            'type_capability_gate.py --release-version "${RELEASE_TAG_NAME#v}"',
+            release,
+        )
+
     def test_workspace_alopex_dependencies_are_exact_patch_pins(self) -> None:
         with (ROOT / "Cargo.toml").open("rb") as stream:
             workspace = tomllib.load(stream)
@@ -263,6 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/demo/v08/demo_sql_v08.py", run)
+        self.assertIn("JSON-on-TEXT", run)
         self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
         self.assertIn("--require-all", run)

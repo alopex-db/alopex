@@ -34,6 +34,7 @@ pub mod dialect;
 pub mod distributed_read;
 pub mod error;
 pub mod executor;
+pub mod fts;
 mod nim_bridge;
 mod nim_ffi;
 pub mod parser;

@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "contract_version": "sql-value-v1",
+  "migration_policy": {
+    "type_tags": "Existing tags are immutable; new tags are append-only.",
+    "old_data": "New readers must retain tests for old stored values.",
+    "old_readers": "Old readers must reject unsupported new values without coercion."
+  },
+  "surfaces": [
+    {
+      "id": "parser_ast",
+      "owners": [
+        "crates/alopex-sql/nim-sql-parser/src/ast.nim",
+        "crates/alopex-sql/src/ast/ddl.rs"
+      ]
+    },
+    {
+      "id": "catalog_schema",
+      "owners": [
+        "crates/alopex-sql/src/planner/types.rs",
+        "crates/alopex-core/src/storage/format/models/metadata.rs"
+      ]
+    },
+    {
+      "id": "storage",
+      "owners": [
+        "crates/alopex-sql/src/storage/value.rs",
+        "crates/alopex-sql/src/storage/codec.rs"
+      ]
+    },
+    {
+      "id": "wal_snapshot_backup",
+      "owners": [
+        "crates/alopex-core/src/log/wal.rs",
+        "crates/alopex-server/src/ops/backup.rs"
+      ]
+    },
+    {
+      "id": "distributed_wire",
+      "owners": [
+        "crates/alopex-sql/src/distributed_read/assembler.rs"
+      ]
+    },
+    {
+      "id": "rust_api",
+      "owners": [
+        "crates/alopex-sql/src/storage/value.rs"
+      ]
+    },
+    {
+      "id": "python_ffi",
+      "owners": [
+        "crates/alopex-py/src/embedded/sql.rs"
+      ]
+    },
+    {
+      "id": "dataframe_arrow_parquet",
+      "owners": [
+        "crates/alopex-dataframe/src/lib.rs"
+      ]
+    },
+    {
+      "id": "packaging_demo",
+      "owners": [
+        "crates/alopex-tools/v08/verify-v08-surfaces.sh",
+        "scripts/demo/v08/demo_sql_v08.py"
+      ]
+    }
+  ],
+  "type_families": [
+    {
+      "id": "decimal",
+      "issue": 158,
+      "target_release": "0.8.10",
+      "status": "complete",
+      "evidence": {
+        "parser_ast": [
+          "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim"
+        ],
+        "catalog_schema": [
+          "crates/alopex-sql/src/catalog/persistent.rs"
+        ],
+        "storage": [
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "wal_snapshot_backup": [
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "distributed_wire": [
+          "crates/alopex-server/proto/alopex.proto",
+          "crates/alopex-server/src/grpc/mod.rs"
+        ],
+        "rust_api": [
+          "crates/alopex-sql/tests/decimal_types.rs"
+        ],
+        "python_ffi": [
+          "crates/alopex-py/src/embedded/sql.rs"
+        ],
+        "dataframe_arrow_parquet": [
+          "crates/alopex-embedded/tests/dataframe_integration.rs",
+          "crates/alopex-sql/src/executor/bulk/parquet.rs"
+        ],
+        "packaging_demo": [
+          "scripts/demo/v08/demo_sql_v08.py",
+          "docs/sql-decimal.md"
+        ]
+      }
+    },
+    {
+      "id": "temporal",
+      "issue": 159,
+      "target_release": "0.8.10",
+      "status": "complete",
+      "evidence": {
+        "parser_ast": [
+          "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim"
+        ],
+        "catalog_schema": [
+          "crates/alopex-sql/src/catalog/persistent.rs"
+        ],
+        "storage": [
+          "crates/alopex-sql/src/storage/codec.rs",
+          "crates/alopex-sql/src/storage/key.rs"
+        ],
+        "wal_snapshot_backup": [
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "distributed_wire": [
+          "crates/alopex-server/proto/alopex.proto",
+          "crates/alopex-server/src/grpc/mod.rs"
+        ],
+        "rust_api": [
+          "crates/alopex-sql/tests/temporal_types.rs"
+        ],
+        "python_ffi": [
+          "crates/alopex-py/src/embedded/sql.rs"
+        ],
+        "dataframe_arrow_parquet": [
+          "crates/alopex-embedded/tests/dataframe_integration.rs",
+          "crates/alopex-sql/src/executor/bulk/parquet.rs"
+        ],
+        "packaging_demo": [
+          "scripts/demo/v08/demo_sql_v08.py",
+          "docs/sql-temporal-types.md"
+        ]
+      }
+    },
+    {
+      "id": "json",
+      "issue": 161,
+      "target_release": "0.8.10",
+      "status": "complete",
+      "evidence": {
+        "parser_ast": [
+          "crates/alopex-sql/nim-sql-parser/src/parser.nim",
+          "crates/alopex-sql/tests/json_native.rs"
+        ],
+        "catalog_schema": [
+          "crates/alopex-sql/src/catalog/persistent.rs",
+          "crates/alopex-embedded/src/catalog_api.rs"
+        ],
+        "storage": [
+          "crates/alopex-sql/src/storage/value.rs",
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "wal_snapshot_backup": [
+          "crates/alopex-sql/src/storage/codec.rs",
+          "crates/alopex-sql/tests/json_native.rs"
+        ],
+        "distributed_wire": [
+          "crates/alopex-server/proto/alopex.proto",
+          "crates/alopex-sql/src/distributed_read/catalog_v0_8.rs"
+        ],
+        "rust_api": [
+          "crates/alopex-sql/src/storage/value.rs",
+          "crates/alopex-sql/src/executor/evaluator/json.rs"
+        ],
+        "python_ffi": [
+          "crates/alopex-py/src/embedded/sql.rs"
+        ],
+        "dataframe_arrow_parquet": [
+          "crates/alopex-embedded/src/dataframe_api.rs",
+          "crates/alopex-sql/src/executor/bulk/parquet.rs"
+        ],
+        "packaging_demo": [
+          "scripts/demo/v08/demo_sql_v08.py",
+          "docs/sql-json-text.md"
+        ]
+      }
+    },
+    {
+      "id": "nested",
+      "issue": 162,
+      "target_release": "0.8.10",
+      "status": "complete",
+      "evidence": {
+        "parser_ast": [
+          "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim",
+          "crates/alopex-sql/tests/nested_types.rs"
+        ],
+        "catalog_schema": [
+          "crates/alopex-sql/src/catalog/persistent.rs",
+          "crates/alopex-embedded/src/catalog_api.rs"
+        ],
+        "storage": [
+          "crates/alopex-sql/src/storage/value.rs",
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "wal_snapshot_backup": [
+          "crates/alopex-sql/src/storage/codec.rs",
+          "crates/alopex-sql/tests/nested_types.rs"
+        ],
+        "distributed_wire": [
+          "crates/alopex-server/proto/alopex.proto",
+          "crates/alopex-sql/src/distributed_read/catalog_v0_8.rs"
+        ],
+        "rust_api": [
+          "crates/alopex-sql/src/storage/value.rs",
+          "crates/alopex-sql/tests/nested_types.rs"
+        ],
+        "python_ffi": [
+          "crates/alopex-py/src/embedded/sql.rs"
+        ],
+        "dataframe_arrow_parquet": [
+          "crates/alopex-embedded/src/dataframe_api.rs",
+          "crates/alopex-sql/src/executor/bulk/parquet.rs"
+        ],
+        "packaging_demo": [
+          "scripts/demo/v08/demo_sql_v08.py",
+          "docs/sql-nested-types.md"
+        ]
+      }
+    }
+  ]
+}

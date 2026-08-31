@@ -55,6 +55,7 @@ impl Arity {
 pub enum ReturnRule {
     Fixed(ResolvedType),
     FromArgs(fn(&[ResolvedType]) -> Result<ResolvedType, PlannerError>),
+    FromTypedArgs(fn(&[TypedExpr]) -> Result<ResolvedType, PlannerError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +160,312 @@ pub fn check_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+fn check_json_object(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if !args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON_OBJECT expects label/value pairs".to_string(),
+        ));
+    }
+    for label in args.iter().step_by(2) {
+        if !matches!(label.resolved_type, ResolvedType::Text | ResolvedType::Null) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                label.resolved_type.type_name(),
+                label.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_json_input(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Text | ResolvedType::Json | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "JSON or Text",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn common_nested_type(
+    types: impl IntoIterator<Item = ResolvedType>,
+) -> Result<ResolvedType, PlannerError> {
+    let mut common = ResolvedType::Null;
+    for data_type in types {
+        common = match (&common, &data_type) {
+            (ResolvedType::Null, _) => data_type,
+            (_, ResolvedType::Null) => common,
+            (left, right) if left == right => common,
+            (ResolvedType::Integer, ResolvedType::BigInt)
+            | (ResolvedType::BigInt, ResolvedType::Integer) => ResolvedType::BigInt,
+            (
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float,
+                ResolvedType::Double,
+            )
+            | (
+                ResolvedType::Double,
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float,
+            ) => ResolvedType::Double,
+            (ResolvedType::Integer, ResolvedType::Float)
+            | (ResolvedType::Float, ResolvedType::Integer) => ResolvedType::Float,
+            (ResolvedType::BigInt, ResolvedType::Float)
+            | (ResolvedType::Float, ResolvedType::BigInt) => ResolvedType::Double,
+            _ => {
+                return Err(PlannerError::invalid_expression(
+                    "nested values require a common element type",
+                ));
+            }
+        };
+    }
+    Ok(common)
+}
+
+fn return_array_value(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type(
+        args.to_vec(),
+    )?)))
+}
+
+fn return_integer_array(_args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(ResolvedType::Integer)))
+}
+
+fn return_text_array(_args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(ResolvedType::Text)))
+}
+
+fn array_element(data_type: &ResolvedType) -> Result<ResolvedType, PlannerError> {
+    match data_type {
+        ResolvedType::Array(element) => Ok((**element).clone()),
+        ResolvedType::Null => Ok(ResolvedType::Null),
+        other => Err(PlannerError::invalid_expression(format!(
+            "expected ARRAY, found {other}"
+        ))),
+    }
+}
+
+fn check_array_first(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    array_element(&args[0].resolved_type).map(|_| ())
+}
+
+fn check_array_append(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        array_element(&args[0].resolved_type)?,
+        args[1].resolved_type.clone(),
+    ])
+    .map(|_| ())
+}
+
+fn check_array_prepend(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        args[0].resolved_type.clone(),
+        array_element(&args[1].resolved_type)?,
+    ])
+    .map(|_| ())
+}
+
+fn check_array_replace(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    common_nested_type([
+        array_element(&args[0].resolved_type)?,
+        args[1].resolved_type.clone(),
+        args[2].resolved_type.clone(),
+    ])
+    .map(|_| ())
+}
+
+fn check_array_slice(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_array_first(args)?;
+    for arg in &args[1..] {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+        ) {
+            return Err(PlannerError::invalid_expression(
+                "ARRAY slice bounds must be INTEGER",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_array_pair(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    let left = array_element(&args[0].resolved_type)?;
+    let right = array_element(&args[1].resolved_type)?;
+    common_nested_type([left, right]).map(|_| ())
+}
+
+fn return_array_first(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(array_element(&args[0])?)))
+}
+
+fn return_array_append(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        array_element(&args[0])?,
+        args[1].clone(),
+    ])?)))
+}
+
+fn return_array_prepend(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        args[0].clone(),
+        array_element(&args[1])?,
+    ])?)))
+}
+
+fn return_array_cat(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Array(Box::new(common_nested_type([
+        array_element(&args[0])?,
+        array_element(&args[1])?,
+    ])?)))
+}
+
+fn check_map(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    array_element(&args[0].resolved_type)?;
+    array_element(&args[1].resolved_type)?;
+    Ok(())
+}
+
+fn check_array_text_tail(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_array_first(args)?;
+    check_text(&args[1..])
+}
+
+fn return_map(args: &[ResolvedType]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Map {
+        key: Box::new(array_element(&args[0])?),
+        value: Box::new(array_element(&args[1])?),
+    })
+}
+
+fn check_struct_pack(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if !args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "STRUCT_PACK expects name/value pairs",
+        ));
+    }
+    for name in args.iter().step_by(2) {
+        if !matches!(name.kind, TypedExprKind::Literal(Literal::String(_))) {
+            return Err(PlannerError::invalid_expression(
+                "STRUCT_PACK field names must be string literals",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn return_struct(args: &[TypedExpr]) -> Result<ResolvedType, PlannerError> {
+    Ok(ResolvedType::Struct(
+        args.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let TypedExprKind::Literal(Literal::String(name)) = &pair[0].kind else {
+                    unreachable!("checked by check_struct_pack")
+                };
+                (name.clone(), pair[1].resolved_type.clone())
+            })
+            .collect(),
+    ))
+}
+
+fn check_subscript(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    match &args[0].resolved_type {
+        ResolvedType::Array(_) => {
+            if matches!(
+                args[1].resolved_type,
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+            ) {
+                Ok(())
+            } else {
+                Err(PlannerError::invalid_expression(
+                    "ARRAY subscript must be INTEGER",
+                ))
+            }
+        }
+        ResolvedType::Map { key, .. } if args[1].resolved_type.can_cast_to(key) => Ok(()),
+        ResolvedType::Struct(_) if matches!(args[1].resolved_type, ResolvedType::Text) => Ok(()),
+        ResolvedType::Null => Ok(()),
+        other => Err(PlannerError::invalid_expression(format!(
+            "cannot subscript {other}"
+        ))),
+    }
+}
+
+fn return_subscript(args: &[TypedExpr]) -> Result<ResolvedType, PlannerError> {
+    match &args[0].resolved_type {
+        ResolvedType::Array(element) => Ok((**element).clone()),
+        ResolvedType::Map { value, .. } => Ok((**value).clone()),
+        ResolvedType::Struct(fields) => {
+            let TypedExprKind::Literal(Literal::String(name)) = &args[1].kind else {
+                return Ok(ResolvedType::Null);
+            };
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, data_type)| data_type.clone())
+                .ok_or_else(|| {
+                    PlannerError::invalid_expression(format!("unknown struct field '{name}'"))
+                })
+        }
+        ResolvedType::Null => Ok(ResolvedType::Null),
+        _ => unreachable!("checked by check_subscript"),
+    }
+}
+
+fn check_json_selector(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_json_input(&args[..1])?;
+    if matches!(
+        args[1].resolved_type,
+        ResolvedType::Text | ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+    ) {
+        Ok(())
+    } else {
+        Err(PlannerError::type_mismatch(
+            "Text or Integer",
+            args[1].resolved_type.type_name(),
+            args[1].span,
+        ))
+    }
+}
+
+fn check_json_path(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_json_input(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_jsonb_update(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON update expects JSON followed by path/value pairs".to_string(),
+        ));
+    }
+    check_json_input(&args[..1])?;
+    for path in args[1..].iter().step_by(2) {
+        check_text(std::slice::from_ref(path))?;
+    }
+    Ok(())
+}
+
+fn check_json_update(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON update expects JSON followed by path/value pairs".to_string(),
+        ));
+    }
+    check_text(&args[..1])?;
+    for path in args[1..].iter().step_by(2) {
+        check_text(std::slice::from_ref(path))?;
+    }
+    Ok(())
+}
+
 pub fn check_text_or_blob(args: &[TypedExpr]) -> Result<(), PlannerError> {
     for arg in args {
         if !matches!(
@@ -216,6 +523,85 @@ fn check_to_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
         ));
     }
     check_text(args)
+}
+
+fn check_temporal_input(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Text
+                | ResolvedType::Date
+                | ResolvedType::Time
+                | ResolvedType::Timestamp
+                | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Temporal or Text",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_datetime(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_temporal_input(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_temporal_interval(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    let temporal = &args[0];
+    if !matches!(
+        temporal.resolved_type,
+        ResolvedType::Date | ResolvedType::Time | ResolvedType::Timestamp | ResolvedType::Null
+    ) {
+        return Err(PlannerError::type_mismatch(
+            "Date, Time, or Timestamp",
+            temporal.resolved_type.type_name(),
+            temporal.span,
+        ));
+    }
+    let interval = &args[1];
+    if matches!(
+        interval.resolved_type,
+        ResolvedType::Interval | ResolvedType::Null
+    ) {
+        Ok(())
+    } else {
+        Err(PlannerError::type_mismatch(
+            "Interval",
+            interval.resolved_type.type_name(),
+            interval.span,
+        ))
+    }
+}
+
+fn check_age(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Date | ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Date or Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    if args.len() == 2
+        && args[0].resolved_type != ResolvedType::Null
+        && args[1].resolved_type != ResolvedType::Null
+        && args[0].resolved_type != args[1].resolved_type
+    {
+        return Err(PlannerError::type_mismatch(
+            args[0].resolved_type.type_name(),
+            args[1].resolved_type.type_name(),
+            args[1].span,
+        ));
+    }
+    Ok(())
 }
 
 pub fn check_bigint(args: &[TypedExpr]) -> Result<(), PlannerError> {
@@ -412,6 +798,252 @@ const fn sig_meta(
 
 static SIGNATURES: &[ScalarSignature] = &[
     sig(
+        "to_tsvector",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "to_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "plainto_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "websearch_to_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "ts_rank",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "ts_headline",
+        Arity::Range(2, 3),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "array_value",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::FromArgs(return_array_value),
+    ),
+    sig(
+        "list_value",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::FromArgs(return_array_value),
+    ),
+    sig(
+        "array_append",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_array_append),
+    ),
+    sig(
+        "array_prepend",
+        Arity::Exact(2),
+        check_array_prepend,
+        ReturnRule::FromArgs(return_array_prepend),
+    ),
+    sig(
+        "array_cat",
+        Arity::Exact(2),
+        check_array_pair,
+        ReturnRule::FromArgs(return_array_cat),
+    ),
+    sig(
+        "array_remove",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_array_first),
+    ),
+    sig(
+        "array_replace",
+        Arity::Exact(3),
+        check_array_replace,
+        ReturnRule::FromArgs(return_array_first),
+    ),
+    sig(
+        "array_length",
+        Arity::Exact(1),
+        check_array_first,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "array_position",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "array_positions",
+        Arity::Exact(2),
+        check_array_append,
+        ReturnRule::FromArgs(return_integer_array),
+    ),
+    sig(
+        "string_to_array",
+        Arity::Range(2, 3),
+        check_text,
+        ReturnRule::FromArgs(return_text_array),
+    ),
+    sig(
+        "array_to_string",
+        Arity::Range(2, 3),
+        check_array_text_tail,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "map",
+        Arity::Exact(2),
+        check_map,
+        ReturnRule::FromArgs(return_map),
+    ),
+    sig(
+        "struct_pack",
+        Arity::Variadic(0),
+        check_struct_pack,
+        ReturnRule::FromTypedArgs(return_struct),
+    ),
+    sig(
+        "array_subscript",
+        Arity::Exact(2),
+        check_subscript,
+        ReturnRule::FromTypedArgs(return_subscript),
+    ),
+    sig(
+        "array_slice",
+        Arity::Exact(3),
+        check_array_slice,
+        ReturnRule::FromArgs(return_array_first),
+    ),
+    sig(
+        "jsonb_extract",
+        Arity::Exact(2),
+        check_json_selector,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_extract_text",
+        Arity::Exact(2),
+        check_json_selector,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "jsonb_extract_path",
+        Arity::Exact(2),
+        check_json_path,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_extract_path_text",
+        Arity::Exact(2),
+        check_json_path,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "jsonb_set",
+        Arity::Variadic(3),
+        check_jsonb_update,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_insert",
+        Arity::Variadic(3),
+        check_jsonb_update,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_build_object",
+        Arity::Variadic(0),
+        check_json_object,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_build_array",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "json",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_valid",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Boolean),
+    ),
+    sig(
+        "json_type",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_extract",
+        Arity::Variadic(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_object",
+        Arity::Variadic(0),
+        check_json_object,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_array",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_insert",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_replace",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_set",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_remove",
+        Arity::Variadic(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_array_length",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
         "vector_similarity",
         Arity::Exact(3),
         check_vector_triplet,
@@ -605,6 +1237,86 @@ static SIGNATURES: &[ScalarSignature] = &[
         check_numeric,
         ReturnRule::Fixed(ResolvedType::Timestamp),
         STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_date",
+        Arity::Exact(0),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Date),
+        STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_time",
+        Arity::Exact(0),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Time),
+        STATEMENT_STABLE_META,
+    ),
+    sig(
+        "make_date",
+        Arity::Exact(3),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "make_time",
+        Arity::Exact(3),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Time),
+    ),
+    sig(
+        "make_timestamp",
+        Arity::Exact(6),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "make_interval",
+        Arity::Range(0, 7),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Interval),
+    ),
+    sig(
+        "date",
+        Arity::Exact(1),
+        check_temporal_input,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "time",
+        Arity::Exact(1),
+        check_temporal_input,
+        ReturnRule::Fixed(ResolvedType::Time),
+    ),
+    sig(
+        "datetime",
+        Arity::Variadic(1),
+        check_datetime,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "to_date",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "age",
+        Arity::Range(1, 2),
+        check_age,
+        ReturnRule::Fixed(ResolvedType::Interval),
+    ),
+    sig(
+        "date_add",
+        Arity::Exact(2),
+        check_temporal_interval,
+        ReturnRule::FromArgs(return_arg0),
+    ),
+    sig(
+        "date_sub",
+        Arity::Exact(2),
+        check_temporal_interval,
+        ReturnRule::FromArgs(return_arg0),
     ),
     sig(
         "extract",

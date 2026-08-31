@@ -146,8 +146,16 @@ impl Default for RecursiveCteLimits {
 pub enum TableFunctionKind {
     /// `UNNEST(vector)` — one row per element.
     Unnest,
+    /// `UNNEST(array) WITH ORDINALITY` — element and one-based position.
+    UnnestWithOrdinality,
     /// `GENERATE_SERIES(start, stop [, step])` over integers.
     GenerateSeries,
+    /// `JSON_EACH(json [, path])` — immediate children of JSON TEXT.
+    JsonEach,
+    /// `JSON_TREE(json [, path])` — recursive JSON TEXT traversal.
+    JsonTree,
+    /// `FTS_SEARCH(table, column, query [, config])` — ranked full-text matches.
+    FtsSearch,
 }
 
 impl TableFunctionKind {
@@ -156,6 +164,9 @@ impl TableFunctionKind {
         match name.to_ascii_uppercase().as_str() {
             "UNNEST" => Some(Self::Unnest),
             "GENERATE_SERIES" => Some(Self::GenerateSeries),
+            "JSON_EACH" => Some(Self::JsonEach),
+            "JSON_TREE" => Some(Self::JsonTree),
+            "FTS_SEARCH" => Some(Self::FtsSearch),
             _ => None,
         }
     }
@@ -163,8 +174,11 @@ impl TableFunctionKind {
     /// Canonical uppercase spelling used in messages and plan output.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Unnest => "UNNEST",
+            Self::Unnest | Self::UnnestWithOrdinality => "UNNEST",
             Self::GenerateSeries => "GENERATE_SERIES",
+            Self::JsonEach => "JSON_EACH",
+            Self::JsonTree => "JSON_TREE",
+            Self::FtsSearch => "FTS_SEARCH",
         }
     }
 
@@ -172,8 +186,11 @@ impl TableFunctionKind {
     /// the lowercase function name).
     pub fn default_relation_name(self) -> &'static str {
         match self {
-            Self::Unnest => "unnest",
+            Self::Unnest | Self::UnnestWithOrdinality => "unnest",
             Self::GenerateSeries => "generate_series",
+            Self::JsonEach => "json_each",
+            Self::JsonTree => "json_tree",
+            Self::FtsSearch => "fts_search",
         }
     }
 }

@@ -229,6 +229,36 @@ suite "MessagePack output - contract shape":
       let create = payloadJson(sql).stmtKind()
       check create["columns"][0]["data_type"]["variant"].getStr() == "Float"
 
+  test "temporal data types and typed literals emit contract variants":
+    let create = payloadJson(
+      "CREATE TABLE events (day DATE, at TIME, elapsed INTERVAL)").stmtKind()
+    check create["columns"][0]["data_type"]["variant"].getStr() == "Date"
+    check create["columns"][1]["data_type"]["variant"].getStr() == "Time"
+    check create["columns"][2]["data_type"]["variant"].getStr() == "Interval"
+
+    let select = selectKind(
+      "SELECT DATE '2024-02-29', TIME '12:34:56', INTERVAL '1 day'")
+    check select["projection"][0]["expr"]["kind"]["target_type"]["variant"].getStr() == "Date"
+    check select["projection"][1]["expr"]["kind"]["target_type"]["variant"].getStr() == "Time"
+    check select["projection"][2]["expr"]["kind"]["variant"].getStr() == "Literal"
+    check select["projection"][2]["expr"]["kind"]["literal"]["variant"].getStr() == "Interval"
+
+  test "nested data types emit recursive contract variants":
+    let create = payloadJson(
+      "CREATE TABLE nested (a ARRAY<INT>, m MAP<TEXT, BIGINT>, " &
+      "s STRUCT<x INT, labels LIST<TEXT>>)"
+      ).stmtKind()
+    let arrayType = create["columns"][0]["data_type"]
+    check arrayType["variant"].getStr() == "Array"
+    check arrayType["element"]["variant"].getStr() == "Int"
+    let mapType = create["columns"][1]["data_type"]
+    check mapType["variant"].getStr() == "Map"
+    check mapType["key"]["variant"].getStr() == "Text"
+    check mapType["value"]["variant"].getStr() == "BigInt"
+    let structType = create["columns"][2]["data_type"]
+    check structType["variant"].getStr() == "Struct"
+    check structType["fields"][1]["data_type"]["variant"].getStr() == "Array"
+
   test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
     let kind = selectKind(
       "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH FIRST 3 ROWS WITH TIES")
@@ -331,6 +361,11 @@ suite "MessagePack output - contract shape":
     check create["column"].getStr() == "embedding"
     check create["method"].getStr() == "Hnsw"
     check create["options"].len == 2
+
+  test "CREATE INDEX emits FTS method":
+    let create = payloadJson(
+      "CREATE INDEX idx_docs_body ON documents (body) USING FTS").stmtKind()
+    check create["method"].getStr() == "Fts"
 
 suite "MessagePack output - INSERT (issue #40)":
 
@@ -738,7 +773,7 @@ suite "MessagePack output - staged continuous aggregate contract":
     check not query.hasKey("limit_with_ties")
     check not query.hasKey("distinct_on")
 
-  test "future helper accepts the existing CAST DECIMAL grammar":
+  test "DECIMAL precision and scale survive the public AST contract":
     let statement = parseSql(
       "CREATE CONTINUOUS AGGREGATE hourly AS " &
       "SELECT CAST(value AS DECIMAL(10,2)) FROM samples " &
@@ -749,7 +784,9 @@ suite "MessagePack output - staged continuous aggregate contract":
     )["kind"]["query"]
     let castKind = query["projection"][0]["expr"]["kind"]
     check castKind["variant"].getStr() == "Cast"
-    check castKind["target_type"]["variant"].getStr() == "Double"
+    check castKind["target_type"]["variant"].getStr() == "Decimal"
+    check castKind["target_type"]["precision"].getInt() == 10
+    check castKind["target_type"]["scale"].getInt() == 2
 
   test "TRY_CAST has a dedicated MessagePack expression variant":
     let statement = parseSql(
@@ -937,6 +974,11 @@ suite "LATERAL and table functions (issue #151, contract 0.14.0)":
     check item["columns"].len == 1
     check item["columns"][0].getStr() == "x"
     check item["lateral"].getBool() == false
+    check item["with_ordinality"].getBool() == false
+
+    let ordinal = selectKind(
+      "SELECT * FROM UNNEST(ARRAY[1, NULL]) WITH ORDINALITY AS u")["from"][0]
+    check ordinal["with_ordinality"].getBool()
 
     let lateral = selectKind(
       "SELECT * FROM t, LATERAL GENERATE_SERIES(1, t.n)")["from"][0]

@@ -2,6 +2,7 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::storage::{SqlTxn, SqlValue, StorageError};
@@ -37,13 +38,19 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .clone();
 
     let column_indices = resolve_column_indices(&table, &index)?;
-
+    ensure_indexable_columns(&table, &column_indices, "CREATE INDEX")?;
     let index_id = catalog.next_index_id();
     index.index_id = index_id;
     index.column_indices = column_indices.clone();
+    if matches!(index.method, Some(IndexMethod::Fts)) {
+        FtsBridge::prepare(&mut index)?;
+    }
 
     if matches!(index.method, Some(IndexMethod::Hnsw)) {
         HnswBridge::create_index(txn, &table, &index)?;
+    } else if matches!(index.method, Some(IndexMethod::Fts)) {
+        FtsBridge::validate(&index, &table.columns[column_indices[0]].data_type)?;
+        build_fts_index_for_existing_rows(txn, &table, &index)?;
     } else {
         // Populate index entries for existing rows before publishing metadata.
         build_index_for_existing_rows(txn, &table, &index, column_indices)?;
@@ -53,6 +60,58 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     persist_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
+}
+
+pub(crate) fn build_fts_index_for_existing_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table: &TableMetadata,
+    index: &IndexMetadata,
+) -> Result<()> {
+    let mut start_row_id = 0;
+    loop {
+        let rows = txn.with_table(table, |storage| {
+            storage
+                .range_scan(start_row_id, u64::MAX)?
+                .take(2048)
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for (row_id, row) in rows {
+            FtsBridge::on_insert(txn, index, row_id, &row)?;
+            start_row_id = row_id.saturating_add(1);
+        }
+    }
+}
+
+pub(super) fn ensure_indexable_columns(
+    table: &TableMetadata,
+    column_indices: &[usize],
+    operation: &str,
+) -> Result<()> {
+    if let Some(data_type) = column_indices.iter().find_map(|column| {
+        let data_type = &table.columns[*column].data_type;
+        matches!(
+            data_type,
+            crate::planner::ResolvedType::Json
+                | crate::planner::ResolvedType::Array(_)
+                | crate::planner::ResolvedType::Map { .. }
+                | crate::planner::ResolvedType::Struct(_)
+        )
+        .then_some(data_type)
+    }) {
+        return Err(ExecutorError::InvalidOperation {
+            operation: operation.into(),
+            reason: if matches!(data_type, crate::planner::ResolvedType::Json) {
+                "Alopex does not define a JSON sort order"
+            } else {
+                "Alopex does not define a nested-value sort order"
+            }
+            .into(),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_column_indices(

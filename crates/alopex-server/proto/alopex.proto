@@ -137,6 +137,17 @@ message Vector {
   repeated float values = 1;
 }
 
+message Interval {
+  int32 months = 1;
+  int32 days = 2;
+  int64 microseconds = 3;
+}
+
+message Decimal {
+  bytes coefficient = 1;
+  uint32 scale = 2;
+}
+
 message Value {
   oneof kind {
     int32 int_value = 1;
@@ -148,6 +159,14 @@ message Value {
     bool bool_value = 7;
     int64 timestamp_value = 8;
     Vector vector_value = 9;
+    int32 date_value = 10;
+    int64 time_value = 11;
+    Interval interval_value = 12;
+    Decimal decimal_value = 13;
+    string json_value = 14;
+    string array_json_value = 15;
+    string map_json_value = 16;
+    string struct_json_value = 17;
   }
 }
 

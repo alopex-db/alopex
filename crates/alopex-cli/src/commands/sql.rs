@@ -1081,7 +1081,7 @@ async fn collect_remote_streaming_rows(
                 _ => {
                     return Err(CliError::InvalidArgument(
                         "Invalid streaming response: expected ',' or ']'".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1127,7 +1127,7 @@ async fn collect_remote_streaming_rows(
             let bytes = match chunk {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    return Err(CliError::ServerConnection(format!("request failed: {err}")))
+                    return Err(CliError::ServerConnection(format!("request failed: {err}")));
                 }
             };
 
@@ -1486,7 +1486,7 @@ async fn stream_remote_result_set<W: Write>(
                 _ => {
                     return Err(CliError::InvalidArgument(
                         "Invalid streaming response: expected ',' or ']'".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1532,7 +1532,7 @@ async fn stream_remote_result_set<W: Write>(
             let bytes = match chunk {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    return Err(CliError::ServerConnection(format!("request failed: {err}")))
+                    return Err(CliError::ServerConnection(format!("request failed: {err}")));
                 }
             };
 
@@ -2410,6 +2410,16 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
             Value::Text(format!("{}", ts))
         }
         SqlValue::Vector(v) => Value::Vector(v),
+        value @ (SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. }) => {
+            Value::Text(value.temporal_text().expect("valid stored temporal value"))
+        }
+        SqlValue::Decimal(value) => Value::Text(value.to_string()),
+        SqlValue::Json(value) => Value::Text(value.to_string()),
+        value @ (SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_)) => Value::Text(
+            value
+                .nested_json_text()
+                .expect("nested SQL value has a JSON mapping"),
+        ),
     }
 }
 
@@ -2427,6 +2437,16 @@ fn remote_value_to_value(sql_value: alopex_sql::storage::SqlValue) -> Value {
         SqlValue::Boolean(b) => Value::Bool(b),
         SqlValue::Timestamp(ts) => Value::Text(ts.to_string()),
         SqlValue::Vector(v) => Value::Vector(v),
+        value @ (SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. }) => {
+            Value::Text(value.temporal_text().expect("valid stored temporal value"))
+        }
+        SqlValue::Decimal(value) => Value::Text(value.to_string()),
+        SqlValue::Json(value) => Value::Text(value.to_string()),
+        value @ (SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_)) => Value::Text(
+            value
+                .nested_json_text()
+                .expect("nested SQL value has a JSON mapping"),
+        ),
     }
 }
 
@@ -2458,6 +2478,12 @@ fn sql_column_to_column(col: &alopex_sql::executor::ColumnInfo) -> Column {
         ResolvedType::Blob => DataType::Bytes,
         ResolvedType::Boolean => DataType::Bool,
         ResolvedType::Timestamp => DataType::Text, // Display as text
+        ResolvedType::Date | ResolvedType::Time | ResolvedType::Interval => DataType::Text,
+        ResolvedType::Decimal { .. } => DataType::Text,
+        ResolvedType::Json => DataType::Text,
+        ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
+            DataType::Text
+        }
         ResolvedType::Vector { .. } => DataType::Vector,
         ResolvedType::Null => DataType::Text, // Fallback
     };

@@ -204,7 +204,7 @@ pub struct IndexInfo {
     pub table_name: String,
     /// 対象カラム名。
     pub columns: Vec<String>,
-    /// インデックス方式（"btree" | "hnsw"）。
+    /// インデックス方式（"btree" | "hnsw" | "fts"）。
     pub method: String,
     /// ユニーク制約。
     pub is_unique: bool,
@@ -215,6 +215,7 @@ impl From<&IndexMetadata> for IndexInfo {
         let method = match value.method {
             Some(IndexMethod::BTree) | None => "btree",
             Some(IndexMethod::Hnsw) => "hnsw",
+            Some(IndexMethod::Fts) => "fts",
         };
         Self {
             name: value.name.clone(),
@@ -1555,6 +1556,21 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Blob => "BLOB".to_string(),
         ResolvedType::Boolean => "BOOLEAN".to_string(),
         ResolvedType::Timestamp => "TIMESTAMP".to_string(),
+        ResolvedType::Date => "DATE".to_string(),
+        ResolvedType::Time => "TIME".to_string(),
+        ResolvedType::Interval => "INTERVAL".to_string(),
+        ResolvedType::Decimal { precision, scale } => format!("DECIMAL({precision},{scale})"),
+        ResolvedType::Json => "JSON".to_string(),
+        ResolvedType::Array(element) => format!("ARRAY<{element}>"),
+        ResolvedType::Map { key, value } => format!("MAP<{key},{value}>"),
+        ResolvedType::Struct(fields) => format!(
+            "STRUCT<{}>",
+            fields
+                .iter()
+                .map(|(name, data_type)| format!("{name} {data_type}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",
@@ -1842,6 +1858,24 @@ pub enum CatalogManifestDataType {
         metric: CatalogManifestVectorMetric,
     },
     Null,
+    Date,
+    Time,
+    Interval,
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
+    Json,
+    Array {
+        element: Box<CatalogManifestDataType>,
+    },
+    Map {
+        key: Box<CatalogManifestDataType>,
+        value: Box<CatalogManifestDataType>,
+    },
+    Struct {
+        fields: Vec<(String, CatalogManifestDataType)>,
+    },
 }
 
 impl From<&ResolvedType> for CatalogManifestDataType {
@@ -1855,6 +1889,27 @@ impl From<&ResolvedType> for CatalogManifestDataType {
             ResolvedType::Blob => Self::Blob,
             ResolvedType::Boolean => Self::Boolean,
             ResolvedType::Timestamp => Self::Timestamp,
+            ResolvedType::Date => Self::Date,
+            ResolvedType::Time => Self::Time,
+            ResolvedType::Interval => Self::Interval,
+            ResolvedType::Decimal { precision, scale } => Self::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            ResolvedType::Json => Self::Json,
+            ResolvedType::Array(element) => Self::Array {
+                element: Box::new(Self::from(element.as_ref())),
+            },
+            ResolvedType::Map { key, value } => Self::Map {
+                key: Box::new(Self::from(key.as_ref())),
+                value: Box::new(Self::from(value.as_ref())),
+            },
+            ResolvedType::Struct(fields) => Self::Struct {
+                fields: fields
+                    .iter()
+                    .map(|(name, data_type)| (name.clone(), Self::from(data_type)))
+                    .collect(),
+            },
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: (*metric).into(),
@@ -1875,6 +1930,24 @@ impl From<CatalogManifestDataType> for ResolvedType {
             CatalogManifestDataType::Blob => Self::Blob,
             CatalogManifestDataType::Boolean => Self::Boolean,
             CatalogManifestDataType::Timestamp => Self::Timestamp,
+            CatalogManifestDataType::Date => Self::Date,
+            CatalogManifestDataType::Time => Self::Time,
+            CatalogManifestDataType::Interval => Self::Interval,
+            CatalogManifestDataType::Decimal { precision, scale } => {
+                Self::Decimal { precision, scale }
+            }
+            CatalogManifestDataType::Json => Self::Json,
+            CatalogManifestDataType::Array { element } => Self::Array(Box::new((*element).into())),
+            CatalogManifestDataType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            CatalogManifestDataType::Struct { fields } => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             CatalogManifestDataType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -2037,6 +2110,7 @@ impl From<&IndexMetadata> for CatalogManifestIndex {
 pub enum CatalogManifestIndexMethod {
     BTree,
     Hnsw,
+    Fts,
 }
 
 impl From<IndexMethod> for CatalogManifestIndexMethod {
@@ -2044,6 +2118,7 @@ impl From<IndexMethod> for CatalogManifestIndexMethod {
         match value {
             IndexMethod::BTree => Self::BTree,
             IndexMethod::Hnsw => Self::Hnsw,
+            IndexMethod::Fts => Self::Fts,
         }
     }
 }
@@ -2053,6 +2128,7 @@ impl From<CatalogManifestIndexMethod> for IndexMethod {
         match value {
             CatalogManifestIndexMethod::BTree => Self::BTree,
             CatalogManifestIndexMethod::Hnsw => Self::Hnsw,
+            CatalogManifestIndexMethod::Fts => Self::Fts,
         }
     }
 }

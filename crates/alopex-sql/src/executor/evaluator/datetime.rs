@@ -52,6 +52,19 @@ macro_rules! wrappers {
 }
 
 wrappers!(
+    eval_current_date => "current_date",
+    eval_current_time => "current_time",
+    eval_make_date => "make_date",
+    eval_make_time => "make_time",
+    eval_make_timestamp => "make_timestamp",
+    eval_make_interval => "make_interval",
+    eval_date => "date",
+    eval_time => "time",
+    eval_datetime => "datetime",
+    eval_to_date => "to_date",
+    eval_age => "age",
+    eval_date_add => "date_add",
+    eval_date_sub => "date_sub",
     eval_extract => "extract",
     eval_date_part => "date_part",
     eval_date_trunc => "date_trunc",
@@ -67,6 +80,32 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
         return Ok(SqlValue::Null);
     }
     match name {
+        "current_date" => Ok(SqlValue::Date(
+            i32::try_from(current_statement_timestamp().div_euclid(86_400_000_000))
+                .map_err(|_| invalid(name, "date is out of range"))?,
+        )),
+        "current_time" => Ok(SqlValue::Time(
+            current_statement_timestamp().rem_euclid(86_400_000_000),
+        )),
+        "make_date" => make_date(values),
+        "make_time" => make_time(values),
+        "make_timestamp" => make_timestamp(values),
+        "make_interval" => make_interval(values),
+        "date" => super::timestamp::coerce_date(values[0].clone()),
+        "time" => super::timestamp::coerce_time(values[0].clone()),
+        "datetime" => sqlite_datetime(values),
+        "to_date" => to_date(values),
+        "age" => age(values),
+        "date_add" => super::binary_op::eval_binary_values(
+            &crate::ast::expr::BinaryOp::Add,
+            values[0].clone(),
+            values[1].clone(),
+        ),
+        "date_sub" => super::binary_op::eval_binary_values(
+            &crate::ast::expr::BinaryOp::Sub,
+            values[0].clone(),
+            values[1].clone(),
+        ),
         "extract" | "date_part" => {
             let unit = text(values.first(), name)?;
             let micros = timestamp(values.get(1), name)?;
@@ -98,6 +137,177 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
             EvaluationError::UnsupportedFunction(name.into()),
         )),
     }
+}
+
+fn integer(value: &SqlValue, function: &str) -> Result<i64> {
+    match value {
+        SqlValue::Integer(value) => Ok(i64::from(*value)),
+        SqlValue::BigInt(value) => Ok(*value),
+        value => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Integer".into(),
+            actual: format!("{} in {function}", value.type_name()),
+        })),
+    }
+}
+
+fn number(value: &SqlValue, function: &str) -> Result<f64> {
+    match value {
+        SqlValue::Integer(value) => Ok(f64::from(*value)),
+        SqlValue::BigInt(value) => Ok(*value as f64),
+        SqlValue::Float(value) => Ok(f64::from(*value)),
+        SqlValue::Double(value) => Ok(*value),
+        value => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Numeric".into(),
+            actual: format!("{} in {function}", value.type_name()),
+        })),
+    }
+}
+
+fn make_date(values: &[SqlValue]) -> Result<SqlValue> {
+    let date = NaiveDate::from_ymd_opt(
+        i32::try_from(integer(&values[0], "make_date")?)
+            .map_err(|_| invalid("make_date", "year is out of range"))?,
+        u32::try_from(integer(&values[1], "make_date")?)
+            .map_err(|_| invalid("make_date", "month is out of range"))?,
+        u32::try_from(integer(&values[2], "make_date")?)
+            .map_err(|_| invalid("make_date", "day is out of range"))?,
+    )
+    .ok_or_else(|| invalid("make_date", "invalid calendar date"))?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+    Ok(SqlValue::Date(
+        i32::try_from(date.signed_duration_since(epoch).num_days())
+            .map_err(|_| invalid("make_date", "date is out of range"))?,
+    ))
+}
+
+fn make_time(values: &[SqlValue]) -> Result<SqlValue> {
+    let hour = u32::try_from(integer(&values[0], "make_time")?)
+        .map_err(|_| invalid("make_time", "hour is out of range"))?;
+    let minute = u32::try_from(integer(&values[1], "make_time")?)
+        .map_err(|_| invalid("make_time", "minute is out of range"))?;
+    let seconds = number(&values[2], "make_time")?;
+    if !(0.0..60.0).contains(&seconds) {
+        return Err(invalid("make_time", "second is out of range"));
+    }
+    let whole = seconds.trunc() as u32;
+    let micros = ((seconds.fract() * 1_000_000.0).round() as u32).min(999_999);
+    let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, whole, micros)
+        .ok_or_else(|| invalid("make_time", "invalid time"))?;
+    Ok(SqlValue::Time(
+        i64::from(time.num_seconds_from_midnight()) * 1_000_000
+            + i64::from(time.nanosecond() / 1_000),
+    ))
+}
+
+fn make_timestamp(values: &[SqlValue]) -> Result<SqlValue> {
+    let SqlValue::Date(days) = make_date(&values[..3])? else {
+        unreachable!()
+    };
+    let SqlValue::Time(micros) = make_time(&values[3..])? else {
+        unreachable!()
+    };
+    Ok(SqlValue::Timestamp(
+        i64::from(days) * 86_400_000_000 + micros,
+    ))
+}
+
+fn make_interval(values: &[SqlValue]) -> Result<SqlValue> {
+    let arg = |index: usize| {
+        values
+            .get(index)
+            .map(|value| integer(value, "make_interval"))
+            .transpose()
+            .map(|value| value.unwrap_or(0))
+    };
+    let years = arg(0)?;
+    let months = years
+        .checked_mul(12)
+        .and_then(|value| value.checked_add(arg(1).ok()?))
+        .ok_or_else(|| invalid("make_interval", "months overflow"))?;
+    let days = arg(2)?
+        .checked_mul(7)
+        .and_then(|value| value.checked_add(arg(3).ok()?))
+        .ok_or_else(|| invalid("make_interval", "days overflow"))?;
+    let hours = arg(4)?;
+    let minutes = arg(5)?;
+    let seconds = values
+        .get(6)
+        .map(|value| number(value, "make_interval"))
+        .transpose()?
+        .unwrap_or(0.0);
+    let second_micros = seconds * 1_000_000.0;
+    if !second_micros.is_finite()
+        || second_micros < i64::MIN as f64
+        || second_micros >= -(i64::MIN as f64)
+    {
+        return Err(invalid("make_interval", "seconds are out of range"));
+    }
+    let micros = hours
+        .checked_mul(3_600_000_000)
+        .and_then(|value| value.checked_add(minutes.checked_mul(60_000_000)?))
+        .and_then(|value| value.checked_add(second_micros.round() as i64))
+        .ok_or_else(|| invalid("make_interval", "time overflow"))?;
+    Ok(SqlValue::Interval {
+        months: i32::try_from(months).map_err(|_| invalid("make_interval", "months overflow"))?,
+        days: i32::try_from(days).map_err(|_| invalid("make_interval", "days overflow"))?,
+        micros,
+    })
+}
+
+fn sqlite_datetime(values: &[SqlValue]) -> Result<SqlValue> {
+    let mut value = match &values[0] {
+        SqlValue::Timestamp(value) => SqlValue::Timestamp(*value),
+        SqlValue::Date(days) => SqlValue::Timestamp(i64::from(*days) * 86_400_000_000),
+        SqlValue::Text(text) => super::timestamp::coerce_timestamp(SqlValue::Text(text.clone()))?,
+        value => {
+            return Err(invalid(
+                "datetime",
+                format!("unsupported {} input", value.type_name()),
+            ));
+        }
+    };
+    for modifier in &values[1..] {
+        let modifier = text(Some(modifier), "datetime")?
+            .trim()
+            .to_ascii_lowercase();
+        if modifier == "start of day" {
+            let SqlValue::Timestamp(micros) = value else {
+                unreachable!()
+            };
+            value = SqlValue::Timestamp(micros.div_euclid(86_400_000_000) * 86_400_000_000);
+        } else {
+            let interval = super::timestamp::parse_interval(&modifier)?;
+            value = super::binary_op::eval_binary_values(
+                &crate::ast::expr::BinaryOp::Add,
+                value,
+                interval,
+            )?;
+        }
+    }
+    Ok(value)
+}
+
+fn to_date(values: &[SqlValue]) -> Result<SqlValue> {
+    let input = text(values.first(), "to_date")?;
+    let format = postgres_format(text(values.get(1), "to_date")?);
+    let date = NaiveDate::parse_from_str(input, &format)
+        .map_err(|error| invalid("to_date", error.to_string()))?;
+    make_date(&[
+        SqlValue::Integer(date.year()),
+        SqlValue::Integer(date.month() as i32),
+        SqlValue::Integer(date.day() as i32),
+    ])
+}
+
+fn age(values: &[SqlValue]) -> Result<SqlValue> {
+    let right = values.get(1).cloned().unwrap_or_else(|| match values[0] {
+        SqlValue::Date(_) => SqlValue::Date(
+            i32::try_from(current_statement_timestamp().div_euclid(86_400_000_000))
+                .expect("current date fits i32"),
+        ),
+        _ => SqlValue::Timestamp(current_statement_timestamp()),
+    });
+    super::binary_op::eval_binary_values(&crate::ast::expr::BinaryOp::Sub, values[0].clone(), right)
 }
 
 fn invalid(function: &str, reason: impl Into<String>) -> ExecutorError {

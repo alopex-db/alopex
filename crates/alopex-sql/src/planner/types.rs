@@ -42,6 +42,25 @@ pub enum ResolvedType {
     Boolean,
     /// Timestamp type
     Timestamp,
+    /// Calendar date without a time zone, stored as days from 1970-01-01.
+    Date,
+    /// Time of day without a time zone, stored as microseconds after midnight.
+    Time,
+    /// Calendar interval stored as independent month, day, and microsecond parts.
+    Interval,
+    /// Exact fixed-precision decimal with up to 38 digits.
+    Decimal { precision: u8, scale: u8 },
+    /// Canonical native JSON value (`JSONB` is a dialect alias).
+    Json,
+    /// Variable-length homogeneous nested values (`LIST` is a dialect alias).
+    Array(Box<ResolvedType>),
+    /// Ordered key/value entries with homogeneous key and value types.
+    Map {
+        key: Box<ResolvedType>,
+        value: Box<ResolvedType>,
+    },
+    /// Named heterogeneous nested fields.
+    Struct(Vec<(String, ResolvedType)>),
     /// Vector type with dimension and metric
     /// Metric is always populated (defaults to Cosine if omitted in AST)
     Vector {
@@ -101,6 +120,25 @@ impl ResolvedType {
             DataType::Blob => Self::Blob,
             DataType::Boolean | DataType::Bool => Self::Boolean,
             DataType::Timestamp => Self::Timestamp,
+            DataType::Date => Self::Date,
+            DataType::Time => Self::Time,
+            DataType::Interval => Self::Interval,
+            DataType::Decimal { precision, scale } => Self::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            DataType::Json => Self::Json,
+            DataType::Array { element } => Self::Array(Box::new(Self::from_ast(element))),
+            DataType::Map { key, value } => Self::Map {
+                key: Box::new(Self::from_ast(key)),
+                value: Box::new(Self::from_ast(value)),
+            },
+            DataType::Struct { fields } => Self::Struct(
+                fields
+                    .iter()
+                    .map(|field| (field.name.clone(), Self::from_ast(&field.data_type)))
+                    .collect(),
+            ),
             DataType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: metric.unwrap_or(VectorMetric::Cosine),
@@ -153,9 +191,10 @@ impl ResolvedType {
             (Null, _) => true,
 
             // Numeric widening conversions
-            (Integer, BigInt | Float | Double) => true,
+            (Integer, BigInt | Float | Double | Decimal { .. }) => true,
             (BigInt, Double) => true,
             (Float, Double) => true,
+            (BigInt | Float | Double | Text | Decimal { .. }, Decimal { .. }) => true,
 
             // A decimal literal is typed DOUBLE, so assigning one to a FLOAT
             // column needs this narrowing; the value is rounded to f32 at
@@ -166,6 +205,25 @@ impl ResolvedType {
             // canonical UTC timestamp and numeric values must be integral
             // microseconds at execution time.
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,
+            (Text, Date | Time | Interval) => true,
+            (Text, Json) | (Json, Text) => true,
+            (Array(source), Array(target)) => source.can_cast_to(target),
+            (
+                Map {
+                    key: source_key,
+                    value: source_value,
+                },
+                Map {
+                    key: target_key,
+                    value: target_value,
+                },
+            ) => source_key.can_cast_to(target_key) && source_value.can_cast_to(target_value),
+            (Struct(source), Struct(target)) if source.len() == target.len() => source
+                .iter()
+                .zip(target)
+                .all(|((source_name, source_type), (target_name, target_type))| {
+                    source_name == target_name && source_type.can_cast_to(target_type)
+                }),
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,
@@ -188,6 +246,14 @@ impl ResolvedType {
             Self::Blob => "Blob",
             Self::Boolean => "Boolean",
             Self::Timestamp => "Timestamp",
+            Self::Date => "Date",
+            Self::Time => "Time",
+            Self::Interval => "Interval",
+            Self::Decimal { .. } => "Decimal",
+            Self::Json => "Json",
+            Self::Array(_) => "Array",
+            Self::Map { .. } => "Map",
+            Self::Struct(_) => "Struct",
             Self::Vector { .. } => "Vector",
             Self::Null => "Null",
         }
@@ -205,6 +271,23 @@ impl std::fmt::Display for ResolvedType {
             Self::Blob => write!(f, "BLOB"),
             Self::Boolean => write!(f, "BOOLEAN"),
             Self::Timestamp => write!(f, "TIMESTAMP"),
+            Self::Date => write!(f, "DATE"),
+            Self::Time => write!(f, "TIME"),
+            Self::Interval => write!(f, "INTERVAL"),
+            Self::Decimal { precision, scale } => write!(f, "DECIMAL({precision},{scale})"),
+            Self::Json => write!(f, "JSON"),
+            Self::Array(element) => write!(f, "ARRAY<{element}>"),
+            Self::Map { key, value } => write!(f, "MAP<{key},{value}>"),
+            Self::Struct(fields) => {
+                write!(f, "STRUCT<")?;
+                for (index, (name, data_type)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{name} {data_type}")?;
+                }
+                write!(f, ">")
+            }
             Self::Vector { dimension, metric } => {
                 write!(f, "VECTOR({}, {:?})", dimension, metric)
             }
@@ -296,6 +379,17 @@ mod tests {
 
         // Float → Double
         assert!(ResolvedType::Float.can_cast_to(&ResolvedType::Double));
+
+        assert!(
+            ResolvedType::Decimal {
+                precision: 5,
+                scale: 3,
+            }
+            .can_cast_to(&ResolvedType::Decimal {
+                precision: 10,
+                scale: 2,
+            })
+        );
     }
 
     #[test]

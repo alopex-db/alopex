@@ -378,14 +378,23 @@ fn value_from_column(
                 .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
             Ok(SqlValue::Integer(v as i32))
         }
-        (ResolvedType::BigInt | ResolvedType::Timestamp, Column::Int64(values)) => {
+        (
+            ResolvedType::BigInt
+            | ResolvedType::Timestamp
+            | ResolvedType::Date
+            | ResolvedType::Time,
+            Column::Int64(values),
+        ) => {
             let v = *values
                 .get(row_idx)
                 .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
-            if matches!(ty, ResolvedType::Timestamp) {
-                Ok(SqlValue::Timestamp(v))
-            } else {
-                Ok(SqlValue::BigInt(v))
+            match ty {
+                ResolvedType::Timestamp => Ok(SqlValue::Timestamp(v)),
+                ResolvedType::Date => i32::try_from(v)
+                    .map(SqlValue::Date)
+                    .map_err(|_| ExecutorError::Columnar("date is out of range".into())),
+                ResolvedType::Time => Ok(SqlValue::Time(v)),
+                _ => Ok(SqlValue::BigInt(v)),
             }
         }
         (ResolvedType::Float, Column::Float32(values)) => {
@@ -436,6 +445,35 @@ fn value_from_column(
                 .map(|bytes| f32::from_le_bytes(*bytes))
                 .collect();
             Ok(SqlValue::Vector(floats))
+        }
+        (ResolvedType::Interval, Column::Fixed { values, .. }) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            if raw.len() != 16 {
+                return Err(ExecutorError::Columnar(
+                    "invalid interval byte length".into(),
+                ));
+            }
+            Ok(SqlValue::Interval {
+                months: i32::from_le_bytes(raw[0..4].try_into().unwrap()),
+                days: i32::from_le_bytes(raw[4..8].try_into().unwrap()),
+                micros: i64::from_le_bytes(raw[8..16].try_into().unwrap()),
+            })
+        }
+        (ResolvedType::Decimal { scale, .. }, Column::Fixed { values, .. }) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            let coefficient = i128::from_le_bytes(
+                raw.as_slice()
+                    .try_into()
+                    .map_err(|_| ExecutorError::Columnar("invalid decimal byte length".into()))?,
+            );
+            Ok(SqlValue::Decimal(crate::storage::DecimalValue::new(
+                coefficient,
+                *scale,
+            )))
         }
         (_, Column::Binary(values)) => {
             let raw = values

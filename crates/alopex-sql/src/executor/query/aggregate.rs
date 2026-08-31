@@ -64,6 +64,39 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             buf.extend_from_slice(&v.to_le_bytes());
             Ok(())
         }
+        SqlValue::Date(v) => {
+            buf.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+        SqlValue::Time(v) => {
+            buf.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            buf.extend_from_slice(&months.to_le_bytes());
+            buf.extend_from_slice(&days.to_le_bytes());
+            buf.extend_from_slice(&micros.to_le_bytes());
+            Ok(())
+        }
+        SqlValue::Decimal(value) => {
+            buf.extend_from_slice(&value.coefficient.to_le_bytes());
+            buf.push(value.scale);
+            Ok(())
+        }
+        SqlValue::Json(value) => {
+            let bytes = value.as_str().as_bytes();
+            let len = u32::try_from(bytes.len()).map_err(|_| ExecutorError::InvalidOperation {
+                operation: "aggregate".into(),
+                reason: "JSON length exceeds u32::MAX".into(),
+            })?;
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(bytes);
+            Ok(())
+        }
         SqlValue::Vector(values) => {
             let len = u32::try_from(values.len()).map_err(|_| ExecutorError::InvalidOperation {
                 operation: "aggregate".into(),
@@ -72,6 +105,30 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             buf.extend_from_slice(&len.to_le_bytes());
             for f in values {
                 buf.extend_from_slice(&f.to_bits().to_le_bytes());
+            }
+            Ok(())
+        }
+        SqlValue::Array(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                encode_group_value(value, buf)?;
+            }
+            Ok(())
+        }
+        SqlValue::Map(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (key, value) in values {
+                encode_group_value(key, buf)?;
+                encode_group_value(value, buf)?;
+            }
+            Ok(())
+        }
+        SqlValue::Struct(values) => {
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (name, value) in values {
+                buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                buf.extend_from_slice(name.as_bytes());
+                encode_group_value(value, buf)?;
             }
             Ok(())
         }
@@ -360,6 +417,27 @@ impl SumAccumulator {
                 };
                 SqlValue::BigInt(sum)
             }
+            ResolvedType::Decimal { precision, scale } => {
+                let SqlValue::Decimal(value) = value else {
+                    return sum_type_mismatch("Decimal", &value);
+                };
+                let value = value
+                    .rescale(*scale)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+                let coefficient = match self.sum.as_ref() {
+                    None => value.coefficient,
+                    Some(SqlValue::Decimal(current)) => current
+                        .coefficient
+                        .checked_add(value.coefficient)
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                    Some(other) => return sum_type_mismatch("Decimal", other),
+                };
+                let sum = crate::storage::DecimalValue::new(coefficient, *scale);
+                if !sum.fits_precision(*precision) {
+                    return Err(ExecutorError::Evaluation(EvaluationError::Overflow));
+                }
+                SqlValue::Decimal(sum)
+            }
             _ => {
                 let value = numeric_to_f64(&value)?;
                 let sum = match self.sum.as_ref() {
@@ -480,7 +558,8 @@ impl Accumulator for TotalAccumulator {
 /// Accumulator for AVG.
 #[derive(Debug, Clone)]
 pub struct AvgAccumulator {
-    sum: Option<f64>,
+    sum: SumAccumulator,
+    result_type: ResolvedType,
     count: usize,
     distinct_values: Option<HashSet<Vec<u8>>>,
 }
@@ -492,8 +571,13 @@ impl AvgAccumulator {
     }
 
     pub fn with_distinct(distinct: bool) -> Self {
+        Self::with_distinct_for_type(distinct, ResolvedType::Double)
+    }
+
+    pub fn with_distinct_for_type(distinct: bool, result_type: ResolvedType) -> Self {
         Self {
-            sum: None,
+            sum: SumAccumulator::with_distinct_for_type(false, result_type.clone()),
+            result_type,
             count: 0,
             distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
@@ -517,8 +601,7 @@ impl Accumulator for AvgAccumulator {
         if !distinct_allows(&mut self.distinct_values, &value)? {
             return Ok(());
         }
-        let numeric = numeric_to_f64(&value)?;
-        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
+        self.sum.add_value(value)?;
         self.count += 1;
         Ok(())
     }
@@ -527,20 +610,42 @@ impl Accumulator for AvgAccumulator {
         if self.count == 0 {
             return Ok(SqlValue::Null);
         }
-        let sum = self.sum.unwrap_or(0.0);
-        Ok(SqlValue::Double(sum / self.count as f64))
+        match self.sum.finalize()? {
+            SqlValue::Decimal(sum) => {
+                let divisor = self.count as i128;
+                let quotient = sum.coefficient / divisor;
+                let remainder = sum.coefficient % divisor;
+                let rounded = if remainder.abs().saturating_mul(2) >= divisor {
+                    quotient
+                        .checked_add(sum.coefficient.signum())
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?
+                } else {
+                    quotient
+                };
+                Ok(SqlValue::Decimal(crate::storage::DecimalValue::new(
+                    rounded, sum.scale,
+                )))
+            }
+            SqlValue::Double(sum) => Ok(SqlValue::Double(sum / self.count as f64)),
+            other => sum_type_mismatch(self.result_type.type_name(), &other),
+        }
     }
 
     fn state(&self) -> Result<Vec<SqlValue>> {
-        Ok(vec![
-            SqlValue::Double(self.sum.unwrap_or(0.0)),
-            SqlValue::BigInt(self.count as i64),
-        ])
+        let sum = match self.sum.finalize()? {
+            SqlValue::Null => match self.result_type {
+                ResolvedType::Decimal { scale, .. } => {
+                    SqlValue::Decimal(crate::storage::DecimalValue::new(0, scale))
+                }
+                _ => SqlValue::Double(0.0),
+            },
+            value => value,
+        };
+        Ok(vec![sum, SqlValue::BigInt(self.count as i64)])
     }
 
     fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
         expect_state_arity("avg", state, 2)?;
-        let sum = state_double("avg", &state[0], 0)?;
         let count = state_bigint("avg", &state[1], 1)?;
         if count < 0 {
             return Err(invalid_aggregate_state(
@@ -548,7 +653,9 @@ impl Accumulator for AvgAccumulator {
                 "state count must be non-negative",
             ));
         }
-        self.sum = Some(self.sum.unwrap_or(0.0) + sum);
+        if !state[0].is_null() {
+            self.sum.add_value(state[0].clone())?;
+        }
         self.count = self.count.saturating_add(count as usize);
         Ok(())
     }
@@ -1771,6 +1878,239 @@ impl Accumulator for BoolAccumulator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ArrayAccumulator {
+    values: Vec<SqlValue>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+}
+
+impl ArrayAccumulator {
+    fn new(distinct: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+        }
+    }
+}
+
+impl Accumulator for ArrayAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let value = value.unwrap_or(SqlValue::Null);
+        if !self.distinct
+            || self
+                .seen
+                .insert(encode_group_key(std::slice::from_ref(&value))?)
+        {
+            self.values.push(value);
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::Array(self.values.clone())])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("ARRAY_AGG", state, 1)?;
+        let SqlValue::Array(values) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "ARRAY_AGG",
+                "partial state must be ARRAY",
+            ));
+        };
+        for value in values {
+            self.update(Some(value.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(SqlValue::Array(self.values.clone()))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JsonArrayAccumulator {
+    values: Vec<SqlValue>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+    native: bool,
+}
+
+impl JsonArrayAccumulator {
+    fn new(distinct: bool, native: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+            native,
+        }
+    }
+}
+
+impl Accumulator for JsonArrayAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let value = value.unwrap_or(SqlValue::Null);
+        if !self.distinct
+            || self
+                .seen
+                .insert(encode_group_key(std::slice::from_ref(&value))?)
+        {
+            self.values.push(value);
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::Text(
+            crate::executor::evaluator::json::json_group_array(&self.values)?,
+        )])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_ARRAY", state, 1)?;
+        let SqlValue::Text(json) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_ARRAY",
+                "partial state must be TEXT",
+            ));
+        };
+        let serde_json::Value::Array(values) =
+            crate::executor::evaluator::json::parse_json("JSON_GROUP_ARRAY", json)?
+        else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_ARRAY",
+                "partial state must be a JSON array",
+            ));
+        };
+        for value in values {
+            self.update(Some(crate::executor::evaluator::json::json_to_sql(&value)?))?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        let value = crate::executor::evaluator::json::json_group_array(&self.values)?;
+        if self.native {
+            Ok(SqlValue::Json(
+                crate::storage::JsonValue::parse(&value).expect("aggregate emits JSON"),
+            ))
+        } else {
+            Ok(SqlValue::Text(value))
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+    fn retained_bytes(&self) -> u64 {
+        self.values.iter().map(ByteSized::estimated_bytes).sum()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JsonObjectAccumulator {
+    values: Vec<(String, SqlValue)>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+    native: bool,
+}
+
+impl JsonObjectAccumulator {
+    fn new(distinct: bool, native: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+            native,
+        }
+    }
+}
+
+impl Accumulator for JsonObjectAccumulator {
+    fn update(&mut self, _value: Option<SqlValue>) -> Result<()> {
+        Err(invalid_aggregate_state(
+            "JSON_GROUP_OBJECT",
+            "requires two arguments",
+        ))
+    }
+
+    fn update_values(&mut self, values: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_OBJECT", values, 2)?;
+        let key = match &values[0] {
+            SqlValue::Null => return Ok(()),
+            SqlValue::Text(key) => key.clone(),
+            other => {
+                return Err(invalid_aggregate_state(
+                    "JSON_GROUP_OBJECT",
+                    format!("object label must be TEXT, found {}", other.type_name()),
+                ));
+            }
+        };
+        if !self.distinct || self.seen.insert(encode_group_key(values)?) {
+            self.values.push((key, values[1].clone()));
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        let state = serde_json::to_string(&self.values).map_err(|error| {
+            invalid_aggregate_state("JSON_GROUP_OBJECT", format!("cannot encode state: {error}"))
+        })?;
+        if state.len() > crate::executor::evaluator::json::MAX_JSON_BYTES {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_OBJECT",
+                "partial state exceeds 1048576 bytes",
+            ));
+        }
+        Ok(vec![SqlValue::Text(state)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_OBJECT", state, 1)?;
+        let SqlValue::Text(state) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_OBJECT",
+                "partial state must be TEXT",
+            ));
+        };
+        let values: Vec<(String, SqlValue)> = serde_json::from_str(state).map_err(|error| {
+            invalid_aggregate_state("JSON_GROUP_OBJECT", format!("invalid state: {error}"))
+        })?;
+        for (key, value) in values {
+            self.update_values(&[SqlValue::Text(key), value])?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        let value = crate::executor::evaluator::json::json_group_object(&self.values)?;
+        if self.native {
+            Ok(SqlValue::Json(
+                crate::storage::JsonValue::parse(&value).expect("aggregate emits JSON"),
+            ))
+        } else {
+            Ok(SqlValue::Text(value))
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+    fn retained_bytes(&self) -> u64 {
+        self.values
+            .iter()
+            .map(|(key, value)| key.capacity() as u64 + value.estimated_bytes())
+            .sum()
+    }
+}
+
 /// Create a new accumulator instance for the aggregate function.
 pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<dyn Accumulator> {
     match function {
@@ -1788,6 +2128,11 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
+        AggregateFunction::JsonGroupArray => Box::new(JsonArrayAccumulator::new(distinct, false)),
+        AggregateFunction::ArrayAgg => Box::new(ArrayAccumulator::new(distinct)),
+        AggregateFunction::JsonGroupObject => Box::new(JsonObjectAccumulator::new(distinct, false)),
+        AggregateFunction::JsonbAgg => Box::new(JsonArrayAccumulator::new(distinct, true)),
+        AggregateFunction::JsonbObjectAgg => Box::new(JsonObjectAccumulator::new(distinct, true)),
         AggregateFunction::PercentileDisc { fraction } => {
             Box::new(PercentileDiscAccumulator::new(*fraction, Vec::new()))
         }
@@ -1852,6 +2197,10 @@ fn aggregate_sort_specs(aggregate: &AggregateExpr) -> Vec<(bool, bool)> {
 pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Accumulator> {
     match &aggregate.function {
         AggregateFunction::Sum => Box::new(SumAccumulator::with_distinct_for_type(
+            aggregate.distinct,
+            aggregate.result_type.clone(),
+        )),
+        AggregateFunction::Avg => Box::new(AvgAccumulator::with_distinct_for_type(
             aggregate.distinct,
             aggregate.result_type.clone(),
         )),
@@ -2192,6 +2541,10 @@ impl<'a> AggregateIterator<'a> {
                                         agg.function,
                                         AggregateFunction::GroupConcat { .. }
                                             | AggregateFunction::StringAgg { .. }
+                                            | AggregateFunction::JsonGroupArray
+                                            | AggregateFunction::JsonGroupObject
+                                            | AggregateFunction::JsonbAgg
+                                            | AggregateFunction::JsonbObjectAgg
                                             | AggregateFunction::PercentileDisc { .. }
                                             | AggregateFunction::PercentileCont { .. }
                                             | AggregateFunction::QuantileCont { .. }
@@ -2553,10 +2906,17 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::Count => vec![ResolvedType::BigInt],
         AggregateFunction::Sum => vec![agg.result_type.clone()],
         AggregateFunction::Total => vec![ResolvedType::Double],
-        AggregateFunction::Avg => vec![ResolvedType::Double, ResolvedType::BigInt],
+        AggregateFunction::Avg => vec![agg.result_type.clone(), ResolvedType::BigInt],
         AggregateFunction::Min | AggregateFunction::Max => vec![agg.result_type.clone()],
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]
+        }
+        AggregateFunction::ArrayAgg => vec![agg.result_type.clone()],
+        AggregateFunction::JsonGroupArray
+        | AggregateFunction::JsonGroupObject
+        | AggregateFunction::JsonbAgg
+        | AggregateFunction::JsonbObjectAgg => {
+            vec![ResolvedType::Text]
         }
         // Ordered-set aggregation never runs in Partial mode (D11); the
         // accumulator rejects state()/merge() with invalid_aggregate_state.
@@ -2655,6 +3015,11 @@ pub fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::ArrayAgg => format!("array_agg_{idx}"),
+            AggregateFunction::JsonGroupArray => format!("json_group_array_{idx}"),
+            AggregateFunction::JsonGroupObject => format!("json_group_object_{idx}"),
+            AggregateFunction::JsonbAgg => format!("jsonb_agg_{idx}"),
+            AggregateFunction::JsonbObjectAgg => format!("jsonb_object_agg_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
             AggregateFunction::PercentileCont { .. } => format!("percentile_cont_{idx}"),
             AggregateFunction::QuantileCont { .. } => format!("quantile_cont_{idx}"),

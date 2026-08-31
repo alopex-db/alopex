@@ -883,20 +883,36 @@ impl PySqlResultStream {
 }
 
 fn estimated_row_bytes(row: &[SqlValue]) -> usize {
-    row.iter()
-        .map(|value| match value {
-            SqlValue::Null => 1,
-            SqlValue::Integer(_)
-            | SqlValue::BigInt(_)
-            | SqlValue::Double(_)
-            | SqlValue::Timestamp(_) => 8,
-            SqlValue::Float(_) => 4,
-            SqlValue::Boolean(_) => 1,
-            SqlValue::Text(value) => value.len(),
-            SqlValue::Blob(value) => value.len(),
-            SqlValue::Vector(values) => values.len().saturating_mul(std::mem::size_of::<f32>()),
-        })
-        .sum()
+    row.iter().map(estimated_value_bytes).sum()
+}
+
+fn estimated_value_bytes(value: &SqlValue) -> usize {
+    match value {
+        SqlValue::Null => 1,
+        SqlValue::Integer(_)
+        | SqlValue::BigInt(_)
+        | SqlValue::Double(_)
+        | SqlValue::Timestamp(_)
+        | SqlValue::Time(_) => 8,
+        SqlValue::Float(_) => 4,
+        SqlValue::Date(_) => 4,
+        SqlValue::Interval { .. } => 16,
+        SqlValue::Decimal(_) => 17,
+        SqlValue::Json(value) => value.as_str().len(),
+        SqlValue::Boolean(_) => 1,
+        SqlValue::Text(value) => value.len(),
+        SqlValue::Blob(value) => value.len(),
+        SqlValue::Vector(values) => values.len().saturating_mul(std::mem::size_of::<f32>()),
+        SqlValue::Array(values) => values.iter().map(estimated_value_bytes).sum(),
+        SqlValue::Map(values) => values
+            .iter()
+            .map(|(key, value)| estimated_value_bytes(key) + estimated_value_bytes(value))
+            .sum(),
+        SqlValue::Struct(values) => values
+            .iter()
+            .map(|(name, value)| name.len() + estimated_value_bytes(value))
+            .sum(),
+    }
 }
 
 #[cfg(test)]

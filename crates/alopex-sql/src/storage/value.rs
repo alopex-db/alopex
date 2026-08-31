@@ -7,6 +7,184 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{Result, StorageError};
 
+/// Canonical native JSON value. JSON and JSONB share this representation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JsonValue(String);
+
+impl JsonValue {
+    pub fn parse(input: &str) -> std::result::Result<Self, serde_json::Error> {
+        let mut value: serde_json::Value = serde_json::from_str(input)?;
+        sort_json_keys(&mut value);
+        Ok(Self(
+            serde_json::to_string(&value).expect("JSON serialization cannot fail"),
+        ))
+    }
+
+    pub fn from_value(mut value: serde_json::Value) -> Self {
+        sort_json_keys(&mut value);
+        Self(serde_json::to_string(&value).expect("JSON serialization cannot fail"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::from_str(&self.0).expect("JsonValue is validated on construction")
+    }
+}
+
+impl std::fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn sort_json_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().for_each(sort_json_keys),
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = std::mem::take(values).into_iter().collect();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            for (key, mut value) in entries {
+                sort_json_keys(&mut value);
+                values.insert(key, value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Exact decimal value represented as a signed coefficient and base-10 scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DecimalValue {
+    pub coefficient: i128,
+    pub scale: u8,
+}
+
+impl DecimalValue {
+    pub fn new(coefficient: i128, scale: u8) -> Self {
+        Self { coefficient, scale }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        let (negative, unsigned) = match value.as_bytes().first() {
+            Some(b'-') => (true, &value[1..]),
+            Some(b'+') => (false, &value[1..]),
+            _ => (false, value),
+        };
+        let mut parts = unsigned.split('.');
+        let whole = parts.next()?;
+        let fraction = parts.next().unwrap_or("");
+        if parts.next().is_some()
+            || (whole.is_empty() && fraction.is_empty())
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.len() > 38
+        {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let coefficient = digits.parse::<i128>().ok()?;
+        Some(Self {
+            coefficient: if negative {
+                coefficient.checked_neg()?
+            } else {
+                coefficient
+            },
+            scale: fraction.len() as u8,
+        })
+    }
+
+    pub fn rescale(self, target_scale: u8) -> Option<Self> {
+        if target_scale == self.scale {
+            return Some(self);
+        }
+        if target_scale > self.scale {
+            return Some(Self::new(
+                self.coefficient
+                    .checked_mul(decimal_power(target_scale - self.scale)?)?,
+                target_scale,
+            ));
+        }
+        let divisor = decimal_power(self.scale - target_scale)?;
+        let quotient = self.coefficient / divisor;
+        let remainder = self.coefficient % divisor;
+        let rounded = if remainder.abs().checked_mul(2)? >= divisor {
+            quotient.checked_add(self.coefficient.signum())?
+        } else {
+            quotient
+        };
+        Some(Self::new(rounded, target_scale))
+    }
+
+    pub fn fits_precision(self, precision: u8) -> bool {
+        decimal_digits(self.coefficient) <= usize::from(precision)
+    }
+
+    pub(crate) fn cmp_numeric(self, other: Self) -> Ordering {
+        if self.coefficient.signum() != other.coefficient.signum() {
+            return self.coefficient.signum().cmp(&other.coefficient.signum());
+        }
+        let negative = self.coefficient < 0;
+        let mut left = self.coefficient.unsigned_abs().to_string();
+        let mut right = other.coefficient.unsigned_abs().to_string();
+        let left_integer_digits = left.len() as i16 - i16::from(self.scale);
+        let right_integer_digits = right.len() as i16 - i16::from(other.scale);
+        let ordering = left_integer_digits
+            .cmp(&right_integer_digits)
+            .then_with(|| {
+                let scale = self.scale.max(other.scale);
+                left.extend(std::iter::repeat_n('0', usize::from(scale - self.scale)));
+                right.extend(std::iter::repeat_n('0', usize::from(scale - other.scale)));
+                left.cmp(&right)
+            });
+        if negative {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
+}
+
+pub(crate) fn decimal_power(scale: u8) -> Option<i128> {
+    10_i128.checked_pow(u32::from(scale))
+}
+
+fn decimal_digits(value: i128) -> usize {
+    value.unsigned_abs().to_string().len()
+}
+
+impl std::fmt::Display for DecimalValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let negative = self.coefficient < 0;
+        let digits = self.coefficient.unsigned_abs().to_string();
+        if self.scale == 0 {
+            return write!(f, "{}{}", if negative { "-" } else { "" }, digits);
+        }
+        let scale = usize::from(self.scale);
+        if digits.len() <= scale {
+            write!(
+                f,
+                "{}0.{:0>width$}",
+                if negative { "-" } else { "" },
+                digits,
+                width = scale
+            )
+        } else {
+            let split = digits.len() - scale;
+            write!(
+                f,
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                &digits[..split],
+                &digits[split..]
+            )
+        }
+    }
+}
+
 /// Runtime value representation for the SQL storage layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SqlValue {
@@ -20,9 +198,59 @@ pub enum SqlValue {
     Boolean(bool),
     Timestamp(i64), // microseconds since epoch
     Vector(Vec<f32>),
+    Date(i32), // days since 1970-01-01
+    Time(i64), // microseconds since midnight
+    Interval { months: i32, days: i32, micros: i64 },
+    Decimal(DecimalValue),
+    Json(JsonValue),
+    Array(Vec<SqlValue>),
+    Map(Vec<(SqlValue, SqlValue)>),
+    Struct(Vec<(String, SqlValue)>),
 }
 
 impl SqlValue {
+    /// Canonical JSON mapping used by public surfaces for nested values.
+    pub fn nested_json_text(&self) -> Option<String> {
+        matches!(self, Self::Array(_) | Self::Map(_) | Self::Struct(_))
+            .then(|| nested_json_value(self))?
+            .and_then(|value| serde_json::to_string(&value).ok())
+    }
+
+    /// Formats native temporal values for text-oriented public surfaces.
+    pub fn temporal_text(&self) -> Option<String> {
+        match self {
+            Self::Date(days) => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+                Some(
+                    epoch
+                        .checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                        .map(|date| date.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| format!("{days} days since 1970-01-01")),
+                )
+            }
+            Self::Time(micros) => {
+                let formatted = u32::try_from(micros.div_euclid(1_000_000))
+                    .ok()
+                    .zip(u32::try_from(micros.rem_euclid(1_000_000)).ok())
+                    .and_then(|(seconds, micros)| {
+                        chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                            seconds,
+                            micros * 1_000,
+                        )
+                    })
+                    .map(|time| time.format("%H:%M:%S%.6f").to_string())
+                    .unwrap_or_else(|| format!("{micros} microseconds after midnight"));
+                Some(formatted)
+            }
+            Self::Interval {
+                months,
+                days,
+                micros,
+            } => Some(format!("{months} months {days} days {micros} microseconds")),
+            _ => None,
+        }
+    }
+
     /// Returns the type tag for serialization (see design type tags).
     pub fn type_tag(&self) -> u8 {
         match self {
@@ -36,6 +264,14 @@ impl SqlValue {
             SqlValue::Boolean(_) => 0x07,
             SqlValue::Timestamp(_) => 0x08,
             SqlValue::Vector(_) => 0x09,
+            SqlValue::Date(_) => 0x0a,
+            SqlValue::Time(_) => 0x0b,
+            SqlValue::Interval { .. } => 0x0c,
+            SqlValue::Decimal(_) => 0x0d,
+            SqlValue::Json(_) => 0x0e,
+            SqlValue::Array(_) => 0x0f,
+            SqlValue::Map(_) => 0x10,
+            SqlValue::Struct(_) => 0x11,
         }
     }
 
@@ -57,6 +293,14 @@ impl SqlValue {
             SqlValue::Boolean(_) => "Boolean",
             SqlValue::Timestamp(_) => "Timestamp",
             SqlValue::Vector(_) => "Vector",
+            SqlValue::Date(_) => "Date",
+            SqlValue::Time(_) => "Time",
+            SqlValue::Interval { .. } => "Interval",
+            SqlValue::Decimal(_) => "Decimal",
+            SqlValue::Json(_) => "Json",
+            SqlValue::Array(_) => "Array",
+            SqlValue::Map(_) => "Map",
+            SqlValue::Struct(_) => "Struct",
         }
     }
 
@@ -76,8 +320,110 @@ impl SqlValue {
                 dimension: v.len() as u32,
                 metric: VectorMetric::Cosine,
             },
+            SqlValue::Date(_) => ResolvedType::Date,
+            SqlValue::Time(_) => ResolvedType::Time,
+            SqlValue::Interval { .. } => ResolvedType::Interval,
+            SqlValue::Decimal(value) => ResolvedType::Decimal {
+                precision: 38,
+                scale: value.scale,
+            },
+            SqlValue::Json(_) => ResolvedType::Json,
+            SqlValue::Array(values) => ResolvedType::Array(Box::new(
+                values
+                    .iter()
+                    .find(|value| !value.is_null())
+                    .map(SqlValue::resolved_type)
+                    .unwrap_or(ResolvedType::Null),
+            )),
+            SqlValue::Map(values) => ResolvedType::Map {
+                key: Box::new(
+                    values
+                        .iter()
+                        .find(|(key, _)| !key.is_null())
+                        .map(|(key, _)| key.resolved_type())
+                        .unwrap_or(ResolvedType::Null),
+                ),
+                value: Box::new(
+                    values
+                        .iter()
+                        .find(|(_, value)| !value.is_null())
+                        .map(|(_, value)| value.resolved_type())
+                        .unwrap_or(ResolvedType::Null),
+                ),
+            },
+            SqlValue::Struct(values) => ResolvedType::Struct(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.resolved_type()))
+                    .collect(),
+            ),
         }
     }
+}
+
+fn nested_json_value(value: &SqlValue) -> Option<serde_json::Value> {
+    use serde_json::{Map, Number, Value};
+    Some(match value {
+        SqlValue::Null => Value::Null,
+        SqlValue::Integer(value) => Value::Number(Number::from(*value)),
+        SqlValue::BigInt(value) => Value::Number(Number::from(*value)),
+        SqlValue::Float(value) => Value::Number(Number::from_f64(f64::from(*value))?),
+        SqlValue::Double(value) => Value::Number(Number::from_f64(*value)?),
+        SqlValue::Text(value) => Value::String(value.clone()),
+        SqlValue::Boolean(value) => Value::Bool(*value),
+        SqlValue::Decimal(value) => serde_json::from_str(&value.to_string()).ok()?,
+        SqlValue::Json(value) => value.to_value(),
+        SqlValue::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(nested_json_value)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        SqlValue::Map(values) => {
+            if values
+                .iter()
+                .all(|(key, _)| matches!(key, SqlValue::Text(_)))
+            {
+                let mut output = Map::new();
+                for (key, value) in values {
+                    let SqlValue::Text(key) = key else {
+                        unreachable!()
+                    };
+                    output.insert(key.clone(), nested_json_value(value)?);
+                }
+                Value::Object(output)
+            } else {
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|(key, value)| {
+                            Some(Value::Array(vec![
+                                nested_json_value(key)?,
+                                nested_json_value(value)?,
+                            ]))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+        }
+        SqlValue::Struct(values) => Value::Object(
+            values
+                .iter()
+                .map(|(name, value)| Some((name.clone(), nested_json_value(value)?)))
+                .collect::<Option<Map<_, _>>>()?,
+        ),
+        SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. } => {
+            Value::String(value.temporal_text()?)
+        }
+        SqlValue::Timestamp(value) => Value::Number(Number::from(*value)),
+        SqlValue::Vector(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| Number::from_f64(f64::from(*value)).map(Value::Number))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        SqlValue::Blob(_) => return None,
+    })
 }
 
 impl PartialOrd for SqlValue {
@@ -93,6 +439,23 @@ impl PartialOrd for SqlValue {
             (Blob(a), Blob(b)) => Some(a.cmp(b)),
             (Boolean(a), Boolean(b)) => Some(a.cmp(b)),
             (Timestamp(a), Timestamp(b)) => Some(a.cmp(b)),
+            (Date(a), Date(b)) => Some(a.cmp(b)),
+            (Time(a), Time(b)) => Some(a.cmp(b)),
+            (
+                Interval {
+                    months: am,
+                    days: ad,
+                    micros: au,
+                },
+                Interval {
+                    months: bm,
+                    days: bd,
+                    micros: bu,
+                },
+            ) => Some((am, ad, au).cmp(&(bm, bd, bu))),
+            (Decimal(a), Decimal(b)) => Some(a.cmp_numeric(*b)),
+            (Json(a), Json(b)) if a == b => Some(Ordering::Equal),
+            (Json(_), Json(_)) => None,
             // Vector ordering is undefined for now.
             (Vector(_), Vector(_)) => None,
             _ => None,
@@ -210,6 +573,18 @@ mod tests {
             SqlValue::Text("a".into())
                 .partial_cmp(&SqlValue::Blob(vec![0x61]))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn temporal_text_preserves_out_of_range_public_values() {
+        assert_eq!(
+            SqlValue::Date(i32::MAX).temporal_text().as_deref(),
+            Some("2147483647 days since 1970-01-01")
+        );
+        assert_eq!(
+            SqlValue::Time(-1).temporal_text().as_deref(),
+            Some("-1 microseconds after midnight")
         );
     }
 

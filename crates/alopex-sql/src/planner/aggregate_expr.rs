@@ -16,6 +16,11 @@ pub enum AggregateFunction {
     StringAgg {
         separator: Option<String>,
     },
+    ArrayAgg,
+    JsonGroupArray,
+    JsonGroupObject,
+    JsonbAgg,
+    JsonbObjectAgg,
     /// Ordered-set aggregate `PERCENTILE_DISC(fraction) WITHIN GROUP
     /// (ORDER BY ...)` (issue #148). `fraction` is validated by the planner to
     /// be a literal in `[0, 1]`. Issue #154 (PERCENTILE_CONT / MODE) extends
@@ -134,12 +139,13 @@ impl AggregateExpr {
     }
 
     pub fn avg(arg: TypedExpr) -> Self {
+        let result_type = avg_result_type(&arg.resolved_type);
         Self {
             function: AggregateFunction::Avg,
             arg: Some(arg),
             extra_args: Vec::new(),
             distinct: false,
-            result_type: ResolvedType::Double,
+            result_type,
             filter: None,
             order_by: Vec::new(),
         }
@@ -184,6 +190,20 @@ impl AggregateExpr {
 pub fn sum_result_type(input_type: &ResolvedType) -> ResolvedType {
     match input_type {
         ResolvedType::Integer | ResolvedType::BigInt => ResolvedType::BigInt,
+        ResolvedType::Decimal { precision, scale } => ResolvedType::Decimal {
+            precision: precision.saturating_add(10).min(38),
+            scale: *scale,
+        },
+        _ => ResolvedType::Double,
+    }
+}
+
+pub fn avg_result_type(input_type: &ResolvedType) -> ResolvedType {
+    match input_type {
+        ResolvedType::Decimal { scale, .. } => ResolvedType::Decimal {
+            precision: 38,
+            scale: (*scale).max(6),
+        },
         _ => ResolvedType::Double,
     }
 }

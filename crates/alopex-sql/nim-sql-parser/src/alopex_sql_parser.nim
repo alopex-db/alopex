@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.15.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.19.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -180,12 +180,20 @@ proc normalizedDataTypeName(name: string): string =
   of "BIGINT": "BigInt"
   of "FLOAT": "Float"
   of "REAL": "Float"
-  of "DOUBLE", "DECIMAL": "Double"
+  of "DOUBLE": "Double"
+  of "DECIMAL", "NUMERIC": "Decimal"
   of "TEXT", "VARCHAR", "CHAR": "Text"
   of "BLOB": "Blob"
   of "BOOLEAN": "Boolean"
   of "BOOL": "Bool"
-  of "TIMESTAMP", "DATE", "TIME": "Timestamp"
+  of "TIMESTAMP": "Timestamp"
+  of "DATE": "Date"
+  of "TIME": "Time"
+  of "INTERVAL": "Interval"
+  of "JSON", "JSONB": "Json"
+  of "ARRAY", "LIST": "Array"
+  of "MAP": "Map"
+  of "STRUCT": "Struct"
   of "VECTOR": "Vector"
   else: name
 
@@ -200,6 +208,7 @@ proc normalizedIndexMethod(name: string): string =
   case name.toUpperAscii()
   of "BTREE": "BTree"
   of "HNSW": "Hnsw"
+  of "FTS": "Fts"
   else: name
 
 proc writeStatement(s: Stream; node: SqlNode)
@@ -547,7 +556,35 @@ proc writeTableConstraint(s: Stream; node: SqlNode) =
 proc writeDataType(s: Stream; node: SqlNode) =
   let rawName = node.firstIdent()
   let variant = normalizedDataTypeName(rawName)
-  if variant == "Vector":
+  if variant == "Array":
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Array")
+    s.writeKey("element")
+    s.writeDataType(node.children[1])
+  elif variant == "Map":
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Map")
+    s.writeKey("key")
+    s.writeDataType(node.children[1])
+    s.writeKey("value")
+    s.writeDataType(node.children[2])
+  elif variant == "Struct":
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Struct")
+    s.writeKey("fields")
+    s.pack_array((node.children.len - 1) div 2)
+    var fieldIndex = 1
+    while fieldIndex + 1 < node.children.len:
+      s.pack_map(2)
+      s.writeKey("name")
+      s.pack_type(node.children[fieldIndex].firstIdent())
+      s.writeKey("data_type")
+      s.writeDataType(node.children[fieldIndex + 1])
+      fieldIndex += 2
+  elif variant == "Vector":
     s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("Vector")
@@ -561,6 +598,23 @@ proc writeDataType(s: Stream; node: SqlNode) =
       s.pack_type(normalizedMetricName(node.children[2].firstIdent()))
     else:
       s.writeNil()
+  elif variant == "Decimal":
+    var precision = 38
+    var scale = 0
+    if node.children.len > 1 and node.children[1].kind == nkIntLit:
+      precision = node.children[1].intVal.int
+    if node.children.len > 2 and node.children[2].kind == nkIntLit:
+      scale = node.children[2].intVal.int
+    if precision < 1 or precision > 38 or scale < 0 or scale > precision:
+      raise newException(ValueError,
+        "DECIMAL requires 1 <= precision <= 38 and 0 <= scale <= precision")
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Decimal")
+    s.writeKey("precision")
+    s.pack_type(uint8(precision))
+    s.writeKey("scale")
+    s.pack_type(uint8(scale))
   else:
     s.pack_map(1)
     s.writeKey("variant")
@@ -618,7 +672,7 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
                            columns: seq[string]; span: Span) =
   # Contract 0.14.0 (issue #151). Only the public wire carries this variant;
   # the staged continuous-aggregate validator rejects it before encoding.
-  s.pack_map(7)
+  s.pack_map(8)
   s.writeKey("variant")
   s.pack_type("Function")
   s.writeKey("name")
@@ -638,6 +692,8 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
     s.pack_type(column)
   s.writeKey("lateral")
   s.pack_type(function.lateral)
+  s.writeKey("with_ordinality")
+  s.pack_type(function.withOrdinality)
   s.writeKey("span")
   s.writeSpan(span)
 

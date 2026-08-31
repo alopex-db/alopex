@@ -413,13 +413,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 (TypedExprKind::Literal(lit.clone()), resolved_type)
             }
             Literal::String(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Text),
-            Literal::Interval(_) => {
-                return Err(PlannerError::unsupported_feature(
-                    "INTERVAL literals require a SQL-TS semantic layer",
-                    "0.9.0",
-                    span,
-                ));
-            }
+            Literal::Interval(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Interval),
             Literal::Boolean(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Boolean),
             Literal::Null => (TypedExprKind::Literal(lit.clone()), ResolvedType::Null),
         };
@@ -837,6 +831,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         match op {
             // Arithmetic operators: require numeric types
             Add | Sub | Mul | Div => {
+                if let Some(result) = Self::temporal_arithmetic_type(op, left, right) {
+                    return Ok(result);
+                }
+                if let Some(result) = decimal_arithmetic_type(op, left, right) {
+                    return Ok(result);
+                }
                 let result = self.check_arithmetic_op(left, right, span)?;
                 Ok(result)
             }
@@ -911,6 +911,27 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         }
     }
 
+    fn temporal_arithmetic_type(
+        op: BinaryOp,
+        left: &ResolvedType,
+        right: &ResolvedType,
+    ) -> Option<ResolvedType> {
+        use ResolvedType::*;
+        match (op, left, right) {
+            (BinaryOp::Add | BinaryOp::Sub, Date, Interval) => Some(Date),
+            (BinaryOp::Add | BinaryOp::Sub, Timestamp, Interval) => Some(Timestamp),
+            (BinaryOp::Add | BinaryOp::Sub, Time, Interval) => Some(Time),
+            (BinaryOp::Add, Interval, Date) => Some(Date),
+            (BinaryOp::Add, Interval, Timestamp) => Some(Timestamp),
+            (BinaryOp::Add, Interval, Time) => Some(Time),
+            (BinaryOp::Sub, Date, Date)
+            | (BinaryOp::Sub, Timestamp, Timestamp)
+            | (BinaryOp::Sub, Time, Time)
+            | (BinaryOp::Add | BinaryOp::Sub, Interval, Interval) => Some(Interval),
+            _ => None,
+        }
+    }
+
     /// Check remainder operands and return the integral result type.
     fn check_modulo_op(
         &self,
@@ -977,7 +998,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             (a, b) if a == b => true,
 
             // Numeric types are comparable with each other
-            (Integer | BigInt | Float | Double, Integer | BigInt | Float | Double) => true,
+            (
+                Integer | BigInt | Float | Double | Decimal { .. },
+                Integer | BigInt | Float | Double | Decimal { .. },
+            ) => true,
 
             // Text types
             (Text, Text) => true,
@@ -987,6 +1011,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
             // Timestamp types
             (Timestamp, Timestamp) => true,
+            (Date, Date) | (Time, Time) | (Interval, Interval) => true,
 
             // Vector types (for equality only, dimension must match)
             (Vector { dimension: d1, .. }, Vector { dimension: d2, .. }) => d1 == d2,
@@ -1108,6 +1133,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     ResolvedType::BigInt => ResolvedType::BigInt,
                     ResolvedType::Float => ResolvedType::Float,
                     ResolvedType::Double => ResolvedType::Double,
+                    ResolvedType::Decimal { precision, scale } => ResolvedType::Decimal {
+                        precision: *precision,
+                        scale: *scale,
+                    },
                     ResolvedType::Null => ResolvedType::Null,
                     other => {
                         return Err(PlannerError::InvalidOperator {
@@ -1174,6 +1203,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 ResolvedType::BigInt => ResolvedType::BigInt,
                 ResolvedType::Float => ResolvedType::Float,
                 ResolvedType::Double => ResolvedType::Double,
+                ResolvedType::Decimal { precision, scale } => ResolvedType::Decimal {
+                    precision: *precision,
+                    scale: *scale,
+                },
                 ResolvedType::Null => ResolvedType::Null,
                 other => {
                     return Err(PlannerError::InvalidOperator {
@@ -2192,6 +2225,17 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
+            "json_group_array" => self.check_json_group_array(args, star, span),
+            "array_agg" => self
+                .check_json_group_array(args, star, span)
+                .map(|_| ResolvedType::Array(Box::new(args[0].resolved_type.clone()))),
+            "json_group_object" => self.check_json_group_object(args, star, span),
+            "jsonb_agg" => self
+                .check_json_group_array(args, star, span)
+                .map(|_| ResolvedType::Json),
+            "jsonb_object_agg" => self
+                .check_json_group_object(args, star, span)
+                .map(|_| ResolvedType::Json),
             name if is_portable_aggregate_name(name) => {
                 check_portable_aggregate(name, args, distinct, star, span)
             }
@@ -2236,6 +2280,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 match &signature.ret {
                     crate::scalar::ReturnRule::Fixed(ty) => Ok(ty.clone()),
                     crate::scalar::ReturnRule::FromArgs(rule) => rule(&types),
+                    crate::scalar::ReturnRule::FromTypedArgs(rule) => rule(args),
                 }
             }
         }
@@ -2630,6 +2675,48 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         Ok(ResolvedType::Text)
     }
 
+    fn check_json_group_array(
+        &self,
+        args: &[TypedExpr],
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star || args.len() != 1 {
+            return Err(PlannerError::type_mismatch(
+                "1 argument",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        Ok(ResolvedType::Text)
+    }
+
+    fn check_json_group_object(
+        &self,
+        args: &[TypedExpr],
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star || args.len() != 2 {
+            return Err(PlannerError::type_mismatch(
+                "2 arguments",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        if !matches!(
+            args[0].resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                args[0].resolved_type.type_name(),
+                args[0].span,
+            ));
+        }
+        Ok(ResolvedType::Text)
+    }
+
     fn require_single_arg<'b>(
         &self,
         args: &'b [TypedExpr],
@@ -3015,6 +3102,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     | ResolvedType::Float
                     | ResolvedType::Double
                     | ResolvedType::Timestamp
+                    | ResolvedType::Date
+                    | ResolvedType::Time
+                    | ResolvedType::Interval
+                    | ResolvedType::Decimal { .. }
             )
         {
             TypedExpr::cast(value, expected.clone(), span)
@@ -3073,8 +3164,49 @@ fn fold_integral_binary(
 fn is_numeric_type(ty: &ResolvedType) -> bool {
     matches!(
         ty,
-        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float | ResolvedType::Double
+        ResolvedType::Integer
+            | ResolvedType::BigInt
+            | ResolvedType::Float
+            | ResolvedType::Double
+            | ResolvedType::Decimal { .. }
     )
+}
+
+fn decimal_arithmetic_type(
+    op: BinaryOp,
+    left: &ResolvedType,
+    right: &ResolvedType,
+) -> Option<ResolvedType> {
+    let parts = |ty: &ResolvedType| match ty {
+        ResolvedType::Decimal { precision, scale } => Some((*precision, *scale)),
+        ResolvedType::Integer => Some((10, 0)),
+        ResolvedType::BigInt => Some((19, 0)),
+        _ => None,
+    };
+    if !matches!(left, ResolvedType::Decimal { .. })
+        && !matches!(right, ResolvedType::Decimal { .. })
+    {
+        return None;
+    }
+    let (lp, ls) = parts(left)?;
+    let (rp, rs) = parts(right)?;
+    let (raw_precision, raw_scale) = match op {
+        BinaryOp::Add | BinaryOp::Sub => ((lp - ls).max(rp - rs) + ls.max(rs) + 1, ls.max(rs)),
+        BinaryOp::Mul => (
+            lp.saturating_add(rp).saturating_add(1),
+            ls.saturating_add(rs),
+        ),
+        BinaryOp::Div => {
+            let scale = 6_u8.max(ls.saturating_add(rp).saturating_add(1));
+            ((lp - ls).saturating_add(rs).saturating_add(scale), scale)
+        }
+        _ => return None,
+    };
+    let reduction = raw_precision.saturating_sub(38);
+    Some(ResolvedType::Decimal {
+        precision: raw_precision.min(38),
+        scale: raw_scale.saturating_sub(reduction),
+    })
 }
 
 fn validate_window_frame(
@@ -3437,6 +3569,11 @@ fn is_aggregate_name(name: &str) -> bool {
             | "max"
             | "group_concat"
             | "string_agg"
+            | "json_group_array"
+            | "array_agg"
+            | "json_group_object"
+            | "jsonb_agg"
+            | "jsonb_object_agg"
             | "percentile_disc"
             | "percentile_cont"
             | "variance"
@@ -3572,6 +3709,26 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
         AggregateFunction::StringAgg { separator } => (
             "string_agg".to_string(),
             separator.clone(),
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::ArrayAgg => ("array_agg".to_string(), None, false, expr.arg.as_ref()),
+        AggregateFunction::JsonGroupArray => (
+            "json_group_array".to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::JsonGroupObject => (
+            "json_group_object".to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::JsonbAgg => ("jsonb_agg".to_string(), None, false, expr.arg.as_ref()),
+        AggregateFunction::JsonbObjectAgg => (
+            "jsonb_object_agg".to_string(),
+            None,
             false,
             expr.arg.as_ref(),
         ),

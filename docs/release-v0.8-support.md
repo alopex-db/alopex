@@ -20,6 +20,18 @@ The exact public operation, normal outcome, rejection class, prerequisite, test
 evidence, and artifact identity must be present in the generated matrix. A
 missing row is a release-readiness blocker, not an implicit support claim.
 
+The [SQL type capability catalog](sql-type-capabilities.json) maps every
+v0.8.10 value-type family to its production owners and required evidence. All
+required families are complete; the release gate rejects a target version if
+any required surface becomes incomplete.
+The [JSON-on-TEXT contract](sql-json-text.md) defines issue #160 separately
+because those functions reuse `TEXT`; the value-type catalog tracks native JSON
+in issue #161. The [nested SQL type contract](sql-nested-types.md) records the
+ARRAY/LIST/MAP/STRUCT semantics and public mapping boundaries for issue #162.
+The [full-text search contract](sql-full-text-search.md) records the local
+tokenizer, query grammar, FTS index lifecycle, and distributed boundary for
+issue #163.
+
 ## Artifact identity
 
 The candidate verifier inventories every Cargo workspace member separately.
@@ -41,6 +53,9 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 - [Distributed-read SQL/CLI coverage](distributed-read.md)
 - [DataFrame bounded and streaming contract](dataframe-streaming.md)
 - [Python embedded-local API](../crates/alopex-py/README.md)
+- [JSON-on-TEXT SQL contract](sql-json-text.md)
+- [Nested SQL types](sql-nested-types.md)
+- [SQL full-text search](sql-full-text-search.md)
 - [v0.7.4 to v0.8 upgrade and recovery](upgrade-v0.7.4-to-v0.8.md)
 
 Post-release verification is intentionally `not_run` in every candidate report.

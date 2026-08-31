@@ -10,10 +10,13 @@ mod column_ref;
 pub(crate) mod conditional;
 mod context;
 pub(crate) mod datetime;
+pub(crate) mod fts;
 mod function_call;
 pub(crate) mod hash;
 mod is_null;
+pub(crate) mod json;
 mod literal;
+pub(crate) mod nested;
 pub(crate) mod numeric;
 pub(crate) mod pattern;
 pub(crate) mod predicate;
@@ -43,7 +46,7 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             column_ref::eval_column_ref(*column_index, ctx)
         }
         TypedExprKind::BinaryOp { left, op, right } => {
-            binary_op::eval_binary_op(op, left, right, ctx)
+            binary_op::eval_binary_op(op, left, right, &expr.resolved_type, ctx)
         }
         TypedExprKind::UnaryOp { op, operand } => unary_op::eval_unary_op(op, operand, ctx),
         TypedExprKind::Case {
@@ -78,7 +81,17 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
                         .into(),
                 });
             }
-            function_call::evaluate_function_call(name, args, *distinct, *star, ctx)
+            let value = function_call::evaluate_function_call(name, args, *distinct, *star, ctx)?;
+            if matches!(
+                expr.resolved_type,
+                crate::planner::ResolvedType::Array(_)
+                    | crate::planner::ResolvedType::Map { .. }
+                    | crate::planner::ResolvedType::Struct(_)
+            ) {
+                timestamp::coerce_value(value, &expr.resolved_type)
+            } else {
+                Ok(value)
+            }
         }
         TypedExprKind::Cast { expr, target_type } => {
             timestamp::evaluate_cast(expr, target_type, ctx)

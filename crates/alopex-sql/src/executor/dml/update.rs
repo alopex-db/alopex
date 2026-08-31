@@ -3,6 +3,7 @@ use alopex_core::kv::KVStore;
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
@@ -26,9 +27,12 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .into_iter()
         .cloned()
         .collect();
-    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
     let mut rows_affected = 0u64;
     let mut next_row_id = 0u64;
@@ -79,6 +83,7 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         }
 
         update_indexes_batch(txn, &btree_indexes, &changes)?;
+        update_fts_indexes(txn, &fts_indexes, &changes)?;
         update_hnsw_indexes(txn, &table, &hnsw_indexes, &changes)?;
         apply_table_updates(txn, &table, &changes)?;
 
@@ -86,6 +91,19 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     }
 
     Ok(ExecutionResult::RowsAffected(rows_affected))
+}
+
+fn update_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    indexes: &[IndexMetadata],
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, old_row, new_row) in changes {
+            FtsBridge::on_update(txn, index, *row_id, old_row, new_row)?;
+        }
+    }
+    Ok(())
 }
 
 fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(

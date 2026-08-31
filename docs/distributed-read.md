@@ -8,7 +8,7 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `select.aggregate.basic` | COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP BY, HAVING, DISTINCT | `remote_supported` | Closed aggregate descriptor and global finalization budget | Prepared aggregate result | Classified failure |
 | `select.aggregate.ordered_string` | GROUP_CONCAT, STRING_AGG | `remote_supported` | Ordered raw-value finalization budget | Prepared ordered aggregate result | Classified failure |
 | `scalar.deterministic` | Explicit deterministic scalar list | `remote_supported` | Explicit v0.8 function identity | Prepared remote read | Unlisted function rejected before transport |
-| `scalar.local_only` | Vector, random/UUID, statistics, cache control scalar functions | `local_only` | Local execution profile | v0.7.4 local behavior | Explicit local-only classification |
+| `scalar.local_only` | JSON, nested, full-text, temporal, vector, random/UUID, statistics, and cache-control scalar functions | `local_only` | Local execution profile | local executor behavior | Explicit local-only classification |
 | `statement.ddl` | CREATE/DROP TABLE, CREATE/DROP INDEX | `pre_execution_rejection` | Local schema workflow | v0.7.4 local behavior | `ddl_not_supported_remote` |
 | `statement.dml` | INSERT, UPDATE, DELETE | `pre_execution_rejection` | Local transaction workflow | v0.7.4 local behavior | `dml_not_supported_remote` |
 | `statement.pragma` | PRAGMA | `local_only` | Local execution profile | v0.7.4 local behavior | `pragma_local_only` |
@@ -21,9 +21,10 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `relation.distinct_on` | SELECT DISTINCT ON deterministic first-row deduplication | `local_only` | local execution profile | deterministic per-key first-row evaluation by the local executor | `distinct_on_local_only` before transport |
 | `scalar.aggregate_filter` | Aggregate FILTER (WHERE ...) per-aggregate row filtering | `local_only` | local execution profile | per-aggregate predicate filtering by the local executor | `aggregate_filter_local_only` before transport |
 | `scalar.ordered_aggregate` | Aggregate-local ORDER BY and WITHIN GROUP ordered-set aggregates (PERCENTILE_DISC) | `local_only` | local execution profile | ordered aggregate evaluation by the local executor | `ordered_aggregate_local_only` before transport |
+| `scalar.nested_aggregate` | ARRAY_AGG and JSON/JSONB collection aggregates | `local_only` | local execution profile | nested collection aggregation by the local executor | `nested_aggregate_local_only` before transport |
 | `aggregate.grouping_sets` | GROUPING SETS / ROLLUP / CUBE multi-set aggregation and GROUPING/GROUPING_ID | `local_only` | local execution profile | single-pass multi-set aggregation by the local executor | `grouping_sets_local_only` before transport |
 | `relation.lateral_join` | LATERAL joins over a correlated relation | `pre_execution_rejection` | Local execution profile | Per-left-row correlated evaluation by the local executor | `lateral_join_not_supported_remote` before transport |
-| `relation.table_function` | FROM-clause table functions (UNNEST) | `local_only` | Local execution profile | Row generation by the local executor | `table_function_not_supported_remote` before transport |
+| `relation.table_function` | FROM-clause table functions (UNNEST, GENERATE_SERIES, FTS_SEARCH) | `local_only` | Local execution profile | Row generation by the local executor | `table_function_not_supported_remote` before transport |
 | `relation.recursive_cte` | Recursive common table expressions | `pre_execution_rejection` | Local execution profile | Bounded local fixed-point evaluation | `recursive_cte_not_supported_remote` |
 | `transaction.multi_statement` | Existing Transaction API workflow | `local_only` | Local transaction workflow | v0.7.4 local transaction behavior | Explicit pre-execution classification |
 

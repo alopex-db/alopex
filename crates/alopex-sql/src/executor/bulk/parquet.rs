@@ -1,10 +1,12 @@
 use std::fs::File;
 
+use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeBinaryArray, StringArray, TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray, ListArray,
+    MapArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
-use arrow_schema::DataType as ArrowDataType;
+use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::catalog::TableMetadata;
@@ -124,6 +126,13 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
             Ok(ResolvedType::Timestamp)
         }
+        ArrowDataType::Date32 => Ok(ResolvedType::Date),
+        ArrowDataType::Time64(TimeUnit::Microsecond) => Ok(ResolvedType::Time),
+        ArrowDataType::Interval(IntervalUnit::MonthDayNano) => Ok(ResolvedType::Interval),
+        ArrowDataType::Decimal128(precision, scale) if *scale >= 0 => Ok(ResolvedType::Decimal {
+            precision: *precision,
+            scale: *scale as u8,
+        }),
         other => Err(ExecutorError::BulkLoad(format!(
             "unsupported parquet/arrow type: {other:?}"
         ))),
@@ -185,6 +194,82 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Ok(SqlValue::Text(arr.value(row_idx).to_string()))
         }
+        (ArrowDataType::Utf8, ResolvedType::Json) => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            crate::storage::JsonValue::parse(arr.value(row_idx))
+                .map(SqlValue::Json)
+                .map_err(|error| ExecutorError::BulkLoad(format!("invalid JSON: {error}")))
+        }
+        (
+            ArrowDataType::Utf8,
+            expected
+            @ (ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_)),
+        ) => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            crate::executor::evaluator::nested::parse_typed_json(arr.value(row_idx), expected)
+        }
+        (ArrowDataType::List(_), ResolvedType::Array(element)) => {
+            let arr = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = arr.value(row_idx);
+            (0..values.len())
+                .map(|index| {
+                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Array)
+        }
+        (ArrowDataType::LargeList(_), ResolvedType::Array(element)) => {
+            let arr = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let values = arr.value(row_idx);
+            (0..values.len())
+                .map(|index| {
+                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Array)
+        }
+        (ArrowDataType::Map(_, _), ResolvedType::Map { key, value }) => {
+            let arr = array.as_any().downcast_ref::<MapArray>().unwrap();
+            let entries = arr.value(row_idx);
+            let keys = entries.column(0);
+            let values = entries.column(1);
+            (0..entries.len())
+                .map(|index| {
+                    Ok((
+                        arrow_value_to_sql(keys.as_ref(), keys.data_type(), key, index)?,
+                        arrow_value_to_sql(values.as_ref(), values.data_type(), value, index)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Map)
+        }
+        (ArrowDataType::Struct(arrow_fields), ResolvedType::Struct(expected_fields))
+            if arrow_fields.len() == expected_fields.len() =>
+        {
+            let arr = array.as_any().downcast_ref::<StructArray>().unwrap();
+            expected_fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, data_type))| {
+                    if arrow_fields[index].name() != name {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "struct field mismatch: expected {name}, found {}",
+                            arrow_fields[index].name()
+                        )));
+                    }
+                    Ok((
+                        name.clone(),
+                        arrow_value_to_sql(
+                            arr.column(index).as_ref(),
+                            arrow_fields[index].data_type(),
+                            data_type,
+                            row_idx,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(SqlValue::Struct)
+        }
         (ArrowDataType::Binary, ResolvedType::Blob) => {
             let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             Ok(SqlValue::Blob(arr.value(row_idx).to_vec()))
@@ -203,9 +288,110 @@ fn arrow_value_to_sql(
                 .unwrap();
             Ok(SqlValue::Timestamp(arr.value(row_idx)))
         }
+        (ArrowDataType::Date32, ResolvedType::Date) => {
+            let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
+            Ok(SqlValue::Date(arr.value(row_idx)))
+        }
+        (ArrowDataType::Time64(TimeUnit::Microsecond), ResolvedType::Time) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            Ok(SqlValue::Time(arr.value(row_idx)))
+        }
+        (ArrowDataType::Interval(IntervalUnit::MonthDayNano), ResolvedType::Interval) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<IntervalMonthDayNanoArray>()
+                .unwrap();
+            let value = arr.value(row_idx);
+            let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(value);
+            if nanos % 1_000 != 0 {
+                return Err(ExecutorError::BulkLoad(
+                    "interval nanoseconds cannot be represented as microseconds".into(),
+                ));
+            }
+            Ok(SqlValue::Interval {
+                months,
+                days,
+                micros: nanos / 1_000,
+            })
+        }
+        (ArrowDataType::Decimal128(_, arrow_scale), ResolvedType::Decimal { precision, scale })
+            if *arrow_scale >= 0 =>
+        {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let value = crate::storage::DecimalValue::new(arr.value(row_idx), *arrow_scale as u8)
+                .rescale(*scale)
+                .ok_or_else(|| ExecutorError::BulkLoad("decimal rescale overflow".into()))?;
+            if !value.fits_precision(*precision) {
+                return Err(ExecutorError::BulkLoad("decimal precision overflow".into()));
+            }
+            Ok(SqlValue::Decimal(value))
+        }
         _ => Err(ExecutorError::BulkLoad(format!(
             "parquet field type {:?} does not match expected {:?}",
             dt, expected
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::DecimalValue;
+
+    #[test]
+    fn arrow_list_maps_to_native_array_with_null_elements() {
+        let mut builder =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::Int32Builder::new());
+        builder.values().append_value(1);
+        builder.values().append_null();
+        builder.values().append_value(2);
+        builder.append(true);
+        let array = builder.finish();
+
+        assert_eq!(
+            arrow_value_to_sql(
+                &array,
+                array.data_type(),
+                &ResolvedType::Array(Box::new(ResolvedType::Integer)),
+                0,
+            )
+            .unwrap(),
+            SqlValue::Array(vec![
+                SqlValue::Integer(1),
+                SqlValue::Null,
+                SqlValue::Integer(2),
+            ])
+        );
+    }
+
+    #[test]
+    fn decimal128_maps_to_exact_sql_decimal() {
+        let array = Decimal128Array::from(vec![Some(12345)])
+            .with_precision_and_scale(10, 3)
+            .unwrap();
+        let ty = ArrowDataType::Decimal128(10, 3);
+        assert_eq!(
+            map_arrow_type(&ty).unwrap(),
+            ResolvedType::Decimal {
+                precision: 10,
+                scale: 3,
+            }
+        );
+        assert_eq!(
+            arrow_value_to_sql(
+                &array,
+                &ty,
+                &ResolvedType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                0,
+            )
+            .unwrap(),
+            SqlValue::Decimal(DecimalValue::new(1235, 2))
+        );
     }
 }

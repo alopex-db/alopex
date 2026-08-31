@@ -223,6 +223,13 @@ fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
+    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
+    if value.is_instance(&decimal_type)? {
+        let text = value
+            .call_method1("__format__", ("f",))?
+            .extract::<String>()?;
+        return Ok(format!("DECIMAL {}", escape_text(&text)));
+    }
     if value.is_instance_of::<PyString>() {
         let text = value.extract::<String>()?;
         // Nim FFI 境界（CString）は NUL を扱えないため明示的に拒否する。
@@ -361,7 +368,7 @@ fn type_name(value: &Bound<'_, PyAny>) -> String {
 /// `SqlValue` を Python ネイティブ値へ変換する。
 ///
 /// CLI / Server と同じく値をそのまま返す（Timestamp はエポックマイクロ秒の int、
-/// Vector は float の list）。
+/// Date/Time は標準の datetime 値、Interval は成分 dict、Vector は float の list）。
 pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<PyAny>> {
     match value {
         SqlValue::Null => Ok(py.None()),
@@ -373,12 +380,75 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
         SqlValue::Blob(v) => PyBytes::new(py, &v).into_py_any(py),
         SqlValue::Boolean(v) => v.into_py_any(py),
         SqlValue::Timestamp(v) => v.into_py_any(py),
+        SqlValue::Date(days) => PyModule::import(py, "datetime")?
+            .getattr("date")?
+            .call_method1("fromordinal", (i64::from(days) + 719_163,))?
+            .unbind()
+            .into_py_any(py),
+        SqlValue::Time(micros) => {
+            let seconds = micros.div_euclid(1_000_000);
+            PyModule::import(py, "datetime")?
+                .getattr("time")?
+                .call1((
+                    seconds / 3_600,
+                    seconds / 60 % 60,
+                    seconds % 60,
+                    micros.rem_euclid(1_000_000),
+                ))?
+                .unbind()
+                .into_py_any(py)
+        }
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            let value = PyDict::new(py);
+            value.set_item("months", months)?;
+            value.set_item("days", days)?;
+            value.set_item("microseconds", micros)?;
+            value.into_py_any(py)
+        }
+        SqlValue::Decimal(value) => PyModule::import(py, "decimal")?
+            .getattr("Decimal")?
+            .call1((value.to_string(),))?
+            .unbind()
+            .into_py_any(py),
+        SqlValue::Json(value) => PyModule::import(py, "json")?
+            .getattr("loads")?
+            .call1((value.as_str(),))?
+            .unbind()
+            .into_py_any(py),
         SqlValue::Vector(values) => {
             let list = PyList::empty(py);
             for v in values {
                 list.append(f64::from(v))?;
             }
             list.into_py_any(py)
+        }
+        SqlValue::Array(values) => {
+            let list = PyList::empty(py);
+            for value in values {
+                list.append(sql_value_to_py(py, value)?.bind(py))?;
+            }
+            list.into_py_any(py)
+        }
+        SqlValue::Map(values) => {
+            let dict = PyDict::new(py);
+            for (key, value) in values {
+                dict.set_item(
+                    sql_value_to_py(py, key)?.bind(py),
+                    sql_value_to_py(py, value)?.bind(py),
+                )?;
+            }
+            dict.into_py_any(py)
+        }
+        SqlValue::Struct(values) => {
+            let dict = PyDict::new(py);
+            for (name, value) in values {
+                dict.set_item(name, sql_value_to_py(py, value)?.bind(py))?;
+            }
+            dict.into_py_any(py)
         }
     }
 }
@@ -390,7 +460,9 @@ mod tests {
     use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
     use pyo3::IntoPyObjectExt;
 
-    use super::{bind_params, bind_sql_params_py};
+    use alopex_sql::{storage::DecimalValue, SqlValue};
+
+    use super::{bind_params, bind_sql_params_py, sql_value_to_py};
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
@@ -406,6 +478,63 @@ mod tests {
         with_py(|_| {
             let sql = "SELECT * FROM users";
             assert_eq!(bind_params(sql, None).expect("bind"), sql);
+        });
+    }
+
+    #[test]
+    fn temporal_values_use_python_native_date_time_and_lossless_interval_mapping() {
+        with_py(|py| {
+            let date = sql_value_to_py(py, SqlValue::Date(19_782)).unwrap();
+            assert_eq!(date.bind(py).get_type().name().unwrap(), "date");
+            assert_eq!(
+                date.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "2024-02-29"
+            );
+
+            let time = sql_value_to_py(py, SqlValue::Time(86_399_123_456)).unwrap();
+            assert_eq!(time.bind(py).get_type().name().unwrap(), "time");
+            assert_eq!(
+                time.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "23:59:59.123456"
+            );
+
+            let interval = sql_value_to_py(
+                py,
+                SqlValue::Interval {
+                    months: 1,
+                    days: -2,
+                    micros: 3,
+                },
+            )
+            .unwrap();
+            let interval = interval.bind(py).cast::<PyDict>().unwrap();
+            assert_eq!(
+                interval
+                    .get_item("months")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                interval
+                    .get_item("days")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                -2
+            );
+            assert_eq!(
+                interval
+                    .get_item("microseconds")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                3
+            );
         });
     }
 
@@ -461,6 +590,54 @@ mod tests {
             let params = params_list(py, vec![datetime]);
             let sql = bind_params("INSERT INTO ts VALUES (?)", Some(&params)).expect("bind");
             assert_eq!(sql, "INSERT INTO ts VALUES ('2025-01-15 10:30:00.123456')");
+        });
+    }
+
+    #[test]
+    fn decimal_values_roundtrip_as_python_decimal() {
+        with_py(|py| {
+            let decimal_type = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            let input = decimal_type.call1(("12.340",)).unwrap();
+            let params = params_list(py, vec![input]);
+            assert_eq!(
+                bind_params("SELECT ?", Some(&params)).unwrap(),
+                "SELECT DECIMAL '12.340'"
+            );
+
+            let output =
+                sql_value_to_py(py, SqlValue::Decimal(DecimalValue::new(12340, 3))).unwrap();
+            assert!(output.bind(py).is_instance(&decimal_type).unwrap());
+            assert_eq!(
+                output.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "12.340"
+            );
+        });
+    }
+
+    #[test]
+    fn nested_values_map_recursively_to_python_containers() {
+        with_py(|py| {
+            let output = sql_value_to_py(
+                py,
+                SqlValue::Struct(vec![
+                    (
+                        "items".into(),
+                        SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]),
+                    ),
+                    (
+                        "attrs".into(),
+                        SqlValue::Map(vec![(SqlValue::Text("a".into()), SqlValue::Boolean(true))]),
+                    ),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(
+                output.bind(py).repr().unwrap().extract::<String>().unwrap(),
+                "{'items': [1, None], 'attrs': {'a': True}}"
+            );
         });
     }
 

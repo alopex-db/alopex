@@ -180,6 +180,20 @@ pub enum PersistedType {
         metric: PersistedVectorMetric,
     },
     Null,
+    Date,
+    Time,
+    Interval,
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
+    Json,
+    Array(Box<PersistedType>),
+    Map {
+        key: Box<PersistedType>,
+        value: Box<PersistedType>,
+    },
+    Struct(Vec<(String, PersistedType)>),
 }
 
 impl From<ResolvedType> for PersistedType {
@@ -193,6 +207,22 @@ impl From<ResolvedType> for PersistedType {
             ResolvedType::Blob => Self::Blob,
             ResolvedType::Boolean => Self::Boolean,
             ResolvedType::Timestamp => Self::Timestamp,
+            ResolvedType::Date => Self::Date,
+            ResolvedType::Time => Self::Time,
+            ResolvedType::Interval => Self::Interval,
+            ResolvedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
+            ResolvedType::Json => Self::Json,
+            ResolvedType::Array(element) => Self::Array(Box::new((*element).into())),
+            ResolvedType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            ResolvedType::Struct(fields) => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -213,6 +243,22 @@ impl From<PersistedType> for ResolvedType {
             PersistedType::Blob => Self::Blob,
             PersistedType::Boolean => Self::Boolean,
             PersistedType::Timestamp => Self::Timestamp,
+            PersistedType::Date => Self::Date,
+            PersistedType::Time => Self::Time,
+            PersistedType::Interval => Self::Interval,
+            PersistedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
+            PersistedType::Json => Self::Json,
+            PersistedType::Array(element) => Self::Array(Box::new((*element).into())),
+            PersistedType::Map { key, value } => Self::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+            },
+            PersistedType::Struct(fields) => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, data_type)| (name, data_type.into()))
+                    .collect(),
+            ),
             PersistedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -226,6 +272,7 @@ impl From<PersistedType> for ResolvedType {
 pub enum PersistedIndexType {
     BTree,
     Hnsw,
+    Fts,
 }
 
 impl From<PersistedIndexType> for IndexMethod {
@@ -233,6 +280,7 @@ impl From<PersistedIndexType> for IndexMethod {
         match value {
             PersistedIndexType::BTree => IndexMethod::BTree,
             PersistedIndexType::Hnsw => IndexMethod::Hnsw,
+            PersistedIndexType::Fts => IndexMethod::Fts,
         }
     }
 }
@@ -244,6 +292,7 @@ impl TryFrom<IndexMethod> for PersistedIndexType {
         match value {
             IndexMethod::BTree => Ok(Self::BTree),
             IndexMethod::Hnsw => Ok(Self::Hnsw),
+            IndexMethod::Fts => Ok(Self::Fts),
         }
     }
 }
@@ -3210,5 +3259,26 @@ mod tests {
         assert_eq!(alopex, "\"ALOPEX\"");
         assert_eq!(parquet, "\"PARQUET\"");
         assert_eq!(delta, "\"DELTA\"");
+    }
+
+    #[test]
+    fn nested_catalog_types_roundtrip_recursively() {
+        let data_type = ResolvedType::Struct(vec![
+            (
+                "items".into(),
+                ResolvedType::Array(Box::new(ResolvedType::Integer)),
+            ),
+            (
+                "attrs".into(),
+                ResolvedType::Map {
+                    key: Box::new(ResolvedType::Text),
+                    value: Box::new(ResolvedType::BigInt),
+                },
+            ),
+        ]);
+        let persisted = PersistedType::from(data_type.clone());
+        let bytes = bincode::serialize(&persisted).unwrap();
+        let decoded: PersistedType = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(ResolvedType::from(decoded), data_type);
     }
 }

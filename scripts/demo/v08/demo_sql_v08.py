@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, time
+from decimal import Decimal
 from typing import Any
 
 
@@ -117,6 +119,83 @@ def main() -> int:
                 "TRY_CAST('bad' AS INTEGER) AS rejected, "
                 "TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension",
                 [{"parsed": 42, "rejected": None, "wrong_dimension": None}],
+            ),
+            (
+                "SELECT JSON_SET('{\"a\":1}', '$.b', 2) AS document, "
+                "JSON_EXTRACT('{\"n\":9007199254740993}', '$.n') AS exact_integer",
+                [{"document": '{"a":1,"b":2}', "exact_integer": 9007199254740993}],
+            ),
+            (
+                "SELECT JSON_GROUP_ARRAY(qty) AS quantities FROM sales",
+                [{"quantities": "[3,1,5,2,0]"}],
+            ),
+            (
+                "SELECT JSONB_BUILD_OBJECT('b', 1, 'a', JSONB_BUILD_ARRAY(2, 3)) "
+                "#> '{a}' AS document, "
+                "JSONB '{\"n\":90071992547409931234567890}' ->> 'n' AS exact_number",
+                [
+                    {
+                        "document": [2, 3],
+                        "exact_number": "90071992547409931234567890",
+                    }
+                ],
+            ),
+            (
+                "SELECT DATE_ADD(DATE '2024-01-31', INTERVAL '1 month') AS month_end, "
+                "TIME '23:59:59.123456' AS precise_time, "
+                "AGE(DATE '2024-03-01', DATE '2024-02-28') AS elapsed",
+                [
+                    {
+                        "month_end": date(2024, 2, 29),
+                        "precise_time": time(23, 59, 59, 123456),
+                        "elapsed": {"months": 0, "days": 2, "microseconds": 0},
+                    }
+                ],
+            ),
+            (
+                "SELECT g.ts FROM GENERATE_SERIES("
+                "TIMESTAMP '2024-01-01 00:00:00', "
+                "TIMESTAMP '2024-01-03 00:00:00', INTERVAL '1 day') AS g(ts) "
+                "ORDER BY g.ts",
+                [
+                    {"ts": 1704067200000000},
+                    {"ts": 1704153600000000},
+                    {"ts": 1704240000000000},
+                ],
+            ),
+            (
+                "SELECT DECIMAL '12.345' + CAST('0.005' AS DECIMAL(10,3)) AS exact_amount",
+                [{"exact_amount": Decimal("12.350")}],
+            ),
+            (
+                "SELECT ARRAY_APPEND(ARRAY[1, NULL], 3) AS items, "
+                "MAP(ARRAY['a'], ARRAY[1]) AS attrs, "
+                "STRUCT_PACK('name', 'Ada', 'active', TRUE) AS person",
+                [
+                    {
+                        "items": [1, None, 3],
+                        "attrs": {"a": 1},
+                        "person": {"name": "Ada", "active": True},
+                    }
+                ],
+            ),
+            (
+                "SELECT u.value, u.ordinality FROM "
+                "UNNEST(ARRAY['a', 'b']) WITH ORDINALITY AS u(value, ordinality) "
+                "ORDER BY u.ordinality",
+                [
+                    {"value": "a", "ordinality": 1},
+                    {"value": "b", "ordinality": 2},
+                ],
+            ),
+            (
+                "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "
+                "AS j(k, v, t, atom, id, parent, fullkey, path) "
+                "WHERE j.atom IS NOT NULL ORDER BY j.id",
+                [
+                    {"fullkey": "$[0]", "atom": 1},
+                    {"fullkey": "$[1].x", "atom": 2},
+                ],
             ),
             (
                 "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
@@ -668,12 +747,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 72:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 72")
+        if completed != 73:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 73")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 72 checks passed")
+    print("v0.8 SQL correctness demo completed: 73 checks passed")
     return 0
 
 

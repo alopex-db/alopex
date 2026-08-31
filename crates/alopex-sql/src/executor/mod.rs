@@ -43,6 +43,7 @@ pub(crate) mod ddl;
 pub(crate) mod dml;
 mod error;
 pub mod evaluator;
+mod fts_bridge;
 mod hnsw_bridge;
 pub mod memory;
 pub mod query;
@@ -646,9 +647,18 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         let index_id = catalog.next_index_id();
         index.index_id = index_id;
         index.column_indices = column_indices.clone();
+        if matches!(index.method, Some(crate::ast::ddl::IndexMethod::Fts)) {
+            crate::executor::fts_bridge::FtsBridge::prepare(&mut index)?;
+        }
 
         if matches!(index.method, Some(crate::ast::ddl::IndexMethod::Hnsw)) {
             crate::executor::hnsw_bridge::HnswBridge::create_index(txn, &table, &index)?;
+        } else if matches!(index.method, Some(crate::ast::ddl::IndexMethod::Fts)) {
+            crate::executor::fts_bridge::FtsBridge::validate(
+                &index,
+                &table.columns[column_indices[0]].data_type,
+            )?;
+            ddl::create_index::build_fts_index_for_existing_rows(txn, &table, &index)?;
         } else {
             ddl::create_index::build_index_for_existing_rows(txn, &table, &index, column_indices)?;
         }

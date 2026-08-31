@@ -1,6 +1,9 @@
 use alopex_dataframe::DataFrameError;
 use alopex_embedded::{Database, Error, JoinType};
-use arrow::array::{Array, Float32Array, Int32Array, StringArray};
+use arrow::array::{
+    Array, Date32Array, Decimal128Array, Float32Array, Int32Array, IntervalMonthDayNanoArray,
+    StringArray, Time64MicrosecondArray,
+};
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
@@ -18,6 +21,85 @@ fn dataframe_query_preserves_float_column_as_float32() {
     let values = frame.column("value").unwrap().to_arrow();
     let values = values[0].as_any().downcast_ref::<Float32Array>().unwrap();
     assert_eq!(values.values(), &[1.5, 2.5]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_preserves_native_temporal_types() {
+    let db = Database::new();
+    let frame = db
+        .query_df(
+            "SELECT DATE '2024-02-29' AS d, TIME '23:59:59.123456' AS t, \
+                    INTERVAL '1 month -2 days 3 microseconds' AS i",
+        )
+        .unwrap();
+
+    let dates = frame.column("d").unwrap().to_arrow();
+    let dates = dates[0].as_any().downcast_ref::<Date32Array>().unwrap();
+    assert_eq!(dates.value(0), 19_782);
+
+    let times = frame.column("t").unwrap().to_arrow();
+    let times = times[0]
+        .as_any()
+        .downcast_ref::<Time64MicrosecondArray>()
+        .unwrap();
+    assert_eq!(times.value(0), 86_399_123_456);
+
+    let intervals = frame.column("i").unwrap().to_arrow();
+    let intervals = intervals[0]
+        .as_any()
+        .downcast_ref::<IntervalMonthDayNanoArray>()
+        .unwrap();
+    let interval = intervals.value(0);
+    assert_eq!(
+        (interval.months, interval.days, interval.nanoseconds),
+        (1, -2, 3_000)
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_preserves_decimal128() {
+    let db = Database::new();
+    let frame = db
+        .query_df("SELECT CAST('12.34' AS DECIMAL(10,2)) AS amount")
+        .unwrap();
+    let amounts = frame.column("amount").unwrap().to_arrow();
+    let amounts = amounts[0]
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(amounts.value(0), 1234);
+    assert_eq!((amounts.precision(), amounts.scale()), (10, 2));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_maps_native_json_to_canonical_utf8() {
+    let db = Database::new();
+    let frame = db
+        .query_df(r#"SELECT JSONB '{"b":1,"a":2}' AS document"#)
+        .unwrap();
+    let documents = frame.column("document").unwrap().to_arrow();
+    let documents = documents[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(documents.value(0), r#"{"a":2,"b":1}"#);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_maps_nested_values_to_canonical_utf8() {
+    let db = Database::new();
+    let frame = db
+        .query_df("SELECT ARRAY[1, NULL] AS items, MAP(ARRAY['a'], ARRAY[1]) AS attrs")
+        .unwrap();
+
+    let items = frame.column("items").unwrap().to_arrow();
+    let items = items[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(items.value(0), "[1,null]");
+
+    let attrs = frame.column("attrs").unwrap().to_arrow();
+    let attrs = attrs[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(attrs.value(0), r#"{"a":1}"#);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

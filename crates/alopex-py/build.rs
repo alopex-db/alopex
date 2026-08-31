@@ -110,6 +110,8 @@ fn main() {
             println!("cargo:rustc-link-search=native={path}");
         } else if let Some(lib) = token.strip_prefix("-l") {
             println!("cargo:rustc-link-lib={lib}");
+        } else if token.starts_with("-Wl,-rpath,") {
+            println!("cargo:rustc-link-arg={token}");
         }
     }
 }

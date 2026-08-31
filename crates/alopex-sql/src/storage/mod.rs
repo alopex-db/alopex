@@ -28,7 +28,7 @@ pub use range_read::{
     StorageRangeConstraintError,
 };
 pub use table::{TableScanIterator, TableStorage};
-pub use value::SqlValue;
+pub use value::{DecimalValue, JsonValue, SqlValue};
 
 #[cfg(test)]
 mod disk;

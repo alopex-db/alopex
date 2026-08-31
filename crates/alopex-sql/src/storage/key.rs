@@ -147,6 +147,38 @@ fn encode_index_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
                 actual: "Vector".into(),
             });
         }
+        SqlValue::Date(v) => {
+            buf.push(0x0a);
+            buf.extend_from_slice(&((*v as u32) ^ 0x8000_0000).to_be_bytes());
+        }
+        SqlValue::Time(v) => {
+            buf.push(0x0b);
+            buf.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+        }
+        SqlValue::Interval { .. } => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Interval".into(),
+            });
+        }
+        SqlValue::Decimal(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Decimal".into(),
+            });
+        }
+        SqlValue::Json(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Json".into(),
+            });
+        }
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: value.type_name().into(),
+            });
+        }
     }
     Ok(())
 }

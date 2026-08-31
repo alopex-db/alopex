@@ -63,7 +63,7 @@ if [ "${ALOPEX_SKIP_CLIPPY:-0}" != "1" ]; then
         CLIPPY_TOOLCHAIN="+stable"
     fi
     echo -e "${YELLOW}Running cargo ${CLIPPY_TOOLCHAIN:-default} clippy...${NC}"
-    if ! cargo ${CLIPPY_TOOLCHAIN} clippy --all-targets --all-features -- -D warnings; then
+    if ! make lane-ci-clippy CLIPPY_TOOLCHAIN="${CLIPPY_TOOLCHAIN}"; then
         echo -e "${RED}Clippy check failed!${NC}"
         echo "Fix the warnings above before committing"
         exit 1

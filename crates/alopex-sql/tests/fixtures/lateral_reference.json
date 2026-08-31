@@ -8,8 +8,10 @@
   "source_docs": {
     "postgresql_lateral": "https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-LATERAL",
     "postgresql_table_aliases": "https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-TABLE-ALIASES",
+    "postgresql_generate_series": "https://www.postgresql.org/docs/current/functions-srf.html",
     "duckdb_lateral": "https://duckdb.org/docs/stable/sql/query_syntax/from",
-    "datafusion_select": "https://datafusion.apache.org/user-guide/sql/select.html"
+    "duckdb_generate_series": "https://duckdb.org/docs/stable/sql/functions/timestamp.html",
+    "datafusion_generate_series": "https://datafusion.apache.org/user-guide/sql/scalar_functions.html#generate-series"
   },
   "setup": "CREATE TABLE t (id INTEGER PRIMARY KEY); CREATE TABLE s (id INTEGER PRIMARY KEY, t_id INTEGER, val INTEGER); INSERT INTO t VALUES (1), (2); INSERT INTO s VALUES (10, 1, 100), (11, 1, 200)",
   "cases": [
@@ -48,6 +50,12 @@
       "sql": "SELECT p.a, p.c FROM s AS p(a, b, c) ORDER BY p.a",
       "columns": ["a", "c"],
       "rows": [[10, 100], [11, 200]]
+    },
+    {
+      "name": "timestamp_generate_series_is_inclusive",
+      "sql": "SELECT g.ts FROM GENERATE_SERIES(TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-03 00:00:00', INTERVAL '1 day') AS g(ts) ORDER BY g.ts",
+      "columns": ["ts"],
+      "rows": [[1704067200000000], [1704153600000000], [1704240000000000]]
     }
   ]
 }

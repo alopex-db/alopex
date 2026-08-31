@@ -27,14 +27,15 @@ type
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith, tkRecursive
     tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
-    tkTimestamp, tkDate, tkTime, tkVector, tkInterval
-    tkHnsw, tkBtree, tkCosine, tkL2
+    tkTimestamp, tkDate, tkTime, tkVector, tkInterval, tkJson, tkJsonb
+    tkHnsw, tkBtree, tkFts, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
-    tkStar, tkComma, tkDot, tkSemicolon
+    tkStar, tkComma, tkDot, tkColon, tkSemicolon
     tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
+    tkArrow, tkArrowText, tkPathArrow, tkPathArrowText
     tkBitAnd, tkBitOr, tkBitXor, tkBitNot, tkShiftLeft, tkShiftRight
     tkQuestion
     # Special
@@ -87,12 +88,14 @@ const Keywords = {
   "default": tkDefault, "constraint": tkConstraint, "escape": tkEscape,
   "with": tkWith, "recursive": tkRecursive,
   "int": tkInt, "integer": tkInt, "bigint": tkBigint, "smallint": tkSmallint,
-  "float": tkFloatType, "real": tkReal, "double": tkDouble, "decimal": tkDecimal,
+  "float": tkFloatType, "real": tkReal, "double": tkDouble,
+  "decimal": tkDecimal, "numeric": tkDecimal,
   "varchar": tkVarchar, "char": tkChar, "text": tkText,
   "blob": tkBlob, "boolean": tkBoolean, "bool": tkBool,
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
   "interval": tkInterval,
-  "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree,
+  "json": tkJson, "jsonb": tkJsonb,
+  "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree, "fts": tkFts,
   "cosine": tkCosine, "l2": tkL2,
   "if": tkIf,
 }.toTable
@@ -237,7 +240,22 @@ proc nextToken*(lex: var Lexer): Token =
     return lex.makeToken(tkPlus, "+", startLine, startCol)
   of '-':
     discard lex.advance()
+    if lex.peek() == '>':
+      discard lex.advance()
+      if lex.peek() == '>':
+        discard lex.advance()
+        return lex.makeToken(tkArrowText, "->>", startLine, startCol)
+      return lex.makeToken(tkArrow, "->", startLine, startCol)
     return lex.makeToken(tkMinus, "-", startLine, startCol)
+  of '#':
+    discard lex.advance()
+    if lex.peek() == '>':
+      discard lex.advance()
+      if lex.peek() == '>':
+        discard lex.advance()
+        return lex.makeToken(tkPathArrowText, "#>>", startLine, startCol)
+      return lex.makeToken(tkPathArrow, "#>", startLine, startCol)
+    return lex.makeToken(tkIdent, "#", startLine, startCol)
   of '/':
     discard lex.advance()
     return lex.makeToken(tkSlash, "/", startLine, startCol)
@@ -265,6 +283,9 @@ proc nextToken*(lex: var Lexer): Token =
   of '=':
     discard lex.advance()
     return lex.makeToken(tkEq, "=", startLine, startCol)
+  of ':':
+    discard lex.advance()
+    return lex.makeToken(tkColon, ":", startLine, startCol)
   of '<':
     discard lex.advance()
     if lex.peek() == '<':

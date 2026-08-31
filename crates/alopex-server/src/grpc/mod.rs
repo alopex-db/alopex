@@ -808,9 +808,34 @@ fn sql_value_to_proto(value: &alopex_sql::storage::SqlValue) -> proto::Value {
         alopex_sql::storage::SqlValue::Blob(v) => Some(Kind::BlobValue(v.clone())),
         alopex_sql::storage::SqlValue::Boolean(v) => Some(Kind::BoolValue(*v)),
         alopex_sql::storage::SqlValue::Timestamp(v) => Some(Kind::TimestampValue(*v)),
+        alopex_sql::storage::SqlValue::Date(v) => Some(Kind::DateValue(*v)),
+        alopex_sql::storage::SqlValue::Time(v) => Some(Kind::TimeValue(*v)),
+        alopex_sql::storage::SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => Some(Kind::IntervalValue(proto::Interval {
+            months: *months,
+            days: *days,
+            microseconds: *micros,
+        })),
+        alopex_sql::storage::SqlValue::Decimal(value) => Some(Kind::DecimalValue(proto::Decimal {
+            coefficient: value.coefficient.to_be_bytes().to_vec(),
+            scale: u32::from(value.scale),
+        })),
+        alopex_sql::storage::SqlValue::Json(value) => Some(Kind::JsonValue(value.to_string())),
         alopex_sql::storage::SqlValue::Vector(values) => Some(Kind::VectorValue(proto::Vector {
             values: values.clone(),
         })),
+        value @ alopex_sql::storage::SqlValue::Array(_) => Some(Kind::ArrayJsonValue(
+            value.nested_json_text().expect("ARRAY has a JSON mapping"),
+        )),
+        value @ alopex_sql::storage::SqlValue::Map(_) => Some(Kind::MapJsonValue(
+            value.nested_json_text().expect("MAP has a JSON mapping"),
+        )),
+        value @ alopex_sql::storage::SqlValue::Struct(_) => Some(Kind::StructJsonValue(
+            value.nested_json_text().expect("STRUCT has a JSON mapping"),
+        )),
     };
     proto::Value { kind }
 }
@@ -872,4 +897,104 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         format!("{} (correlation_id={})", err, correlation_id)
     };
     Status::new(code, message)
+}
+
+#[cfg(test)]
+mod temporal_wire_tests {
+    use super::{proto, sql_value_to_proto};
+    use alopex_sql::{storage::DecimalValue, SqlValue};
+    use prost::Message;
+
+    #[test]
+    fn temporal_values_use_appended_wire_variants() {
+        let date = sql_value_to_proto(&SqlValue::Date(19_782));
+        let time = sql_value_to_proto(&SqlValue::Time(3));
+        let value = sql_value_to_proto(&SqlValue::Interval {
+            months: 1,
+            days: -2,
+            micros: 3,
+        });
+        for value in [&date, &time, &value] {
+            assert_eq!(
+                proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+                value.clone()
+            );
+        }
+        assert!(matches!(
+            date.kind,
+            Some(proto::value::Kind::DateValue(19_782))
+        ));
+        assert!(matches!(time.kind, Some(proto::value::Kind::TimeValue(3))));
+        let Some(proto::value::Kind::IntervalValue(interval)) = value.kind else {
+            panic!("expected interval wire value");
+        };
+        assert_eq!(
+            (interval.months, interval.days, interval.microseconds),
+            (1, -2, 3)
+        );
+    }
+
+    #[test]
+    fn decimal_value_uses_appended_wire_variant() {
+        let value = sql_value_to_proto(&SqlValue::Decimal(DecimalValue::new(-12345, 2)));
+        assert_eq!(
+            proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        let Some(proto::value::Kind::DecimalValue(decimal)) = value.kind else {
+            panic!("expected decimal wire value");
+        };
+        assert_eq!(decimal.coefficient, (-12345_i128).to_be_bytes());
+        assert_eq!(decimal.scale, 2);
+    }
+
+    #[test]
+    fn json_value_uses_appended_wire_variant() {
+        let value = sql_value_to_proto(&SqlValue::Json(
+            alopex_sql::storage::JsonValue::parse(r#"{"b":1,"a":2}"#).unwrap(),
+        ));
+        assert_eq!(
+            proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        assert!(matches!(
+            value.kind,
+            Some(proto::value::Kind::JsonValue(ref json)) if json == r#"{"a":2,"b":1}"#
+        ));
+    }
+
+    #[test]
+    fn nested_values_use_appended_json_wire_variants() {
+        let values = [
+            (
+                SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]),
+                r#"[1,null]"#,
+                "array",
+            ),
+            (
+                SqlValue::Map(vec![(SqlValue::Text("a".into()), SqlValue::Integer(1))]),
+                r#"{"a":1}"#,
+                "map",
+            ),
+            (
+                SqlValue::Struct(vec![("name".into(), SqlValue::Text("Ada".into()))]),
+                r#"{"name":"Ada"}"#,
+                "struct",
+            ),
+        ];
+        for (input, expected, kind) in values {
+            let value = sql_value_to_proto(&input);
+            assert_eq!(
+                proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+                value
+            );
+            let actual = match value.kind {
+                Some(proto::value::Kind::ArrayJsonValue(value)) if kind == "array" => value,
+                Some(proto::value::Kind::MapJsonValue(value)) if kind == "map" => value,
+                Some(proto::value::Kind::StructJsonValue(value)) if kind == "struct" => value,
+                other => panic!("unexpected {kind} wire value: {other:?}"),
+            };
+            assert_eq!(actual, expected);
+        }
+    }
 }

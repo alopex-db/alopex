@@ -32,7 +32,15 @@ fn eval_pg_typeof(values: &[SqlValue]) -> Result<SqlValue> {
         SqlValue::Blob(_) => "bytea",
         SqlValue::Boolean(_) => "boolean",
         SqlValue::Timestamp(_) => "timestamp",
+        SqlValue::Date(_) => "date",
+        SqlValue::Time(_) => "time",
+        SqlValue::Interval { .. } => "interval",
+        SqlValue::Decimal(_) => "numeric",
+        SqlValue::Json(_) => "jsonb",
         SqlValue::Vector(_) => "vector",
+        SqlValue::Array(_) => "array",
+        SqlValue::Map(_) => "map",
+        SqlValue::Struct(_) => "struct",
         SqlValue::Null => "unknown",
     };
     Ok(SqlValue::Text(name.into()))
@@ -50,6 +58,8 @@ fn eval_quote(values: &[SqlValue]) -> Result<SqlValue> {
             }
         }
         SqlValue::Integer(value) => value.to_string(),
+        SqlValue::Decimal(value) => value.to_string(),
+        SqlValue::Json(value) => format!("'{}'", value.as_str().replace('\'', "''")),
         SqlValue::BigInt(value) => value.to_string(),
         SqlValue::Float(value) => value.to_string(),
         SqlValue::Double(value) => value.to_string(),

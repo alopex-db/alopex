@@ -24,7 +24,7 @@ const
                        tkNatural, tkUsing, tkOn}
   TypeTokens = {tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal,
                 tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool,
-                tkTimestamp, tkDate, tkTime, tkVector}
+                tkTimestamp, tkDate, tkTime, tkInterval, tkVector, tkJson, tkJsonb}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,
                        tkCosine, tkL2, tkInner, tkText, tkBoolean, tkBool}
   # FETCH pagination (issue #152) reserves FETCH/NEXT/TIES/ONLY/ROW in the
@@ -73,6 +73,21 @@ proc expect(p: var Parser, kind: TokenKind): Token =
   if p.current.kind != kind:
     p.error("expected " & $kind)
   result = p.advance()
+
+proc expectTypeClose(p: var Parser): Token =
+  if p.current.kind == tkGt:
+    return p.advance()
+  if p.current.kind == tkShiftRight:
+    result = p.current
+    result.kind = tkGt
+    result.value = ">"
+    result.endCol = result.col
+    p.previous = result
+    p.current.kind = tkGt
+    p.current.value = ">"
+    inc p.current.col
+    return
+  p.error("expected " & $tkGt)
 
 proc check(p: Parser, kind: TokenKind): bool =
   p.current.kind == kind
@@ -179,6 +194,19 @@ proc parseVectorLiteral(p: var Parser): SqlNode =
       p.error("expected ',' or ']' in vector literal")
   if not sawValue:
     p.error("vector literal cannot be empty")
+  discard p.expect(tkRBracket)
+
+proc parseArrayLiteral(p: var Parser; start: Token): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
+  discard p.expect(tkLBracket)
+  result = newNode(nkFunctionCall, tokenSpan(start))
+  result.children.add(newIdent("ARRAY_VALUE", tokenSpan(start)))
+  if not p.check(tkRBracket):
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
   discard p.expect(tkRBracket)
 
 proc parseSubqueryInParens(p: var Parser): SqlNode =
@@ -511,6 +539,61 @@ proc parsePrimary(p: var Parser): SqlNode =
     let valueTok = p.expect(tkString)
     result = newIntervalLit(valueTok.value,
       Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
+  of tkDecimal:
+    let typeTok = p.advance()
+    let valueTok = p.expect(tkString)
+    let unsigned = valueTok.value.strip(chars = {'+', '-'})
+    let dot = unsigned.find('.')
+    let scale = if dot < 0: 0 else: unsigned.len - dot - 1
+    let whole = if dot < 0: unsigned else: unsigned[0 ..< dot]
+    let precision = max(1, whole.strip(chars = {'0'}).len + scale)
+    if precision > 38 or scale > precision:
+      p.error("DECIMAL literal precision must be between 1 and 38")
+    let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+    typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+    typeNode.children.add(newIntLit(precision, tokenSpan(typeTok)))
+    typeNode.children.add(newIntLit(scale, tokenSpan(typeTok)))
+    result = newNode(nkCast,
+      Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+    result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+    result.children.add(typeNode)
+  of tkJson, tkJsonb:
+    let typeTok = p.advance()
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+      typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(typeTok)
+    else:
+      p.error("expected JSON literal or function call")
+  of tkTimestamp:
+    let typeTok = p.advance()
+    let valueTok = p.expect(tkString)
+    let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+    typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+    result = newNode(nkCast,
+      Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+    result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+    result.children.add(typeNode)
+  of tkDate:
+    let tok = p.advance()
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(tok))
+      typeNode.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(tok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(tok)
+    else:
+      result = newIdent(tok.value, tokenSpan(tok))
   of tkTrue:
     let tok = p.advance()
     result = newBoolLit(true, tokenSpan(tok))
@@ -572,15 +655,39 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkQuestion:
     p.error("bind parameters are not yet supported; pass literal values " &
       "instead (prepared statements are tracked by issue #166)")
-  of tkIdent, tkFirst, tkLast, tkTime, tkFetch, tkNext, tkTies, tkOnly, tkRow:
+  of tkTime:
     let tok = p.advance()
-    if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(tok))
+      typeNode.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(tok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(tok)
+    elif p.check(tkDot):
+      discard p.advance()
+      let col = p.expectExprIdent("column name")
+      result = newNode(nkColumnRef, tokenSpan(tok))
+      result.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result.children.add(newIdent(col.value, tokenSpan(col)))
+    else:
+      result = newIdent(tok.value, tokenSpan(tok))
+  of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow:
+    let tok = p.advance()
+    if tok.value.cmpIgnoreCase("array") == 0 and p.check(tkLBracket):
+      result = p.parseArrayLiteral(tok)
+    elif tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
       result = p.parseCastBody(tok, nkTryCast)
     elif p.check(tkLParen):
       result = p.parseFunctionCall(tok)
-    elif tok.value.cmpIgnoreCase("current_timestamp") == 0:
+    elif tok.value.cmpIgnoreCase("current_timestamp") == 0 or
+        tok.value.cmpIgnoreCase("current_date") == 0 or
+        tok.value.cmpIgnoreCase("current_time") == 0:
       result = newNode(nkFunctionCall, tokenSpan(tok))
-      result.children.add(newIdent("CURRENT_TIMESTAMP", tokenSpan(tok)))
+      result.children.add(newIdent(tok.value.toUpperAscii(), tokenSpan(tok)))
     elif p.check(tkDot):
       discard p.advance()
       if p.check(tkStar):
@@ -603,8 +710,35 @@ proc parsePrimary(p: var Parser): SqlNode =
   else:
     p.error("unexpected token in expression")
 
-proc parseMulDiv(p: var Parser): SqlNode =
+proc nestedCall(name: string; base: SqlNode; args: varargs[SqlNode]): SqlNode =
+  result = newNode(nkFunctionCall, base.span)
+  result.children.add(newIdent(name, base.span))
+  result.children.add(base)
+  for arg in args:
+    result.children.add(arg)
+
+proc parsePostfix(p: var Parser): SqlNode =
   result = p.parsePrimary()
+  while p.check(tkLBracket):
+    let bracket = p.advance()
+    if p.check(tkColon):
+      discard p.advance()
+      let upper = if p.check(tkRBracket): newNull(tokenSpan(bracket)) else: p.parseExpr()
+      discard p.expect(tkRBracket)
+      result = nestedCall("ARRAY_SLICE", result, newNull(tokenSpan(bracket)), upper)
+    else:
+      let first = p.parseExpr()
+      if p.check(tkColon):
+        discard p.advance()
+        let upper = if p.check(tkRBracket): newNull(tokenSpan(bracket)) else: p.parseExpr()
+        discard p.expect(tkRBracket)
+        result = nestedCall("ARRAY_SLICE", result, first, upper)
+      else:
+        discard p.expect(tkRBracket)
+        result = nestedCall("ARRAY_SUBSCRIPT", result, first)
+
+proc parseMulDiv(p: var Parser): SqlNode =
+  result = p.parsePostfix()
   while p.current.kind in {tkStar, tkSlash, tkPercent}:
     let op = case p.current.kind
       of tkStar: opMul
@@ -612,7 +746,7 @@ proc parseMulDiv(p: var Parser): SqlNode =
       of tkPercent: opMod
       else: opMul
     discard p.advance()
-    result = newBinaryOp(op, result, p.parsePrimary())
+    result = newBinaryOp(op, result, p.parsePostfix())
 
 proc parseAddSub(p: var Parser): SqlNode =
   result = p.parseMulDiv()
@@ -651,6 +785,24 @@ proc parseConcat(p: var Parser): SqlNode =
   while p.check(tkPipePipe):
     discard p.advance()
     result = newBinaryOp(opStringConcat, result, p.parseBitOr())
+
+proc newJsonOperator(name: string; opTok: Token; left, right: SqlNode): SqlNode =
+  result = newNode(nkFunctionCall,
+    Span(start: left.span.start, `end`: right.span.`end`))
+  result.children.add(newIdent(name, tokenSpan(opTok)))
+  result.children.add(left)
+  result.children.add(right)
+
+proc parseJsonOperator(p: var Parser): SqlNode =
+  result = p.parseConcat()
+  while p.current.kind in {tkArrow, tkArrowText, tkPathArrow, tkPathArrowText}:
+    let opTok = p.advance()
+    let name = case opTok.kind
+      of tkArrow: "JSONB_EXTRACT"
+      of tkArrowText: "JSONB_EXTRACT_TEXT"
+      of tkPathArrow: "JSONB_EXTRACT_PATH"
+      else: "JSONB_EXTRACT_PATH_TEXT"
+    result = newJsonOperator(name, opTok, result, p.parseConcat())
 
 proc comparisonOp(kind: TokenKind): BinaryOpKind =
   case kind
@@ -704,7 +856,7 @@ proc parsePattern(p: var Parser; left: SqlNode; op: BinaryOpKind; allowEscape: b
   newBinaryOp(op, left, pattern)
 
 proc parseComparison(p: var Parser): SqlNode =
-  result = p.parseConcat()
+  result = p.parseJsonOperator()
 
   if p.check(tkNot):
     discard p.advance()
@@ -862,6 +1014,12 @@ proc parseTableFunction(p: var Parser; name: Token; lateral: bool): SqlNode =
       discard p.advance()
       result.children.add(p.parseExpr())
   discard p.expect(tkRParen)
+  if p.check(tkWith) and p.peekNext() == tkIdent:
+    discard p.advance()
+    let ordinality = p.expectIdent("ORDINALITY")
+    if ordinality.value.cmpIgnoreCase("ordinality") != 0:
+      p.error("expected ORDINALITY after WITH")
+    result.withOrdinality = true
 
 proc parseFromItem(p: var Parser): SqlNode =
   # LATERAL is contextual: it only introduces a FROM item when a subquery or a
@@ -1419,7 +1577,27 @@ proc parseTypeName(p: var Parser): SqlNode =
   let typeTok = p.advance()
   result = newNode(nkTypeName, tokenSpan(typeTok))
   result.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
-  if p.check(tkLParen):
+  let nestedName = typeTok.value.toUpperAscii()
+  if nestedName in ["ARRAY", "LIST", "MAP", "STRUCT"] and p.check(tkLt):
+    p.enterNesting()
+    defer: p.leaveNesting()
+    discard p.advance()
+    if nestedName in ["ARRAY", "LIST"]:
+      result.children.add(p.parseTypeName())
+    elif nestedName == "MAP":
+      result.children.add(p.parseTypeName())
+      discard p.expect(tkComma)
+      result.children.add(p.parseTypeName())
+    else:
+      while true:
+        let field = p.expectIdent("struct field name")
+        result.children.add(newIdent(field.value, tokenSpan(field)))
+        result.children.add(p.parseTypeName())
+        if not p.check(tkComma):
+          break
+        discard p.advance()
+    discard p.expectTypeClose()
+  elif p.check(tkLParen):
     p.enterNesting()
     defer: p.leaveNesting()
     discard p.advance()
@@ -1629,8 +1807,8 @@ proc parseCreateIndexAfterCreate(p: var Parser; start: Token): SqlNode =
   result.children.add(newIdent(column.value, tokenSpan(column)))
   if p.check(tkUsing):
     discard p.advance()
-    if p.current.kind notin {tkHnsw, tkBtree}:
-      p.error("expected HNSW or BTREE index method")
+    if p.current.kind notin {tkHnsw, tkBtree, tkFts}:
+      p.error("expected HNSW, BTREE, or FTS index method")
     let idxMethod = p.advance()
     result.children.add(newIdent(idxMethod.value, tokenSpan(idxMethod)))
   if p.check(tkWith):

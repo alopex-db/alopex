@@ -1,7 +1,8 @@
 use crate::ast::expr::BinaryOp;
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::SqlValue;
+use crate::storage::{DecimalValue, SqlValue};
+use chrono::{Duration, Months, NaiveDate};
 
 use super::evaluate;
 
@@ -9,19 +10,29 @@ pub fn eval_binary_op(
     op: &BinaryOp,
     left: &TypedExpr,
     right: &TypedExpr,
+    result_type: &crate::planner::ResolvedType,
     ctx: &super::EvalContext<'_>,
 ) -> Result<SqlValue> {
     let l = evaluate(left, ctx)?;
     let r = evaluate(right, ctx)?;
-    eval_binary_values(op, l, r)
+    eval_binary_values_with_type(op, l, r, Some(result_type))
 }
 
 pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Result<SqlValue> {
+    eval_binary_values_with_type(op, l, r, None)
+}
+
+fn eval_binary_values_with_type(
+    op: &BinaryOp,
+    l: SqlValue,
+    r: SqlValue,
+    result_type: Option<&crate::planner::ResolvedType>,
+) -> Result<SqlValue> {
     match op {
-        BinaryOp::Add => add(l, r),
-        BinaryOp::Sub => sub(l, r),
-        BinaryOp::Mul => mul(l, r),
-        BinaryOp::Div => div(l, r),
+        BinaryOp::Add => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| add(l, r)),
+        BinaryOp::Sub => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| sub(l, r)),
+        BinaryOp::Mul => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| mul(l, r)),
+        BinaryOp::Div => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| div(l, r)),
         BinaryOp::Mod => r#mod(l, r),
         BinaryOp::Eq => compare(l, r, OrderingKind::Eq),
         BinaryOp::Neq => compare(l, r, OrderingKind::Neq),
@@ -38,6 +49,120 @@ pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Res
         BinaryOp::ShiftLeft => shift(l, r, true),
         BinaryOp::ShiftRight => shift(l, r, false),
     }
+}
+
+fn decimal_operand(value: &SqlValue) -> Option<DecimalValue> {
+    match value {
+        SqlValue::Decimal(value) => Some(*value),
+        SqlValue::Integer(value) => Some(DecimalValue::new(i128::from(*value), 0)),
+        SqlValue::BigInt(value) => Some(DecimalValue::new(i128::from(*value), 0)),
+        _ => None,
+    }
+}
+
+fn decimal_binary(
+    op: &BinaryOp,
+    left: &SqlValue,
+    right: &SqlValue,
+    result_type: Option<&crate::planner::ResolvedType>,
+) -> Option<Result<SqlValue>> {
+    if left.is_null() || right.is_null() {
+        return (matches!(left, SqlValue::Decimal(_)) || matches!(right, SqlValue::Decimal(_)))
+            .then_some(Ok(SqlValue::Null));
+    }
+    if !matches!(left, SqlValue::Decimal(_)) && !matches!(right, SqlValue::Decimal(_)) {
+        return None;
+    }
+    let left = decimal_operand(left)?;
+    let right = decimal_operand(right)?;
+    let crate::planner::ResolvedType::Decimal { precision, scale } = result_type? else {
+        return None;
+    };
+    Some(decimal_calculate(op, left, right, *precision, *scale).map(SqlValue::Decimal))
+}
+
+fn decimal_calculate(
+    op: &BinaryOp,
+    left: DecimalValue,
+    right: DecimalValue,
+    precision: u8,
+    scale: u8,
+) -> Result<DecimalValue> {
+    let overflow = || ExecutorError::Evaluation(EvaluationError::Overflow);
+    let result = match op {
+        BinaryOp::Add | BinaryOp::Sub => {
+            let input_scale = left.scale.max(right.scale);
+            let left = left.rescale(input_scale).ok_or_else(overflow)?;
+            let right = right.rescale(input_scale).ok_or_else(overflow)?;
+            let coefficient = if matches!(op, BinaryOp::Add) {
+                left.coefficient.checked_add(right.coefficient)
+            } else {
+                left.coefficient.checked_sub(right.coefficient)
+            }
+            .ok_or_else(overflow)?;
+            DecimalValue::new(coefficient, input_scale)
+                .rescale(scale)
+                .ok_or_else(overflow)?
+        }
+        BinaryOp::Mul => DecimalValue::new(
+            left.coefficient
+                .checked_mul(right.coefficient)
+                .ok_or_else(overflow)?,
+            left.scale.checked_add(right.scale).ok_or_else(overflow)?,
+        )
+        .rescale(scale)
+        .ok_or_else(overflow)?,
+        BinaryOp::Div => {
+            if right.coefficient == 0 {
+                return Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero));
+            }
+            let exponent = i16::from(right.scale) + i16::from(scale) - i16::from(left.scale);
+            let (numerator, denominator) = if exponent >= 0 {
+                (
+                    left.coefficient
+                        .checked_mul(
+                            crate::storage::value::decimal_power(exponent as u8)
+                                .ok_or_else(overflow)?,
+                        )
+                        .ok_or_else(overflow)?,
+                    right.coefficient,
+                )
+            } else {
+                (
+                    left.coefficient,
+                    right
+                        .coefficient
+                        .checked_mul(
+                            crate::storage::value::decimal_power((-exponent) as u8)
+                                .ok_or_else(overflow)?,
+                        )
+                        .ok_or_else(overflow)?,
+                )
+            };
+            let quotient = numerator / denominator;
+            let remainder = numerator % denominator;
+            let rounded =
+                if remainder.abs().checked_mul(2).ok_or_else(overflow)? >= denominator.abs() {
+                    quotient
+                        .checked_add(numerator.signum() * denominator.signum())
+                        .ok_or_else(overflow)?
+                } else {
+                    quotient
+                };
+            DecimalValue::new(rounded, scale)
+        }
+        _ => {
+            return type_mismatch(
+                "Decimal arithmetic",
+                &SqlValue::Decimal(left),
+                &SqlValue::Decimal(right),
+            );
+        }
+    };
+    if !result.fits_precision(precision) {
+        return Err(ExecutorError::Evaluation(EvaluationError::Overflow));
+    }
+    Ok(result)
 }
 
 fn bitwise(left: SqlValue, right: SqlValue, op: fn(i64, i64) -> i64) -> Result<SqlValue> {
@@ -100,6 +225,9 @@ fn add(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
     if left.is_null() || right.is_null() {
         return Ok(SqlValue::Null);
     }
+    if let Some(value) = temporal_add(&left, &right, false)? {
+        return Ok(value);
+    }
     match numeric_operands(&left, &right) {
         Some(NumericOperands::Integer(a, b)) => a
             .checked_add(b)
@@ -119,6 +247,9 @@ fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
     if left.is_null() || right.is_null() {
         return Ok(SqlValue::Null);
     }
+    if let Some(value) = temporal_add(&left, &right, true)? {
+        return Ok(value);
+    }
     match numeric_operands(&left, &right) {
         Some(NumericOperands::Integer(a, b)) => a
             .checked_sub(b)
@@ -132,6 +263,155 @@ fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
         Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a - b)),
         None => type_mismatch("Numeric", &left, &right),
     }
+}
+
+fn temporal_add(left: &SqlValue, right: &SqlValue, subtract: bool) -> Result<Option<SqlValue>> {
+    let negate = |months: i32, days: i32, micros: i64| {
+        if subtract {
+            months
+                .checked_neg()
+                .zip(days.checked_neg())
+                .zip(micros.checked_neg())
+                .map(|((m, d), u)| (m, d, u))
+        } else {
+            Some((months, days, micros))
+        }
+    };
+    let interval = match right {
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => negate(*months, *days, *micros),
+        _ => None,
+    };
+    if let Some((months, days, micros)) = interval {
+        return match left {
+            SqlValue::Date(value) => add_date_interval(*value, months, days, micros).map(Some),
+            SqlValue::Timestamp(value) => {
+                add_timestamp_interval(*value, months, days, micros).map(Some)
+            }
+            SqlValue::Time(value) if months == 0 => {
+                add_time_interval(*value, days, micros).map(Some)
+            }
+            SqlValue::Interval {
+                months: lm,
+                days: ld,
+                micros: lu,
+            } => Ok(Some(SqlValue::Interval {
+                months: lm
+                    .checked_add(months)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                days: ld
+                    .checked_add(days)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                micros: lu
+                    .checked_add(micros)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+            })),
+            _ => Ok(None),
+        };
+    }
+    if subtract {
+        return match (left, right) {
+            (SqlValue::Date(a), SqlValue::Date(b)) => Ok(Some(SqlValue::Interval {
+                months: 0,
+                days: a - b,
+                micros: 0,
+            })),
+            (SqlValue::Timestamp(a), SqlValue::Timestamp(b))
+            | (SqlValue::Time(a), SqlValue::Time(b)) => Ok(Some(SqlValue::Interval {
+                months: 0,
+                days: 0,
+                micros: a
+                    .checked_sub(*b)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+            })),
+            _ => Ok(None),
+        };
+    }
+    if let SqlValue::Interval {
+        months,
+        days,
+        micros,
+    } = left
+    {
+        return match right {
+            SqlValue::Date(value) => add_date_interval(*value, *months, *days, *micros).map(Some),
+            SqlValue::Timestamp(value) => {
+                add_timestamp_interval(*value, *months, *days, *micros).map(Some)
+            }
+            SqlValue::Time(value) if *months == 0 => {
+                add_time_interval(*value, *days, *micros).map(Some)
+            }
+            _ => Ok(None),
+        };
+    }
+    Ok(None)
+}
+
+fn add_time_interval(value: i64, days: i32, micros: i64) -> Result<SqlValue> {
+    let delta = i64::from(days)
+        .checked_mul(86_400_000_000)
+        .and_then(|days| days.checked_add(micros))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    value
+        .checked_add(delta)
+        .map(|value| SqlValue::Time(value.rem_euclid(86_400_000_000)))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))
+}
+
+fn add_date_interval(value: i32, months: i32, days: i32, micros: i64) -> Result<SqlValue> {
+    if micros % 86_400_000_000 != 0 {
+        return type_mismatch(
+            "DATE with whole-day INTERVAL",
+            &SqlValue::Date(value),
+            &SqlValue::Interval {
+                months,
+                days,
+                micros,
+            },
+        );
+    }
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+    let date = epoch
+        .checked_add_signed(Duration::days(i64::from(value)))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let date = if months >= 0 {
+        date.checked_add_months(Months::new(months as u32))
+    } else {
+        date.checked_sub_months(Months::new(months.unsigned_abs()))
+    }
+    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let total_days = i64::from(days) + micros / 86_400_000_000;
+    let date = date
+        .checked_add_signed(Duration::days(total_days))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    Ok(SqlValue::Date(
+        i32::try_from(date.signed_duration_since(epoch).num_days())
+            .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))?,
+    ))
+}
+
+pub(crate) fn add_timestamp_interval(
+    value: i64,
+    months: i32,
+    days: i32,
+    micros: i64,
+) -> Result<SqlValue> {
+    let datetime = chrono::DateTime::from_timestamp_micros(value)
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?
+        .naive_utc();
+    let datetime = if months >= 0 {
+        datetime.checked_add_months(Months::new(months as u32))
+    } else {
+        datetime.checked_sub_months(Months::new(months.unsigned_abs()))
+    }
+    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let datetime = datetime
+        .checked_add_signed(Duration::days(i64::from(days)) + Duration::microseconds(micros))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    Ok(SqlValue::Timestamp(datetime.and_utc().timestamp_micros()))
 }
 
 fn mul(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
@@ -255,8 +535,14 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         return Ok(SqlValue::Null);
     }
 
-    use OrderingKind::*;
-    use std::cmp::Ordering;
+    if (matches!(left, SqlValue::Decimal(_)) || matches!(right, SqlValue::Decimal(_)))
+        && let (Some(lhs), Some(rhs)) = (decimal_operand(&left), decimal_operand(&right))
+    {
+        return Ok(SqlValue::Boolean(ordering_matches(
+            lhs.cmp_numeric(rhs),
+            kind,
+        )));
+    }
     if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
         let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
             EvaluationError::TypeMismatch {
@@ -264,15 +550,7 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
                 actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
             },
         ))?;
-        let result = match kind {
-            Eq => cmp == Ordering::Equal,
-            Neq => cmp != Ordering::Equal,
-            Lt => cmp == Ordering::Less,
-            Gt => cmp == Ordering::Greater,
-            Le => cmp != Ordering::Greater,
-            Ge => cmp != Ordering::Less,
-        };
-        return Ok(SqlValue::Boolean(result));
+        return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
     let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
         EvaluationError::TypeMismatch {
@@ -281,15 +559,20 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         },
     ))?;
 
-    let result = match kind {
+    Ok(SqlValue::Boolean(ordering_matches(cmp, kind)))
+}
+
+fn ordering_matches(cmp: std::cmp::Ordering, kind: OrderingKind) -> bool {
+    use OrderingKind::*;
+    use std::cmp::Ordering;
+    match kind {
         Eq => cmp == Ordering::Equal,
         Neq => cmp != Ordering::Equal,
         Lt => cmp == Ordering::Less,
         Gt => cmp == Ordering::Greater,
         Le => cmp != Ordering::Greater,
         Ge => cmp != Ordering::Less,
-    };
-    Ok(SqlValue::Boolean(result))
+    }
 }
 
 fn numeric_as_f64(value: &SqlValue) -> Option<f64> {
@@ -298,6 +581,7 @@ fn numeric_as_f64(value: &SqlValue) -> Option<f64> {
         SqlValue::BigInt(v) => Some(*v as f64),
         SqlValue::Float(v) => Some(*v as f64),
         SqlValue::Double(v) => Some(*v),
+        SqlValue::Decimal(v) => v.to_string().parse().ok(),
         _ => None,
     }
 }
