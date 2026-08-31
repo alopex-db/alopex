@@ -268,7 +268,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn('-f "repair_forward=${REPAIR_FORWARD}"', dispatch)
         self.assertIn("needs.publish-crate.result == 'success'", dispatch)
 
-    def test_python_repair_skips_protected_publish_and_runs_public_join(self) -> None:
+    def test_python_repair_builds_missing_artifacts_and_runs_public_join(self) -> None:
         workflow = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
             encoding="utf-8"
         )
@@ -276,7 +276,7 @@ class ReleaseContractTests(unittest.TestCase):
             header = workflow.split(f"  {job}:", maxsplit=1)[1].split(
                 "    steps:", maxsplit=1
             )[0]
-            self.assertIn("if: ${{ !inputs.repair_forward }}", header)
+            self.assertNotIn("if: ${{ !inputs.repair_forward }}", header)
         join = workflow.split("  final-release-join:", maxsplit=1)[1].split(
             "  verify-public-release:", maxsplit=1
         )[0]
