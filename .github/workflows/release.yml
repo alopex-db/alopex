@@ -377,7 +377,7 @@ jobs:
               target_dir.mkdir(parents=True, exist_ok=True)
               (target_dir / dynamic_name).write_bytes(library)
               (target_dir / static_name).write_bytes(static_library)
-          (target_dir / "CONTRACT_VERSION").write_bytes(b"0.19.0\n")
+              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.19.0\n")
               (target_dir / "SHA256SUMS").write_bytes(
                   f"{expected}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
               )
