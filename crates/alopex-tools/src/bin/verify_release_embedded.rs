@@ -136,6 +136,22 @@ fn normalize_value(value: &SqlValue) -> Result<Value, String> {
             xs.iter().map(|x| round_sig9(f64::from(*x))).collect(),
         )),
         SqlValue::Timestamp(t) => Ok(json!(t)),
+        SqlValue::Date(days) => Ok(json!(days)),
+        SqlValue::Time(micros) => Ok(json!(micros)),
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => Ok(json!({ "months": months, "days": days, "microseconds": micros })),
+        SqlValue::Decimal(value) => Ok(json!(value.to_string())),
+        SqlValue::Json(value) => serde_json::from_str(value.as_str())
+            .map_err(|error| format!("invalid native JSON value: {error}")),
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => serde_json::from_str(
+            &value
+                .nested_json_text()
+                .ok_or_else(|| "nested value cannot be normalized".to_string())?,
+        )
+        .map_err(|error| format!("invalid nested JSON mapping: {error}")),
         SqlValue::Blob(_) => {
             Err("BLOB 値の正規化表現は未定義(コーパスに BLOB を含めない前提)".to_string())
         }
@@ -575,5 +591,58 @@ fn main() -> ExitCode {
             eprintln!("環境エラー: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alopex_sql::storage::{DecimalValue, JsonValue};
+
+    #[test]
+    fn normalize_value_covers_v08_native_types() {
+        assert_eq!(normalize_value(&SqlValue::Date(1)).unwrap(), json!(1));
+        assert_eq!(normalize_value(&SqlValue::Time(2)).unwrap(), json!(2));
+        assert_eq!(
+            normalize_value(&SqlValue::Interval {
+                months: 3,
+                days: 4,
+                micros: 5,
+            })
+            .unwrap(),
+            json!({"months": 3, "days": 4, "microseconds": 5})
+        );
+        assert_eq!(
+            normalize_value(&SqlValue::Decimal(DecimalValue::new(-12345, 2))).unwrap(),
+            json!("-123.45")
+        );
+        assert_eq!(
+            normalize_value(&SqlValue::Json(
+                JsonValue::parse(r#"{"answer":42}"#).unwrap()
+            ))
+            .unwrap(),
+            json!({"answer": 42})
+        );
+        assert_eq!(
+            normalize_value(&SqlValue::Array(vec![SqlValue::Integer(1), SqlValue::Null]))
+                .unwrap(),
+            json!([1, null])
+        );
+        assert_eq!(
+            normalize_value(&SqlValue::Map(vec![(
+                SqlValue::Text("answer".into()),
+                SqlValue::Integer(42),
+            )]))
+            .unwrap(),
+            json!({"answer": 42})
+        );
+        assert_eq!(
+            normalize_value(&SqlValue::Struct(vec![(
+                "answer".into(),
+                SqlValue::Integer(42),
+            )]))
+            .unwrap(),
+            json!({"answer": 42})
+        );
     }
 }
