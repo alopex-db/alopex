@@ -213,6 +213,10 @@ jobs:
           name: release-verification-${{ github.run_id }}
           path: ${{ env.REPORT_ROOT }}
 
+      - name: Select downloaded verification report
+        shell: bash
+        run: echo "REPORT_ROOT=${REPORT_ROOT}/release-verification-v${VERSION}" >> "${GITHUB_ENV}"
+
       - name: Validate explicit publication candidate
         id: candidate
         shell: bash
