@@ -759,6 +759,28 @@ fn parses_transaction_control_statements_from_nim() {
 }
 
 #[test]
+fn parses_savepoint_control_statements_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SAVEPOINT retry; ROLLBACK TO SAVEPOINT retry; RELEASE SAVEPOINT retry",
+    )
+    .expect("savepoint controls should parse");
+
+    assert!(matches!(
+        &statements[0].kind,
+        StatementKind::Savepoint { name } if name == "retry"
+    ));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::RollbackToSavepoint { name } if name == "retry"
+    ));
+    assert!(matches!(
+        &statements[2].kind,
+        StatementKind::ReleaseSavepoint { name } if name == "retry"
+    ));
+}
+
+#[test]
 fn join_markers_are_applied_inside_recursive_set_operation_terms() {
     let sql = "WITH RECURSIVE ancestors AS (\
          SELECT id, parent_id FROM employees WHERE id = 3 \

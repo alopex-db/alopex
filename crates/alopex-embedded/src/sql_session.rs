@@ -51,6 +51,9 @@ impl SqlSession {
             StatementKind::Begin => self.begin(),
             StatementKind::Commit => self.commit(),
             StatementKind::Rollback => self.rollback(),
+            StatementKind::Savepoint { name } => self.savepoint(name),
+            StatementKind::RollbackToSavepoint { name } => self.rollback_to_savepoint(name),
+            StatementKind::ReleaseSavepoint { name } => self.release_savepoint(name),
             _ => self.execute_statement(sql),
         }
     }
@@ -98,6 +101,43 @@ impl SqlSession {
         self.transaction = None;
         self.state = SqlSessionState::Idle;
         result.map(|()| ExecutionResult::Success)
+    }
+
+    fn savepoint(&mut self, name: &str) -> Result<SqlResult> {
+        if self.state != SqlSessionState::Active {
+            return Err(self.invalid("SAVEPOINT"));
+        }
+        self.transaction
+            .as_mut()
+            .expect("active SQL session owns a transaction")
+            .create_savepoint(name)?;
+        Ok(ExecutionResult::Success)
+    }
+
+    fn rollback_to_savepoint(&mut self, name: &str) -> Result<SqlResult> {
+        if !matches!(
+            self.state,
+            SqlSessionState::Active | SqlSessionState::Failed
+        ) {
+            return Err(self.invalid("ROLLBACK TO SAVEPOINT"));
+        }
+        self.transaction
+            .as_mut()
+            .expect("non-idle SQL session owns a transaction")
+            .rollback_to_savepoint(name)?;
+        self.state = SqlSessionState::Active;
+        Ok(ExecutionResult::Success)
+    }
+
+    fn release_savepoint(&mut self, name: &str) -> Result<SqlResult> {
+        if self.state != SqlSessionState::Active {
+            return Err(self.invalid("RELEASE SAVEPOINT"));
+        }
+        self.transaction
+            .as_mut()
+            .expect("active SQL session owns a transaction")
+            .release_savepoint(name)?;
+        Ok(ExecutionResult::Success)
     }
 
     fn execute_statement(&mut self, sql: &str) -> Result<SqlResult> {
@@ -314,5 +354,103 @@ mod tests {
         assert!(second.execute_sql("ROLLBACK").is_err());
         assert_eq!(second.state(), SqlSessionState::Idle);
         assert!(second.execute_sql("SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn nested_duplicate_savepoints_use_the_latest_name_and_keep_rollback_target() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut session = database.sql_session();
+        session.execute_sql("BEGIN").unwrap();
+        session
+            .execute_sql("INSERT INTO items (id) VALUES (1)")
+            .unwrap();
+        session.execute_sql("SAVEPOINT Retry").unwrap();
+        session
+            .execute_sql("INSERT INTO items (id) VALUES (2)")
+            .unwrap();
+        session.execute_sql("SAVEPOINT retry").unwrap();
+        session
+            .execute_sql("INSERT INTO items (id) VALUES (3)")
+            .unwrap();
+
+        session.execute_sql("ROLLBACK TO SAVEPOINT RETRY").unwrap();
+        session.execute_sql("RELEASE SAVEPOINT retry").unwrap();
+        session.execute_sql("ROLLBACK TO SAVEPOINT Retry").unwrap();
+        session.execute_sql("COMMIT").unwrap();
+
+        let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(rows.rows.len(), 1);
+    }
+
+    #[test]
+    fn releasing_a_savepoint_discards_descendants_and_missing_names_are_typed() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut session = database.sql_session();
+        session.execute_sql("BEGIN").unwrap();
+        session.execute_sql("SAVEPOINT outer_point").unwrap();
+        session
+            .execute_sql("INSERT INTO items (id) VALUES (1)")
+            .unwrap();
+        session.execute_sql("SAVEPOINT inner_point").unwrap();
+        session
+            .execute_sql("INSERT INTO items (id) VALUES (2)")
+            .unwrap();
+        session
+            .execute_sql("RELEASE SAVEPOINT outer_point")
+            .unwrap();
+
+        assert!(matches!(
+            session.execute_sql("ROLLBACK TO SAVEPOINT inner_point"),
+            Err(Error::SavepointNotFound(name)) if name == "inner_point"
+        ));
+        assert_eq!(session.state(), SqlSessionState::Active);
+        session.execute_sql("COMMIT").unwrap();
+        let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(rows.rows.len(), 2);
+    }
+
+    #[test]
+    fn rollback_to_savepoint_recovers_failed_state_and_catalog_overlay() {
+        let database = Arc::new(Database::new());
+        let mut session = database.sql_session();
+        assert!(matches!(
+            session.execute_sql("SAVEPOINT idle_point"),
+            Err(Error::InvalidSqlTransactionTransition {
+                state: SqlSessionState::Idle,
+                ..
+            })
+        ));
+        session.execute_sql("BEGIN").unwrap();
+        session.execute_sql("SAVEPOINT safe").unwrap();
+        session
+            .execute_sql("CREATE TABLE staged (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        session
+            .execute_sql("INSERT INTO staged (id) VALUES (1)")
+            .unwrap();
+        assert!(session.execute_sql("SELECT * FROM missing").is_err());
+        assert_eq!(session.state(), SqlSessionState::Failed);
+        assert!(matches!(
+            session.execute_sql("ROLLBACK TO SAVEPOINT absent"),
+            Err(Error::SavepointNotFound(name)) if name == "absent"
+        ));
+        assert_eq!(session.state(), SqlSessionState::Failed);
+
+        session.execute_sql("ROLLBACK TO SAVEPOINT safe").unwrap();
+        assert_eq!(session.state(), SqlSessionState::Active);
+        session.execute_sql("COMMIT").unwrap();
+        assert!(database.execute_sql("SELECT id FROM staged").is_err());
     }
 }

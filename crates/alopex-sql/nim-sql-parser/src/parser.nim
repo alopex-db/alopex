@@ -34,7 +34,8 @@ const
   # the grammar requires, so accepting these tokens cannot make a parse
   # ambiguous.
   PaginationIdentTokens = {tkFetch, tkNext, tkTies, tkOnly, tkRow}
-  TransactionIdentTokens = {tkBegin, tkStart, tkTransaction, tkCommit, tkRollback}
+  TransactionIdentTokens = {tkBegin, tkStart, tkTransaction, tkCommit, tkRollback,
+                            tkSavepoint, tkRelease}
   # An *implicit* (bare) alias is optional, so the token must not be able to
   # start the clause that follows. `FETCH` starts the pagination tail there
   # and therefore stays reserved; the other four cannot begin any clause.
@@ -678,7 +679,7 @@ proc parsePrimary(p: var Parser): SqlNode =
     else:
       result = newIdent(tok.value, tokenSpan(tok))
   of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow,
-      tkBegin, tkStart, tkTransaction, tkCommit, tkRollback:
+      tkBegin, tkStart, tkTransaction, tkCommit, tkRollback, tkSavepoint, tkRelease:
     let tok = p.advance()
     if tok.value.cmpIgnoreCase("array") == 0 and p.check(tkLBracket):
       result = p.parseArrayLiteral(tok)
@@ -1892,10 +1893,33 @@ proc parseCommitStmt(p: var Parser): SqlNode =
 
 proc parseRollbackStmt(p: var Parser): SqlNode =
   let start = p.expect(tkRollback)
-  result = newNode(nkRollback, tokenSpan(start))
   if p.check(tkTransaction):
-    let finish = p.advance()
-    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+    discard p.advance()
+  if p.check(tkTo):
+    discard p.advance()
+    if p.check(tkSavepoint):
+      discard p.advance()
+    let name = p.expectIdent("savepoint name")
+    result = newNode(nkRollbackToSavepoint,
+      spanThrough(tokenSpan(start), tokenSpan(name)))
+    result.children.add(newIdent(name.value, tokenSpan(name)))
+  else:
+    result = newNode(nkRollback, spanThrough(tokenSpan(start), tokenSpan(p.previous)))
+
+proc parseSavepointStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkSavepoint)
+  let name = p.expectIdent("savepoint name")
+  result = newNode(nkSavepoint, spanThrough(tokenSpan(start), tokenSpan(name)))
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+
+proc parseReleaseSavepointStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkRelease)
+  if p.check(tkSavepoint):
+    discard p.advance()
+  let name = p.expectIdent("savepoint name")
+  result = newNode(nkReleaseSavepoint,
+    spanThrough(tokenSpan(start), tokenSpan(name)))
+  result.children.add(newIdent(name.value, tokenSpan(name)))
 
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
@@ -1919,8 +1943,12 @@ proc parseStatement*(p: var Parser): SqlNode =
     result = p.parseCommitStmt()
   of tkRollback:
     result = p.parseRollbackStmt()
+  of tkSavepoint:
+    result = p.parseSavepointStmt()
+  of tkRelease:
+    result = p.parseReleaseSavepointStmt()
   else:
-    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK)")
+    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()

@@ -33,6 +33,9 @@ type
     nkBegin
     nkCommit
     nkRollback
+    nkSavepoint
+    nkRollbackToSavepoint
+    nkReleaseSavepoint
     nkStatementList
     nkIdentifier
     nkStringLit

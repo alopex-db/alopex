@@ -7,8 +7,8 @@ Nim parser boundary.
 ## Contract Overview
 
 - Current contract version: `0.20.0`, returned by `alopex_parser_version()`.
-- Contract `0.20.0` adds `Begin`, `Commit`, and `Rollback`; `START TRANSACTION`
-  normalizes to `Begin`.
+- Contract `0.20.0` adds transaction-control variants. `START TRANSACTION`
+  normalizes to `Begin`; savepoint controls retain their names.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -98,6 +98,9 @@ from invalid user SQL.
 | `Begin` | none |
 | `Commit` | none |
 | `Rollback` | none |
+| `Savepoint` | `name: string` |
+| `RollbackToSavepoint` | `name: string` |
+| `ReleaseSavepoint` | `name: string` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
 | `CreateTable` | `if_not_exists: bool`, `name: string`, `columns: [ColumnDef]`, `constraints: [TableConstraint]`, `with_options: [IndexOption]`, `span: Span` |

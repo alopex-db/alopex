@@ -101,6 +101,9 @@ pub enum Error {
     /// SQL session execution accepts one statement per call.
     #[error("SQL session execution requires exactly one statement")]
     SqlSessionRequiresSingleStatement,
+    /// A named savepoint does not exist in the active transaction.
+    #[error("savepoint not found: {0}")]
+    SavepointNotFound(String),
     /// Catalog が見つかりません。
     #[error("カタログが見つかりません: {0}")]
     CatalogNotFound(String),

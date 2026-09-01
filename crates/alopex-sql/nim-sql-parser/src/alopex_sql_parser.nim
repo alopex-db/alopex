@@ -1492,6 +1492,13 @@ proc writeUnitStatementKind(s: Stream; variant: string) =
   s.writeKey("variant")
   s.pack_type(variant)
 
+proc writeNamedStatementKind(s: Stream; variant: string; node: SqlNode) =
+  s.pack_map(2)
+  s.writeKey("variant")
+  s.pack_type(variant)
+  s.writeKey("name")
+  s.pack_type(node.children[0].firstIdent())
+
 const
   maxStagedPayloadBytes = 1_048_576
   maxStagedPayloadDepth = 128
@@ -1970,6 +1977,12 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeUnitStatementKind("Commit")
   of nkRollback:
     s.writeUnitStatementKind("Rollback")
+  of nkSavepoint:
+    s.writeNamedStatementKind("Savepoint", node)
+  of nkRollbackToSavepoint:
+    s.writeNamedStatementKind("RollbackToSavepoint", node)
+  of nkReleaseSavepoint:
+    s.writeNamedStatementKind("ReleaseSavepoint", node)
   of nkCreateContinuousAggregate:
     when continuousAggregateProducerEnabled:
       s.writeContinuousAggregateV040Kind(node)

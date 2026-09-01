@@ -107,6 +107,7 @@ impl Database {
             hnsw_indices: HashMap::new(),
             vector_cache_invalidated: false,
             failed: false,
+            savepoints: Vec::new(),
         })
     }
 }
@@ -125,6 +126,15 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
     pub(crate) failed: bool,
+    savepoints: Vec<OwnedEmbeddedSavepoint>,
+}
+
+struct OwnedEmbeddedSavepoint {
+    name: String,
+    core_id: u64,
+    overlay: CatalogOverlay,
+    catalog_modified: bool,
+    vector_cache_invalidated: bool,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -162,6 +172,48 @@ impl OwnedEmbeddedTransaction {
     /// error mapping as the borrowed compatibility transaction.
     pub fn execute_sql(&mut self, sql: &str) -> Result<crate::SqlResult> {
         crate::sql_api::execute_sql_owned(self, sql)
+    }
+
+    pub(crate) fn create_savepoint(&mut self, name: &str) -> Result<()> {
+        let core_id = self.session.create_savepoint().map_err(Error::Core)?;
+        self.savepoints.push(OwnedEmbeddedSavepoint {
+            name: name.to_owned(),
+            core_id,
+            overlay: self.overlay.clone(),
+            catalog_modified: self.catalog_modified,
+            vector_cache_invalidated: self.vector_cache_invalidated,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        let position = self.savepoint_position(name)?;
+        let savepoint = &self.savepoints[position];
+        self.session
+            .rollback_to_savepoint(savepoint.core_id)
+            .map_err(Error::Core)?;
+        self.overlay = savepoint.overlay.clone();
+        self.catalog_modified = savepoint.catalog_modified;
+        self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
+        self.failed = false;
+        self.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    pub(crate) fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        let position = self.savepoint_position(name)?;
+        self.session
+            .release_savepoint(self.savepoints[position].core_id)
+            .map_err(Error::Core)?;
+        self.savepoints.truncate(position);
+        Ok(())
+    }
+
+    fn savepoint_position(&self, name: &str) -> Result<usize> {
+        self.savepoints
+            .iter()
+            .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::SavepointNotFound(name.to_owned()))
     }
 
     /// Preflight a streamable local SELECT against this transaction's catalog overlay.

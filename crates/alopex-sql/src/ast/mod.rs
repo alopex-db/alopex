@@ -58,6 +58,18 @@ pub enum StatementKind {
     Commit,
     /// Roll back the active explicit SQL transaction.
     Rollback,
+    /// Create a named savepoint in the active transaction.
+    Savepoint {
+        name: String,
+    },
+    /// Roll back to a named savepoint while keeping it active.
+    RollbackToSavepoint {
+        name: String,
+    },
+    /// Release a named savepoint and every savepoint nested after it.
+    ReleaseSavepoint {
+        name: String,
+    },
 
     // DML
     Select(Select),

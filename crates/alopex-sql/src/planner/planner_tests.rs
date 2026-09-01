@@ -210,6 +210,15 @@ fn transaction_controls_require_session_dispatch() {
         StatementKind::Begin,
         StatementKind::Commit,
         StatementKind::Rollback,
+        StatementKind::Savepoint {
+            name: "point".to_owned(),
+        },
+        StatementKind::RollbackToSavepoint {
+            name: "point".to_owned(),
+        },
+        StatementKind::ReleaseSavepoint {
+            name: "point".to_owned(),
+        },
     ] {
         assert!(matches!(
             planner.plan(&stmt(kind)),

@@ -1744,6 +1744,22 @@ suite "FETCH pagination (issue #152)":
     check parseSql("COMMIT").kind == nkCommit
     check parseSql("ROLLBACK").kind == nkRollback
 
+  test "savepoint control statements parse names and complete spans":
+    let saved = parseSql("SAVEPOINT retry")
+    check saved.kind == nkSavepoint
+    check saved.children[0].strVal == "retry"
+    check saved.span.`end`.column == 15
+
+    let rewound = parseSql("ROLLBACK TO SAVEPOINT retry")
+    check rewound.kind == nkRollbackToSavepoint
+    check rewound.children[0].strVal == "retry"
+    check rewound.span.`end`.column == 27
+
+    let released = parseSql("RELEASE SAVEPOINT retry")
+    check released.kind == nkReleaseSavepoint
+    check released.children[0].strVal == "retry"
+    check released.span.`end`.column == 23
+
   test "transaction control words remain legal identifiers outside statement position":
     for name in ["begin", "start", "transaction", "commit", "rollback"]:
       check parseSql("SELECT " & name & " FROM " & name).kind == nkSelect

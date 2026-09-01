@@ -13,6 +13,7 @@ type
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
     tkPragma, tkBegin, tkStart, tkTransaction, tkCommit, tkRollback
+    tkSavepoint, tkRelease
     tkJoin, tkInner, tkLeft, tkRight, tkFull, tkOuter, tkCross, tkOn
     tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
@@ -66,6 +67,7 @@ const Keywords = {
   "pragma": tkPragma,
   "begin": tkBegin, "start": tkStart, "transaction": tkTransaction,
   "commit": tkCommit, "rollback": tkRollback,
+  "savepoint": tkSavepoint, "release": tkRelease,
   "alter": tkAlter, "index": tkIndex,
   "join": tkJoin, "inner": tkInner, "left": tkLeft,
   "right": tkRight, "full": tkFull, "outer": tkOuter,
