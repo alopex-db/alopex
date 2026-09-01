@@ -116,6 +116,48 @@ pub const REMOTE_DETERMINISTIC_SCALAR_FUNCTIONS: &[&str] = &[
     "quote",
 ];
 
+/// JSON and JSONB scalar identities intentionally excluded from remote execution.
+pub const REMOTE_LOCAL_ONLY_JSON_FUNCTIONS: &[&str] = &[
+    "json",
+    "json_array",
+    "json_array_length",
+    "json_extract",
+    "json_insert",
+    "json_object",
+    "json_remove",
+    "json_replace",
+    "json_set",
+    "json_type",
+    "json_valid",
+    "jsonb_build_array",
+    "jsonb_build_object",
+    "jsonb_extract",
+    "jsonb_extract_path",
+    "jsonb_extract_path_text",
+    "jsonb_extract_text",
+    "jsonb_insert",
+    "jsonb_set",
+];
+
+/// Temporal scalar identities intentionally excluded from remote execution.
+pub const REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS: &[&str] = &[
+    "age",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "date",
+    "date_add",
+    "date_sub",
+    "datetime",
+    "make_date",
+    "make_interval",
+    "make_time",
+    "make_timestamp",
+    "now",
+    "time",
+    "to_date",
+];
+
 /// Registered scalar identities intentionally excluded from remote execution.
 pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "age",
@@ -361,6 +403,24 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             prerequisite: "one-table SELECT and each function identity listed by the v0.8 catalog",
             normal_outcome: "evaluated as part of a prepared remotely supported read",
             failure_outcome: "unlisted function is rejected before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.json_local_only",
+            public_surface: "JSON and JSONB scalar functions",
+            identities: REMOTE_LOCAL_ONLY_JSON_FUNCTIONS,
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "JSON/JSONB evaluation by the local executor",
+            failure_outcome: "json_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.temporal_local_only",
+            public_surface: "temporal scalar functions",
+            identities: REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS,
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "temporal evaluation by the local executor",
+            failure_outcome: "temporal_local_only before transport",
         },
         RemoteReadCoverageEntry {
             id: "scalar.local_only",
@@ -1126,6 +1186,46 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "vector_sql_local_only"
         ));
+    }
+
+    #[test]
+    fn json_and_temporal_scalars_have_explicit_local_only_rows() {
+        let entries = coverage_entries();
+        let json = entries
+            .iter()
+            .find(|entry| entry.id == "scalar.json_local_only")
+            .expect("JSON scalar coverage row");
+        let temporal = entries
+            .iter()
+            .find(|entry| entry.id == "scalar.temporal_local_only")
+            .expect("temporal scalar coverage row");
+
+        for (entry, names) in [
+            (json, REMOTE_LOCAL_ONLY_JSON_FUNCTIONS),
+            (temporal, REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS),
+        ] {
+            assert_eq!(entry.remote_status, RemoteReadCoverageStatus::LocalOnly);
+            for name in names {
+                assert!(
+                    entry.identities.contains(name),
+                    "{name} missing from {}",
+                    entry.id
+                );
+                let expression = TypedExpr::function_call(
+                    (*name).to_string(),
+                    vec![],
+                    false,
+                    false,
+                    ResolvedType::Null,
+                    Span::default(),
+                );
+                assert!(matches!(
+                    classify(&LogicalPlan::filter(scan(), expression), &references()),
+                    RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                        if code == "stateful_function_local_only"
+                ));
+            }
+        }
     }
 
     #[test]
