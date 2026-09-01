@@ -1,9 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use alopex_sql::{
-    AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
-    InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span, Statement,
-    StatementKind, TransactionAccessMode, TransactionIsolationLevel, VectorMetric,
+    AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExplainFormat, ExprKind,
+    FromItem, InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span,
+    Statement, StatementKind, TransactionAccessMode, TransactionIsolationLevel, VectorMetric,
     WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -358,7 +358,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.21.0");
+    assert_eq!(parser_contract_version(), "0.22.0");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.21.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.22.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -508,7 +508,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.21.0");
+    assert_eq!(parser_contract_version(), "0.22.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -1130,5 +1130,33 @@ fn positional_bind_parameters_cross_the_nim_messagepack_boundary() {
             panic!("expected expression projection");
         };
         assert!(matches!(expr.kind, ExprKind::Parameter { index: 1 }));
+    }
+}
+
+#[test]
+fn parses_explain_and_explain_analyze_formats() {
+    for (sql, expected_analyze, expected_format) in [
+        ("EXPLAIN SELECT 1", false, ExplainFormat::Text),
+        ("EXPLAIN ANALYZE SELECT 1", true, ExplainFormat::Text),
+        ("EXPLAIN (FORMAT JSON) SELECT 1", false, ExplainFormat::Json),
+        (
+            "EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1",
+            true,
+            ExplainFormat::Json,
+        ),
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        assert_eq!(statements.len(), 1, "{sql}");
+        let StatementKind::Explain {
+            analyze,
+            format,
+            statement,
+        } = &statements[0].kind
+        else {
+            panic!("expected EXPLAIN for {sql}");
+        };
+        assert_eq!(*analyze, expected_analyze, "{sql}");
+        assert_eq!(*format, expected_format, "{sql}");
+        assert!(matches!(statement.kind, StatementKind::Select(_)), "{sql}");
     }
 }

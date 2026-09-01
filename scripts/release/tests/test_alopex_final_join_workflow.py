@@ -111,7 +111,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("CONTRACT_VERSION').write_text", text)
         self.assertNotIn("SHA256SUMS').write_text", text)
-        self.assertGreaterEqual(text.count("CONTRACT_VERSION').write_bytes(b'0.21.0\\n')"), 3)
+        self.assertGreaterEqual(text.count("CONTRACT_VERSION').write_bytes(b'0.22.0\\n')"), 3)
 
     def test_every_wheel_target_retargets_parser_pins_from_release_manifest(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

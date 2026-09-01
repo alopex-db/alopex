@@ -17,6 +17,7 @@ type
 
   SqlNodeKind* = enum
     nkSelect
+    nkExplain
     nkValues
     nkWithClause
     nkCommonTableExpr
@@ -144,6 +145,8 @@ type
     withOrdinality*: bool   ## nkFromFunction: WITH ORDINALITY (issue #162)
     recursive*: bool
     parameterIndex*: int
+    explainAnalyze*: bool
+    explainFormat*: string
     limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST

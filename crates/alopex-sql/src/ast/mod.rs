@@ -42,6 +42,15 @@ pub enum TransactionAccessMode {
     ReadWrite,
 }
 
+/// Output encoding requested by an `EXPLAIN` statement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExplainFormat {
+    /// Stable human-readable tree. This format may change between releases.
+    Text,
+    /// Versioned machine-readable JSON document.
+    Json,
+}
+
 impl Spanned for Statement {
     fn span(&self) -> Span {
         self.span
@@ -52,6 +61,15 @@ impl Spanned for Statement {
 #[serde(tag = "variant")]
 #[allow(clippy::large_enum_variant)]
 pub enum StatementKind {
+    /// Describe a nested statement, optionally executing it for runtime metrics.
+    Explain {
+        /// Execute the nested statement and collect timing and row counts.
+        analyze: bool,
+        /// Requested output encoding.
+        format: ExplainFormat,
+        /// Statement being described.
+        statement: Box<Statement>,
+    },
     // DDL
     CreateTable(CreateTable),
     DropTable(DropTable),
@@ -104,8 +122,11 @@ pub enum StatementKind {
 }
 
 impl StatementKind {
-    /// Returns whether this statement produces a query result without mutating data.
+    /// Returns whether this statement produces a query result.
     pub const fn is_query(&self) -> bool {
-        matches!(self, Self::Select(_) | Self::Values(_))
+        matches!(
+            self,
+            Self::Explain { .. } | Self::Select(_) | Self::Values(_)
+        )
     }
 }

@@ -8,6 +8,8 @@
 - ``Transaction.execute_sql`` も同一形状
 """
 
+import json
+
 import pytest
 
 from alopex import AlopexError, Database, TxnMode
@@ -30,6 +32,20 @@ def users_db(db):
 def test_execute_sql_ddl_returns_none(db):
     result = db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     assert result is None
+
+
+def test_execute_sql_explain_json_is_machine_readable_and_redacts_params(db):
+    db.execute_sql("CREATE TABLE explain_items (id INTEGER PRIMARY KEY, secret TEXT)")
+    rows = db.execute_sql(
+        "EXPLAIN (FORMAT JSON) SELECT id FROM explain_items WHERE secret = ?",
+        ["never-show-this"],
+    )
+    payload = rows[0]["query_plan"]
+    assert "never-show-this" not in payload
+    document = json.loads(payload)
+    assert document["schema"] == "alopex.explain"
+    assert document["version"] == 1
+    assert document["physical_plan"]["engine"] == "logical-direct"
 
 
 def test_execute_sql_insert_returns_rows_affected(users_db):

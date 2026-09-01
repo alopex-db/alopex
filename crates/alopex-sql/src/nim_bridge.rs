@@ -1382,7 +1382,7 @@ mod input_preflight_tests {
             .expect_err("sidecar labels cannot make a pre-frame producer compatible");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.21.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
     }
 
@@ -1392,32 +1392,32 @@ mod input_preflight_tests {
             .expect_err("a 0.5.0 producer cannot satisfy the current named-window contract");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.21.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
     }
 
     #[test]
     fn legacy_v040_consumer_rejects_the_current_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.21.0");
+        assert_eq!(linked_producer_contract, "0.22.0");
         let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
             .expect_err("legacy consumer must reject a producer with frame semantics");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.21.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
     }
 
     #[test]
     fn legacy_v050_consumer_rejects_a_v060_named_window_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.21.0");
+        assert_eq!(linked_producer_contract, "0.22.0");
         let error = ensure_parser_contract("0.5.0", &linked_producer_contract)
             .expect_err("legacy consumer must not ignore QUALIFY or named-window fields");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.21.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
     }
 
     #[test]

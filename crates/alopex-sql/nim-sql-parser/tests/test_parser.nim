@@ -1747,6 +1747,29 @@ suite "FETCH pagination (issue #152)":
     check statements.children[0].children[0].children[0].parameterIndex == 1
     check statements.children[1].children[0].children[0].parameterIndex == 1
 
+  test "EXPLAIN keeps execution mode, output format, and inner statement":
+    let plain = parseSql("EXPLAIN SELECT 1")
+    check plain.kind == nkExplain
+    check plain.explainAnalyze == false
+    check plain.explainFormat == "Text"
+    check plain.children[0].kind == nkSelect
+
+    let analyzed = parseSql("EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1")
+    check analyzed.kind == nkExplain
+    check analyzed.explainAnalyze
+    check analyzed.explainFormat == "Json"
+    check analyzed.children[0].kind == nkSelect
+
+  test "EXPLAIN rejects unsupported formats and control statements":
+    check parseErrorMessage("EXPLAIN (FORMAT YAML) SELECT 1").contains(
+      "expected JSON or TEXT explain format")
+    check parseErrorMessage("EXPLAIN (ANALYZE, ANALYZE) SELECT 1").contains(
+      "duplicate ANALYZE explain option")
+    check parseErrorMessage("EXPLAIN COMMIT").contains(
+      "EXPLAIN requires a query, DML, DDL, or PRAGMA statement")
+    check parseErrorMessage("EXPLAIN EXPLAIN SELECT 1").contains(
+      "EXPLAIN requires a query, DML, DDL, or PRAGMA statement")
+
   test "transaction control statements parse to dedicated nodes":
     check parseSql("BEGIN").kind == nkBegin
     check parseSql("START TRANSACTION").kind == nkBegin

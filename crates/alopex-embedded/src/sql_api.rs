@@ -124,10 +124,23 @@ fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn stmt_requires_write(stmt: &Statement) -> bool {
-    !stmt.kind.is_query()
+    match &stmt.kind {
+        StatementKind::Explain {
+            analyze, statement, ..
+        } => *analyze && stmt_requires_write(statement),
+        kind => !kind.is_query(),
+    }
 }
 
 fn stmt_changes_catalog(stmt: &Statement) -> bool {
+    if let StatementKind::Explain {
+        analyze: true,
+        statement,
+        ..
+    } = &stmt.kind
+    {
+        return stmt_changes_catalog(statement);
+    }
     matches!(
         stmt.kind,
         StatementKind::CreateTable(_)
@@ -138,9 +151,24 @@ fn stmt_changes_catalog(stmt: &Statement) -> bool {
 }
 
 fn stmt_changes_user_data(stmt: &Statement) -> bool {
+    if let StatementKind::Explain {
+        analyze: true,
+        statement,
+        ..
+    } = &stmt.kind
+    {
+        return stmt_changes_user_data(statement);
+    }
     matches!(
         stmt.kind,
         StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_)
+    )
+}
+
+fn stmt_can_stream(stmt: &Statement) -> bool {
+    matches!(
+        stmt.kind,
+        StatementKind::Select(_) | StatementKind::Values(_)
     )
 }
 
@@ -512,7 +540,7 @@ impl Database {
         }
 
         // For streaming SELECT, use the new pipeline
-        if stmts.len() == 1 && stmts[0].kind.is_query() {
+        if stmts.len() == 1 && stmt_can_stream(&stmts[0]) {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 
@@ -659,7 +687,7 @@ impl Database {
         }
 
         // For streaming, only support single SELECT statement
-        if stmts.len() == 1 && stmts[0].kind.is_query() {
+        if stmts.len() == 1 && stmt_can_stream(&stmts[0]) {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 

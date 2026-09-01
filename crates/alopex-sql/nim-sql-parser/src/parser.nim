@@ -1991,8 +1991,56 @@ proc parseReleaseSavepointStmt(p: var Parser): SqlNode =
     spanThrough(tokenSpan(start), tokenSpan(name)))
   result.children.add(newIdent(name.value, tokenSpan(name)))
 
+proc parseStatement*(p: var Parser): SqlNode
+
+proc parseExplainStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkExplain)
+  result = newNode(nkExplain, tokenSpan(start))
+  result.explainFormat = "Text"
+  var sawAnalyze = false
+  var sawFormat = false
+  if p.checkContextual("analyze"):
+    discard p.advance()
+    result.explainAnalyze = true
+    sawAnalyze = true
+  if p.check(tkLParen):
+    discard p.advance()
+    while true:
+      if p.checkContextual("analyze"):
+        if sawAnalyze:
+          p.error("duplicate ANALYZE explain option")
+        discard p.advance()
+        result.explainAnalyze = true
+        sawAnalyze = true
+      elif p.checkContextual("format"):
+        if sawFormat:
+          p.error("duplicate FORMAT explain option")
+        discard p.advance()
+        if p.check(tkJson):
+          discard p.advance()
+          result.explainFormat = "Json"
+        elif p.check(tkText):
+          discard p.advance()
+        else:
+          p.error("expected JSON or TEXT explain format")
+        sawFormat = true
+      else:
+        p.error("expected ANALYZE or FORMAT explain option")
+      if not p.check(tkComma):
+        break
+      discard p.advance()
+    discard p.expect(tkRParen)
+  let statement = p.parseStatement()
+  if statement.kind in {nkBegin, nkSetTransaction, nkCommit, nkRollback,
+      nkSavepoint, nkRollbackToSavepoint, nkReleaseSavepoint, nkExplain}:
+    p.error("EXPLAIN requires a query, DML, DDL, or PRAGMA statement")
+  result.children.add(statement)
+  result.span = spanThrough(tokenSpan(start), statement.span)
+
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
+  of tkExplain:
+    result = p.parseExplainStmt()
   of tkWith, tkSelect, tkValues:
     result = p.parseQueryStmt()
   of tkInsert:
@@ -2020,7 +2068,7 @@ proc parseStatement*(p: var Parser): SqlNode =
   of tkRelease:
     result = p.parseReleaseSavepointStmt()
   else:
-    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
+    p.error("expected SQL statement (EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()

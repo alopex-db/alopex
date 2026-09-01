@@ -205,6 +205,15 @@ impl TableFunctionKind {
 /// 3. **DDL Plans**: Schema modification (CreateTable, DropTable, CreateIndex, DropIndex)
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
+    /// Introspection wrapper around the plan that the executor actually uses.
+    Explain {
+        /// Execute the wrapped plan and include runtime metrics.
+        analyze: bool,
+        /// Requested output encoding.
+        format: crate::ast::ExplainFormat,
+        /// Planned statement being described.
+        input: Box<LogicalPlan>,
+    },
     /// Runtime configuration or statistics operation.
     Pragma {
         /// PRAGMA name.
@@ -503,8 +512,100 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// Render the stable, secret-free machine-readable explain contract.
+    pub fn explain_json(
+        &self,
+        analyze: bool,
+        elapsed_ns: Option<u64>,
+        rows: Option<u64>,
+    ) -> String {
+        let knn_pattern_applied = super::knn_optimizer::detect_knn_pattern(self).is_some();
+        serde_json::json!({
+            "schema": "alopex.explain",
+            "version": 1,
+            "analyze": analyze,
+            "logical_plan": self.explain_node(),
+            "physical_plan": {
+                "engine": "logical-direct",
+                "root": self.explain_node(),
+            },
+            "distributed_plan": {
+                "mode": "single-node",
+                "fragments": [{"id": 0, "placement": "local", "root": self.name()}],
+            },
+            "optimizer_rules": [{
+                "name": "knn_pattern_detection",
+                "status": "integrated",
+                "applied": knn_pattern_applied,
+            }],
+            "metrics": {
+                "elapsed_ns": elapsed_ns,
+                "rows": rows,
+            },
+        })
+        .to_string()
+    }
+
+    /// Render the human-readable explain tree. This format is not stable across releases.
+    pub fn explain_text(&self, elapsed_ns: Option<u64>, rows: Option<u64>) -> String {
+        fn write_tree(plan: &LogicalPlan, depth: usize, output: &mut String) {
+            output.push_str(&"  ".repeat(depth));
+            output.push_str(plan.name());
+            if let Some(table) = plan.table_name() {
+                output.push_str(" table=");
+                output.push_str(table);
+            }
+            output.push('\n');
+            for child in plan.explain_children() {
+                write_tree(child, depth + 1, output);
+            }
+        }
+
+        let mut output = String::new();
+        write_tree(self, 0, &mut output);
+        if let Some(value) = elapsed_ns {
+            output.push_str(&format!("elapsed_ns={value}\n"));
+        }
+        if let Some(value) = rows {
+            output.push_str(&format!("rows={value}\n"));
+        }
+        output
+    }
+
+    fn explain_node(&self) -> serde_json::Value {
+        serde_json::json!({
+            "node": self.name(),
+            "table": self.table_name(),
+            "children": self.explain_children().into_iter().map(Self::explain_node).collect::<Vec<_>>(),
+        })
+    }
+
+    fn explain_children(&self) -> Vec<&LogicalPlan> {
+        match self {
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::InsertSelect { source: input, .. } => vec![input],
+            LogicalPlan::Join { left, right, .. }
+            | LogicalPlan::LateralJoin { left, right, .. }
+            | LogicalPlan::SetOperation { left, right, .. } => vec![left, right],
+            LogicalPlan::RecursiveCte {
+                anchor,
+                recursive_term,
+                ..
+            } => vec![anchor, recursive_term],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn operation_name(&self) -> &'static str {
         match self {
+            LogicalPlan::Explain { .. } => "EXPLAIN",
             LogicalPlan::Pragma { .. } => "PRAGMA",
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }
@@ -676,6 +777,7 @@ impl LogicalPlan {
     /// Returns the name of this plan variant.
     pub fn name(&self) -> &'static str {
         match self {
+            LogicalPlan::Explain { .. } => "Explain",
             LogicalPlan::Pragma { .. } => "Pragma",
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Values { .. } => "Values",
@@ -707,7 +809,8 @@ impl LogicalPlan {
     pub fn is_query(&self) -> bool {
         matches!(
             self,
-            LogicalPlan::Scan { .. }
+            LogicalPlan::Explain { .. }
+                | LogicalPlan::Scan { .. }
                 | LogicalPlan::Values { .. }
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
@@ -751,7 +854,8 @@ impl LogicalPlan {
     /// Returns the input plan if this is a transformation (Filter, Aggregate, Sort, Limit).
     pub fn input(&self) -> Option<&LogicalPlan> {
         match self {
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
@@ -771,6 +875,7 @@ impl LogicalPlan {
     /// Returns the table name if this plan operates on a single table.
     pub fn table_name(&self) -> Option<&str> {
         match self {
+            LogicalPlan::Explain { input, .. } => input.table_name(),
             LogicalPlan::Scan { table, .. }
             | LogicalPlan::Insert { table, .. }
             | LogicalPlan::InsertSelect { table, .. }
@@ -807,6 +912,7 @@ impl LogicalPlan {
     /// opened rather than trying to infer it from a table name.
     pub fn contains_join(&self) -> bool {
         match self {
+            LogicalPlan::Explain { input, .. } => input.contains_join(),
             LogicalPlan::Join { .. } | LogicalPlan::LateralJoin { .. } => true,
             LogicalPlan::SetOperation { left, right, .. } => {
                 left.contains_join() || right.contains_join()
@@ -830,6 +936,7 @@ impl LogicalPlan {
     /// Returns whether this plan tree contains a set-operation boundary.
     pub fn contains_set_operation(&self) -> bool {
         match self {
+            LogicalPlan::Explain { input, .. } => input.contains_set_operation(),
             LogicalPlan::SetOperation { .. } | LogicalPlan::RecursiveCte { .. } => true,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }

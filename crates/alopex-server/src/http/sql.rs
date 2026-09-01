@@ -1242,6 +1242,12 @@ fn classify_statement_schema(
     // authorization merely because the generic classifier predates it.
     #[allow(unreachable_patterns)]
     match statement_kind {
+        alopex_sql::ast::StatementKind::Explain {
+            analyze: true,
+            statement,
+            ..
+        } => classify_statement_schema(&statement.kind),
+        alopex_sql::ast::StatementKind::Explain { .. } => StatementSchemaClass::NonSchema,
         alopex_sql::ast::StatementKind::CreateTable(_)
         | alopex_sql::ast::StatementKind::DropTable(_)
         | alopex_sql::ast::StatementKind::CreateIndex(_)
@@ -1269,7 +1275,15 @@ fn is_write_sql(sql: &str) -> bool {
     let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
         return false;
     };
-    statements.iter().any(|stmt| !stmt.kind.is_query())
+    fn is_write(kind: &alopex_sql::StatementKind) -> bool {
+        match kind {
+            alopex_sql::StatementKind::Explain {
+                analyze, statement, ..
+            } => *analyze && is_write(&statement.kind),
+            kind => !kind.is_query(),
+        }
+    }
+    statements.iter().any(|stmt| is_write(&stmt.kind))
 }
 
 #[cfg(test)]
@@ -1328,5 +1342,13 @@ mod tests {
         assert!(!is_ddl("VALUES (1);"));
         assert!(!is_write_sql("VALUES (1);"));
         assert!(!is_ddl("INSERT INTO items (id) VALUES (1);"));
+    }
+
+    #[test]
+    fn explain_only_inherits_nested_write_classification_when_analyzing() {
+        assert!(!is_write_sql("EXPLAIN INSERT INTO items VALUES (1)"));
+        assert!(is_write_sql("EXPLAIN ANALYZE INSERT INTO items VALUES (1)"));
+        assert!(!is_ddl("EXPLAIN CREATE TABLE items (id INT)"));
+        assert!(is_ddl("EXPLAIN ANALYZE CREATE TABLE items (id INT)"));
     }
 }

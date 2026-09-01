@@ -2157,6 +2157,11 @@ fn execute_sql_select_streaming<W: Write>(
         })
     }
 
+    if options.cancel.is_cancelled() {
+        return Err(CliError::Cancelled);
+    }
+    options.deadline.check()?;
+
     let cancelled = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancelled.clone();
@@ -2674,6 +2679,26 @@ mod tests {
     }
 
     #[test]
+    fn explain_json_is_available_through_cli_query_output() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, secret TEXT)")
+            .unwrap();
+        let mut output = Vec::new();
+        let columns = vec![Column::new("query_plan", DataType::Text)];
+        let mut writer = create_query_writer(&mut output, columns);
+        execute_sql(
+            &db,
+            "EXPLAIN (FORMAT JSON) SELECT id FROM items WHERE secret = 'never-show-this'",
+            &mut writer,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("alopex.explain"));
+        assert!(rendered.contains("logical_plan"));
+        assert!(!rendered.contains("never-show-this"));
+    }
+
+    #[test]
     fn test_syntax_error() {
         let db = create_test_db();
 
@@ -2746,6 +2771,42 @@ mod tests {
             result.is_err(),
             "row evaluation errors must propagate instead of yielding an empty result"
         );
+    }
+
+    #[test]
+    fn cancelled_explain_analyze_does_not_start_or_commit_writes() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let deadline = Deadline::new(parse_deadline(None).unwrap());
+        let cancel = CancelSignal::new();
+        cancel.cancel();
+        let options = SqlExecutionOptions {
+            limit: None,
+            quiet: false,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher: None,
+        };
+        let mut output = Vec::new();
+        let formatter = Box::new(JsonlFormatter::new());
+        let error = execute_sql_select_streaming(
+            &db,
+            "EXPLAIN ANALYZE INSERT INTO items VALUES (1)",
+            &mut output,
+            formatter,
+            &options,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Cancelled));
+
+        let alopex_sql::ExecutionResult::Query(rows) =
+            db.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+        else {
+            panic!("COUNT must return rows");
+        };
+        assert_eq!(rows.rows[0][0], alopex_sql::SqlValue::BigInt(0));
     }
 
     #[test]

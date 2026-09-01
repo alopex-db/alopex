@@ -9,7 +9,7 @@ type
     # Literals
     tkIdent, tkString, tkInteger, tkFloat
     # Keywords
-    tkSelect, tkFrom, tkWhere, tkAnd, tkOr, tkNot
+    tkSelect, tkExplain, tkFrom, tkWhere, tkAnd, tkOr, tkNot
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
     tkPragma, tkBegin, tkStart, tkTransaction, tkCommit, tkRollback
@@ -59,7 +59,7 @@ type
     lastCol: int
 
 const Keywords = {
-  "select": tkSelect, "from": tkFrom, "where": tkWhere,
+  "select": tkSelect, "explain": tkExplain, "from": tkFrom, "where": tkWhere,
   "and": tkAnd, "or": tkOr, "not": tkNot,
   "insert": tkInsert, "into": tkInto, "values": tkValues,
   "update": tkUpdate, "set": tkSet, "delete": tkDelete,

@@ -612,6 +612,9 @@ impl TableReferenceExtractor {
         references: &mut Vec<TableReference>,
     ) {
         match plan {
+            LogicalPlan::Explain { input, .. } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references)
+            }
             LogicalPlan::Scan { table, projection } => {
                 if table != LITERAL_TABLE {
                     push_table_reference(
@@ -1128,6 +1131,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// - Type checking fails
     /// - DDL validation fails (e.g., table already exists for CREATE TABLE)
     pub fn plan(&self, stmt: &Statement) -> Result<LogicalPlan, PlannerError> {
+        if let StatementKind::Explain {
+            analyze,
+            format,
+            statement,
+        } = &stmt.kind
+        {
+            return Ok(LogicalPlan::Explain {
+                analyze: *analyze,
+                format: *format,
+                input: Box::new(self.plan(statement)?),
+            });
+        }
         self.plan_classified_statement(stmt, classify_generic_host_statement(&stmt.kind))
     }
 

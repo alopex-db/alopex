@@ -8,7 +8,9 @@ All notable changes to this project will be documented in this file.
 
 - SQL adds one-based positional `?` parameters and reusable prepared statement
   lifecycles across Rust, embedded, Python, and CLI surfaces (issue #166).
-- The Nim parser wire contract is `0.21.0`.
+- The Nim parser wire contract is `0.22.0`.
+- Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with
+  versioned, secret-free logical/physical/distributed plan output (#167).
 
 ## [0.8.10] — 2026-08-28
 

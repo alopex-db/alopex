@@ -71,7 +71,36 @@ use crate::catalog::Catalog;
 use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
-use crate::storage::{BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, TxnBridge};
+use crate::storage::{
+    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, TxnBridge,
+};
+use crate::{ExplainFormat, ResolvedType};
+use std::time::Instant;
+
+fn explain_result(
+    plan: &LogicalPlan,
+    analyze: bool,
+    format: ExplainFormat,
+    elapsed_ns: Option<u64>,
+    rows: Option<u64>,
+) -> ExecutionResult {
+    let (column, value) = match format {
+        ExplainFormat::Text => ("QUERY PLAN", plan.explain_text(elapsed_ns, rows)),
+        ExplainFormat::Json => ("query_plan", plan.explain_json(analyze, elapsed_ns, rows)),
+    };
+    ExecutionResult::Query(QueryResult::new(
+        vec![ColumnInfo::new(column, ResolvedType::Text)],
+        vec![vec![SqlValue::Text(value)]],
+    ))
+}
+
+fn result_rows(result: &ExecutionResult) -> u64 {
+    match result {
+        ExecutionResult::Success => 0,
+        ExecutionResult::RowsAffected(rows) => *rows,
+        ExecutionResult::Query(result) => result.rows.len() as u64,
+    }
+}
 
 /// SQL statement executor.
 ///
@@ -149,7 +178,30 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
         let _statement_timestamp = evaluator::begin_statement();
+        let plan = match plan {
+            LogicalPlan::Explain {
+                analyze,
+                format,
+                input,
+            } => {
+                if !analyze {
+                    return Ok(explain_result(&input, false, format, None, None));
+                }
+                let started = Instant::now();
+                let result = self.execute((*input).clone())?;
+                let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                return Ok(explain_result(
+                    &input,
+                    true,
+                    format,
+                    Some(elapsed_ns),
+                    Some(result_rows(&result)),
+                ));
+            }
+            plan => plan,
+        };
         match plan {
+            LogicalPlan::Explain { .. } => unreachable!("EXPLAIN handled before dispatch"),
             LogicalPlan::Pragma { name, value } => {
                 system::execute_pragma(&self.bridge, &name, value.as_ref())
             }
@@ -321,6 +373,28 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
+        let plan = match plan {
+            LogicalPlan::Explain {
+                analyze,
+                format,
+                input,
+            } => {
+                if !analyze {
+                    return Ok(explain_result(&input, false, format, None, None));
+                }
+                let started = Instant::now();
+                let result = self.execute_in_txn((*input).clone(), txn)?;
+                let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                return Ok(explain_result(
+                    &input,
+                    true,
+                    format,
+                    Some(elapsed_ns),
+                    Some(result_rows(&result)),
+                ));
+            }
+            plan => plan,
+        };
         if txn.mode() == TxnMode::ReadOnly
             && !matches!(
                 plan,
@@ -351,6 +425,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         let (mut sql_txn, overlay) = txn.split_parts();
 
         let result = match plan {
+            LogicalPlan::Explain { .. } => unreachable!("EXPLAIN handled before dispatch"),
             LogicalPlan::CreateTable {
                 table,
                 if_not_exists,

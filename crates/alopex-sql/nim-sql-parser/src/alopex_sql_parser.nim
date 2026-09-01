@@ -24,7 +24,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.21.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.22.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -1974,6 +1974,20 @@ proc writeContinuousAggregateV040Kind(s: Stream; statement: SqlNode) =
 
 proc writeStatementKind(s: Stream; node: SqlNode) =
   case node.kind
+  of nkExplain:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("Explain")
+    s.writeKey("analyze")
+    s.pack_type(node.explainAnalyze)
+    s.writeKey("format")
+    s.pack_type(node.explainFormat)
+    s.writeKey("statement")
+    s.pack_map(2)
+    s.writeKey("kind")
+    s.writeStatementKind(node.children[0])
+    s.writeKey("span")
+    s.writeSpan(node.children[0].span)
   of nkSelect:
     s.writeSelectKind(node)
   of nkValues:

@@ -709,6 +709,10 @@ fn validate_plan(
     analysis: &mut Analysis,
 ) -> Result<(), RemoteReadClassification> {
     match plan {
+        LogicalPlan::Explain { .. } => Err(RemoteReadRejection::local_only(
+            "explain_local_only",
+            "EXPLAIN is rendered by the coordinating local executor",
+        )),
         LogicalPlan::Pragma { .. } => Err(RemoteReadRejection::local_only(
             "pragma_local_only",
             "PRAGMA remains available only to the local executor",

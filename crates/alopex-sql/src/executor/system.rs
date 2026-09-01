@@ -36,6 +36,7 @@ pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
 
 fn direct_system_call(plan: &LogicalPlan) -> Option<(&str, ResolvedType)> {
     let projection = match plan {
+        LogicalPlan::Explain { input, .. } => return direct_system_call(input),
         LogicalPlan::Scan { projection, .. } => projection,
         LogicalPlan::Project { projection, .. } => projection,
         LogicalPlan::Filter { input, .. }
