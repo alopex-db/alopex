@@ -8,6 +8,8 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `select.aggregate.basic` | COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP BY, HAVING, DISTINCT | `remote_supported` | Closed aggregate descriptor and global finalization budget | Prepared aggregate result | Classified failure |
 | `select.aggregate.ordered_string` | GROUP_CONCAT, STRING_AGG | `remote_supported` | Ordered raw-value finalization budget | Prepared ordered aggregate result | Classified failure |
 | `scalar.deterministic` | Explicit deterministic scalar list | `remote_supported` | Explicit v0.8 function identity | Prepared remote read | Unlisted function rejected before transport |
+| `scalar.json_local_only` | JSON and JSONB scalar functions | `local_only` | Local execution profile | JSON/JSONB evaluation by the local executor | `json_local_only` before transport |
+| `scalar.temporal_local_only` | Temporal scalar functions | `local_only` | Local execution profile | Temporal evaluation by the local executor | `temporal_local_only` before transport |
 | `scalar.local_only` | JSON, nested, full-text, temporal, vector, random/UUID, statistics, and cache-control scalar functions | `local_only` | Local execution profile | local executor behavior | Explicit local-only classification |
 | `statement.ddl` | CREATE/DROP TABLE, CREATE/DROP INDEX | `pre_execution_rejection` | Local schema workflow | v0.7.4 local behavior | `ddl_not_supported_remote` |
 | `statement.dml` | INSERT, UPDATE, DELETE | `pre_execution_rejection` | Local transaction workflow | v0.7.4 local behavior | `dml_not_supported_remote` |
