@@ -15,7 +15,7 @@ All notable changes to this project will be documented in this file.
 - The v0.8 type capability gate now records every v0.8.10 family as complete.
   The distributed execution catalog keeps non-portable JSON, temporal,
   nested, and full-text functions local-only.
-- The Nim parser wire contract is `0.19.0`.
+- The Nim parser wire contract is `0.20.0`.
 
 ### Fixed
 

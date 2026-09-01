@@ -357,7 +357,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.19.0");
+    assert_eq!(parser_contract_version(), "0.20.0");
 }
 
 #[test]
@@ -499,7 +499,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.19.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.20.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -507,7 +507,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.19.0");
+    assert_eq!(parser_contract_version(), "0.20.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -744,6 +744,18 @@ fn parse_join_subquery_and_vector_variants_from_nim() {
             literal: Literal::Number(value)
         }) if value == "10"
     ));
+}
+
+#[test]
+fn parses_transaction_control_statements_from_nim() {
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "BEGIN; START TRANSACTION; COMMIT; ROLLBACK")
+            .expect("transaction controls should parse");
+
+    assert!(matches!(statements[0].kind, StatementKind::Begin));
+    assert!(matches!(statements[1].kind, StatementKind::Begin));
+    assert!(matches!(statements[2].kind, StatementKind::Commit));
+    assert!(matches!(statements[3].kind, StatementKind::Rollback));
 }
 
 #[test]

@@ -34,10 +34,12 @@ const
   # the grammar requires, so accepting these tokens cannot make a parse
   # ambiguous.
   PaginationIdentTokens = {tkFetch, tkNext, tkTies, tkOnly, tkRow}
+  TransactionIdentTokens = {tkBegin, tkStart, tkTransaction, tkCommit, tkRollback}
   # An *implicit* (bare) alias is optional, so the token must not be able to
   # start the clause that follows. `FETCH` starts the pagination tail there
   # and therefore stays reserved; the other four cannot begin any clause.
-  ImplicitAliasTokens = {tkIdent, tkNext, tkTies, tkOnly, tkRow}
+  ImplicitAliasTokens = {tkIdent, tkNext, tkTies, tkOnly, tkRow} +
+                        TransactionIdentTokens
 
 proc initParser*(input: string): Parser =
   result.lex = initLexer(input)
@@ -130,7 +132,7 @@ proc expectIdent(p: var Parser; context = "identifier"): Token =
   ## keywords for the FETCH pagination tail (issue #152) but remain legal
   ## names here, so `CREATE TABLE t (row INTEGER)`, `INSERT INTO t (next)`,
   ## `UPDATE t SET only = 1` and `... AS ties` keep parsing (issue #152 D16).
-  if p.current.kind notin {tkIdent} + PaginationIdentTokens:
+  if p.current.kind notin {tkIdent} + PaginationIdentTokens + TransactionIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
@@ -139,7 +141,7 @@ proc expectExprIdent(p: var Parser; context = "identifier"): Token =
   ## FETCH/NEXT/TIES/ONLY/ROW by FETCH pagination (issue #152), but SQL-TS
   ## also uses them as ordinary function/column identifiers.
   if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime} +
-                          PaginationIdentTokens:
+                          PaginationIdentTokens + TransactionIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
@@ -675,7 +677,8 @@ proc parsePrimary(p: var Parser): SqlNode =
       result.children.add(newIdent(col.value, tokenSpan(col)))
     else:
       result = newIdent(tok.value, tokenSpan(tok))
-  of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow:
+  of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow,
+      tkBegin, tkStart, tkTransaction, tkCommit, tkRollback:
     let tok = p.advance()
     if tok.value.cmpIgnoreCase("array") == 0 and p.check(tkLBracket):
       result = p.parseArrayLiteral(tok)
@@ -1870,6 +1873,30 @@ proc parsePragmaStmt(p: var Parser): SqlNode =
     else:
       p.error("expected integer or string pragma value")
 
+proc parseBeginStmt(p: var Parser): SqlNode =
+  let start = p.advance()
+  result = newNode(nkBegin, tokenSpan(start))
+  if start.kind == tkStart:
+    let finish = p.expect(tkTransaction)
+    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+  elif p.check(tkTransaction):
+    let finish = p.advance()
+    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+
+proc parseCommitStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkCommit)
+  result = newNode(nkCommit, tokenSpan(start))
+  if p.check(tkTransaction):
+    let finish = p.advance()
+    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+
+proc parseRollbackStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkRollback)
+  result = newNode(nkRollback, tokenSpan(start))
+  if p.check(tkTransaction):
+    let finish = p.advance()
+    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
   of tkWith, tkSelect, tkValues:
@@ -1886,8 +1913,14 @@ proc parseStatement*(p: var Parser): SqlNode =
     result = p.parseDropStmt()
   of tkPragma:
     result = p.parsePragmaStmt()
+  of tkBegin, tkStart:
+    result = p.parseBeginStmt()
+  of tkCommit:
+    result = p.parseCommitStmt()
+  of tkRollback:
+    result = p.parseRollbackStmt()
   else:
-    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
+    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK)")
 
   if p.check(tkSemicolon):
     discard p.advance()

@@ -106,6 +106,7 @@ impl Database {
             journal,
             hnsw_indices: HashMap::new(),
             vector_cache_invalidated: false,
+            failed: false,
         })
     }
 }
@@ -123,6 +124,7 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
+    pub(crate) failed: bool,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -172,6 +174,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Commit the owned transaction after staging catalog and range-change metadata.
     pub fn commit(&mut self) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
         let mut preparation = Ok(());
         let journal = self.journal.take();
         self.session

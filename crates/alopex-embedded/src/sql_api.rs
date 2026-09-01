@@ -176,7 +176,13 @@ pub(crate) fn execute_sql_owned(
     transaction: &mut OwnedEmbeddedTransaction,
     sql: &str,
 ) -> Result<SqlResult> {
-    let statements = parse_sql(sql)?;
+    let statements = match parse_sql(sql) {
+        Ok(statements) => statements,
+        Err(error) => {
+            transaction.failed = true;
+            return Err(error);
+        }
+    };
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
@@ -202,7 +208,7 @@ pub(crate) fn execute_sql_owned(
     let catalog_modified = &mut transaction.catalog_modified;
     let mut outcome = Ok(alopex_sql::ExecutionResult::Success);
 
-    session
+    let session_result = session
         .with_transaction(|owned| {
             outcome = (|| {
                 let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
@@ -239,7 +245,14 @@ pub(crate) fn execute_sql_owned(
             })();
             Ok(())
         })
-        .map_err(Error::Core)?;
+        .map_err(Error::Core);
+    if let Err(error) = session_result {
+        transaction.failed = true;
+        return Err(error);
+    }
+    if outcome.is_err() {
+        transaction.failed = true;
+    }
     outcome
 }
 

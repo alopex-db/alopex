@@ -202,6 +202,22 @@ fn continuous_aggregate_is_rejected_by_both_generic_planner_paths() {
     assert_eq!(routing_error, expected);
 }
 
+#[test]
+fn transaction_controls_require_session_dispatch() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    for kind in [
+        StatementKind::Begin,
+        StatementKind::Commit,
+        StatementKind::Rollback,
+    ] {
+        assert!(matches!(
+            planner.plan(&stmt(kind)),
+            Err(PlannerError::UnsupportedFeature { .. })
+        ));
+    }
+}
+
 /// Create a binary operation expression.
 fn binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
     Expr {

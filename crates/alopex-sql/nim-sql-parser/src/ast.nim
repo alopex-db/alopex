@@ -30,6 +30,9 @@ type
     nkCreateContinuousAggregate
     nkDropIndex
     nkPragma
+    nkBegin
+    nkCommit
+    nkRollback
     nkStatementList
     nkIdentifier
     nkStringLit

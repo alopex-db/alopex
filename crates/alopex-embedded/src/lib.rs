@@ -12,6 +12,7 @@ pub mod options;
 pub mod owned_session;
 pub mod owned_sql;
 mod sql_api;
+mod sql_session;
 mod txn_manager;
 
 pub use crate::catalog::{CachedTableInfo, Catalog};
@@ -31,6 +32,7 @@ pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
+pub use crate::sql_session::{SqlSession, SqlSessionState};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
@@ -85,6 +87,20 @@ pub enum Error {
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
+    /// A statement failed and the transaction must be rolled back.
+    #[error("transaction is failed and must be rolled back")]
+    TxnFailed,
+    /// A SQL transaction control statement is invalid in the current session state.
+    #[error("invalid SQL transaction transition: {statement} while {state:?}")]
+    InvalidSqlTransactionTransition {
+        /// The rejected statement kind.
+        statement: &'static str,
+        /// The state in which the statement was rejected.
+        state: SqlSessionState,
+    },
+    /// SQL session execution accepts one statement per call.
+    #[error("SQL session execution requires exactly one statement")]
+    SqlSessionRequiresSingleStatement,
     /// Catalog が見つかりません。
     #[error("カタログが見つかりません: {0}")]
     CatalogNotFound(String),

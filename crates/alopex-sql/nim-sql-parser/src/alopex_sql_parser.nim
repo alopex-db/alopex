@@ -23,7 +23,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.19.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.20.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -1486,6 +1487,11 @@ proc writePragmaKind(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writeUnitStatementKind(s: Stream; variant: string) =
+  s.pack_map(1)
+  s.writeKey("variant")
+  s.pack_type(variant)
+
 const
   maxStagedPayloadBytes = 1_048_576
   maxStagedPayloadDepth = 128
@@ -1958,6 +1964,12 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeDropIndexKind(node)
   of nkPragma:
     s.writePragmaKind(node)
+  of nkBegin:
+    s.writeUnitStatementKind("Begin")
+  of nkCommit:
+    s.writeUnitStatementKind("Commit")
+  of nkRollback:
+    s.writeUnitStatementKind("Rollback")
   of nkCreateContinuousAggregate:
     when continuousAggregateProducerEnabled:
       s.writeContinuousAggregateV040Kind(node)

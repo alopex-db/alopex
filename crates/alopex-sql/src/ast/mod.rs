@@ -52,6 +52,13 @@ pub enum StatementKind {
         value: Option<PragmaValue>,
     },
 
+    /// Begin an explicit SQL transaction (`BEGIN` or `START TRANSACTION`).
+    Begin,
+    /// Commit the active explicit SQL transaction.
+    Commit,
+    /// Roll back the active explicit SQL transaction.
+    Rollback,
+
     // DML
     Select(Select),
     Values(Values),

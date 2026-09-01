@@ -1022,9 +1022,8 @@ enum GenericHostStatement<'a> {
 }
 
 fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHostStatement<'_> {
-    // The fallback is intentionally unreachable for the current enum. It
-    // becomes the safe route before a future statement-specific host is added.
-    #[allow(unreachable_patterns)]
+    // Session-level control statements never enter the generic statement
+    // planner; fail closed if a caller bypasses the session dispatcher.
     match statement_kind {
         StatementKind::CreateTable(statement) => GenericHostStatement::CreateTable(statement),
         StatementKind::DropTable(statement) => GenericHostStatement::DropTable(statement),

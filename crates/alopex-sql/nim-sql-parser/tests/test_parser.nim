@@ -21,6 +21,14 @@ suite "Tokenizer":
     let tok = lex.nextToken()
     check tok.kind == tkPragma
 
+  test "transaction control keywords are recognized":
+    var lex = initLexer("BEGIN START TRANSACTION COMMIT ROLLBACK")
+    check lex.nextToken().kind == tkBegin
+    check lex.nextToken().kind == tkStart
+    check lex.nextToken().kind == tkTransaction
+    check lex.nextToken().kind == tkCommit
+    check lex.nextToken().kind == tkRollback
+
   test "keywords are case-insensitive":
     # All of these should produce keyword tokens regardless of case
     var lex = initLexer("SELECT select Select FROM from WHERE where")
@@ -1729,6 +1737,24 @@ suite "FETCH pagination (issue #152)":
     check message.contains("bind parameters are not yet supported")
     check parseErrorMessage("SELECT id FROM t LIMIT ?").contains(
       "bind parameters are not yet supported")
+
+  test "transaction control statements parse to dedicated nodes":
+    check parseSql("BEGIN").kind == nkBegin
+    check parseSql("START TRANSACTION").kind == nkBegin
+    check parseSql("COMMIT").kind == nkCommit
+    check parseSql("ROLLBACK").kind == nkRollback
+
+  test "transaction control words remain legal identifiers outside statement position":
+    for name in ["begin", "start", "transaction", "commit", "rollback"]:
+      check parseSql("SELECT " & name & " FROM " & name).kind == nkSelect
+      check parseSql("CREATE TABLE t (" & name & " INTEGER)").kind == nkCreateTable
+
+  test "transaction control statements retain their complete span":
+    let started = parseSql("START TRANSACTION")
+    check started.span.start.column == 1
+    check started.span.`end`.column == 17
+    let committed = parseSql("COMMIT TRANSACTION")
+    check committed.span.`end`.column == 18
 
   test "fetch keywords stay usable as expression identifiers":
     let ast = parseSql("SELECT fetch, next, ties, only, row FROM t")
