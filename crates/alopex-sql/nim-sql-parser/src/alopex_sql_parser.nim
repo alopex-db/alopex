@@ -24,7 +24,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.20.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.21.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -87,6 +87,8 @@ proc firstIdent(node: SqlNode): string =
   case node.kind
   of nkIdentifier, nkStringLit:
     node.strVal
+  of nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkParameter:
+    ""
   else:
     if node.children.len > 0:
       firstIdent(node.children[0])
@@ -758,6 +760,12 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.pack_type("Literal")
     s.writeKey("literal")
     s.writeLiteralKind(node)
+  of nkParameter:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Parameter")
+    s.writeKey("index")
+    s.pack_type(node.parameterIndex)
   of nkIdentifier:
     s.pack_map(3)
     s.writeKey("variant")
@@ -1833,7 +1841,7 @@ proc validateStagedAst(node: SqlNode; depth: int;
 
   case node.kind
   of nkIdentifier, nkStringLit, nkIntervalLit, nkIntLit, nkFloatLit,
-      nkBoolLit, nkNull, nkStar:
+      nkBoolLit, nkNull, nkParameter, nkStar:
     discard
   of nkBinaryOp:
     node.binLeft.validateStagedAst(depth + 1, ancestors)

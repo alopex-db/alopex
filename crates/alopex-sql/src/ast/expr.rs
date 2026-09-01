@@ -145,6 +145,12 @@ pub enum ExprKind {
         quantifier: Quantifier,
         subquery: Box<super::Statement>,
     },
+    /// One-based positional `?` bind parameter.
+    ///
+    /// Appended to preserve existing bincode discriminants.
+    Parameter {
+        index: usize,
+    },
 }
 
 /// A window specification attached to a function call through `OVER name` or

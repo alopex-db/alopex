@@ -1732,11 +1732,20 @@ suite "FETCH pagination (issue #152)":
       "SELECT 1 FETCH FIRST 10 PERCENT ROWS ONLY").contains(
       "FETCH ... PERCENT is not supported")
 
-  test "bind parameter placeholder reports a dedicated error":
-    let message = parseErrorMessage("SELECT ? FROM t")
-    check message.contains("bind parameters are not yet supported")
-    check parseErrorMessage("SELECT id FROM t LIMIT ?").contains(
-      "bind parameters are not yet supported")
+  test "bind parameters are numbered per statement in expression positions":
+    let paginated = parseSql("SELECT ?, ? LIMIT ? OFFSET ?")
+    check paginated.children[0].children[0].parameterIndex == 1
+    check paginated.children[0].children[1].parameterIndex == 2
+    check paginated.findClause(nkLimitClause).children[0].parameterIndex == 3
+    check paginated.findClause(nkOffsetClause).children[0].parameterIndex == 4
+
+    let fetched = parseSql("SELECT ? FETCH FIRST ? ROWS ONLY")
+    check fetched.children[0].children[0].parameterIndex == 1
+    check fetched.findClause(nkLimitClause).children[0].parameterIndex == 2
+
+    let statements = parseSql("SELECT ?; SELECT ?")
+    check statements.children[0].children[0].children[0].parameterIndex == 1
+    check statements.children[1].children[0].children[0].parameterIndex == 1
 
   test "transaction control statements parse to dedicated nodes":
     check parseSql("BEGIN").kind == nkBegin

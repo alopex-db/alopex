@@ -30,6 +30,77 @@ pub struct PyDatabase {
     rollback_fail_count: AtomicUsize,
 }
 
+#[pyclass(name = "PreparedStatement")]
+pub struct PyPreparedStatement {
+    database: Arc<alopex_embedded::Database>,
+    sql: String,
+    bindings: Vec<Option<String>>,
+    finalized: bool,
+}
+
+#[pymethods]
+impl PyPreparedStatement {
+    fn parameter_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    fn bind(&mut self, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
+        self.ensure_open()?;
+        let count = self.bindings.len();
+        let slot = index
+            .checked_sub(1)
+            .and_then(|index| self.bindings.get_mut(index))
+            .ok_or_else(|| {
+                error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
+            })?;
+        *slot = Some(crate::embedded::sql::render_param(&value, index - 1)?);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> PyResult<()> {
+        self.ensure_open()?;
+        self.bindings.fill(None);
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> PyResult<()> {
+        self.ensure_open()?;
+        self.bindings.clear();
+        self.finalized = true;
+        Ok(())
+    }
+
+    fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let rendered = self
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .clone()
+                    .ok_or_else(|| error::to_py_err(format!("parameter ?{} is unbound", index + 1)))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let sql = crate::embedded::sql::bind_rendered_params(&self.sql, &rendered)?;
+        let database = Arc::clone(&self.database);
+        let result = py
+            .detach(move || database.execute_sql(&sql))
+            .map_err(error::embedded_err)?;
+        crate::embedded::sql::execution_result_to_py(py, result)
+    }
+}
+
+impl PyPreparedStatement {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.finalized {
+            Err(error::to_py_err("prepared statement is finalized"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl PyDatabase {
     #[cfg(test)]
     fn inject_rollback_failure_once(&self) {
@@ -172,6 +243,21 @@ impl PyDatabase {
             .detach(move || db.execute_sql(&bound_sql))
             .map_err(error::embedded_err)?;
         crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
+    /// Prepare one SQL statement with one-based positional `?` parameters.
+    fn prepare(&self, sql: &str) -> PyResult<PyPreparedStatement> {
+        let database = self.ensure_open()?;
+        let parameter_count = database
+            .prepare(sql)
+            .map_err(error::embedded_err)?
+            .parameter_count();
+        Ok(PyPreparedStatement {
+            database,
+            sql: sql.to_owned(),
+            bindings: vec![None; parameter_count],
+            finalized: false,
+        })
     }
 
     /// Open a local-only, incrementally consumed SQL result stream.
@@ -481,6 +567,7 @@ impl PyDatabase {
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyThreadMode>()?;
     m.add_class::<PyDatabase>()?;
+    m.add_class::<PyPreparedStatement>()?;
     m.add_class::<PySqlResultStream>()?;
     m.add_class::<PyLocalScan>()?;
     Ok(())
@@ -559,6 +646,26 @@ mod tests {
                 .expect("select");
             let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
             assert_eq!(rows.len(), 0);
+        });
+    }
+
+    #[test]
+    fn prepared_statement_python_surface_rebinds_and_finalizes() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            db.execute_sql(py, "CREATE TABLE prepared (id INTEGER PRIMARY KEY)", None)
+                .unwrap();
+            let mut statement = db.prepare("INSERT INTO prepared (id) VALUES (?)").unwrap();
+            assert_eq!(statement.parameter_count(), 1);
+            let one = 1i64.into_py_any(py).unwrap();
+            statement.bind(1, one.bind(py).clone()).unwrap();
+            statement.execute(py).unwrap();
+            statement.reset().unwrap();
+            let two = 2i64.into_py_any(py).unwrap();
+            statement.bind(1, two.bind(py).clone()).unwrap();
+            statement.execute(py).unwrap();
+            statement.finalize().unwrap();
+            assert!(statement.execute(py).is_err());
         });
     }
 

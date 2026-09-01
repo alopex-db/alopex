@@ -1938,7 +1938,7 @@ pub fn execute<W: Write>(
 impl SqlCommand {
     /// Resolve the SQL query source (argument, file, or stdin).
     pub fn resolve_query(&self, batch_mode: &BatchMode) -> Result<String> {
-        match (&self.query, &self.file) {
+        let sql = match (&self.query, &self.file) {
             (Some(query), None) => Ok(query.clone()),
             (None, Some(file)) => fs::read_to_string(file).map_err(|e| {
                 CliError::InvalidArgument(format!("Failed to read SQL file '{}': {}", file, e))
@@ -1952,7 +1952,60 @@ impl SqlCommand {
             (Some(_), Some(_)) => Err(CliError::InvalidArgument(
                 "Cannot specify both query and file".to_string(),
             )),
+        }?;
+        let values = self
+            .params
+            .iter()
+            .map(|value| parse_cli_parameter(value))
+            .collect::<Result<Vec<_>>>()?;
+        alopex_embedded::bind_sql_parameters(&sql, &values)
+            .map_err(|error| CliError::InvalidArgument(error.to_string()))
+    }
+}
+
+fn parse_cli_parameter(input: &str) -> Result<alopex_sql::SqlValue> {
+    use alopex_sql::SqlValue;
+
+    let value: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        CliError::InvalidArgument(format!("invalid --param JSON value: {error}"))
+    })?;
+    match value {
+        serde_json::Value::Null => Ok(SqlValue::Null),
+        serde_json::Value::Bool(value) => Ok(SqlValue::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(SqlValue::BigInt(value))
+            } else {
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(SqlValue::Double)
+                    .ok_or_else(|| CliError::InvalidArgument("invalid numeric --param".into()))
+            }
         }
+        serde_json::Value::String(value) => Ok(SqlValue::Text(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| {
+                let value = value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        CliError::InvalidArgument(
+                            "array --param must contain only finite numbers".into(),
+                        )
+                    })? as f32;
+                value.is_finite().then_some(value).ok_or_else(|| {
+                    CliError::InvalidArgument(
+                        "array --param must contain only finite f32 numbers".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(SqlValue::Vector),
+        serde_json::Value::Object(_) => Err(CliError::InvalidArgument(
+            "object --param values are not supported".into(),
+        )),
     }
 }
 
@@ -2725,6 +2778,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2745,6 +2799,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2762,6 +2817,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2779,6 +2835,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2789,5 +2846,23 @@ mod tests {
             err,
             CliError::InvalidArgument(msg) if msg == "Cannot specify both query and file"
         ));
+    }
+
+    #[test]
+    fn resolve_query_binds_json_parameters_without_changing_sql_structure() {
+        let cmd = SqlCommand {
+            query: Some("SELECT ? AS id, ? AS note".to_string()),
+            file: None,
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
+            params: vec!["1".into(), r#""x'); DROP TABLE items; --""#.into()],
+            read_mode: None,
+            routing_report: None,
+            tui: false,
+        };
+
+        let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
+        assert_eq!(sql, "SELECT 1 AS id, 'x''); DROP TABLE items; --' AS note");
     }
 }

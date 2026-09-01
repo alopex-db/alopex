@@ -190,9 +190,10 @@ fn cte_dependency_cycle(with: &crate::ast::WithClause) -> bool {
 
 fn expr_contains_subquery(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Literal { .. } | ExprKind::ColumnRef { .. } | ExprKind::VectorLiteral { .. } => {
-            false
-        }
+        ExprKind::Parameter { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::VectorLiteral { .. } => false,
         ExprKind::BinaryOp { left, right, .. } => {
             expr_contains_subquery(left) || expr_contains_subquery(right)
         }
@@ -5515,7 +5516,8 @@ fn substitute_projection_aliases(
         },
         // Qualified column refs, literals, and subquery-bearing expressions are
         // left untouched (see the subquery note above).
-        ExprKind::ColumnRef { .. }
+        ExprKind::Parameter { .. }
+        | ExprKind::ColumnRef { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
         | ExprKind::ScalarSubquery { .. }
@@ -5635,7 +5637,8 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
         | ExprKind::Quantified { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
-        | ExprKind::ColumnRef { .. } => false,
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::Parameter { .. } => false,
     }
 }
 
@@ -6863,7 +6866,8 @@ fn expr_contains_grouping(expr: &crate::ast::expr::Expr) -> bool {
         | ExprKind::Quantified { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
-        | ExprKind::ColumnRef { .. } => false,
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::Parameter { .. } => false,
     }
 }
 

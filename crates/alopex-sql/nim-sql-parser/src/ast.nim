@@ -45,6 +45,7 @@ type
     nkFloatLit
     nkBoolLit
     nkNull
+    nkParameter
     nkStar
     nkQualifiedStar
     nkColumnRef
@@ -142,6 +143,7 @@ type
     lateral*: bool          ## nkFromDerived/nkFromFunction: LATERAL (issue #151)
     withOrdinality*: bool   ## nkFromFunction: WITH ORDINALITY (issue #162)
     recursive*: bool
+    parameterIndex*: int
     limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST

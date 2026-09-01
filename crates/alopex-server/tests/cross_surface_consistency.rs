@@ -232,6 +232,7 @@ fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
         deadline: None,
         read_mode: None,
         routing_report: None,
+        params: Vec::new(),
         tui: false,
     };
     let mut output = Vec::new();

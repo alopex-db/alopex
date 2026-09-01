@@ -6,9 +6,8 @@
 //! - SELECT: 列名でアクセス可能な行（dict）の list
 //! - DML: 影響行数（int）/ DDL: `None`
 //!
-//! Rust 側（alopex-embedded / alopex-sql）はプリペアドステートメントを持たないため、
-//! パラメータは SQL リテラルへのエスケープ展開（クライアントサイドバインディング）で
-//! 実現する。文字列リテラルのエスケープは Nim lexer の仕様（引用符の二重化）に一致させる。
+//! Python 値は既存の安全な SQL リテラル変換を通り、`execute_sql` と
+//! `PreparedStatement` の両方が同じ変換規則を使う。
 
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -38,6 +37,10 @@ pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyRes
         .into());
     }
     let rendered = render_params(params)?;
+    bind_rendered_params(sql, &rendered)
+}
+
+pub(crate) fn bind_rendered_params(sql: &str, rendered: &[String]) -> PyResult<String> {
     let segments = split_on_placeholders(sql);
     let placeholders = segments.len() - 1;
     if placeholders != rendered.len() {
@@ -192,7 +195,7 @@ fn render_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 }
 
 /// 1 つのパラメータ値を SQL リテラルへ変換する。
-fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
+pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
     if value.is_none() {
         return Ok("NULL".to_string());
     }

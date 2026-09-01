@@ -191,8 +191,8 @@ if not isinstance(distributions, list) or not distributions or any(
 parser = data.get("parser")
 if not isinstance(parser, dict):
     fail("parser public surface is missing")
-if parser.get("contract") != "0.20.0":
-    fail("parser contract must be 0.20.0")
+if parser.get("contract") != "0.21.0":
+    fail("parser contract must be 0.21.0")
 for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")
@@ -332,13 +332,21 @@ cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bi
 cp crates/alopex-tools/src/bin/demo_v08_embedded.rs "${tool_source}/src/bin/"
 cp crates/alopex-tools/src/bin/verify_sql_transaction_failures.rs "${tool_source}/src/bin/"
 cat >"${tool_source}/src/bin/embedded-dependency-smoke.rs" <<'EOF'
+use std::sync::Arc;
+
 use alopex_embedded::Database;
+use alopex_sql::SqlValue;
 
 fn main() {
-    let database = Database::new();
+    let database = Arc::new(Database::new());
     database
-        .execute_sql("CREATE TABLE smoke (id INTEGER); INSERT INTO smoke VALUES (1);")
+        .execute_sql("CREATE TABLE smoke (id INTEGER)")
         .expect("published alopex-embedded must execute SQL without parser runtime assets");
+    let mut statement = database
+        .prepare("INSERT INTO smoke VALUES (?)")
+        .expect("published alopex-embedded must prepare SQL");
+    statement.bind(1, SqlValue::Integer(1)).expect("bind");
+    statement.execute().expect("execute prepared SQL");
     println!("ok");
 }
 EOF

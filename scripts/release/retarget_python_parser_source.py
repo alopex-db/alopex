@@ -10,7 +10,7 @@ import re
 
 
 EXPECTED_SCHEMA = "alopex-parser-vendor-manifest-v2"
-EXPECTED_CONTRACT = "0.20.0"
+EXPECTED_CONTRACT = "0.21.0"
 EXPECTED_TARGETS = {
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",

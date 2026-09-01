@@ -1171,6 +1171,23 @@ fn scenario_fail_closed_boundaries() -> DemoResult {
     Ok(())
 }
 
+fn scenario_prepared_statements() -> DemoResult {
+    let db = Arc::new(Database::new());
+    db.execute_sql("CREATE TABLE prepared (id INTEGER PRIMARY KEY, note TEXT)")?;
+    let mut statement = db.prepare("INSERT INTO prepared VALUES (?, ?)")?;
+    statement.bind(1, SqlValue::Integer(1))?;
+    statement.bind(2, SqlValue::Text("bound value".into()))?;
+    statement.execute()?;
+    check_rows(
+        &db,
+        "SELECT id, note FROM prepared",
+        &[vec![
+            SqlValue::Integer(1),
+            SqlValue::Text("bound value".into()),
+        ]],
+    )
+}
+
 fn run() -> DemoResult {
     println!("AlopexDB v0.8.x complete embedded-local API demo");
     run_scenario(
@@ -1223,7 +1240,12 @@ fn run() -> DemoResult {
         "unsupported and external-prerequisite boundaries",
         scenario_fail_closed_boundaries,
     )?;
-    println!("\nAll 10 embedded-local scenarios passed.");
+    run_scenario(
+        "EMB-11-prepared-statements",
+        "prepared statement lifecycle",
+        scenario_prepared_statements,
+    )?;
+    println!("\nAll 11 embedded-local scenarios passed.");
     Ok(())
 }
 

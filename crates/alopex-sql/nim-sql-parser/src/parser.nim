@@ -12,6 +12,7 @@ type
     previous: Token
     errors*: seq[string]
     nestingDepth: int
+    parameterCount: int
 
   ParseError* = object of CatchableError
 
@@ -656,8 +657,10 @@ proc parsePrimary(p: var Parser): SqlNode =
     let tok = p.advance()
     result = newUnaryOp(opBitNot, p.parsePrimary(), tokenSpan(tok))
   of tkQuestion:
-    p.error("bind parameters are not yet supported; pass literal values " &
-      "instead (prepared statements are tracked by issue #166)")
+    let tok = p.advance()
+    inc p.parameterCount
+    result = newNode(nkParameter, tokenSpan(tok))
+    result.parameterIndex = p.parameterCount
   of tkTime:
     let tok = p.advance()
     if p.check(tkString):
@@ -2028,6 +2031,7 @@ proc parseSqlStatements*(input: string): seq[SqlNode] =
   while p.check(tkSemicolon):
     discard p.advance()
   while not p.check(tkEof):
+    p.parameterCount = 0
     let stmt = p.parseStatement()
     stmt.fillMissingSpans(stmt.span)
     result.add(stmt)

@@ -79,6 +79,18 @@ with remote.begin() as txn:          # サーバーセッション（/session/be
 remote.close()
 ```
 
+組み込み`Database`では、繰り返し実行する1文を`prepare()`できます。bind indexは
+1-basedで、`?`だけを受け付けます。
+
+```python
+statement = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+statement.bind(1, 2)
+statement.bind(2, "beta")
+statement.execute()
+statement.reset()
+statement.finalize()
+```
+
 | target | 結果 |
 | --- | --- |
 | `http://host:port` / `https://host:port` | `RemoteDatabase` |

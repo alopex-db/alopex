@@ -69,6 +69,7 @@ fn run_sql_with_formatter(db: &Database, output_format: OutputFormat) -> String 
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        params: Vec::new(),
         read_mode: None,
         routing_report: None,
         tui: false,

@@ -177,6 +177,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let span = expr.span;
         match &expr.kind {
+            ExprKind::Parameter { index } => Err(PlannerError::InvalidExpression {
+                message: format!("unbound positional parameter ?{index}"),
+            }),
             ExprKind::Literal { literal: lit } => self.infer_literal_type(lit, span),
 
             ExprKind::ColumnRef {
