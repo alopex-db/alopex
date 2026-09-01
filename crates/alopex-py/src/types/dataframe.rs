@@ -1256,12 +1256,11 @@ fn list_utf8_from_py(values: &Bound<'_, PyAny>) -> PyResult<ArrayRef> {
 fn dataframe_to_py_dict(py: Python<'_>, df: &DataFrame) -> PyResult<Py<PyDict>> {
     let out = PyDict::new(py);
     for series in df.columns() {
-        let chunks = series.to_arrow();
-        let Some(array) = chunks.first() else {
-            out.set_item(series.name(), PyList::empty(py))?;
-            continue;
-        };
-        out.set_item(series.name(), array_to_py_list(py, array)?)?;
+        let values = PyList::empty(py);
+        for array in series.to_arrow() {
+            values.call_method1("extend", (array_to_py_list(py, &array)?,))?;
+        }
+        out.set_item(series.name(), values)?;
     }
     Ok(out.unbind())
 }

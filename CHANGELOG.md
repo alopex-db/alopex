@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - The Nim parser wire contract is `0.22.0`.
 - Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with
   versioned, secret-free logical/physical/distributed plan output (#167).
+- Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of
+  truncating eager CSV results at the first 1,024-row batch (#304).
 
 ## [0.8.10] — 2026-08-28
 

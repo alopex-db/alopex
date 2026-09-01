@@ -1,6 +1,40 @@
 import pytest
 
-from alopex import AlopexError, DataFrame
+from alopex import AlopexError, DataFrame, LazyFrame
+
+
+@pytest.mark.parametrize("row_count", [1023, 1024, 1025, 34_250])
+def test_scan_csv_collect_to_dict_preserves_all_arrow_batches(tmp_path, row_count):
+    path = tmp_path / f"rows-{row_count}.csv"
+    path.write_text(
+        "id,label\n"
+        + "".join(f"{index},row-{index}\n" for index in range(row_count)),
+        encoding="utf-8",
+    )
+
+    frame = LazyFrame.scan_csv(str(path)).collect(batch_rows=50_000)
+    values = frame.to_dict()
+
+    assert frame.height() == row_count
+    assert values["id"] == list(range(row_count))
+    assert values["label"] == [f"row-{index}" for index in range(row_count)]
+
+
+def test_scan_csv_stream_is_publicly_iterable_across_batches(tmp_path):
+    path = tmp_path / "stream.csv"
+    path.write_text(
+        "id\n" + "".join(f"{index}\n" for index in range(1025)),
+        encoding="utf-8",
+    )
+
+    with LazyFrame.scan_csv(str(path)).collect(
+        streaming=True, batch_rows=1024
+    ) as batches:
+        values = [
+            value for batch in batches for value in batch.to_dict()["id"]
+        ]
+
+    assert values == list(range(1025))
 
 
 def test_python_string_namespace_operations():
