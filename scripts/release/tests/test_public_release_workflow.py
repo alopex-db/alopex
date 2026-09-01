@@ -63,6 +63,8 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("contents: write", publish)
         self.assertIn("actions/download-artifact@v4", publish)
         self.assertIn("name: release-verification-${{ github.run_id }}", publish)
+        self.assertIn("Select downloaded verification report", publish)
+        self.assertIn('REPORT_ROOT=${REPORT_ROOT}/release-verification-v${VERSION}', publish)
 
     def test_public_demos_wait_for_exact_pypi_wheel_with_a_finite_retry(self) -> None:
         verify = self.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
