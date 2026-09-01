@@ -41,6 +41,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Initialize verification report context
+        id: report_context
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION#alopex-py-v}"
+          version="${version#v}"
+          if [[ -z "${version}" || ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="unknown"
+          fi
+          report_root="${RUNNER_TEMP}/release-verification-v${version}"
+          rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' scripts/release/verify-release/Dockerfile)"
+          nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' scripts/release/verify-release/Dockerfile)"
+          mkdir -p "${report_root}"
+          python3 scripts/release/verify-release/report.py init \
+            --results "${report_root}/v${version}.json" \
+            --version "${version}" --rust "${rust_version:-unknown}" --nim "${nim_image:-unknown}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
+
       - name: Resolve exact public version
         id: release
         env:
@@ -64,8 +86,16 @@ jobs:
           git fetch --force origin "refs/tags/v${version}:refs/tags/v${version}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${RUNNER_TEMP}/release-verification-v${version}" >> "${GITHUB_ENV}"
+          report_root="${RUNNER_TEMP}/release-verification-v${version}"
+          mkdir -p "${report_root}"
+          rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' scripts/release/verify-release/Dockerfile)"
+          nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' scripts/release/verify-release/Dockerfile)"
+          python3 scripts/release/verify-release/report.py init \
+            --results "${report_root}/v${version}.json" \
+            --version "${version}" --rust "${rust_version}" --nim "${nim_image}"
 
       - name: Wait for exact PyPI release
+        id: readiness
         env:
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
@@ -107,12 +137,61 @@ jobs:
             --results-file "${REPORT_ROOT}/v${VERSION}.json" \
             --report-dir "${REPORT_ROOT}"
 
+      - name: Finalize verification report
+        if: always()
+        env:
+          VERSION: ${{ steps.release.outputs.version || steps.report_context.outputs.version || 'unknown' }}
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          READINESS_OUTCOME: ${{ steps.readiness.outcome }}
+          DEMOS_OUTCOME: ${{ steps.demos.outcome }}
+        shell: bash
+        run: |
+          set -u
+          version="${VERSION:-unknown}"
+          report_root="${REPORT_ROOT:-${RUNNER_TEMP}/release-verification-v${version}}"
+          results="${report_root}/v${version}.json"
+          mkdir -p "${report_root}"
+          if [[ ! -f "${results}" ]]; then
+            python3 scripts/release/verify-release/report.py init \
+              --results "${results}" --version "${version}" --rust unknown --nim unknown
+          fi
+          needs_failure=false
+          for outcome in "${RELEASE_OUTCOME:-skipped}" "${READINESS_OUTCOME:-skipped}" "${DEMOS_OUTCOME:-skipped}"; do
+            if [[ "${outcome}" != success ]]; then
+              needs_failure=true
+            fi
+          done
+          if [[ "${needs_failure}" == true ]] && ! python3 - "${results}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              payload = json.load(stream)
+          raise SystemExit(0 if any(step.get("status") == "fail" for step in payload.get("steps", [])) else 1)
+          PY
+          then
+            failure_log="${report_root}/workflow-failure.log"
+            {
+              echo "release=${RELEASE_OUTCOME:-skipped}"
+              echo "readiness=${READINESS_OUTCOME:-skipped}"
+              echo "demos=${DEMOS_OUTCOME:-skipped}"
+            } > "${failure_log}"
+            python3 scripts/release/verify-release/report.py record \
+              --results "${results}" --name "workflow orchestration" --status fail \
+              --description "A verification workflow step failed or was skipped; see the recorded step outcomes." \
+              --log "${failure_log}"
+          fi
+          python3 scripts/release/verify-release/report.py render \
+            --results "${results}" --output-dir "${report_root}"
+
       - name: Upload structured result and Markdown
-        if: always() && steps.release.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-verification-v${{ steps.release.outputs.version }}
-          path: ${{ env.REPORT_ROOT }}/v${{ steps.release.outputs.version }}.*
+          name: release-verification-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-verification-v*/v*.json
+            ${{ runner.temp }}/release-verification-v*/v*.md
           if-no-files-found: error
 
   publish:

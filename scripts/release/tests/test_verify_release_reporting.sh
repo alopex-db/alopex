@@ -25,6 +25,8 @@ report="${output}/v0.8.5.md"
 grep -Fxq '> 総合結果: **❌ 失敗あり**' "${report}"
 grep -Fq 'SKIP early diagnostic' "${report}"
 grep -Fq 'ERROR final diagnostic' "${report}"
+python3 "${repo}/scripts/release/verify-release/report.py" validate-report \
+  --results "${results}"
 
 complete="${scratch}/complete.json"
 complete_log="${scratch}/complete.log"
