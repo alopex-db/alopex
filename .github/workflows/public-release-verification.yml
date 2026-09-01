@@ -210,7 +210,7 @@ jobs:
       - name: Download reviewed verification result
         uses: actions/download-artifact@v4
         with:
-          name: release-verification-v${{ needs.verify.outputs.version }}
+          name: release-verification-${{ github.run_id }}
           path: ${{ env.REPORT_ROOT }}
 
       - name: Validate explicit publication candidate
