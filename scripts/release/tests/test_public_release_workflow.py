@@ -20,10 +20,21 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("publish_report:", self.text)
 
     def test_failed_runs_are_artifacts_and_not_public_reports(self) -> None:
-        self.assertIn("if: always() && steps.release.outcome == 'success'", self.text)
+        self.assertIn("- name: Finalize verification report", self.text)
+        self.assertIn("if: always()", self.text)
+        self.assertIn("name: release-verification-${{ github.run_id }}", self.text)
+        self.assertIn("${{ runner.temp }}/release-verification-v*/v*.json", self.text)
+        self.assertIn("${{ runner.temp }}/release-verification-v*/v*.md", self.text)
         self.assertIn("inputs.publish_report == true", self.text)
         self.assertIn("needs.verify.result == 'failure'", self.text)
         self.assertIn("Create or update failure issue", self.text)
+
+    def test_report_context_exists_before_failure_prone_steps(self) -> None:
+        self.assertIn("- name: Initialize verification report context", self.text)
+        self.assertIn("id: report_context", self.text)
+        self.assertIn("report.py init", self.text)
+        self.assertIn("id: readiness", self.text)
+        self.assertIn('VERSION: ${{ steps.release.outputs.version || steps.report_context.outputs.version || \'unknown\' }}', self.text)
 
     def test_publication_requires_success_without_skip_and_exact_docs_bytes(self) -> None:
         self.assertIn("✅ 全ステップ成功", self.text)

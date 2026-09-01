@@ -136,8 +136,28 @@ def render(args: argparse.Namespace) -> None:
     print(output)
 
 
+def validate_report_payload(payload: dict[str, Any]) -> None:
+    if payload.get("overall_status") not in {"ok", "fail"}:
+        raise SystemExit("release verification report has an invalid overall status")
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        raise SystemExit("release verification report steps are missing")
+    statuses = {step.get("status") for step in steps if isinstance(step, dict)}
+    if any(not isinstance(step, dict) for step in steps) or not statuses <= {"ok", "fail"}:
+        raise SystemExit("release verification report contains an invalid step")
+    has_failure = any(step.get("status") == "fail" for step in steps)
+    if has_failure != (payload["overall_status"] == "fail"):
+        raise SystemExit("release verification report status does not match its steps")
+
+
+def validate_report(args: argparse.Namespace) -> None:
+    validate_report_payload(load(args.results))
+    print("release verification report is complete")
+
+
 def validate_public(args: argparse.Namespace) -> None:
     payload = load(args.results)
+    validate_report_payload(payload)
     if payload.get("overall_status") != "ok":
         raise SystemExit("public report candidate is not successful")
     if any(step.get("status") != "ok" for step in payload.get("steps", [])):
@@ -183,6 +203,10 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-public")
     validate.add_argument("--results", type=Path, required=True)
     validate.set_defaults(func=validate_public)
+
+    report = commands.add_parser("validate-report")
+    report.add_argument("--results", type=Path, required=True)
+    report.set_defaults(func=validate_report)
     return root
 
 
