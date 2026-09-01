@@ -127,6 +127,7 @@ impl From<&IndexMetadata> for IndexFqn {
 pub enum TableType {
     Managed,
     External,
+    Temporary,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1069,6 +1070,9 @@ impl<S: KVStore> PersistentCatalog<S> {
                 persisted.name = fqn.table.clone();
             }
             max_table_id = max_table_id.max(persisted.table_id);
+            if persisted.table_type == TableType::Temporary {
+                continue;
+            }
             let table: TableMetadata = persisted.into();
             inner.insert_table_unchecked(table);
         }

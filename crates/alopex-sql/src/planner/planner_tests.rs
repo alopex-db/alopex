@@ -257,6 +257,7 @@ fn test_plan_create_table() {
 
     let create = CreateTable {
         if_not_exists: false,
+        temporary: false,
         name: "new_table".to_string(),
         columns: vec![
             ColumnDef {
@@ -319,6 +320,7 @@ fn test_plan_create_table_already_exists() {
 
     let create = CreateTable {
         if_not_exists: false,
+        temporary: false,
         name: "users".to_string(),
         columns: vec![],
         constraints: vec![],
@@ -340,6 +342,7 @@ fn test_plan_create_table_if_not_exists() {
 
     let create = CreateTable {
         if_not_exists: true,
+        temporary: false,
         name: "users".to_string(),
         columns: vec![],
         constraints: vec![],

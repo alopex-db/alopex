@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.22.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.23.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
@@ -828,7 +828,7 @@ mod tests {
             false,
             VENDOR_MANIFEST_SHA256,
         )
-        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.22.0")
+        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.23.0")
         .to_string();
 
         assert!(message.contains("invalid parser vendor manifest"));

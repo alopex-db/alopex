@@ -33,6 +33,8 @@ pub struct ContinuousAggregateOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTable {
     pub if_not_exists: bool,
+    #[serde(default)]
+    pub temporary: bool,
     pub name: String,
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,

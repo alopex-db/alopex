@@ -93,6 +93,9 @@ impl PreparedState {
 /// Only `?` in expression positions is accepted. Values are emitted as SQL
 /// literals, so they cannot become identifiers or SQL syntax.
 pub fn bind_sql_parameters(sql: &str, values: &[SqlValue]) -> Result<String> {
+    if values.is_empty() && positional_parameter_count(sql) == 0 {
+        return Ok(sql.to_owned());
+    }
     let mut state = PreparedState::new(sql)?;
     for (index, value) in values.iter().cloned().enumerate() {
         state.bind(index + 1, value)?;

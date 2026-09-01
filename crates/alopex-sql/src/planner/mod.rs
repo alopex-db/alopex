@@ -69,6 +69,72 @@ struct WindowSelectStages {
 
 type CtePlans = HashMap<String, PlannedRelation>;
 
+fn metadata_schema(columns: &[(&str, ResolvedType)]) -> Vec<ColumnMetadata> {
+    columns
+        .iter()
+        .map(|(name, data_type)| ColumnMetadata::new(*name, data_type.clone()))
+        .collect()
+}
+
+fn metadata_text(value: Option<String>) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(value.map_or(Literal::Null, Literal::String)),
+        resolved_type: ResolvedType::Text,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_bool(value: bool) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Boolean(value)),
+        resolved_type: ResolvedType::Boolean,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_bigint(value: usize) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Number(value.to_string())),
+        resolved_type: ResolvedType::BigInt,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_index_type(index: &IndexMetadata) -> String {
+    match index.method {
+        Some(crate::ast::IndexMethod::Hnsw) => "HNSW",
+        Some(crate::ast::IndexMethod::Fts) => "FTS",
+        Some(crate::ast::IndexMethod::BTree) | None => "BTREE",
+    }
+    .to_string()
+}
+
+fn metadata_default(expr: &Expr) -> Option<String> {
+    Some(match &expr.kind {
+        ExprKind::Literal {
+            literal: Literal::Number(value),
+        } => value.clone(),
+        ExprKind::Literal {
+            literal: Literal::String(value),
+        } => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+        ExprKind::Literal {
+            literal: Literal::Boolean(value),
+        } => if *value { "TRUE" } else { "FALSE" }.to_string(),
+        ExprKind::Literal {
+            literal: Literal::Null,
+        } => "NULL".to_string(),
+        ExprKind::Literal {
+            literal: Literal::Interval(value),
+        } => {
+            format!("INTERVAL '{}'", value.replace('\'', "''"))
+        }
+        // ponytail: expose only stable SQL literals until the AST owns a canonical SQL formatter.
+        _ => return None,
+    })
+}
+
 fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
     items
         .iter()
@@ -1175,6 +1241,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         value: &Option<PragmaValue>,
     ) -> Result<LogicalPlan, PlannerError> {
         let name = raw_name.to_ascii_lowercase();
+        if matches!(name.as_str(), "show_tables" | "show_indexes" | "describe") {
+            let target = match value {
+                Some(PragmaValue::Text(target)) => Some(target.as_str()),
+                Some(PragmaValue::Int(_)) => {
+                    return Err(PlannerError::InvalidPragma {
+                        name,
+                        reason: "metadata targets must be table names".to_string(),
+                    });
+                }
+                None => None,
+            };
+            return self.metadata_values(&name, target, crate::ast::Span::default());
+        }
         if !matches!(name.as_str(), "cache_size" | "memory_limit" | "io_stats") {
             return Err(PlannerError::InvalidPragma {
                 name,
@@ -1224,6 +1303,205 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         })
     }
 
+    fn metadata_values(
+        &self,
+        surface: &str,
+        target: Option<&str>,
+        span: crate::ast::Span,
+    ) -> Result<LogicalPlan, PlannerError> {
+        let mut tables = self.catalog.list_tables();
+        tables.sort_by(|left, right| {
+            (&left.catalog_name, &left.namespace_name, &left.name).cmp(&(
+                &right.catalog_name,
+                &right.namespace_name,
+                &right.name,
+            ))
+        });
+        let (schema, rows) = match surface {
+            "show_tables" => (
+                vec![ColumnMetadata::new("table_name", ResolvedType::Text)],
+                tables
+                    .iter()
+                    .map(|table| vec![metadata_text(Some(table.name.clone()))])
+                    .collect(),
+            ),
+            "show_indexes" => {
+                if let Some(table) = target
+                    && !self.catalog.table_exists(table)
+                {
+                    return Err(PlannerError::table_not_found(table, span));
+                }
+                let schema = vec![
+                    ColumnMetadata::new("table_name", ResolvedType::Text),
+                    ColumnMetadata::new("index_name", ResolvedType::Text),
+                    ColumnMetadata::new("is_unique", ResolvedType::Boolean),
+                    ColumnMetadata::new("index_type", ResolvedType::Text),
+                ];
+                let mut rows = Vec::new();
+                for table in tables
+                    .iter()
+                    .filter(|table| target.is_none_or(|name| table.name == name))
+                {
+                    let mut indexes = self.catalog.get_indexes_for_table(&table.name);
+                    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+                    for index in indexes {
+                        rows.push(vec![
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(index.name.clone())),
+                            metadata_bool(index.unique),
+                            metadata_text(Some(metadata_index_type(index))),
+                        ]);
+                    }
+                }
+                (schema, rows)
+            }
+            "describe" => {
+                let target = target.ok_or_else(|| PlannerError::InvalidPragma {
+                    name: surface.to_string(),
+                    reason: "DESCRIBE requires a table name".to_string(),
+                })?;
+                let table = self
+                    .catalog
+                    .get_table(target)
+                    .ok_or_else(|| PlannerError::table_not_found(target, span))?;
+                let schema = [
+                    "column_name",
+                    "column_type",
+                    "null",
+                    "key",
+                    "default",
+                    "extra",
+                ]
+                .into_iter()
+                .map(|name| ColumnMetadata::new(name, ResolvedType::Text))
+                .collect();
+                let rows = table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        vec![
+                            metadata_text(Some(column.name.clone())),
+                            metadata_text(Some(column.data_type.to_string())),
+                            metadata_text(Some(if column.not_null { "NO" } else { "YES" }.into())),
+                            metadata_text(Some(
+                                if column.primary_key {
+                                    "PRI"
+                                } else if column.unique {
+                                    "UNI"
+                                } else {
+                                    ""
+                                }
+                                .into(),
+                            )),
+                            metadata_text(column.default.as_ref().and_then(metadata_default)),
+                            metadata_text(Some(String::new())),
+                        ]
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.tables" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("table_type", ResolvedType::Text),
+                ]);
+                let rows = tables
+                    .iter()
+                    .map(|table| {
+                        vec![
+                            metadata_text(Some(table.catalog_name.clone())),
+                            metadata_text(Some(table.namespace_name.clone())),
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(
+                                match table.table_type {
+                                    TableType::Managed => "BASE TABLE",
+                                    TableType::External => "FOREIGN TABLE",
+                                    TableType::Temporary => "LOCAL TEMPORARY",
+                                }
+                                .into(),
+                            )),
+                        ]
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.columns" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("column_name", ResolvedType::Text),
+                    ("ordinal_position", ResolvedType::BigInt),
+                    ("column_default", ResolvedType::Text),
+                    ("is_nullable", ResolvedType::Text),
+                    ("data_type", ResolvedType::Text),
+                ]);
+                let rows = tables
+                    .iter()
+                    .flat_map(|table| {
+                        table
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(move |(position, column)| {
+                                vec![
+                                    metadata_text(Some(table.catalog_name.clone())),
+                                    metadata_text(Some(table.namespace_name.clone())),
+                                    metadata_text(Some(table.name.clone())),
+                                    metadata_text(Some(column.name.clone())),
+                                    metadata_bigint(position + 1),
+                                    metadata_text(
+                                        column.default.as_ref().and_then(metadata_default),
+                                    ),
+                                    metadata_text(Some(
+                                        if column.not_null { "NO" } else { "YES" }.into(),
+                                    )),
+                                    metadata_text(Some(column.data_type.to_string())),
+                                ]
+                            })
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.indexes" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("index_name", ResolvedType::Text),
+                    ("is_unique", ResolvedType::Boolean),
+                    ("index_type", ResolvedType::Text),
+                    ("ordinal_position", ResolvedType::BigInt),
+                    ("column_name", ResolvedType::Text),
+                ]);
+                let mut rows = Vec::new();
+                for table in &tables {
+                    let mut indexes = self.catalog.get_indexes_for_table(&table.name);
+                    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+                    for index in indexes {
+                        for (position, column) in index.columns.iter().enumerate() {
+                            rows.push(vec![
+                                metadata_text(Some(index.catalog_name.clone())),
+                                metadata_text(Some(index.namespace_name.clone())),
+                                metadata_text(Some(table.name.clone())),
+                                metadata_text(Some(index.name.clone())),
+                                metadata_bool(index.unique),
+                                metadata_text(Some(metadata_index_type(index))),
+                                metadata_bigint(position + 1),
+                                metadata_text(Some(column.clone())),
+                            ]);
+                        }
+                    }
+                }
+                (schema, rows)
+            }
+            _ => unreachable!("validated metadata surface"),
+        };
+        Ok(LogicalPlan::Values { rows, schema })
+    }
+
     // ============================================================
     // DDL Planning Methods (Task 16)
     // ============================================================
@@ -1256,7 +1534,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
         table.catalog_name = "default".to_string();
         table.namespace_name = "default".to_string();
-        table.table_type = TableType::Managed;
+        table.table_type = if stmt.temporary {
+            TableType::Temporary
+        } else {
+            TableType::Managed
+        };
         table.data_source_format = DataSourceFormat::Alopex;
         table.properties = HashMap::new();
 
@@ -2866,6 +3148,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 columns,
                 span,
             } => {
+                if matches!(
+                    name.as_str(),
+                    "information_schema.tables"
+                        | "information_schema.columns"
+                        | "information_schema.indexes"
+                ) {
+                    let plan = self.metadata_values(name, None, *span)?;
+                    let LogicalPlan::Values { schema, .. } = &plan else {
+                        unreachable!("metadata surfaces are local VALUES plans");
+                    };
+                    let mut schema = schema.clone();
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut schema, *span)?;
+                    return Ok(PlannedRelation {
+                        plan,
+                        schema: schema.clone(),
+                        scope: vec![ScopedTable::new(
+                            TableMetadata::new(relation_name, schema),
+                            start_index,
+                        )],
+                    });
+                }
                 if let Some(cte) = ctes.get(name) {
                     let mut relation = cte.clone();
                     relation.plan = LogicalPlan::Project {

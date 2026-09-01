@@ -1493,6 +1493,7 @@ fn resolve_storage_location(
                 .ok_or(Error::StorageRootRequired)?;
             Ok(Some(storage_root))
         }
+        TableType::Temporary => Ok(None),
     }
 }
 
@@ -1792,6 +1793,7 @@ impl From<&ColumnMetadata> for CatalogManifestColumn {
 pub enum CatalogManifestTableType {
     Managed,
     External,
+    Temporary,
 }
 
 impl From<TableType> for CatalogManifestTableType {
@@ -1799,6 +1801,7 @@ impl From<TableType> for CatalogManifestTableType {
         match value {
             TableType::Managed => Self::Managed,
             TableType::External => Self::External,
+            TableType::Temporary => Self::Temporary,
         }
     }
 }
@@ -1808,6 +1811,7 @@ impl From<CatalogManifestTableType> for TableType {
         match value {
             CatalogManifestTableType::Managed => Self::Managed,
             CatalogManifestTableType::External => Self::External,
+            CatalogManifestTableType::Temporary => Self::Temporary,
         }
     }
 }

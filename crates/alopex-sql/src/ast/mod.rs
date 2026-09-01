@@ -123,10 +123,13 @@ pub enum StatementKind {
 
 impl StatementKind {
     /// Returns whether this statement produces a query result.
-    pub const fn is_query(&self) -> bool {
-        matches!(
-            self,
-            Self::Explain { .. } | Self::Select(_) | Self::Values(_)
-        )
+    pub fn is_query(&self) -> bool {
+        match self {
+            Self::Explain { .. } | Self::Select(_) | Self::Values(_) => true,
+            Self::Pragma { name, .. } => {
+                matches!(name.as_str(), "show_tables" | "show_indexes" | "describe")
+            }
+            _ => false,
+        }
     }
 }

@@ -34,6 +34,37 @@ def test_execute_sql_ddl_returns_none(db):
     assert result is None
 
 
+def test_execute_sql_portable_metadata_exact_rows(db):
+    db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
+
+    assert db.execute_sql("SHOW TABLES") == [{"table_name": "Order Items"}]
+    assert db.execute_sql('DESC "Order Items"') == [
+        {
+            "column_name": "id",
+            "column_type": "BIGINT",
+            "null": "YES",
+            "key": "",
+            "default": None,
+            "extra": "",
+        },
+        {
+            "column_name": "label",
+            "column_type": "TEXT",
+            "null": "YES",
+            "key": "",
+            "default": None,
+            "extra": "",
+        },
+    ]
+    assert db.execute_sql(
+        "SELECT table_name, column_name, ordinal_position "
+        "FROM information_schema.columns ORDER BY ordinal_position"
+    ) == [
+        {"table_name": "Order Items", "column_name": "id", "ordinal_position": 1},
+        {"table_name": "Order Items", "column_name": "label", "ordinal_position": 2},
+    ]
+
+
 def test_execute_sql_explain_json_is_machine_readable_and_redacts_params(db):
     db.execute_sql("CREATE TABLE explain_items (id INTEGER PRIMARY KEY, secret TEXT)")
     rows = db.execute_sql(

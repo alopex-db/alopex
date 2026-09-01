@@ -1057,7 +1057,14 @@ proc parseFromItem(p: var Parser): SqlNode =
     if p.check(tkLParen):
       result = p.parseTableFunction(name, lateral)
     else:
-      result = newIdent(name.value, tokenSpan(name))
+      var relationName = name.value
+      var relationSpan = tokenSpan(name)
+      if p.check(tkDot):
+        discard p.advance()
+        let qualified = p.expectIdent("qualified table name")
+        relationName &= "." & qualified.value
+        relationSpan = spanThrough(relationSpan, tokenSpan(qualified))
+      result = newIdent(relationName, relationSpan)
     result = p.parseOptionalAlias(result)
 
 proc parseUsingClause(p: var Parser): seq[string] =
@@ -1763,9 +1770,11 @@ proc parseCreateContinuousAggregateAfterCreate(
   result.children.add(query)
   result.children.add(options)
 
-proc parseCreateTableAfterCreate(p: var Parser; start: Token): SqlNode =
+proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false): SqlNode =
   discard p.expect(tkTable)
   result = newNode(nkCreateTable, tokenSpan(start))
+  if temporary:
+    result.children.add(newIdent("TEMPORARY"))
   if p.check(tkIf):
     discard p.advance()
     discard p.expect(tkNot)
@@ -1825,6 +1834,9 @@ proc parseCreateStmt(p: var Parser): SqlNode =
   let start = p.expect(tkCreate)
   if p.check(tkTable):
     result = p.parseCreateTableAfterCreate(start)
+  elif p.checkContextual("temp") or p.checkContextual("temporary"):
+    discard p.advance()
+    result = p.parseCreateTableAfterCreate(start, true)
   elif p.check(tkIndex):
     result = p.parseCreateIndexAfterCreate(start)
   elif p.checkContextual("CONTINUOUS"):
@@ -2037,38 +2049,69 @@ proc parseExplainStmt(p: var Parser): SqlNode =
   result.children.add(statement)
   result.span = spanThrough(tokenSpan(start), statement.span)
 
+proc metadataPragma(start: Token; name: string; target: Token = Token()): SqlNode =
+  result = newNode(nkPragma, tokenSpan(start))
+  result.children.add(newIdent(name, tokenSpan(start)))
+  if target.value.len > 0:
+    result.children.add(newStringLit(target.value, tokenSpan(target)))
+    result.span = spanThrough(tokenSpan(start), tokenSpan(target))
+
+proc parseShowStmt(p: var Parser): SqlNode =
+  let start = p.expectContextual("show")
+  if p.checkContextual("tables"):
+    discard p.advance()
+    return metadataPragma(start, "show_tables")
+  if p.checkContextual("indexes"):
+    discard p.advance()
+    if p.check(tkFrom):
+      discard p.advance()
+      return metadataPragma(start, "show_indexes", p.expectIdent("table name"))
+    return metadataPragma(start, "show_indexes")
+  p.error("expected TABLES or INDEXES after SHOW")
+
+proc parseDescribeStmt(p: var Parser): SqlNode =
+  let start = p.advance()
+  if p.check(tkTable):
+    discard p.advance()
+  metadataPragma(start, "describe", p.expectIdent("table name"))
+
 proc parseStatement*(p: var Parser): SqlNode =
-  case p.current.kind
-  of tkExplain:
-    result = p.parseExplainStmt()
-  of tkWith, tkSelect, tkValues:
-    result = p.parseQueryStmt()
-  of tkInsert:
-    result = p.parseInsertStmt()
-  of tkUpdate:
-    result = p.parseUpdateStmt()
-  of tkDelete:
-    result = p.parseDeleteStmt()
-  of tkCreate:
-    result = p.parseCreateStmt()
-  of tkDrop:
-    result = p.parseDropStmt()
-  of tkPragma:
-    result = p.parsePragmaStmt()
-  of tkBegin, tkStart:
-    result = p.parseBeginStmt()
-  of tkSet:
-    result = p.parseSetTransactionStmt()
-  of tkCommit:
-    result = p.parseCommitStmt()
-  of tkRollback:
-    result = p.parseRollbackStmt()
-  of tkSavepoint:
-    result = p.parseSavepointStmt()
-  of tkRelease:
-    result = p.parseReleaseSavepointStmt()
+  if p.checkContextual("show"):
+    result = p.parseShowStmt()
+  elif p.checkContextual("describe") or p.checkContextual("desc") or p.check(tkDesc):
+    result = p.parseDescribeStmt()
   else:
-    p.error("expected SQL statement (EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
+    case p.current.kind
+    of tkExplain:
+      result = p.parseExplainStmt()
+    of tkWith, tkSelect, tkValues:
+      result = p.parseQueryStmt()
+    of tkInsert:
+      result = p.parseInsertStmt()
+    of tkUpdate:
+      result = p.parseUpdateStmt()
+    of tkDelete:
+      result = p.parseDeleteStmt()
+    of tkCreate:
+      result = p.parseCreateStmt()
+    of tkDrop:
+      result = p.parseDropStmt()
+    of tkPragma:
+      result = p.parsePragmaStmt()
+    of tkBegin, tkStart:
+      result = p.parseBeginStmt()
+    of tkSet:
+      result = p.parseSetTransactionStmt()
+    of tkCommit:
+      result = p.parseCommitStmt()
+    of tkRollback:
+      result = p.parseRollbackStmt()
+    of tkSavepoint:
+      result = p.parseSavepointStmt()
+    of tkRelease:
+      result = p.parseReleaseSavepointStmt()
+    else:
+      p.error("expected SQL statement (SHOW, DESCRIBE, EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()

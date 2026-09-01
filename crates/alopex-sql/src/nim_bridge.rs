@@ -239,11 +239,7 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {
     ensure_linked_parser_contract(&nim_ffi::parser_contract_version())?;
     let natural_join_markers = natural_join_markers(sql);
-    // Option (a): double-quoted tokens are identifiers under SQL standard and
-    // PostgreSQL rules. The currently deployed Nim lexer predates that contract
-    // and emits them as string literals, so normalize the FFI input until every
-    // parser binary has the corrected token kind.
-    let normalized_sql = normalize_quoted_identifiers(sql);
+    let normalized_sql = normalize_identifier_case(sql);
     let result = nim_ffi::parse_sql(&normalized_sql).map_err(parser_error_from_ffi_input)?;
     match result.kind {
         ParseResultKind::Ok => {
@@ -849,42 +845,22 @@ impl MessagePackScanner<'_> {
     }
 }
 
-fn normalize_quoted_identifiers(sql: &str) -> String {
+fn normalize_identifier_case(sql: &str) -> String {
+    // PostgreSQL folds bare names but preserves delimited identifiers.
     let mut normalized = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' => {
+            '\'' | '"' => {
                 normalized.push(ch);
-                while let Some(string_ch) = chars.next() {
-                    normalized.push(string_ch);
-                    if string_ch == '\'' {
-                        if chars.peek() == Some(&'\'') {
+                while let Some(quoted_ch) = chars.next() {
+                    normalized.push(quoted_ch);
+                    if quoted_ch == ch {
+                        if chars.peek() == Some(&ch) {
                             normalized.push(chars.next().expect("peeked quote"));
                         } else {
                             break;
                         }
-                    }
-                }
-            }
-            '"' => {
-                // Replace each quote with a space rather than removing it, so
-                // every later token keeps its original offset and diagnostics
-                // point into the SQL the caller actually wrote.
-                normalized.push(' ');
-                while let Some(identifier_ch) = chars.next() {
-                    if identifier_ch == '"' {
-                        if chars.peek() == Some(&'"') {
-                            // An escaped quote is two characters in the input
-                            // and one in the identifier; pad to keep the width.
-                            normalized.push(chars.next().expect("peeked quote"));
-                            normalized.push(' ');
-                        } else {
-                            normalized.push(' ');
-                            break;
-                        }
-                    } else {
-                        normalized.push(identifier_ch);
                     }
                 }
             }
@@ -918,9 +894,6 @@ fn normalize_quoted_identifiers(sql: &str) -> String {
                 {
                     identifier.push(chars.next().expect("peeked identifier character"));
                 }
-                // PostgreSQL folds bare identifiers to lowercase. Delimited
-                // identifiers take the `\"` branch above and keep their exact
-                // spelling for case-sensitive resolution.
                 normalized.push_str(&identifier.to_ascii_lowercase());
             }
             _ => normalized.push(ch),
@@ -1382,7 +1355,7 @@ mod input_preflight_tests {
             .expect_err("sidecar labels cannot make a pre-frame producer compatible");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.23.0"));
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
     }
 
@@ -1392,32 +1365,32 @@ mod input_preflight_tests {
             .expect_err("a 0.5.0 producer cannot satisfy the current named-window contract");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.23.0"));
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
     }
 
     #[test]
     fn legacy_v040_consumer_rejects_the_current_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.22.0");
+        assert_eq!(linked_producer_contract, "0.23.0");
         let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
             .expect_err("legacy consumer must reject a producer with frame semantics");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.23.0"));
     }
 
     #[test]
     fn legacy_v050_consumer_rejects_a_v060_named_window_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.22.0");
+        assert_eq!(linked_producer_contract, "0.23.0");
         let error = ensure_parser_contract("0.5.0", &linked_producer_contract)
             .expect_err("legacy consumer must not ignore QUALIFY or named-window fields");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.22.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.23.0"));
     }
 
     #[test]

@@ -24,7 +24,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.22.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.23.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -1374,6 +1374,7 @@ proc writeDeleteKind(s: Stream; node: SqlNode) =
 
 proc writeCreateTableKind(s: Stream; node: SqlNode) =
   var ifNotExistsFlag = false
+  var temporaryFlag = false
   var tableName = ""
   var columns: seq[SqlNode] = @[]
   var constraints: seq[SqlNode] = @[]
@@ -1384,6 +1385,8 @@ proc writeCreateTableKind(s: Stream; node: SqlNode) =
     of nkIdentifier:
       if child.strVal == "IF NOT EXISTS":
         ifNotExistsFlag = true
+      elif child.strVal == "TEMPORARY":
+        temporaryFlag = true
       elif tableName.len == 0:
         tableName = child.strVal
     of nkColumnDef:
@@ -1395,11 +1398,13 @@ proc writeCreateTableKind(s: Stream; node: SqlNode) =
     else:
       discard
 
-  s.pack_map(7)
+  s.pack_map(8)
   s.writeKey("variant")
   s.pack_type("CreateTable")
   s.writeKey("if_not_exists")
   s.pack_type(ifNotExistsFlag)
+  s.writeKey("temporary")
+  s.pack_type(temporaryFlag)
   s.writeKey("name")
   s.pack_type(tableName)
   s.writeKey("columns")

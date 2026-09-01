@@ -358,7 +358,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.22.0");
+    assert_eq!(parser_contract_version(), "0.23.0");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.22.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.23.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -508,7 +508,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.22.0");
+    assert_eq!(parser_contract_version(), "0.23.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -1159,4 +1159,49 @@ fn parses_explain_and_explain_analyze_formats() {
         assert_eq!(*format, expected_format, "{sql}");
         assert!(matches!(statement.kind, StatementKind::Select(_)), "{sql}");
     }
+}
+
+#[test]
+fn parses_portable_metadata_statements_without_new_wire_variants() {
+    for (sql, expected_name, expected_value) in [
+        ("SHOW TABLES", "show_tables", None),
+        ("SHOW INDEXES", "show_indexes", None),
+        (
+            "SHOW INDEXES FROM \"Order Items\"",
+            "show_indexes",
+            Some("Order Items"),
+        ),
+        ("DESCRIBE \"Order Items\"", "describe", Some("Order Items")),
+        ("DESC \"Order Items\"", "describe", Some("Order Items")),
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let StatementKind::Pragma { name, value } = &statements[0].kind else {
+            panic!("{sql} must normalize to the existing metadata statement envelope");
+        };
+        assert_eq!(name, expected_name, "{sql}");
+        assert_eq!(
+            value,
+            &expected_value.map(|value| alopex_sql::PragmaValue::Text(value.to_string())),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn parses_temporary_table_lifetime_marker() {
+    for sql in [
+        "CREATE TEMP TABLE scratch (id BIGINT)",
+        "CREATE TEMPORARY TABLE scratch (id BIGINT)",
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let StatementKind::CreateTable(table) = &statements[0].kind else {
+            panic!("expected CREATE TABLE for {sql}");
+        };
+        assert!(table.temporary, "{sql}");
+    }
+    let statements = Parser::parse_sql(&AlopexDialect, "CREATE TABLE durable (id BIGINT)").unwrap();
+    let StatementKind::CreateTable(table) = &statements[0].kind else {
+        panic!("expected CREATE TABLE");
+    };
+    assert!(!table.temporary);
 }

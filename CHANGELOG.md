@@ -6,9 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Add portable `SHOW`/`DESCRIBE` and `information_schema` metadata queries,
+  transaction-aware catalog visibility, quoted identifiers, and handle-scoped
+  temporary tables.
 - SQL adds one-based positional `?` parameters and reusable prepared statement
   lifecycles across Rust, embedded, Python, and CLI surfaces (issue #166).
-- The Nim parser wire contract is `0.22.0`.
+- The Nim parser wire contract is `0.23.0`.
 - Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with
   versioned, secret-free logical/physical/distributed plan output (#167).
 - Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of

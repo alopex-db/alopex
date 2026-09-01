@@ -1035,8 +1035,11 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::ast::expr::Literal;
-    use crate::catalog::ColumnMetadata;
-    use crate::planner::{Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr};
+    use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::planner::{
+        Planner, Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr,
+    };
+    use crate::{AlopexDialect, Parser};
 
     fn references() -> Vec<TableReference> {
         vec![TableReference::new(
@@ -1130,6 +1133,21 @@ mod tests {
             )]],
             schema: vec![ColumnMetadata::new("column1", ResolvedType::Integer)],
         };
+        assert!(matches!(
+            classify(&plan, &[]),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "values_local_only"
+        ));
+    }
+
+    #[test]
+    fn metadata_values_fail_closed_before_remote_transport() {
+        let catalog = MemoryCatalog::new();
+        let planner = Planner::new(&catalog);
+        let statement = Parser::parse_sql(&AlopexDialect, "SHOW TABLES")
+            .unwrap()
+            .remove(0);
+        let plan = planner.plan(&statement).unwrap();
         assert!(matches!(
             classify(&plan, &[]),
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })

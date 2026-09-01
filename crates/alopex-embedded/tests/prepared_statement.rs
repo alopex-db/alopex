@@ -4,6 +4,12 @@ use alopex_embedded::{Database, Error};
 use alopex_sql::{ExecutionResult, SqlValue};
 
 #[test]
+fn empty_binding_is_a_noop_for_parameter_free_batches() {
+    let sql = "CREATE TABLE t (id INTEGER); SHOW TABLES";
+    assert_eq!(alopex_embedded::bind_sql_parameters(sql, &[]).unwrap(), sql);
+}
+
+#[test]
 fn prepared_statement_supports_null_rebind_reset_and_finalize() {
     let database = Arc::new(Database::new());
     database

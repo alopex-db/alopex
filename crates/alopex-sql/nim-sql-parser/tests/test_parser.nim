@@ -63,6 +63,15 @@ suite "Tokenizer":
     check t2.kind == tkIdent
     check t2.value == "_Bar1"
 
+  test "double-quoted identifiers keep keywords, spaces, and escaped quotes":
+    var lex = initLexer("\"Order Items\" \"a\"\"b\"")
+    let spaced = lex.nextToken()
+    check spaced.kind == tkIdent
+    check spaced.value == "Order Items"
+    let escaped = lex.nextToken()
+    check escaped.kind == tkIdent
+    check escaped.value == "a\"b"
+
   test "integer literal":
     var lex = initLexer("123")
     let tok = lex.nextToken()
@@ -197,6 +206,10 @@ suite "Expressions — literals":
     check ast.kind == nkSelect
     check ast.children[0].children[0].kind == nkColumnRef
 
+  test "portable information schema relations retain qualification":
+    let ast = parseSql("SELECT table_name FROM information_schema.tables")
+    check ast.children[1].children[0].strVal == "information_schema.tables"
+
   test "PRAGMA accepts integer and string values":
     let integerPragma = parseSql("PRAGMA cache_size = 16")
     check integerPragma.kind == nkPragma
@@ -205,6 +218,22 @@ suite "Expressions — literals":
     let textPragma = parseSql("PRAGMA memory_limit = '100MB'")
     check textPragma.kind == nkPragma
     check textPragma.children[1].strVal == "100MB"
+
+  test "portable metadata statements normalize to PRAGMA nodes":
+    for (sql, name, target) in [
+      ("SHOW TABLES", "show_tables", ""),
+      ("SHOW INDEXES", "show_indexes", ""),
+      ("SHOW INDEXES FROM \"Order Items\"", "show_indexes", "Order Items"),
+      ("DESCRIBE \"Order Items\"", "describe", "Order Items"),
+      ("DESC TABLE \"Order Items\"", "describe", "Order Items")
+    ]:
+      let metadata = parseSql(sql)
+      check metadata.kind == nkPragma
+      check metadata.children[0].strVal == name
+      if target.len == 0:
+        check metadata.children.len == 1
+      else:
+        check metadata.children[1].strVal == target
 
   test "integer literal":
     let ast = parseSql("SELECT 42")
@@ -1113,6 +1142,7 @@ suite "DDL — CREATE TABLE":
       )
     """)
     check ast.kind == nkCreateTable
+
     # First non-flag child is the table name, then column defs
     # Find table name (nkIdentifier with value "users")
     var tableName = ""
@@ -1124,6 +1154,13 @@ suite "DDL — CREATE TABLE":
         inc colCount
     check tableName == "users"
     check colCount == 4
+
+  test "CREATE TEMP and TEMPORARY TABLE retain temporary metadata":
+    for sql in ["CREATE TEMP TABLE scratch (id INT)",
+                "CREATE TEMPORARY TABLE scratch (id INT)"]:
+      let ast = parseSql(sql)
+      check ast.kind == nkCreateTable
+      check ast.children[0].strVal == "TEMPORARY"
 
   test "CREATE TABLE IF NOT EXISTS":
     let ast = parseSql("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY)")

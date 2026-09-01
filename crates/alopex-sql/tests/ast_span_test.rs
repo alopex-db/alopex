@@ -15,6 +15,7 @@ fn span(line: u64, col: u64) -> Span {
 fn ddl_nodes_carry_spans() {
     let tbl = CreateTable {
         if_not_exists: true,
+        temporary: false,
         name: "t".into(),
         columns: vec![],
         constraints: vec![],

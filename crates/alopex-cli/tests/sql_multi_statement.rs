@@ -80,6 +80,47 @@ fn batch_json_single_statement_is_one_element_array() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn batch_json_portable_metadata_uses_query_result_sets() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--quiet",
+        "--output",
+        "json",
+        "sql",
+        "CREATE TABLE items (id BIGINT, label TEXT); \
+         SHOW TABLES; \
+         DESCRIBE items; \
+         SELECT table_name, column_name, ordinal_position \
+         FROM information_schema.columns ORDER BY ordinal_position",
+    ]);
+
+    let value = parse_json_stdout(&output);
+    let sets = value.as_array().expect("top-level JSON array");
+    assert_eq!(
+        sets.len(),
+        3,
+        "DDL is quiet while metadata remains query output"
+    );
+    assert_eq!(sets[0], serde_json::json!([{ "table_name": "items" }]));
+    assert_eq!(
+        sets[1],
+        serde_json::json!([
+            {"column_name":"id","column_type":"BIGINT","null":"YES","key":"","default":null,"extra":""},
+            {"column_name":"label","column_type":"TEXT","null":"YES","key":"","default":null,"extra":""}
+        ])
+    );
+    assert_eq!(
+        sets[2],
+        serde_json::json!([
+            {"table_name":"items","column_name":"id","ordinal_position":1},
+            {"table_name":"items","column_name":"label","ordinal_position":2}
+        ])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn batch_json_lag_and_lead_preserve_exact_rows() {
     let output = run_alopex(&[
         "--in-memory",
