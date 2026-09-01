@@ -32,7 +32,7 @@ pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
-pub use crate::sql_session::{SqlSession, SqlSessionState};
+pub use crate::sql_session::{SqlSession, SqlSessionState, SqlTransactionCharacteristics};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
@@ -101,6 +101,12 @@ pub enum Error {
     /// SQL session execution accepts one statement per call.
     #[error("SQL session execution requires exactly one statement")]
     SqlSessionRequiresSingleStatement,
+    /// The requested SQL isolation name is not provided by the engine.
+    #[error("unsupported SQL transaction isolation level: {0:?}")]
+    UnsupportedSqlTransactionIsolation(alopex_sql::TransactionIsolationLevel),
+    /// Transaction characteristics may only be set before transactional work.
+    #[error("SQL transaction characteristics are already locked")]
+    SqlTransactionCharacteristicsLocked,
     /// A named savepoint does not exist in the active transaction.
     #[error("savepoint not found: {0}")]
     SavepointNotFound(String),

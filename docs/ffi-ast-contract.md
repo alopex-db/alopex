@@ -8,7 +8,8 @@ Nim parser boundary.
 
 - Current contract version: `0.20.0`, returned by `alopex_parser_version()`.
 - Contract `0.20.0` adds transaction-control variants. `START TRANSACTION`
-  normalizes to `Begin`; savepoint controls retain their names.
+  normalizes to `Begin`; transaction characteristics and savepoint names are
+  retained.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -95,7 +96,8 @@ from invalid user SQL.
 | `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
 | `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
-| `Begin` | none |
+| `Begin` | `isolation_level: TransactionIsolationLevel?`, `access_mode: TransactionAccessMode?` |
+| `SetTransaction` | `isolation_level: TransactionIsolationLevel?`, `access_mode: TransactionAccessMode?` |
 | `Commit` | none |
 | `Rollback` | none |
 | `Savepoint` | `name: string` |
@@ -108,6 +110,11 @@ from invalid user SQL.
 | `CreateIndex` | `if_not_exists: bool`, `name: string`, `table: string`, `column: string`, `method: IndexMethod?`, `options: [IndexOption]`, `span: Span` |
 | `DropIndex` | `if_exists: bool`, `name: string`, `span: Span` |
 | `CreateContinuousAggregate` | `name: string`, `name_span: Span`, `query: Select`, `options: [ContinuousAggregateOption]`, `span: Span` |
+
+`TransactionIsolationLevel` is one of `ReadUncommitted`, `ReadCommitted`,
+`RepeatableRead`, or `Serializable`. `TransactionAccessMode` is `ReadOnly` or
+`ReadWrite`. The wire contract preserves every parsed value; the SQL session
+separately rejects isolation levels the engine cannot provide.
 
 `CreateContinuousAggregate.query` is a nested `Select` object with an explicit
 `"variant": "Select"` field. `ContinuousAggregateOption` preserves ordered

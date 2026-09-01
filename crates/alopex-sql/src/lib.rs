@@ -47,7 +47,7 @@ pub mod unified_error;
 
 // AST types
 pub use ast::{
-    PragmaValue, Statement, StatementKind,
+    PragmaValue, Statement, StatementKind, TransactionAccessMode, TransactionIsolationLevel,
     ddl::*,
     dml::*,
     expr::*,

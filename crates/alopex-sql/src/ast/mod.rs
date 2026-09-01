@@ -26,6 +26,22 @@ pub enum PragmaValue {
     Text(String),
 }
 
+/// SQL transaction isolation names accepted by the parser.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransactionIsolationLevel {
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+/// SQL transaction access mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransactionAccessMode {
+    ReadOnly,
+    ReadWrite,
+}
+
 impl Spanned for Statement {
     fn span(&self) -> Span {
         self.span
@@ -53,7 +69,15 @@ pub enum StatementKind {
     },
 
     /// Begin an explicit SQL transaction (`BEGIN` or `START TRANSACTION`).
-    Begin,
+    Begin {
+        isolation_level: Option<TransactionIsolationLevel>,
+        access_mode: Option<TransactionAccessMode>,
+    },
+    /// Set characteristics before the active transaction executes work.
+    SetTransaction {
+        isolation_level: Option<TransactionIsolationLevel>,
+        access_mode: Option<TransactionAccessMode>,
+    },
     /// Commit the active explicit SQL transaction.
     Commit,
     /// Roll back the active explicit SQL transaction.

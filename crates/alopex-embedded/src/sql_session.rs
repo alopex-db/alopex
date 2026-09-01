@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use alopex_sql::{AlopexDialect, ExecutionResult, Parser, StatementKind};
+use alopex_sql::{
+    AlopexDialect, ExecutionResult, Parser, StatementKind, TransactionAccessMode,
+    TransactionIsolationLevel,
+};
 
 use crate::{Database, Error, OwnedEmbeddedTransaction, Result, SqlResult, TxnMode};
 
@@ -15,11 +18,31 @@ pub enum SqlSessionState {
     Failed,
 }
 
+/// Effective characteristics for the current or next explicit SQL transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqlTransactionCharacteristics {
+    /// Engine mapping for the transaction's snapshot behavior.
+    pub isolation_level: TransactionIsolationLevel,
+    /// Whether SQL mutation statements are allowed.
+    pub access_mode: TransactionAccessMode,
+}
+
+impl Default for SqlTransactionCharacteristics {
+    fn default() -> Self {
+        Self {
+            isolation_level: TransactionIsolationLevel::RepeatableRead,
+            access_mode: TransactionAccessMode::ReadWrite,
+        }
+    }
+}
+
 /// A SQL session that owns at most one explicit embedded transaction.
 pub struct SqlSession {
     database: Arc<Database>,
     transaction: Option<OwnedEmbeddedTransaction>,
     state: SqlSessionState,
+    characteristics: SqlTransactionCharacteristics,
+    characteristics_locked: bool,
 }
 
 impl Database {
@@ -29,6 +52,8 @@ impl Database {
             database: Arc::clone(self),
             transaction: None,
             state: SqlSessionState::Idle,
+            characteristics: SqlTransactionCharacteristics::default(),
+            characteristics_locked: false,
         }
     }
 }
@@ -37,6 +62,11 @@ impl SqlSession {
     /// Return the current lifecycle state.
     pub fn state(&self) -> SqlSessionState {
         self.state
+    }
+
+    /// Return the effective explicit-transaction characteristics.
+    pub fn transaction_characteristics(&self) -> SqlTransactionCharacteristics {
+        self.characteristics
     }
 
     /// Execute exactly one SQL statement in this session.
@@ -48,23 +78,67 @@ impl SqlSession {
         }
 
         match &statements[0].kind {
-            StatementKind::Begin => self.begin(),
+            StatementKind::Begin {
+                isolation_level,
+                access_mode,
+            } => self.begin(*isolation_level, *access_mode),
+            StatementKind::SetTransaction {
+                isolation_level,
+                access_mode,
+            } => self.set_transaction(*isolation_level, *access_mode),
             StatementKind::Commit => self.commit(),
             StatementKind::Rollback => self.rollback(),
             StatementKind::Savepoint { name } => self.savepoint(name),
             StatementKind::RollbackToSavepoint { name } => self.rollback_to_savepoint(name),
             StatementKind::ReleaseSavepoint { name } => self.release_savepoint(name),
-            _ => self.execute_statement(sql),
+            kind => self.execute_statement(sql, kind),
         }
     }
 
-    fn begin(&mut self) -> Result<SqlResult> {
+    fn begin(
+        &mut self,
+        isolation_level: Option<TransactionIsolationLevel>,
+        access_mode: Option<TransactionAccessMode>,
+    ) -> Result<SqlResult> {
         if self.state != SqlSessionState::Idle {
             return Err(self.invalid("BEGIN"));
         }
-        self.transaction =
-            Some(Arc::clone(&self.database).begin_owned_embedded_transaction(TxnMode::ReadWrite)?);
+        Self::validate_isolation(isolation_level)?;
+        let characteristics = SqlTransactionCharacteristics {
+            isolation_level: isolation_level.unwrap_or(TransactionIsolationLevel::RepeatableRead),
+            access_mode: access_mode.unwrap_or(TransactionAccessMode::ReadWrite),
+        };
+        let mode = match characteristics.access_mode {
+            TransactionAccessMode::ReadOnly => TxnMode::ReadOnly,
+            TransactionAccessMode::ReadWrite => TxnMode::ReadWrite,
+        };
+        let transaction = Arc::clone(&self.database).begin_owned_embedded_transaction(mode)?;
+        self.transaction = Some(transaction);
+        self.characteristics = characteristics;
+        self.characteristics_locked = isolation_level.is_some() || access_mode.is_some();
         self.state = SqlSessionState::Active;
+        Ok(ExecutionResult::Success)
+    }
+
+    fn set_transaction(
+        &mut self,
+        isolation_level: Option<TransactionIsolationLevel>,
+        access_mode: Option<TransactionAccessMode>,
+    ) -> Result<SqlResult> {
+        if self.state != SqlSessionState::Active {
+            return Err(self.invalid("SET TRANSACTION"));
+        }
+        if self.characteristics_locked {
+            return Err(Error::SqlTransactionCharacteristicsLocked);
+        }
+        Self::validate_isolation(isolation_level)?;
+        if let Some(isolation_level) = isolation_level {
+            self.characteristics.isolation_level = isolation_level;
+        }
+        if let Some(access_mode) = access_mode {
+            self.characteristics.access_mode = access_mode;
+        }
+        self.characteristics_locked = true;
         Ok(ExecutionResult::Success)
     }
 
@@ -80,6 +154,7 @@ impl SqlSession {
         if result.is_ok() {
             self.transaction = None;
             self.state = SqlSessionState::Idle;
+            self.reset_characteristics();
         } else {
             self.state = SqlSessionState::Failed;
         }
@@ -100,6 +175,7 @@ impl SqlSession {
             .rollback();
         self.transaction = None;
         self.state = SqlSessionState::Idle;
+        self.reset_characteristics();
         result.map(|()| ExecutionResult::Success)
     }
 
@@ -107,6 +183,7 @@ impl SqlSession {
         if self.state != SqlSessionState::Active {
             return Err(self.invalid("SAVEPOINT"));
         }
+        self.characteristics_locked = true;
         self.transaction
             .as_mut()
             .expect("active SQL session owns a transaction")
@@ -121,6 +198,7 @@ impl SqlSession {
         ) {
             return Err(self.invalid("ROLLBACK TO SAVEPOINT"));
         }
+        self.characteristics_locked = true;
         self.transaction
             .as_mut()
             .expect("non-idle SQL session owns a transaction")
@@ -133,6 +211,7 @@ impl SqlSession {
         if self.state != SqlSessionState::Active {
             return Err(self.invalid("RELEASE SAVEPOINT"));
         }
+        self.characteristics_locked = true;
         self.transaction
             .as_mut()
             .expect("active SQL session owns a transaction")
@@ -140,10 +219,16 @@ impl SqlSession {
         Ok(ExecutionResult::Success)
     }
 
-    fn execute_statement(&mut self, sql: &str) -> Result<SqlResult> {
+    fn execute_statement(&mut self, sql: &str, kind: &StatementKind) -> Result<SqlResult> {
         match self.state {
             SqlSessionState::Idle => self.database.execute_sql(sql),
             SqlSessionState::Active => {
+                self.characteristics_locked = true;
+                if self.characteristics.access_mode == TransactionAccessMode::ReadOnly
+                    && !kind.is_query()
+                {
+                    return Err(Error::TxnReadOnly);
+                }
                 let result = self
                     .transaction
                     .as_mut()
@@ -163,6 +248,20 @@ impl SqlSession {
             statement,
             state: self.state,
         }
+    }
+
+    fn validate_isolation(level: Option<TransactionIsolationLevel>) -> Result<()> {
+        if level.is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead) {
+            return Err(Error::UnsupportedSqlTransactionIsolation(
+                level.expect("checked as some"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn reset_characteristics(&mut self) {
+        self.characteristics = SqlTransactionCharacteristics::default();
+        self.characteristics_locked = false;
     }
 }
 
@@ -452,5 +551,99 @@ mod tests {
         assert_eq!(session.state(), SqlSessionState::Active);
         session.execute_sql("COMMIT").unwrap();
         assert!(database.execute_sql("SELECT id FROM staged").is_err());
+    }
+
+    #[test]
+    fn repeatable_read_only_keeps_its_start_snapshot_and_rejects_mutation() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        database
+            .execute_sql("INSERT INTO items (id) VALUES (1)")
+            .unwrap();
+        let mut session = database.sql_session();
+        session
+            .execute_sql("START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .unwrap();
+
+        let ExecutionResult::Query(before) = session.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(before.rows.len(), 1);
+        database
+            .execute_sql("INSERT INTO items (id) VALUES (2)")
+            .unwrap();
+        let ExecutionResult::Query(after) = session.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(after.rows.len(), 1);
+        assert!(matches!(
+            session.execute_sql("INSERT INTO items (id) VALUES (3)"),
+            Err(Error::TxnReadOnly)
+        ));
+        assert_eq!(session.state(), SqlSessionState::Active);
+        session.execute_sql("COMMIT").unwrap();
+
+        let ExecutionResult::Query(committed) =
+            database.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(committed.rows.len(), 2);
+    }
+
+    #[test]
+    fn set_transaction_is_allowed_only_before_transactional_work() {
+        let database = Arc::new(Database::new());
+        let mut session = database.sql_session();
+        session.execute_sql("BEGIN").unwrap();
+        session
+            .execute_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .unwrap();
+        assert_eq!(
+            session.transaction_characteristics(),
+            SqlTransactionCharacteristics {
+                isolation_level: TransactionIsolationLevel::RepeatableRead,
+                access_mode: TransactionAccessMode::ReadOnly,
+            }
+        );
+        assert!(matches!(
+            session.execute_sql("CREATE TABLE blocked (id INTEGER)"),
+            Err(Error::TxnReadOnly)
+        ));
+        assert!(matches!(
+            session.execute_sql("SET TRANSACTION READ WRITE"),
+            Err(Error::SqlTransactionCharacteristicsLocked)
+        ));
+        session.execute_sql("ROLLBACK").unwrap();
+        assert_eq!(
+            session.transaction_characteristics(),
+            SqlTransactionCharacteristics::default()
+        );
+
+        session.execute_sql("BEGIN").unwrap();
+        session.execute_sql("SELECT 1").unwrap();
+        assert!(matches!(
+            session.execute_sql("SET TRANSACTION READ ONLY"),
+            Err(Error::SqlTransactionCharacteristicsLocked)
+        ));
+        session.execute_sql("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn unsupported_isolation_is_typed_and_does_not_start_a_transaction() {
+        let database = Arc::new(Database::new());
+        let mut session = database.sql_session();
+        assert!(matches!(
+            session.execute_sql("START TRANSACTION ISOLATION LEVEL SERIALIZABLE"),
+            Err(Error::UnsupportedSqlTransactionIsolation(
+                TransactionIsolationLevel::Serializable
+            ))
+        ));
+        assert_eq!(session.state(), SqlSessionState::Idle);
+        assert!(session.execute_sql("SELECT 1").is_ok());
     }
 }

@@ -1499,6 +1499,21 @@ proc writeNamedStatementKind(s: Stream; variant: string; node: SqlNode) =
   s.writeKey("name")
   s.pack_type(node.children[0].firstIdent())
 
+proc writeTransactionStatementKind(s: Stream; variant: string; node: SqlNode) =
+  s.pack_map(3)
+  s.writeKey("variant")
+  s.pack_type(variant)
+  s.writeKey("isolation_level")
+  if node.isolationLevel.len == 0:
+    s.writeNil()
+  else:
+    s.pack_type(node.isolationLevel)
+  s.writeKey("access_mode")
+  if node.accessMode.len == 0:
+    s.writeNil()
+  else:
+    s.pack_type(node.accessMode)
+
 const
   maxStagedPayloadBytes = 1_048_576
   maxStagedPayloadDepth = 128
@@ -1972,7 +1987,9 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
   of nkPragma:
     s.writePragmaKind(node)
   of nkBegin:
-    s.writeUnitStatementKind("Begin")
+    s.writeTransactionStatementKind("Begin", node)
+  of nkSetTransaction:
+    s.writeTransactionStatementKind("SetTransaction", node)
   of nkCommit:
     s.writeUnitStatementKind("Commit")
   of nkRollback:

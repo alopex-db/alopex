@@ -1874,15 +1874,82 @@ proc parsePragmaStmt(p: var Parser): SqlNode =
     else:
       p.error("expected integer or string pragma value")
 
+proc parseTransactionCharacteristics(p: var Parser; node: SqlNode;
+                                     required = false) =
+  var parsed = false
+  var expectAnother = false
+  while true:
+    if p.checkContextual("isolation"):
+      if node.isolationLevel.len > 0:
+        p.error("duplicate transaction isolation level")
+      discard p.advance()
+      discard p.expectContextual("level")
+      if p.checkContextual("repeatable"):
+        discard p.advance()
+        discard p.expectContextual("read")
+        node.isolationLevel = "RepeatableRead"
+      elif p.checkContextual("read"):
+        discard p.advance()
+        if p.checkContextual("uncommitted"):
+          discard p.advance()
+          node.isolationLevel = "ReadUncommitted"
+        elif p.checkContextual("committed"):
+          discard p.advance()
+          node.isolationLevel = "ReadCommitted"
+        else:
+          p.error("expected COMMITTED or UNCOMMITTED after READ")
+      elif p.checkContextual("serializable"):
+        discard p.advance()
+        node.isolationLevel = "Serializable"
+      else:
+        p.error("expected transaction isolation level")
+      parsed = true
+    elif p.checkContextual("read"):
+      if node.accessMode.len > 0:
+        p.error("duplicate transaction access mode")
+      discard p.advance()
+      if p.check(tkOnly):
+        discard p.advance()
+        node.accessMode = "ReadOnly"
+      elif p.checkContextual("write"):
+        discard p.advance()
+        node.accessMode = "ReadWrite"
+      else:
+        p.error("expected ONLY or WRITE after READ")
+      parsed = true
+    elif p.checkContextual("deferred") or p.checkContextual("immediate") or
+        p.checkContextual("exclusive"):
+      p.error("unsupported transaction characteristic")
+    elif expectAnother:
+      p.error("expected transaction characteristic after comma")
+    else:
+      break
+
+    if p.check(tkComma):
+      discard p.advance()
+      expectAnother = true
+    else:
+      break
+
+  if required and not parsed:
+    p.error("expected transaction characteristic")
+
 proc parseBeginStmt(p: var Parser): SqlNode =
   let start = p.advance()
   result = newNode(nkBegin, tokenSpan(start))
   if start.kind == tkStart:
-    let finish = p.expect(tkTransaction)
-    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+    discard p.expect(tkTransaction)
   elif p.check(tkTransaction):
-    let finish = p.advance()
-    result.span = spanThrough(tokenSpan(start), tokenSpan(finish))
+    discard p.advance()
+  p.parseTransactionCharacteristics(result)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(p.previous))
+
+proc parseSetTransactionStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkSet)
+  discard p.expect(tkTransaction)
+  result = newNode(nkSetTransaction, tokenSpan(start))
+  p.parseTransactionCharacteristics(result, required = true)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(p.previous))
 
 proc parseCommitStmt(p: var Parser): SqlNode =
   let start = p.expect(tkCommit)
@@ -1939,6 +2006,8 @@ proc parseStatement*(p: var Parser): SqlNode =
     result = p.parsePragmaStmt()
   of tkBegin, tkStart:
     result = p.parseBeginStmt()
+  of tkSet:
+    result = p.parseSetTransactionStmt()
   of tkCommit:
     result = p.parseCommitStmt()
   of tkRollback:
@@ -1948,7 +2017,7 @@ proc parseStatement*(p: var Parser): SqlNode =
   of tkRelease:
     result = p.parseReleaseSavepointStmt()
   else:
-    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
+    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()

@@ -16,7 +16,7 @@ use crate::ast::dml::{
 };
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
-use crate::ast::{Statement, StatementKind};
+use crate::ast::{Statement, StatementKind, TransactionAccessMode};
 use crate::catalog::{ColumnMetadata, IndexMetadata, MemoryCatalog, TableMetadata};
 use crate::{DataSourceFormat, TableType};
 
@@ -207,7 +207,14 @@ fn transaction_controls_require_session_dispatch() {
     let catalog = create_test_catalog();
     let planner = Planner::new(&catalog);
     for kind in [
-        StatementKind::Begin,
+        StatementKind::Begin {
+            isolation_level: None,
+            access_mode: None,
+        },
+        StatementKind::SetTransaction {
+            isolation_level: None,
+            access_mode: Some(TransactionAccessMode::ReadOnly),
+        },
         StatementKind::Commit,
         StatementKind::Rollback,
         StatementKind::Savepoint {

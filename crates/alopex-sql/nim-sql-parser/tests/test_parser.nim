@@ -1760,6 +1760,22 @@ suite "FETCH pagination (issue #152)":
     check released.children[0].strVal == "retry"
     check released.span.`end`.column == 23
 
+  test "transaction characteristics parse without silent fallback":
+    let started = parseSql(
+      "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    check started.kind == nkBegin
+    check started.isolationLevel == "RepeatableRead"
+    check started.accessMode == "ReadOnly"
+
+    let configured = parseSql(
+      "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE")
+    check configured.kind == nkSetTransaction
+    check configured.isolationLevel == "Serializable"
+    check configured.accessMode == "ReadWrite"
+
+    check parseErrorMessage("BEGIN DEFERRED").contains(
+      "unsupported transaction characteristic")
+
   test "transaction control words remain legal identifiers outside statement position":
     for name in ["begin", "start", "transaction", "commit", "rollback"]:
       check parseSql("SELECT " & name & " FROM " & name).kind == nkSelect

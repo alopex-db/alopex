@@ -31,6 +31,7 @@ type
     nkDropIndex
     nkPragma
     nkBegin
+    nkSetTransaction
     nkCommit
     nkRollback
     nkSavepoint
@@ -146,6 +147,9 @@ type
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind
     case kind*: SqlNodeKind
+    of nkBegin, nkSetTransaction:
+      isolationLevel*: string
+      accessMode*: string
     of nkIdentifier, nkStringLit, nkIntervalLit:
       strVal*: string
     of nkIntLit:
@@ -253,6 +257,8 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
   if node.span.isEmpty:
     node.span = fallback
   case node.kind
+  of nkBegin, nkSetTransaction:
+    discard
   of nkIdentifier, nkStringLit, nkIntervalLit, nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkStar:
     discard
   of nkBinaryOp:
@@ -294,6 +300,8 @@ proc `$`*(node: SqlNode): string =
   if node == nil:
     return "nil"
   case node.kind
+  of nkBegin, nkSetTransaction:
+    result = $node.kind & "(" & node.isolationLevel & ", " & node.accessMode & ")"
   of nkIdentifier:
     result = "Ident(" & node.strVal & ")"
   of nkStringLit:

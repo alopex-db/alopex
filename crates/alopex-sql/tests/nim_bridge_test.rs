@@ -3,7 +3,8 @@
 use alopex_sql::{
     AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
     InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span, Statement,
-    StatementKind, VectorMetric, WindowFrameBound, WindowFrameUnits, parser_contract_version,
+    StatementKind, TransactionAccessMode, TransactionIsolationLevel, VectorMetric,
+    WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
@@ -752,8 +753,8 @@ fn parses_transaction_control_statements_from_nim() {
         Parser::parse_sql(&AlopexDialect, "BEGIN; START TRANSACTION; COMMIT; ROLLBACK")
             .expect("transaction controls should parse");
 
-    assert!(matches!(statements[0].kind, StatementKind::Begin));
-    assert!(matches!(statements[1].kind, StatementKind::Begin));
+    assert!(matches!(statements[0].kind, StatementKind::Begin { .. }));
+    assert!(matches!(statements[1].kind, StatementKind::Begin { .. }));
     assert!(matches!(statements[2].kind, StatementKind::Commit));
     assert!(matches!(statements[3].kind, StatementKind::Rollback));
 }
@@ -777,6 +778,31 @@ fn parses_savepoint_control_statements_from_nim() {
     assert!(matches!(
         &statements[2].kind,
         StatementKind::ReleaseSavepoint { name } if name == "retry"
+    ));
+}
+
+#[test]
+fn parses_transaction_characteristics_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; \
+         SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+    )
+    .expect("transaction characteristics should parse");
+
+    assert!(matches!(
+        &statements[0].kind,
+        StatementKind::Begin {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            access_mode: Some(TransactionAccessMode::ReadOnly),
+        }
+    ));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::SetTransaction {
+            isolation_level: Some(TransactionIsolationLevel::Serializable),
+            access_mode: Some(TransactionAccessMode::ReadWrite),
+        }
     ));
 }
 
