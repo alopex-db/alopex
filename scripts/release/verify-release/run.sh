@@ -322,7 +322,7 @@ run_in_container() {
 }
 
 run_step "verify-release-embedded ビルド" \
-    "公開検証用の2つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
+    "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
     -- run_in_container bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
@@ -330,6 +330,7 @@ trap "rm -rf \"${tool_source}\"" EXIT
 mkdir -p "${tool_source}/src/bin"
 cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
 cp crates/alopex-tools/src/bin/demo_v08_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/verify_sql_transaction_failures.rs "${tool_source}/src/bin/"
 cat >"${tool_source}/src/bin/embedded-dependency-smoke.rs" <<'EOF'
 use alopex_embedded::Database;
 
@@ -361,6 +362,10 @@ path = "src/bin/demo_v08_embedded.rs"
 [[bin]]
 name = "embedded-dependency-smoke"
 path = "src/bin/embedded-dependency-smoke.rs"
+
+[[bin]]
+name = "verify-sql-transaction-failures"
+path = "src/bin/verify_sql_transaction_failures.rs"
 
 [dependencies]
 serde_json = "1.0"
@@ -400,6 +405,10 @@ run_step "公開版 alopex-embedded 実行時依存 smoke" \
     "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
     -- run_in_container bash -c \
     'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH /tools-target/release/embedded-dependency-smoke'
+
+run_step "公開版 SQL transaction failure conformance" \
+    "公開版 alopex-embedded の別プロセスを transaction 中に強制終了し、未 commit/rollback 済み書込みの不可視性、acknowledged commit の再起動後可視性、savepoint failure recovery、並行 session 競合を再検証する。" \
+    -- run_in_container /tools-target/release/verify-sql-transaction-failures
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
