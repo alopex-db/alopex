@@ -77,6 +77,8 @@ async fn async_txn_preserves_hnsw_index_consistency() {
                 span: Span::default(),
             },
         ]],
+        conflict: None,
+        returning: None,
     };
     let result = txn.execute_plan(insert).await.unwrap();
     assert!(matches!(result, ExecutionResult::RowsAffected(1)));
@@ -101,6 +103,8 @@ async fn async_txn_preserves_hnsw_index_consistency() {
                 span: Span::default(),
             },
         ]],
+        conflict: None,
+        returning: None,
     };
     let result = txn.execute_plan(insert).await.unwrap();
     assert!(matches!(result, ExecutionResult::RowsAffected(1)));

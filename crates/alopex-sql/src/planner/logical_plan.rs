@@ -1194,6 +1194,7 @@ mod tests {
             table,
             columns,
             values,
+            ..
         } = &plan
         {
             assert_eq!(table, "users");

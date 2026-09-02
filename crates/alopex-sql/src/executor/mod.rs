@@ -1102,6 +1102,8 @@ mod tests {
                 resolved_type: ResolvedType::Integer,
                 span: Span::default(),
             }]],
+            conflict: None,
+            returning: None,
         });
         assert!(matches!(result, Ok(ExecutionResult::RowsAffected(1))));
     }

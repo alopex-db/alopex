@@ -265,9 +265,11 @@ fn test_plan_create_table() {
                 data_type: DataType::Integer,
                 constraints: vec![
                     ColumnConstraint::PrimaryKey {
+                        name: None,
                         span: Span::empty(),
                     },
                     ColumnConstraint::NotNull {
+                        name: None,
                         span: Span::empty(),
                     },
                 ],
@@ -277,6 +279,7 @@ fn test_plan_create_table() {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 constraints: vec![ColumnConstraint::NotNull {
+                    name: None,
                     span: Span::empty(),
                 }],
                 span: span(),
@@ -910,6 +913,8 @@ fn test_plan_insert_with_columns() {
         source: InsertSource::Values {
             values: vec![vec![int_lit(1), str_lit("Alice")]],
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
@@ -920,6 +925,7 @@ fn test_plan_insert_with_columns() {
         table,
         columns,
         values,
+        ..
     } = result.unwrap()
     {
         assert_eq!(table, "users");
@@ -942,6 +948,8 @@ fn test_plan_insert_without_columns() {
         source: InsertSource::Values {
             values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
@@ -971,6 +979,8 @@ fn test_plan_insert_multiple_rows() {
                 vec![int_lit(3), str_lit("Gizmo")],
             ],
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
@@ -995,6 +1005,8 @@ fn test_plan_insert_column_count_mismatch() {
         source: InsertSource::Values {
             values: vec![vec![int_lit(1)]], // Missing value
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
@@ -1020,6 +1032,8 @@ fn test_plan_insert_null_constraint_violation() {
         source: InsertSource::Values {
             values: vec![vec![int_lit(1), null_lit()]], // name is NOT NULL
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
@@ -1047,6 +1061,8 @@ fn test_plan_update() {
             span: span(),
         }],
         selection: Some(binary_op(col_ref(None, "id"), BinaryOp::Eq, int_lit(1))),
+        from: vec![],
+        returning: vec![],
         span: span(),
     };
 
@@ -1057,6 +1073,7 @@ fn test_plan_update() {
         table,
         assignments,
         filter,
+        ..
     } = result.unwrap()
     {
         assert_eq!(table, "users");
@@ -1081,6 +1098,8 @@ fn test_plan_update_without_where() {
             span: span(),
         }],
         selection: None,
+        from: vec![],
+        returning: vec![],
         span: span(),
     };
 
@@ -1107,6 +1126,8 @@ fn test_plan_update_null_constraint_violation() {
             span: span(),
         }],
         selection: None,
+        from: vec![],
+        returning: vec![],
         span: span(),
     };
 
@@ -1129,13 +1150,15 @@ fn test_plan_delete() {
     let delete = Delete {
         table: "users".to_string(),
         selection: Some(binary_op(col_ref(None, "id"), BinaryOp::Eq, int_lit(1))),
+        using: vec![],
+        returning: vec![],
         span: span(),
     };
 
     let result = planner.plan(&stmt(StatementKind::Delete(delete)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::Delete { table, filter } = result.unwrap() {
+    if let LogicalPlan::Delete { table, filter, .. } = result.unwrap() {
         assert_eq!(table, "users");
         assert!(filter.is_some());
     } else {
@@ -1151,6 +1174,8 @@ fn test_plan_delete_without_where() {
     let delete = Delete {
         table: "users".to_string(),
         selection: None,
+        using: vec![],
+        returning: vec![],
         span: span(),
     };
 
@@ -1172,6 +1197,8 @@ fn test_plan_delete_table_not_found() {
     let delete = Delete {
         table: "nonexistent".to_string(),
         selection: None,
+        using: vec![],
+        returning: vec![],
         span: span(),
     };
 
@@ -1202,6 +1229,8 @@ fn test_plan_insert_type_compatible() {
         source: InsertSource::Values {
             values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
         },
+        on_conflict: None,
+        returning: vec![],
         span: span(),
     };
 
