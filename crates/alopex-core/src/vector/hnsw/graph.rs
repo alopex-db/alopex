@@ -543,7 +543,7 @@ impl HnswGraph {
                     .node(chosen)
                     .map(|node| {
                         self.distance_raw(
-                            &self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
+                            self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
                             &node.vector,
                         )
                     })

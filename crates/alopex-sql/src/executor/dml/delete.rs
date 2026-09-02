@@ -1,3 +1,5 @@
+#![allow(clippy::while_let_on_iterator)]
+
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;

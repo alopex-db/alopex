@@ -232,8 +232,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 path,
                 options,
-                direction,
-            } if direction == crate::ast::CopyDirection::To => {
+                direction: crate::ast::CopyDirection::To,
+            } => {
                 let catalog = self.catalog.read().expect("catalog lock poisoned");
                 let header = options.iter().any(|option| {
                     option.name.eq_ignore_ascii_case("header")
@@ -687,8 +687,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 table,
                 path,
                 options,
-                direction,
-            } if direction == crate::ast::CopyDirection::To => {
+                direction: crate::ast::CopyDirection::To,
+            } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 let header = options.iter().any(|option| {
                     option.name.eq_ignore_ascii_case("header")

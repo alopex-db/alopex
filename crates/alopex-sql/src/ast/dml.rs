@@ -259,6 +259,7 @@ pub struct OnConflict {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
 pub enum OnConflictAction {
     DoNothing,
     DoUpdate {

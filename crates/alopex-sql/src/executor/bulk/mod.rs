@@ -239,16 +239,15 @@ fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<
                 path: file_path.into(),
                 reason: error.to_string(),
             })?;
-    if let Some(base_dirs) = &config.allowed_base_dirs {
-        if !base_dirs
+    if let Some(base_dirs) = &config.allowed_base_dirs
+        && !base_dirs
             .iter()
             .any(|base| canonical_parent.starts_with(base))
-        {
-            return Err(ExecutorError::PathValidationFailed {
-                path: file_path.into(),
-                reason: "path not in allowed directories".into(),
-            });
-        }
+    {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "path not in allowed directories".into(),
+        });
     }
     Ok(())
 }
