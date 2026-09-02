@@ -177,6 +177,12 @@ impl HnswGraph {
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
         validate_dimensions(self.config.dimension, vector.len())?;
         if let Some(node_id) = self.find_node_id(key) {
+            let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
+            for other in self.nodes.iter_mut().flatten() {
+                for neighbors in &mut other.neighbors {
+                    neighbors.retain(|&neighbor| neighbor != node_id);
+                }
+            }
             let Some(node) = self
                 .nodes
                 .get_mut(node_id as usize)
@@ -194,10 +200,57 @@ impl HnswGraph {
                 self.deleted_count = self.deleted_count.saturating_sub(1);
                 self.active_count = self.active_count.saturating_add(1);
             }
+            if !was_deleted || self.entry_point.is_some() {
+                self.reconnect_existing(node_id)?;
+            }
             Ok(node_id)
         } else {
             self.insert(key, vector, metadata)
         }
+    }
+
+    fn reconnect_existing(&mut self, node_id: u32) -> Result<()> {
+        let Some(node) = self.node(node_id) else {
+            return Ok(());
+        };
+        let level = node.neighbors.len().saturating_sub(1);
+        let Some(mut enter_point) = self.entry_point.filter(|&id| id != node_id) else {
+            self.entry_point = Some(node_id);
+            self.max_level = level;
+            return Ok(());
+        };
+        if self.node(enter_point).is_none_or(|n| n.deleted) {
+            if let Some(new_entry) = self.select_new_entry_point() {
+                enter_point = new_entry;
+            }
+        }
+        let baseline = self.max_level;
+        let vector = self
+            .node(node_id)
+            .map(|n| n.vector.clone())
+            .unwrap_or_default();
+        for l in (0..=level.min(baseline)).rev() {
+            let candidates =
+                self.search_layer(&vector, enter_point, l, self.config.ef_construction, None);
+            let max_conn = if l == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
+            let selected: Vec<ScoredEntry> = candidates
+                .into_iter()
+                .filter(|entry| entry.node_id != node_id)
+                .collect();
+            let selected = self.select_neighbors_heuristic(&selected, max_conn);
+            self.connect_new_node(node_id, &selected, l);
+            for &neighbor in &selected {
+                self.prune_neighbors(neighbor, l, max_conn);
+            }
+            if let Some(&first) = selected.first() {
+                enter_point = first;
+            }
+        }
+        Ok(())
     }
 
     /// Executes a top-k search. Returns results and search statistics.
