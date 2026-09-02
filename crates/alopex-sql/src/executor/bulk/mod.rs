@@ -4,7 +4,7 @@
 //! `SqlValue` へ変換する。Columnar ストレージも Row ストレージと同じ経路で
 //! 取り込み、将来の columnar エンジン実装で差し替え可能な構造にしている。
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -154,35 +154,73 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
     validate_output_path(file_path, config)?;
-    let mut file =
-        File::create(file_path).map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-    if options.header {
-        writeln!(
-            file,
-            "{}",
-            table
-                .columns
-                .iter()
-                .map(|column| csv_escape(&column.name))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-    }
-    let mut rows = 0u64;
-    let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
-    let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
-    for (key, encoded) in entries {
-        let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
-        if table_id != table.table_id {
-            continue;
+    let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
+    let result = (|| {
+        if options.header {
+            writeln!(
+                file,
+                "{}",
+                table
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
         }
-        let values = crate::storage::RowCodec::decode(&encoded)?;
-        let line = values.iter().map(csv_value).collect::<Vec<_>>().join(",");
-        writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-        rows = rows.saturating_add(1);
+        let mut rows = 0u64;
+        let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+        let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
+        for (key, encoded) in entries {
+            let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+            if table_id != table.table_id {
+                continue;
+            }
+            let values = crate::storage::RowCodec::decode(&encoded)?;
+            let line = values.iter().map(csv_value).collect::<Vec<_>>().join(",");
+            writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            rows = rows.saturating_add(1);
+        }
+        file.flush()
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        drop(file);
+        fs::rename(&temporary_path, file_path)
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        Ok(ExecutionResult::RowsAffected(rows))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
     }
-    Ok(ExecutionResult::RowsAffected(rows))
+    result
+}
+
+fn create_copy_temp_file(file_path: &str) -> Result<(PathBuf, File)> {
+    let output = Path::new(file_path);
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "output path must contain a file name".into(),
+        })?;
+    let pid = std::process::id();
+    for attempt in 0..16u32 {
+        let temporary_path = parent.join(format!(".{name}.alopex-copy-{pid}-{attempt}.tmp"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => return Ok((temporary_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(ExecutorError::BulkLoad(error.to_string())),
+        }
+    }
+    Err(ExecutorError::BulkLoad(
+        "could not allocate a temporary COPY output".into(),
+    ))
 }
 
 fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
