@@ -10,8 +10,8 @@
     {"api":"RETURNING","status":"reference-compatible","reference":"postgresql:dml-returning","evidence":"crates/alopex-embedded/tests/advanced_dml.rs"},
     {"api":"ON CONFLICT","status":"reference-compatible","reference":"postgresql:sql-insert","evidence":"crates/alopex-embedded/tests/advanced_dml.rs"},
     {"api":"CHECK/FK constraints","status":"reference-compatible","reference":"sqlite:foreignkeys","evidence":"crates/alopex-embedded/tests/constraints.rs"},
-    {"api":"COPY","status":"not-yet-implemented","reference":"postgresql:sql-copy","evidence":"crates/alopex-sql/tests/copy_bulk_load.rs","issue":172},
-    {"api":"SERIAL/IDENTITY/SEQUENCE","status":"not-yet-implemented","reference":"postgresql:ddl-rowsecurity","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs","issue":173},
+    {"api":"COPY","status":"known-divergence","reference":"postgresql:sql-copy","evidence":"crates/alopex-embedded/tests/copy_sql.rs","issue":172,"notes":"Table-to-file CSV COPY TO and file-to-table CSV/Parquet COPY FROM are implemented; query, stdin/stdout, and atomic streaming semantics remain unsupported."},
+    {"api":"SERIAL/IDENTITY/SEQUENCE","status":"known-divergence","reference":"postgresql:create-sequence","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs;crates/alopex-embedded/tests/sequence.rs","issue":173,"notes":"Nim AST compatibility and transactional CREATE/ALTER/DROP sequence metadata plus allocator primitives are implemented; automatic SERIAL/IDENTITY defaults and SQL nextval wiring remain unsupported."},
     {"api":"VECTOR/HNSW","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/tests"},
     {"api":"PRAGMA","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/src/planner/mod.rs"},
     {"api":"information_schema","status":"reference-compatible","reference":"postgresql:infoschema","evidence":"crates/alopex-sql/tests"}
