@@ -482,6 +482,7 @@ pub enum LogicalPlan {
         path: String,
         direction: crate::ast::CopyDirection,
         options: Vec<crate::ast::CopyOption>,
+        query: Option<Box<LogicalPlan>>,
     },
 
     /// CREATE SEQUENCE metadata operation.
@@ -981,7 +982,13 @@ impl LogicalPlan {
             | LogicalPlan::InsertSelect { table, .. }
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
-            LogicalPlan::Copy { table, .. } => Some(table),
+            LogicalPlan::Copy { table, query, .. } => {
+                if table.is_empty() {
+                    query.as_deref().and_then(Self::table_name)
+                } else {
+                    Some(table)
+                }
+            }
             LogicalPlan::CreateSequence(_)
             | LogicalPlan::AlterSequence(_)
             | LogicalPlan::DropSequence(_) => None,

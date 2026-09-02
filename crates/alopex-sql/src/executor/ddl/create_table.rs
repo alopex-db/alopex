@@ -76,6 +76,19 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     catalog.create_table(table.clone())?;
 
+    for column in &table.columns {
+        if let Some(sequence) = &column.generated_sequence {
+            super::sequence::create_generated(
+                txn,
+                sequence.clone(),
+                column
+                    .generated_sequence_options
+                    .clone()
+                    .unwrap_or_default(),
+            )?;
+        }
+    }
+
     for index in unique_indexes.iter().cloned() {
         if let Err(err) = catalog.create_index(index) {
             let _ = catalog.drop_table(&table.name);

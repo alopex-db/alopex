@@ -229,10 +229,43 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             } => self.execute_create_index(index, if_not_exists),
             LogicalPlan::DropIndex { name, if_exists } => self.execute_drop_index(&name, if_exists),
             LogicalPlan::Copy {
+                query: Some(_),
+                direction: crate::ast::CopyDirection::From,
+                ..
+            } => Err(ExecutorError::InvalidOperation {
+                operation: "COPY FROM".into(),
+                reason: "COPY FROM requires a table source and file input".into(),
+            }),
+            LogicalPlan::Copy {
+                query: Some(query),
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                ..
+            } => {
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let ExecutionResult::Query(result) = self.execute_query(*query)? else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "COPY TO".into(),
+                        reason: "query source did not return rows".into(),
+                    });
+                };
+                bulk::execute_copy_query_to(
+                    &result,
+                    &path,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::Copy {
                 table,
                 path,
                 options,
                 direction: crate::ast::CopyDirection::To,
+                query: None,
             } => {
                 let catalog = self.catalog.read().expect("catalog lock poisoned");
                 let header = options.iter().any(|option| {
@@ -260,6 +293,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 path,
                 options,
+                direction: crate::ast::CopyDirection::From,
+                query: None,
                 ..
             } => {
                 let catalog = self.catalog.read().expect("catalog lock poisoned");
@@ -684,10 +719,46 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 )
             }
             LogicalPlan::Copy {
+                query: Some(_),
+                direction: crate::ast::CopyDirection::From,
+                ..
+            } => Err(ExecutorError::InvalidOperation {
+                operation: "COPY FROM".into(),
+                reason: "COPY FROM requires a table source and file input".into(),
+            }),
+            LogicalPlan::Copy {
+                query: Some(query),
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                ..
+            } => {
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let ExecutionResult::Query(result) =
+                    query::execute_query(&mut sql_txn, &view, *query)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "COPY TO".into(),
+                        reason: "query source did not return rows".into(),
+                    });
+                };
+                bulk::execute_copy_query_to(
+                    &result,
+                    &path,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::Copy {
                 table,
                 path,
                 options,
                 direction: crate::ast::CopyDirection::To,
+                query: None,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 let header = options.iter().any(|option| {
@@ -713,6 +784,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 table,
                 path,
                 options,
+                direction: crate::ast::CopyDirection::From,
+                query: None,
                 ..
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
@@ -913,6 +986,18 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         catalog
             .persist_create_table(txn.inner_mut(), &table)
             .map_err(Self::map_catalog_error)?;
+        for column in &table.columns {
+            if let Some(sequence) = &column.generated_sequence {
+                ddl::sequence::create_generated(
+                    txn,
+                    sequence.clone(),
+                    column
+                        .generated_sequence_options
+                        .clone()
+                        .unwrap_or_default(),
+                )?;
+            }
+        }
         if let Some(index) = &pk_index {
             catalog
                 .persist_create_index(txn.inner_mut(), index)

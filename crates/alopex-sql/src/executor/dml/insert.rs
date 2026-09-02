@@ -74,6 +74,7 @@ fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
             .find(|c| {
                 !columns.iter().any(|col| col == &c.name)
                     && c.default.is_none()
+                    && c.generated_sequence.is_none()
                     && (c.not_null || c.primary_key)
             })
             .map(|c| c.name.clone())
@@ -206,7 +207,16 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
 ) -> Result<ExecutionResult> {
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
-    for row in rows {
+    for mut row in rows {
+        for (index, column) in table.columns.iter().enumerate() {
+            if row[index].is_null()
+                && let Some(sequence) = &column.generated_sequence
+            {
+                let value = super::super::ddl::sequence::next_value(txn, sequence)?;
+                row[index] =
+                    normalize_assignment_value(SqlValue::BigInt(value), &column.data_type)?;
+            }
+        }
         if let Some(plan) = conflict {
             if let Some((row_id, old_row)) = find_conflict(txn, table, plan, &row)? {
                 match &plan.action {

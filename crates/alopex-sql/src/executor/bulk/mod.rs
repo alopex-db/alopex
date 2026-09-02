@@ -5,7 +5,7 @@
 //! 取り込み、将来の columnar エンジン実装で差し替え可能な構造にしている。
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use alopex_core::columnar::encoding::{Column, LogicalType};
@@ -109,17 +109,38 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
 
-    validate_file_path(file_path, config)?;
+    if file_path != "-" {
+        validate_file_path(file_path, config)?;
+    }
 
-    if !Path::new(file_path).exists() {
+    if file_path != "-" && !Path::new(file_path).exists() {
         return Err(ExecutorError::FileNotFound(file_path.to_string()));
     }
 
     let reader: Box<dyn BulkReader> = match format {
         FileFormat::Parquet => {
+            if file_path == "-" {
+                return Err(ExecutorError::UnsupportedFormat(
+                    "COPY FROM STDIN currently supports CSV only".into(),
+                ));
+            }
             Box::new(ParquetReader::open(file_path, &table_meta, options.header)?)
         }
-        FileFormat::Csv => Box::new(CsvReader::open(file_path, &table_meta, options.header)?),
+        FileFormat::Csv => {
+            if file_path == "-" {
+                let mut content = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut content)
+                    .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+                Box::new(CsvReader::from_content(
+                    content,
+                    &table_meta,
+                    options.header,
+                )?)
+            } else {
+                Box::new(CsvReader::open(file_path, &table_meta, options.header)?)
+            }
+        }
     };
 
     validate_schema(reader.schema(), &table_meta)?;
@@ -153,6 +174,34 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    if file_path == "-" {
+        let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+        let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
+        if options.header {
+            println!(
+                "{}",
+                table
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        let mut rows = 0u64;
+        for (key, encoded) in entries {
+            let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+            if table_id == table.table_id {
+                let values = crate::storage::RowCodec::decode(&encoded)?;
+                println!(
+                    "{}",
+                    values.iter().map(csv_value).collect::<Vec<_>>().join(",")
+                );
+                rows = rows.saturating_add(1);
+            }
+        }
+        return Ok(ExecutionResult::RowsAffected(rows));
+    }
     validate_output_path(file_path, config)?;
     let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
     let result = (|| {
@@ -188,6 +237,67 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         fs::rename(&temporary_path, file_path)
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
         Ok(ExecutionResult::RowsAffected(rows))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+/// Write a materialized query result to a local CSV file using the same atomic
+/// replacement semantics as table COPY TO.
+pub fn execute_copy_query_to(
+    result: &crate::executor::QueryResult,
+    file_path: &str,
+    options: CopyOptions,
+    config: &CopySecurityConfig,
+) -> Result<ExecutionResult> {
+    if file_path == "-" {
+        if options.header {
+            println!(
+                "{}",
+                result
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        for row in &result.rows {
+            println!(
+                "{}",
+                row.iter().map(csv_value).collect::<Vec<_>>().join(",")
+            );
+        }
+        return Ok(ExecutionResult::RowsAffected(result.rows.len() as u64));
+    }
+    validate_output_path(file_path, config)?;
+    let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
+    let result = (|| {
+        if options.header {
+            writeln!(
+                file,
+                "{}",
+                result
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        }
+        for row in &result.rows {
+            let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
+            writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        }
+        file.flush()
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        drop(file);
+        fs::rename(&temporary_path, file_path)
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        Ok(ExecutionResult::RowsAffected(result.rows.len() as u64))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);

@@ -17,7 +17,10 @@ impl CsvReader {
     pub fn open(path: &str, table_meta: &TableMetadata, header: bool) -> Result<Self> {
         let content = fs::read_to_string(path)
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to read CSV: {e}")))?;
+        Self::from_content(content, table_meta, header)
+    }
 
+    pub fn from_content(content: String, table_meta: &TableMetadata, header: bool) -> Result<Self> {
         let mut lines = content.lines();
         let header_names: Option<Vec<String>> = if header {
             lines

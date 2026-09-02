@@ -19,8 +19,8 @@ All notable changes to this project will be documented in this file.
 - Added relational constraints and advanced DML (`RETURNING`, `ON CONFLICT`,
   joined DML, and MERGE validation) with transactional enforcement (#170,
   #171).
-- Added transactional table/file CSV COPY, sequence DDL, and SQL `nextval`
-  allocation (#172, #173).
+- Added transactional table/query/file/stdin/stdout CSV COPY, sequence DDL,
+  SQL `nextval`, and persisted SERIAL/IDENTITY allocation (#172, #173).
 - Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of
   truncating eager CSV results at the first 1,024-row batch (#304).
 

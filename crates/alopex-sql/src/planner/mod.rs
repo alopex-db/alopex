@@ -220,6 +220,27 @@ fn view_dependencies(query: &Select) -> Result<Vec<String>, PlannerError> {
 
 pub(crate) fn column_metadata_from_def(col: &ColumnDef) -> ColumnMetadata {
     let mut meta = ColumnMetadata::new(col.name.clone(), ResolvedType::from_ast(&col.data_type));
+    let auto_sequence = matches!(
+        col.data_type,
+        crate::ast::ddl::DataType::SmallSerial
+            | crate::ast::ddl::DataType::Serial
+            | crate::ast::ddl::DataType::BigSerial
+    );
+    let identity_options = col
+        .constraints
+        .iter()
+        .find_map(|constraint| match constraint {
+            ColumnConstraint::Identity { options, .. } => Some(options.clone()),
+            _ => None,
+        });
+    if auto_sequence || identity_options.is_some() {
+        meta = meta.with_generated_sequence(crate::executor::ddl::sequence::generated_name(
+            "pending", &col.name,
+        ));
+        if let Some(options) = identity_options {
+            meta = meta.with_generated_sequence_options(options);
+        }
+    }
     for constraint in &col.constraints {
         match constraint {
             ColumnConstraint::NotNull { .. } => meta.not_null = true,
@@ -1006,17 +1027,32 @@ impl TableReferenceExtractor {
                 }
             }
             LogicalPlan::Copy {
-                table, direction, ..
-            } => push_table_reference(
-                references,
                 table,
-                if *direction == CopyDirection::From {
-                    root_access
+                direction,
+                query,
+                ..
+            } => {
+                if let Some(query) = query {
+                    self.extract_plan(
+                        query,
+                        TableReferenceAccess::Read,
+                        scan_source,
+                        diagnostics,
+                        references,
+                    );
                 } else {
-                    TableReferenceAccess::Read
-                },
-                TableReferenceSource::LogicalPlanMutationTarget,
-            ),
+                    push_table_reference(
+                        references,
+                        table,
+                        if *direction == CopyDirection::From {
+                            root_access
+                        } else {
+                            TableReferenceAccess::Read
+                        },
+                        TableReferenceSource::LogicalPlanMutationTarget,
+                    );
+                }
+            }
             LogicalPlan::CreateTable { table, .. } => push_table_reference(
                 references,
                 &table.name,
@@ -1723,8 +1759,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Convert column definitions to metadata
-        let columns: Vec<ColumnMetadata> =
+        let mut columns: Vec<ColumnMetadata> =
             stmt.columns.iter().map(column_metadata_from_def).collect();
+        for column in &mut columns {
+            if column.generated_sequence.is_some() {
+                column.generated_sequence = Some(crate::executor::ddl::sequence::generated_name(
+                    &stmt.name,
+                    &column.name,
+                ));
+            }
+        }
 
         // Collect primary key from table constraints
         let primary_key = Self::extract_primary_key(stmt);
@@ -1933,38 +1977,69 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     }
 
     fn plan_copy(&self, stmt: &crate::ast::CopyStatement) -> Result<LogicalPlan, PlannerError> {
-        let CopySource::Table { name, columns } = &stmt.source else {
-            return Err(PlannerError::unsupported_feature(
-                "COPY query source",
-                "COPY table",
-                stmt.span,
-            ));
+        let path = match &stmt.target {
+            CopyTarget::File { path } => path.clone(),
+            CopyTarget::Stdin => "-".to_string(),
+            CopyTarget::Stdout => "-".to_string(),
         };
-        let CopyTarget::File { path } = &stmt.target else {
-            return Err(PlannerError::unsupported_feature(
-                "COPY stdin/stdout",
-                "COPY file",
-                stmt.span,
-            ));
-        };
-        let table = self
-            .catalog
-            .get_table(name)
-            .ok_or_else(|| PlannerError::table_not_found(name, stmt.span))?;
-        if !columns.is_empty()
-            && columns
-                .iter()
-                .any(|column| !table.columns.iter().any(|c| c.name == *column))
+        if matches!(stmt.target, CopyTarget::Stdin)
+            && stmt.direction != crate::ast::CopyDirection::From
         {
-            return Err(PlannerError::invalid_expression(
-                "COPY column does not exist".to_string(),
+            return Err(PlannerError::unsupported_feature(
+                "COPY TO STDIN",
+                "COPY FROM STDIN",
+                stmt.span,
             ));
         }
+        if matches!(stmt.target, CopyTarget::Stdout)
+            && stmt.direction != crate::ast::CopyDirection::To
+        {
+            return Err(PlannerError::unsupported_feature(
+                "COPY FROM STDOUT",
+                "COPY TO STDOUT",
+                stmt.span,
+            ));
+        }
+        let (table, query) = match &stmt.source {
+            CopySource::Table { name, columns } => {
+                let table = self
+                    .catalog
+                    .get_table(name)
+                    .ok_or_else(|| PlannerError::table_not_found(name, stmt.span))?;
+                if !columns.is_empty()
+                    && columns
+                        .iter()
+                        .any(|column| !table.columns.iter().any(|c| c.name == *column))
+                {
+                    return Err(PlannerError::invalid_expression(
+                        "COPY column does not exist".to_string(),
+                    ));
+                }
+                (name.clone(), None)
+            }
+            CopySource::Query { query } => {
+                if stmt.direction != crate::ast::CopyDirection::To {
+                    return Err(PlannerError::unsupported_feature(
+                        "COPY query source for FROM",
+                        "COPY table",
+                        stmt.span,
+                    ));
+                }
+                (
+                    String::new(),
+                    Some(Box::new(
+                        self.plan_query_body_relation(query, &[], &CtePlans::new())?
+                            .plan,
+                    )),
+                )
+            }
+        };
         Ok(LogicalPlan::Copy {
-            table: name.clone(),
-            path: path.clone(),
+            table,
+            path,
             direction: stmt.direction,
             options: stmt.options.clone(),
+            query,
         })
     }
 

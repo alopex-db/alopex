@@ -313,7 +313,7 @@ pub struct DropIndex {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SequenceOptions {
     pub start: Option<i64>,
     pub increment: Option<i64>,

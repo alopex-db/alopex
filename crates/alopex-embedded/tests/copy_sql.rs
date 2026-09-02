@@ -48,3 +48,25 @@ fn copy_to_csv_is_available_through_sql() {
     assert!(content.contains("id,name"));
     assert!(content.contains("1,alice"));
 }
+
+#[test]
+fn copy_query_to_csv_is_available_through_sql() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    db.execute_sql("INSERT INTO users VALUES (1, 'alice'), (2, 'bob')")
+        .unwrap();
+    let output = tempfile::NamedTempFile::new().unwrap();
+    let sql = format!(
+        "COPY (SELECT name, id FROM users ORDER BY id) TO '{}' WITH (FORMAT CSV, HEADER TRUE)",
+        output.path().display()
+    );
+    assert_eq!(
+        db.execute_sql(&sql).unwrap(),
+        ExecutionResult::RowsAffected(2)
+    );
+    let content = fs::read_to_string(output.path()).unwrap();
+    assert!(content.contains("name,id"));
+    assert!(content.contains("alice,1"));
+    assert!(content.contains("bob,2"));
+}

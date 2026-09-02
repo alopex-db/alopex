@@ -9,6 +9,11 @@ use crate::storage::SqlTxn;
 
 const PREFIX: &[u8] = b"__sequence__/";
 
+/// Build the reserved sequence name used by SERIAL and IDENTITY columns.
+pub fn generated_name(table: &str, column: &str) -> String {
+    format!("__alopex_auto__{table}__{column}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SequenceState {
     next_value: i64,
@@ -99,6 +104,24 @@ pub fn create<'txn, S: KVStore + 'txn>(
         encode(&state_from_options(&statement.options)?)?,
     )?;
     Ok(ExecutionResult::Success)
+}
+
+/// Create an implicit sequence for a SERIAL/IDENTITY column.
+pub fn create_generated<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    name: String,
+    options: SequenceOptions,
+) -> Result<()> {
+    let _ = create(
+        txn,
+        CreateSequence {
+            if_not_exists: false,
+            name,
+            options,
+            span: crate::ast::Span::default(),
+        },
+    )?;
+    Ok(())
 }
 
 pub fn alter<'txn, S: KVStore + 'txn>(

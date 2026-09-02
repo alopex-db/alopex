@@ -411,6 +411,10 @@ pub struct PersistedColumnMeta {
     pub not_null: bool,
     pub primary_key: bool,
     pub unique: bool,
+    #[serde(default)]
+    pub generated_sequence: Option<String>,
+    #[serde(default)]
+    pub generated_sequence_options: Option<crate::ast::ddl::SequenceOptions>,
 }
 
 impl From<&ColumnMetadata> for PersistedColumnMeta {
@@ -421,16 +425,25 @@ impl From<&ColumnMetadata> for PersistedColumnMeta {
             not_null: value.not_null,
             primary_key: value.primary_key,
             unique: value.unique,
+            generated_sequence: value.generated_sequence.clone(),
+            generated_sequence_options: value.generated_sequence_options.clone(),
         }
     }
 }
 
 impl From<PersistedColumnMeta> for ColumnMetadata {
     fn from(value: PersistedColumnMeta) -> Self {
-        ColumnMetadata::new(value.name, value.data_type.into())
+        let mut metadata = ColumnMetadata::new(value.name, value.data_type.into())
             .with_not_null(value.not_null)
             .with_primary_key(value.primary_key)
-            .with_unique(value.unique)
+            .with_unique(value.unique);
+        if let Some(sequence) = value.generated_sequence {
+            metadata = metadata.with_generated_sequence(sequence);
+        }
+        if let Some(options) = value.generated_sequence_options {
+            metadata = metadata.with_generated_sequence_options(options);
+        }
+        metadata
     }
 }
 

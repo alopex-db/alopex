@@ -3,6 +3,7 @@
 //! This module defines [`TableMetadata`] and [`ColumnMetadata`] which store
 //! schema information for tables and their columns.
 
+use crate::ast::ddl::SequenceOptions;
 use crate::ast::ddl::TableConstraint;
 use crate::ast::expr::Expr;
 use crate::catalog::persistent::{DataSourceFormat, TableType};
@@ -237,6 +238,10 @@ pub struct ColumnMetadata {
     pub unique: bool,
     /// DEFAULT value expression.
     pub default: Option<Expr>,
+    /// Internal sequence used by SERIAL/IDENTITY columns.
+    pub generated_sequence: Option<String>,
+    /// Sequence options declared by an IDENTITY column.
+    pub generated_sequence_options: Option<SequenceOptions>,
 }
 
 impl ColumnMetadata {
@@ -251,6 +256,8 @@ impl ColumnMetadata {
             primary_key: false,
             unique: false,
             default: None,
+            generated_sequence: None,
+            generated_sequence_options: None,
         }
     }
 
@@ -275,6 +282,18 @@ impl ColumnMetadata {
     /// Set the DEFAULT value.
     pub fn with_default(mut self, default: Expr) -> Self {
         self.default = Some(default);
+        self
+    }
+
+    /// Set the internal sequence used for automatic integer generation.
+    pub fn with_generated_sequence(mut self, sequence: impl Into<String>) -> Self {
+        self.generated_sequence = Some(sequence.into());
+        self
+    }
+
+    /// Set sequence options for an automatically generated column.
+    pub fn with_generated_sequence_options(mut self, options: SequenceOptions) -> Self {
+        self.generated_sequence_options = Some(options);
         self
     }
 }
