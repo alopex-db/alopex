@@ -478,7 +478,28 @@ impl HnswGraph {
                 .total_cmp(&a.score)
                 .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
         });
-        sorted.into_iter().take(max).map(|c| c.node_id).collect()
+        let mut selected = Vec::with_capacity(max);
+        for candidate in sorted {
+            if selected.len() >= max {
+                break;
+            }
+            let diverse = selected.iter().all(|&chosen| {
+                let similarity = self
+                    .node(chosen)
+                    .map(|node| {
+                        self.distance_raw(
+                            &self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
+                            &node.vector,
+                        )
+                    })
+                    .unwrap_or(f32::NEG_INFINITY);
+                similarity < candidate.score
+            });
+            if diverse || selected.is_empty() {
+                selected.push(candidate.node_id);
+            }
+        }
+        selected
     }
 
     fn connect_new_node(&mut self, node_id: u32, neighbors: &[u32], level: usize) {
