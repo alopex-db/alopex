@@ -234,18 +234,29 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 columns,
                 values,
-            } => self.execute_insert(&table, columns, values),
+                conflict,
+                returning,
+            } => self.execute_insert(&table, columns, values, conflict, returning),
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
-            } => self.execute_insert_select(&table, columns, *source),
+                conflict,
+                returning,
+            } => self.execute_insert_select(&table, columns, *source, conflict, returning),
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
-            } => self.execute_update(&table, assignments, filter),
-            LogicalPlan::Delete { table, filter } => self.execute_delete(&table, filter),
+                join_source,
+                returning,
+            } => self.execute_update(&table, assignments, filter, join_source, returning),
+            LogicalPlan::Delete {
+                table,
+                filter,
+                join_source,
+                returning,
+            } => self.execute_delete(&table, filter, join_source, returning),
 
             // Query Operations
             LogicalPlan::Scan { .. }
@@ -361,9 +372,15 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         columns: Vec<String>,
         values: Vec<Vec<crate::planner::TypedExpr>>,
+        conflict: Option<crate::planner::OnConflictPlan>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_insert(txn, &*catalog, table, columns, values))
+        self.run_in_write_txn(|txn| {
+            dml::execute_insert_with_plan(
+                txn, &*catalog, table, columns, values, conflict, returning,
+            )
+        })
     }
 
     fn execute_insert_select(
@@ -371,6 +388,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         columns: Vec<String>,
         source: LogicalPlan,
+        conflict: Option<crate::planner::OnConflictPlan>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| {
@@ -381,7 +400,15 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     reason: "SELECT source did not return query rows".into(),
                 });
             };
-            dml::execute_insert_rows(txn, &*catalog, table, columns, result.rows)
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*catalog,
+                table,
+                columns,
+                result.rows,
+                conflict,
+                returning,
+            )
         })
     }
 
@@ -390,18 +417,41 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         assignments: Vec<crate::planner::TypedAssignment>,
         filter: Option<crate::planner::TypedExpr>,
+        join_source: Option<crate::planner::JoinedDmlSource>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_update(txn, &*catalog, table, assignments, filter))
+        self.run_in_write_txn(|txn| {
+            dml::execute_update_with_returning(
+                txn,
+                &*catalog,
+                table,
+                assignments,
+                filter,
+                join_source,
+                returning,
+            )
+        })
     }
 
     fn execute_delete(
         &mut self,
         table: &str,
         filter: Option<crate::planner::TypedExpr>,
+        join_source: Option<crate::planner::JoinedDmlSource>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_delete(txn, &*catalog, table, filter))
+        self.run_in_write_txn(|txn| {
+            dml::execute_delete_with_returning(
+                txn,
+                &*catalog,
+                table,
+                filter,
+                join_source,
+                returning,
+            )
+        })
     }
 
     // ========================================================================
@@ -553,14 +603,26 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 table,
                 columns,
                 values,
+                conflict,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_insert(&mut sql_txn, &view, &table, columns, values)
+                dml::execute_insert_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    columns,
+                    values,
+                    conflict,
+                    returning,
+                )
             }
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
+                conflict,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 let ExecutionResult::Query(result) =
@@ -571,19 +633,49 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                         reason: "SELECT source did not return query rows".into(),
                     });
                 };
-                dml::execute_insert_rows(&mut sql_txn, &view, &table, columns, result.rows)
+                dml::execute_insert_rows_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    columns,
+                    result.rows,
+                    conflict,
+                    returning,
+                )
             }
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
+                join_source,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_update(&mut sql_txn, &view, &table, assignments, filter)
+                dml::execute_update_with_returning(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    assignments,
+                    filter,
+                    join_source,
+                    returning,
+                )
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete {
+                table,
+                filter,
+                join_source,
+                returning,
+            } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_delete(&mut sql_txn, &view, &table, filter)
+                dml::execute_delete_with_returning(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    filter,
+                    join_source,
+                    returning,
+                )
             }
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }

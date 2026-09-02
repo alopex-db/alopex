@@ -24,7 +24,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.24.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.25.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -181,6 +181,9 @@ proc normalizedDataTypeName(name: string): string =
   of "INT": "Int"
   of "SMALLINT": "Int"
   of "BIGINT": "BigInt"
+  of "SMALLSERIAL": "SmallSerial"
+  of "SERIAL": "Serial"
+  of "BIGSERIAL": "BigSerial"
   of "FLOAT": "Float"
   of "REAL": "Float"
   of "DOUBLE": "Double"
@@ -218,6 +221,7 @@ proc writeStatement(s: Stream; node: SqlNode)
 proc writeExpr(s: Stream; node: SqlNode)
 proc writeFromItem(s: Stream; node: SqlNode; publicWire = true)
 proc writeDataType(s: Stream; node: SqlNode)
+proc writeSequenceOptions(s: Stream; options: seq[string])
 proc writeSelectKind(s: Stream; node: SqlNode)
 proc writeQueryBody(s: Stream; node: SqlNode)
 
@@ -489,31 +493,77 @@ proc writeIndexOptions(s: Stream; node: SqlNode) =
   for opt in node.children:
     s.writeIndexOption(opt)
 
+proc referentialActionVariant(action: string): string =
+  case action.toUpperAscii()
+  of "RESTRICT": "Restrict"
+  of "CASCADE": "Cascade"
+  of "SET NULL": "SetNull"
+  else: "NoAction"
+
+proc sequenceOption(options: seq[string]; name: string): string =
+  let prefix = name & "="
+  for option in options:
+    if option.startsWith(prefix): return option[prefix.len .. ^1]
+
+proc writeOptionalSequenceInt(s: Stream; options: seq[string]; name: string) =
+  let value = sequenceOption(options, name)
+  if value.len == 0: s.writeNil() else: s.pack_type(parseBiggestInt(value).int64)
+
+proc writeSequenceOptions(s: Stream; options: seq[string]) =
+  s.pack_map(9)
+  for name in ["START", "INCREMENT", "MINVALUE", "MAXVALUE"]:
+    s.writeKey(case name
+      of "MINVALUE": "min_value"
+      of "MAXVALUE": "max_value"
+      else: name.toLowerAscii())
+    s.writeOptionalSequenceInt(options, name)
+  s.writeKey("cache")
+  let cache = sequenceOption(options, "CACHE")
+  if cache.len == 0: s.writeNil() else: s.pack_type(parseBiggestUInt(cache).uint64)
+  s.writeKey("cycle")
+  if "CYCLE" in options: s.pack_type(true)
+  elif "NO CYCLE" in options: s.pack_type(false)
+  else: s.writeNil()
+  s.writeKey("restart")
+  s.writeOptionalSequenceInt(options, "RESTART")
+  s.writeKey("restart_default")
+  s.pack_type("RESTART" in options)
+  s.writeKey("owned_by")
+  let owner = sequenceOption(options, "OWNED BY")
+  if owner.len == 0: s.writeNil() else: s.pack_type(owner)
+
 proc writeColumnConstraint(s: Stream; node: SqlNode) =
-  let name = node.firstIdent().toUpperAscii()
-  case name
+  let kind = (if node.constraintKind.len > 0: node.constraintKind else: node.firstIdent()).toUpperAscii()
+  template writeName() =
+    s.writeKey("name")
+    if node.constraintName.len > 0: s.pack_type(node.constraintName) else: s.writeNil()
+  case kind
   of "NOT NULL":
-    s.pack_map(2)
+    s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("NotNull")
+    writeName()
     s.writeKey("span")
     s.writeSpan(node.span)
   of "PRIMARY KEY":
-    s.pack_map(2)
+    s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("PrimaryKey")
+    writeName()
     s.writeKey("span")
     s.writeSpan(node.span)
   of "UNIQUE":
-    s.pack_map(2)
+    s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("Unique")
+    writeName()
     s.writeKey("span")
     s.writeSpan(node.span)
   of "DEFAULT":
-    s.pack_map(3)
+    s.pack_map(4)
     s.writeKey("variant")
     s.pack_type("Default")
+    writeName()
     s.writeKey("value")
     if node.children.len > 1:
       s.writeExpr(node.children[1])
@@ -521,10 +571,50 @@ proc writeColumnConstraint(s: Stream; node: SqlNode) =
       s.writeNil()
     s.writeKey("span")
     s.writeSpan(node.span)
+  of "CHECK":
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("Check")
+    writeName()
+    s.writeKey("expression")
+    s.writeExpr(node.constraintExpression)
+    s.writeKey("span")
+    s.writeSpan(node.span)
+  of "REFERENCES":
+    s.pack_map(9)
+    s.writeKey("variant")
+    s.pack_type("References")
+    writeName()
+    s.writeKey("table")
+    s.pack_type(node.referencedTable)
+    s.writeKey("columns")
+    s.pack_array(node.referencedColumns.len)
+    for column in node.referencedColumns: s.pack_type(column)
+    s.writeKey("on_delete")
+    s.pack_type(referentialActionVariant(node.onDeleteAction))
+    s.writeKey("on_update")
+    s.pack_type(referentialActionVariant(node.onUpdateAction))
+    s.writeKey("deferrable")
+    s.pack(node.constraintDeferrable)
+    s.writeKey("initially_deferred")
+    s.pack(node.initiallyDeferred)
+    s.writeKey("span")
+    s.writeSpan(node.span)
+  of "IDENTITY":
+    s.pack_map(5)
+    s.writeKey("variant")
+    s.pack_type("Identity")
+    writeName()
+    s.writeKey("generation")
+    s.pack_type(if node.statementAction == "ALWAYS": "Always" else: "ByDefault")
+    s.writeKey("options")
+    s.writeSequenceOptions(node.sequenceOptions)
+    s.writeKey("span")
+    s.writeSpan(node.span)
   else:
     s.pack_map(2)
     s.writeKey("variant")
-    s.pack_type(name)
+    s.pack_type(kind)
     s.writeKey("span")
     s.writeSpan(node.span)
 
@@ -542,19 +632,53 @@ proc writeColumnDef(s: Stream; node: SqlNode) =
   s.writeSpan(node.span)
 
 proc writeTableConstraint(s: Stream; node: SqlNode) =
-  s.pack_map(3)
-  s.writeKey("variant")
-  s.pack_type("PrimaryKey")
-  s.writeKey("columns")
-  var startIdx = 0
-  if node.children.len > 0 and node.children[0].kind == nkIdentifier and
-      node.children[0].strVal.toUpperAscii() in ["PRIMARY", "UNIQUE", "FOREIGN", "CONSTRAINT"]:
-    startIdx = 1
-  s.pack_array(max(node.children.len - startIdx, 0))
-  for i in startIdx ..< node.children.len:
-    s.pack_type(node.children[i].firstIdent())
-  s.writeKey("span")
-  s.writeSpan(node.span)
+  let kind = (if node.constraintKind.len > 0: node.constraintKind else: node.firstIdent()).toUpperAscii()
+  template writeName() =
+    s.writeKey("name")
+    if node.constraintName.len > 0: s.pack_type(node.constraintName) else: s.writeNil()
+  template writeColumns(key: string; columns: seq[string]) =
+    s.writeKey(key)
+    s.pack_array(columns.len)
+    for column in columns: s.pack_type(column)
+  case kind
+  of "PRIMARY KEY", "UNIQUE":
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type(if kind == "PRIMARY KEY": "PrimaryKey" else: "Unique")
+    writeName()
+    writeColumns("columns", node.constraintColumns)
+    s.writeKey("span")
+    s.writeSpan(node.span)
+  of "CHECK":
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("Check")
+    writeName()
+    s.writeKey("expression")
+    s.writeExpr(node.constraintExpression)
+    s.writeKey("span")
+    s.writeSpan(node.span)
+  of "FOREIGN KEY":
+    s.pack_map(10)
+    s.writeKey("variant")
+    s.pack_type("ForeignKey")
+    writeName()
+    writeColumns("columns", node.constraintColumns)
+    s.writeKey("referenced_table")
+    s.pack_type(node.referencedTable)
+    writeColumns("referenced_columns", node.referencedColumns)
+    s.writeKey("on_delete")
+    s.pack_type(referentialActionVariant(node.onDeleteAction))
+    s.writeKey("on_update")
+    s.pack_type(referentialActionVariant(node.onUpdateAction))
+    s.writeKey("deferrable")
+    s.pack(node.constraintDeferrable)
+    s.writeKey("initially_deferred")
+    s.pack(node.initiallyDeferred)
+    s.writeKey("span")
+    s.writeSpan(node.span)
+  else:
+    raise newException(ValueError, "unsupported table constraint " & kind)
 
 proc writeDataType(s: Stream; node: SqlNode) =
   let rawName = node.firstIdent()
@@ -1289,14 +1413,70 @@ proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writeReturning(s: Stream; node: SqlNode) =
+  if node == nil:
+    s.pack_array(0)
+  else:
+    s.pack_array(node.children.len)
+    for item in node.children: s.writeSelectItem(item)
+
+proc writeAssignments(s: Stream; node: SqlNode) =
+  s.pack_array(node.children.len)
+  for assignmentNode in node.children:
+    s.pack_map(3)
+    s.writeKey("column")
+    s.pack_type(assignmentNode.binLeft.firstIdent())
+    s.writeKey("value")
+    s.writeExpr(assignmentNode.binRight)
+    s.writeKey("span")
+    s.writeSpan(assignmentNode.span)
+
+proc writeOnConflict(s: Stream; node: SqlNode) =
+  if node == nil:
+    s.writeNil()
+    return
+  s.pack_map(4)
+  s.writeKey("columns")
+  s.pack_array(node.constraintColumns.len)
+  for column in node.constraintColumns: s.pack_type(column)
+  s.writeKey("constraint")
+  if node.constraintName.len == 0: s.writeNil() else: s.pack_type(node.constraintName)
+  s.writeKey("action")
+  if node.statementAction == "NOTHING":
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("DoNothing")
+  else:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("DoUpdate")
+    s.writeKey("assignments")
+    s.writeAssignments(node.children[0])
+    s.writeKey("selection")
+    if node.children.len > 1: s.writeExpr(node.children[1].children[0]) else: s.writeNil()
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
 proc writeInsertKind(s: Stream; node: SqlNode) =
   let tableName = node.children[0].firstIdent()
   # カラムリストは nkColumnList、VALUES 行は nkExprList。children 数からの
   # 推測は「カラムリスト省略 × 多行 VALUES」で先頭行を列リストと誤判別する
   # (issue #40) ため、ノード種別で判定する。
   let hasColumns = node.children.len > 1 and node.children[1].kind == nkColumnList
+  let firstRow = if hasColumns: 2 else: 1
 
-  s.pack_map(5)
+  var conflictNode, returningNode: SqlNode
+  var rows: seq[SqlNode] = @[]
+  var queryNode: SqlNode
+  for i in firstRow ..< node.children.len:
+    case node.children[i].kind
+    of nkExprList: rows.add(node.children[i])
+    of nkSelect, nkValues: queryNode = node.children[i]
+    of nkOnConflict: conflictNode = node.children[i]
+    of nkReturningClause: returningNode = node.children[i]
+    else: discard
+
+  s.pack_map(7)
   s.writeKey("variant")
   s.pack_type("Insert")
   s.writeKey("table")
@@ -1308,69 +1488,152 @@ proc writeInsertKind(s: Stream; node: SqlNode) =
       s.pack_type(col.firstIdent())
   else:
     s.writeNil()
-  let firstRow = if hasColumns: 2 else: 1
-  let source = if node.children.len > firstRow: node.children[firstRow] else: nil
   s.writeKey("source")
-  if source != nil and source.kind == nkSelect:
+  if queryNode != nil and queryNode.kind == nkSelect:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Select")
     s.writeKey("select")
-    s.writeSelectKind(source)
-  elif source != nil and source.kind == nkValues:
+    s.writeSelectKind(queryNode)
+  elif queryNode != nil and queryNode.kind == nkValues:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Query")
     s.writeKey("query")
-    s.writeQueryBody(source)
+    s.writeQueryBody(queryNode)
   else:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Values")
     s.writeKey("values")
-    s.pack_array(max(node.children.len - firstRow, 0))
-    for i in firstRow ..< node.children.len:
-      s.writeExprSeq(node.children[i].children)
+    s.pack_array(rows.len)
+    for row in rows: s.writeExprSeq(row.children)
+  s.writeKey("on_conflict")
+  s.writeOnConflict(conflictNode)
+  s.writeKey("returning")
+  s.writeReturning(returningNode)
   s.writeKey("span")
   s.writeSpan(node.span)
 
 proc writeUpdateKind(s: Stream; node: SqlNode) =
-  s.pack_map(5)
+  var fromNode, selectionNode, returningNode: SqlNode
+  for child in node.children:
+    case child.kind
+    of nkFromClause: fromNode = child
+    of nkWhereClause: selectionNode = child
+    of nkReturningClause: returningNode = child
+    else: discard
+  s.pack_map(7)
   s.writeKey("variant")
   s.pack_type("Update")
   s.writeKey("table")
   s.pack_type(node.children[0].firstIdent())
   s.writeKey("assignments")
-  s.pack_array(node.children[1].children.len)
-  for assignmentNode in node.children[1].children:
-    s.pack_map(3)
-    s.writeKey("column")
-    s.pack_type(assignmentNode.binLeft.firstIdent())
-    s.writeKey("value")
-    s.writeExpr(assignmentNode.binRight)
-    s.writeKey("span")
-    s.writeSpan(assignmentNode.span)
-  s.writeKey("selection")
-  if node.children.len > 2:
-    s.writeExpr(node.children[2].children[0])
+  s.writeAssignments(node.children[1])
+  s.writeKey("from")
+  if fromNode == nil: s.pack_array(0)
   else:
-    s.writeNil()
+    s.pack_array(fromNode.children.len)
+    for item in fromNode.children: s.writeFromItem(item)
+  s.writeKey("selection")
+  if selectionNode == nil: s.writeNil() else: s.writeExpr(selectionNode.children[0])
+  s.writeKey("returning")
+  s.writeReturning(returningNode)
   s.writeKey("span")
   s.writeSpan(node.span)
 
 proc writeDeleteKind(s: Stream; node: SqlNode) =
-  s.pack_map(4)
+  var usingNode, selectionNode, returningNode: SqlNode
+  for child in node.children:
+    case child.kind
+    of nkFromClause: usingNode = child
+    of nkWhereClause: selectionNode = child
+    of nkReturningClause: returningNode = child
+    else: discard
+  s.pack_map(6)
   s.writeKey("variant")
   s.pack_type("Delete")
   s.writeKey("table")
   s.pack_type(node.children[0].firstIdent())
-  s.writeKey("selection")
-  if node.children.len > 1:
-    s.writeExpr(node.children[1].children[0])
+  s.writeKey("using")
+  if usingNode == nil: s.pack_array(0)
   else:
-    s.writeNil()
+    s.pack_array(usingNode.children.len)
+    for item in usingNode.children: s.writeFromItem(item)
+  s.writeKey("selection")
+  if selectionNode == nil: s.writeNil() else: s.writeExpr(selectionNode.children[0])
+  s.writeKey("returning")
+  s.writeReturning(returningNode)
   s.writeKey("span")
   s.writeSpan(node.span)
+
+proc writeMergeKind(s: Stream; node: SqlNode) =
+  var returningNode: SqlNode
+  var clauses: seq[SqlNode] = @[]
+  for i in 3 ..< node.children.len:
+    if node.children[i].kind == nkMergeWhen: clauses.add(node.children[i])
+    elif node.children[i].kind == nkReturningClause: returningNode = node.children[i]
+  s.pack_map(7)
+  s.writeKey("variant"); s.pack_type("Merge")
+  s.writeKey("target"); s.writeFromItem(node.children[0])
+  s.writeKey("source"); s.writeFromItem(node.children[1])
+  s.writeKey("on"); s.writeExpr(node.children[2])
+  s.writeKey("clauses")
+  s.pack_array(clauses.len)
+  for clause in clauses:
+    s.pack_map(4)
+    s.writeKey("matched"); s.pack_type(clause.constraintKind == "MATCHED")
+    s.writeKey("condition"); s.writeExprOpt(clause.constraintExpression)
+    s.writeKey("action")
+    case clause.statementAction
+    of "UPDATE":
+      s.pack_map(2); s.writeKey("variant"); s.pack_type("Update")
+      s.writeKey("assignments"); s.writeAssignments(clause.children[0])
+    of "DELETE":
+      s.pack_map(1); s.writeKey("variant"); s.pack_type("Delete")
+    of "INSERT":
+      let hasColumns = clause.children.len > 1 and clause.children[0].kind == nkColumnList
+      let values = clause.children[if hasColumns: 1 else: 0]
+      s.pack_map(3); s.writeKey("variant"); s.pack_type("Insert")
+      s.writeKey("columns")
+      if hasColumns:
+        s.pack_array(clause.children[0].children.len)
+        for column in clause.children[0].children: s.pack_type(column.firstIdent())
+      else: s.pack_array(0)
+      s.writeKey("values"); s.writeExprSeq(values.children)
+    else:
+      s.pack_map(1); s.writeKey("variant"); s.pack_type("DoNothing")
+    s.writeKey("span"); s.writeSpan(clause.span)
+  s.writeKey("returning"); s.writeReturning(returningNode)
+  s.writeKey("span"); s.writeSpan(node.span)
+
+proc writeCopyKind(s: Stream; node: SqlNode) =
+  s.pack_map(6)
+  s.writeKey("variant"); s.pack_type("Copy")
+  s.writeKey("source")
+  if node.children[0].kind in {nkSelect, nkValues}:
+    s.pack_map(2); s.writeKey("variant"); s.pack_type("Query")
+    s.writeKey("query"); s.writeQueryBody(node.children[0])
+  else:
+    s.pack_map(3); s.writeKey("variant"); s.pack_type("Table")
+    s.writeKey("name"); s.pack_type(node.children[0].firstIdent())
+    s.writeKey("columns"); s.pack_array(node.constraintColumns.len)
+    for column in node.constraintColumns: s.pack_type(column)
+  s.writeKey("direction"); s.pack_type(if node.copyDirection == "FROM": "From" else: "To")
+  s.writeKey("target")
+  case node.copyTarget
+  of "FILE":
+    s.pack_map(2); s.writeKey("variant"); s.pack_type("File")
+    s.writeKey("path"); s.pack_type(node.statementAction)
+  of "STDIN": s.pack_map(1); s.writeKey("variant"); s.pack_type("Stdin")
+  else: s.pack_map(1); s.writeKey("variant"); s.pack_type("Stdout")
+  s.writeKey("options")
+  s.pack_array(node.copyOptions.len)
+  for option in node.copyOptions:
+    let parts = option.split('=', 1)
+    s.pack_map(2); s.writeKey("name"); s.pack_type(parts[0])
+    s.writeKey("value"); s.pack_type(if parts.len > 1: parts[1] else: "TRUE")
+  s.writeKey("span"); s.writeSpan(node.span)
 
 proc writeCreateTableKind(s: Stream; node: SqlNode) =
   var ifNotExistsFlag = false
@@ -1611,6 +1874,27 @@ proc writeDropIndexKind(s: Stream; node: SqlNode) =
   s.pack_type(node.children[nameIdx].firstIdent())
   s.writeKey("span")
   s.writeSpan(node.span)
+
+proc writeSequenceKind(s: Stream; node: SqlNode; variant: string) =
+  let marker = if variant == "CreateSequence": "IF NOT EXISTS" else: "IF EXISTS"
+  let hasMarker = node.children.len > 1 and node.children[0].firstIdent() == marker
+  let nameIdx = if hasMarker: 1 else: 0
+  s.pack_map(5)
+  s.writeKey("variant"); s.pack_type(variant)
+  s.writeKey(if variant == "CreateSequence": "if_not_exists" else: "if_exists")
+  s.pack_type(hasMarker)
+  s.writeKey("name"); s.pack_type(node.children[nameIdx].firstIdent())
+  s.writeKey("options"); s.writeSequenceOptions(node.sequenceOptions)
+  s.writeKey("span"); s.writeSpan(node.span)
+
+proc writeDropSequenceKind(s: Stream; node: SqlNode) =
+  let ifExists = node.children.len > 1 and node.children[0].firstIdent() == "IF EXISTS"
+  let nameIdx = if ifExists: 1 else: 0
+  s.pack_map(4)
+  s.writeKey("variant"); s.pack_type("DropSequence")
+  s.writeKey("if_exists"); s.pack_type(ifExists)
+  s.writeKey("name"); s.pack_type(node.children[nameIdx].firstIdent())
+  s.writeKey("span"); s.writeSpan(node.span)
 
 proc writePragmaKind(s: Stream; node: SqlNode) =
   s.pack_map(4)
@@ -2135,6 +2419,10 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeUpdateKind(node)
   of nkDelete:
     s.writeDeleteKind(node)
+  of nkMerge:
+    s.writeMergeKind(node)
+  of nkCopy:
+    s.writeCopyKind(node)
   of nkCreateTable:
     s.writeCreateTableKind(node)
   of nkDropTable:
@@ -2151,6 +2439,12 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeCreateIndexKind(node)
   of nkDropIndex:
     s.writeDropIndexKind(node)
+  of nkCreateSequence:
+    s.writeSequenceKind(node, "CreateSequence")
+  of nkAlterSequence:
+    s.writeSequenceKind(node, "AlterSequence")
+  of nkDropSequence:
+    s.writeDropSequenceKind(node)
   of nkPragma:
     s.writePragmaKind(node)
   of nkBegin:

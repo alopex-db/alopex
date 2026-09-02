@@ -461,6 +461,14 @@ struct PersistedTableMetaV1 {
 
 impl From<&TableMetadata> for PersistedTableMeta {
     fn from(value: &TableMetadata) -> Self {
+        let mut properties = value.properties.clone();
+        if !value.constraints.is_empty() {
+            properties.insert(
+                crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
+                serde_json::to_string(&value.constraints)
+                    .expect("relational constraints must serialize"),
+            );
+        }
         Self {
             table_id: value.table_id,
             name: value.name.clone(),
@@ -477,7 +485,7 @@ impl From<&TableMetadata> for PersistedTableMeta {
             storage_options: value.storage_options.clone().into(),
             storage_location: value.storage_location.clone(),
             comment: value.comment.clone(),
-            properties: value.properties.clone(),
+            properties,
         }
     }
 }
@@ -502,6 +510,11 @@ impl From<PersistedTableMeta> for TableMetadata {
         table.storage_location = value.storage_location;
         table.comment = value.comment;
         table.properties = value.properties;
+        table.constraints = table
+            .properties
+            .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
         table
     }
 }

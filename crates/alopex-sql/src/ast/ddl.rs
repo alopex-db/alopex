@@ -57,6 +57,9 @@ pub enum DataType {
     Integer,
     Int,
     BigInt,
+    SmallSerial,
+    Serial,
+    BigSerial,
     Float,
     Double,
     Text,
@@ -108,16 +111,103 @@ pub enum VectorMetric {
 // variant for no measurable gain.
 #[allow(clippy::large_enum_variant)]
 pub enum ColumnConstraint {
-    NotNull { span: Span },
-    PrimaryKey { span: Span },
-    Unique { span: Span },
-    Default { value: Expr, span: Span },
+    NotNull {
+        #[serde(default)]
+        name: Option<String>,
+        span: Span,
+    },
+    PrimaryKey {
+        #[serde(default)]
+        name: Option<String>,
+        span: Span,
+    },
+    Unique {
+        #[serde(default)]
+        name: Option<String>,
+        span: Span,
+    },
+    Default {
+        #[serde(default)]
+        name: Option<String>,
+        value: Expr,
+        span: Span,
+    },
+    Check {
+        #[serde(default)]
+        name: Option<String>,
+        expression: Box<Expr>,
+        span: Span,
+    },
+    References {
+        #[serde(default)]
+        name: Option<String>,
+        table: String,
+        #[serde(default)]
+        columns: Vec<String>,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+        deferrable: bool,
+        initially_deferred: bool,
+        span: Span,
+    },
+    Identity {
+        #[serde(default)]
+        name: Option<String>,
+        generation: IdentityGeneration,
+        options: SequenceOptions,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdentityGeneration {
+    Always,
+    ByDefault,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReferentialAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
 pub enum TableConstraint {
-    PrimaryKey { columns: Vec<String>, span: Span },
+    PrimaryKey {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+        span: Span,
+    },
+    Unique {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+        span: Span,
+    },
+    Check {
+        #[serde(default)]
+        name: Option<String>,
+        expression: Box<Expr>,
+        span: Span,
+    },
+    ForeignKey {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+        referenced_table: String,
+        #[serde(default)]
+        referenced_columns: Vec<String>,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+        deferrable: bool,
+        initially_deferred: bool,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +313,42 @@ pub struct DropIndex {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SequenceOptions {
+    pub start: Option<i64>,
+    pub increment: Option<i64>,
+    pub min_value: Option<i64>,
+    pub max_value: Option<i64>,
+    pub cache: Option<u64>,
+    pub cycle: Option<bool>,
+    pub restart: Option<i64>,
+    pub restart_default: bool,
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSequence {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub options: SequenceOptions,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterSequence {
+    pub if_exists: bool,
+    pub name: String,
+    pub options: SequenceOptions,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropSequence {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
 impl Spanned for CreateTable {
     fn span(&self) -> Span {
         self.span
@@ -250,9 +376,12 @@ impl Spanned for ColumnDef {
 impl Spanned for ColumnConstraint {
     fn span(&self) -> Span {
         match self {
-            ColumnConstraint::NotNull { span }
-            | ColumnConstraint::PrimaryKey { span }
-            | ColumnConstraint::Unique { span }
+            ColumnConstraint::NotNull { span, .. }
+            | ColumnConstraint::PrimaryKey { span, .. }
+            | ColumnConstraint::Unique { span, .. }
+            | ColumnConstraint::Check { span, .. }
+            | ColumnConstraint::References { span, .. }
+            | ColumnConstraint::Identity { span, .. }
             | ColumnConstraint::Default { span, .. } => *span,
         }
     }
@@ -261,7 +390,10 @@ impl Spanned for ColumnConstraint {
 impl Spanned for TableConstraint {
     fn span(&self) -> Span {
         match self {
-            TableConstraint::PrimaryKey { span, .. } => *span,
+            TableConstraint::PrimaryKey { span, .. }
+            | TableConstraint::Unique { span, .. }
+            | TableConstraint::Check { span, .. }
+            | TableConstraint::ForeignKey { span, .. } => *span,
         }
     }
 }
@@ -309,6 +441,22 @@ impl Spanned for IndexOption {
 }
 
 impl Spanned for DropIndex {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for CreateSequence {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+impl Spanned for AlterSequence {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+impl Spanned for DropSequence {
     fn span(&self) -> Span {
         self.span
     }

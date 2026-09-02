@@ -3,12 +3,14 @@
 //! This module defines [`TableMetadata`] and [`ColumnMetadata`] which store
 //! schema information for tables and their columns.
 
+use crate::ast::ddl::TableConstraint;
 use crate::ast::expr::Expr;
 use crate::catalog::persistent::{DataSourceFormat, TableType};
 use crate::planner::types::ResolvedType;
 
 pub const VIEW_DEFINITION_PROPERTY: &str = "alopex.view.definition";
 pub const VIEW_DEPENDENCIES_PROPERTY: &str = "alopex.view.dependencies";
+pub const RELATIONAL_CONSTRAINTS_PROPERTY: &str = "alopex.relational.constraints";
 use std::collections::HashMap;
 
 /// Storage layout for a table.
@@ -100,6 +102,8 @@ pub struct TableMetadata {
     pub columns: Vec<ColumnMetadata>,
     /// Primary key columns (supports composite keys).
     pub primary_key: Option<Vec<String>>,
+    /// CHECK, UNIQUE, and FOREIGN KEY definitions in declaration order.
+    pub constraints: Vec<TableConstraint>,
     /// Storage configuration (row/columnar, compression, row group sizing).
     pub storage_options: StorageOptions,
     /// Storage location path.
@@ -125,6 +129,7 @@ impl TableMetadata {
             data_source_format: DataSourceFormat::default(),
             columns,
             primary_key: None,
+            constraints: Vec::new(),
             storage_options: StorageOptions::default(),
             storage_location: None,
             comment: None,

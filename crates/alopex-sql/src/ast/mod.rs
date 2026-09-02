@@ -79,6 +79,9 @@ pub enum StatementKind {
     Truncate(Truncate),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
+    CreateSequence(CreateSequence),
+    AlterSequence(AlterSequence),
+    DropSequence(DropSequence),
     /// A Skulk-owned continuous aggregate definition carried but not executed by Alopex.
     CreateContinuousAggregate(CreateContinuousAggregate),
 
@@ -123,6 +126,8 @@ pub enum StatementKind {
     Insert(Insert),
     Update(Update),
     Delete(Delete),
+    Merge(Merge),
+    Copy(CopyStatement),
 }
 
 impl StatementKind {

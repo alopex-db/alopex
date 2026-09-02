@@ -160,6 +160,12 @@ pub enum ConstraintViolation {
         columns: Vec<String>,
         value: Option<String>,
     },
+
+    #[error("CHECK constraint violated: {constraint}")]
+    Check { constraint: String },
+
+    #[error("FOREIGN KEY constraint violated: {constraint}")]
+    ForeignKey { constraint: String },
 }
 
 /// Expression evaluation errors.

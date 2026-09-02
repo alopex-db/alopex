@@ -358,7 +358,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.24.0");
+    assert_eq!(parser_contract_version(), "0.25.0");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.24.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.25.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -508,7 +508,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.24.0");
+    assert_eq!(parser_contract_version(), "0.25.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -1305,4 +1305,73 @@ fn parses_each_alter_table_action_across_the_nim_boundary() {
         );
         assert!(matches_expected, "wrong action for {sql}");
     }
+}
+
+#[test]
+fn parses_v0811_relational_sql_across_the_nim_boundary() {
+    use alopex_sql::{
+        ColumnConstraint, CopyDirection, CopySource, CopyTarget, DataType, MergeAction,
+        OnConflictAction,
+    };
+
+    let insert = Parser::parse_sql(
+        &AlopexDialect,
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) \
+         DO UPDATE SET name = 'b' RETURNING id",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Insert(insert) = insert.kind else {
+        panic!("expected INSERT")
+    };
+    assert!(matches!(
+        insert.on_conflict.unwrap().action,
+        OnConflictAction::DoUpdate { .. }
+    ));
+    assert_eq!(insert.returning.len(), 1);
+
+    let merge = Parser::parse_sql(
+        &AlopexDialect,
+        "MERGE INTO target USING source ON target.id = source.id \
+         WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id) VALUES (source.id)",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Merge(merge) = merge.kind else {
+        panic!("expected MERGE")
+    };
+    assert!(matches!(merge.clauses[0].action, MergeAction::Delete));
+    assert!(matches!(
+        merge.clauses[1].action,
+        MergeAction::Insert { .. }
+    ));
+
+    let copy = Parser::parse_sql(
+        &AlopexDialect,
+        "COPY users (id) FROM 'users.csv' WITH (FORMAT CSV, HEADER TRUE)",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Copy(copy) = copy.kind else {
+        panic!("expected COPY")
+    };
+    assert_eq!(copy.direction, CopyDirection::From);
+    assert!(matches!(copy.source, CopySource::Table { .. }));
+    assert!(matches!(copy.target, CopyTarget::File { .. }));
+
+    let sequence = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE SEQUENCE seq START WITH 10 INCREMENT BY 2 CYCLE; \
+         CREATE TABLE t (id SERIAL, stable BIGINT GENERATED ALWAYS AS IDENTITY)",
+    )
+    .unwrap();
+    assert!(matches!(sequence[0].kind, StatementKind::CreateSequence(_)));
+    let StatementKind::CreateTable(table) = &sequence[1].kind else {
+        panic!("expected table")
+    };
+    assert!(matches!(table.columns[0].data_type, DataType::Serial));
+    assert!(matches!(
+        table.columns[1].constraints[0],
+        ColumnConstraint::Identity { .. }
+    ));
 }

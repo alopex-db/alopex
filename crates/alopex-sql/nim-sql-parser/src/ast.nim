@@ -25,6 +25,11 @@ type
     nkInsert
     nkUpdate
     nkDelete
+    nkMerge
+    nkMergeWhen
+    nkReturningClause
+    nkOnConflict
+    nkCopy
     nkCreateTable
     nkDropTable
     nkCreateView
@@ -44,6 +49,9 @@ type
     nkCreateIndex
     nkCreateContinuousAggregate
     nkDropIndex
+    nkCreateSequence
+    nkAlterSequence
+    nkDropSequence
     nkPragma
     nkBegin
     nkSetTransaction
@@ -162,6 +170,22 @@ type
     explainAnalyze*: bool
     explainFormat*: string
     limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
+    constraintKind*: string
+    constraintName*: string
+    constraintColumns*: seq[string]
+    referencedTable*: string
+    referencedColumns*: seq[string]
+    onDeleteAction*: string
+    onUpdateAction*: string
+    constraintDeferrable*: bool
+    initiallyDeferred*: bool
+    constraintExpression*: SqlNode
+    statementAction*: string
+    copyDirection*: string
+    copyTarget*: string
+    copyFormat*: string
+    copyOptions*: seq[string]
+    sequenceOptions*: seq[string]
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind

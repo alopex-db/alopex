@@ -26,8 +26,9 @@ pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
-    JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator,
-    TableFunctionKind, ValueWindowFunction, WindowExpr, WindowFunction,
+    JoinType, JoinedDmlSource, LogicalPlan, OffsetWindowFunction, OnConflictActionPlan,
+    OnConflictPlan, RecursiveCteLimits, SetOperator, TableFunctionKind, ValueWindowFunction,
+    WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -41,9 +42,9 @@ use crate::ast::ddl::{
     DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
-    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
-    Select, SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update,
-    Values,
+    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OnConflictAction,
+    OrderByExpr, QueryBody, Select, SelectItem, SetOperation as AstSetOperation,
+    SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -228,6 +229,9 @@ pub(crate) fn column_metadata_from_def(col: &ColumnDef) -> ColumnMetadata {
             }
             ColumnConstraint::Unique { .. } => meta.unique = true,
             ColumnConstraint::Default { value, .. } => meta.default = Some(value.clone()),
+            ColumnConstraint::Check { .. }
+            | ColumnConstraint::References { .. }
+            | ColumnConstraint::Identity { .. } => {}
         }
     }
     meta
@@ -975,6 +979,7 @@ impl TableReferenceExtractor {
                 table,
                 assignments,
                 filter,
+                ..
             } => {
                 push_table_reference(
                     references,
@@ -989,7 +994,7 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete { table, filter, .. } => {
                 push_table_reference(
                     references,
                     table,
@@ -1626,6 +1631,37 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 }
                 (schema, rows)
             }
+            "information_schema.table_constraints" => {
+                use crate::ast::ddl::TableConstraint;
+                let schema = metadata_schema(&[
+                    ("constraint_catalog", ResolvedType::Text),
+                    ("constraint_schema", ResolvedType::Text),
+                    ("constraint_name", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("constraint_type", ResolvedType::Text),
+                ]);
+                let mut rows = Vec::new();
+                for table in &tables {
+                    for (position, constraint) in table.constraints.iter().enumerate() {
+                        let (name, kind) = match constraint {
+                            TableConstraint::PrimaryKey { name, .. } => (name, "PRIMARY KEY"),
+                            TableConstraint::Unique { name, .. } => (name, "UNIQUE"),
+                            TableConstraint::Check { name, .. } => (name, "CHECK"),
+                            TableConstraint::ForeignKey { name, .. } => (name, "FOREIGN KEY"),
+                        };
+                        rows.push(vec![
+                            metadata_text(Some(table.catalog_name.clone())),
+                            metadata_text(Some(table.namespace_name.clone())),
+                            metadata_text(Some(name.clone().unwrap_or_else(|| {
+                                format!("{}_constraint_{}", table.name, position)
+                            }))),
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(kind.into())),
+                        ]);
+                    }
+                }
+                (schema, rows)
+            }
             _ => unreachable!("validated metadata surface"),
         };
         Ok(LogicalPlan::Values { rows, schema })
@@ -1658,6 +1694,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         if let Some(pk) = primary_key {
             table = table.with_primary_key(pk);
         }
+        table.constraints = Self::normalized_table_constraints(stmt);
         table.catalog_name = "default".to_string();
         table.namespace_name = "default".to_string();
         table.table_type = if stmt.temporary {
@@ -1703,6 +1740,56 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         } else {
             Some(pk_columns)
         }
+    }
+
+    fn normalized_table_constraints(stmt: &CreateTable) -> Vec<crate::ast::ddl::TableConstraint> {
+        use crate::ast::ddl::{ColumnConstraint, TableConstraint};
+
+        let mut constraints = stmt.constraints.clone();
+        for column in &stmt.columns {
+            for constraint in &column.constraints {
+                match constraint {
+                    ColumnConstraint::Unique { name, span } => {
+                        constraints.push(TableConstraint::Unique {
+                            name: name.clone(),
+                            columns: vec![column.name.clone()],
+                            span: *span,
+                        })
+                    }
+                    ColumnConstraint::Check {
+                        name,
+                        expression,
+                        span,
+                    } => constraints.push(TableConstraint::Check {
+                        name: name.clone(),
+                        expression: expression.clone(),
+                        span: *span,
+                    }),
+                    ColumnConstraint::References {
+                        name,
+                        table,
+                        columns,
+                        on_delete,
+                        on_update,
+                        deferrable,
+                        initially_deferred,
+                        span,
+                    } => constraints.push(TableConstraint::ForeignKey {
+                        name: name.clone(),
+                        columns: vec![column.name.clone()],
+                        referenced_table: table.clone(),
+                        referenced_columns: columns.clone(),
+                        on_delete: *on_delete,
+                        on_update: *on_update,
+                        deferrable: *deferrable,
+                        initially_deferred: *initially_deferred,
+                        span: *span,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        constraints
     }
 
     /// Check if a column constraint is a PRIMARY KEY constraint.
@@ -3335,6 +3422,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     "information_schema.tables"
                         | "information_schema.columns"
                         | "information_schema.indexes"
+                        | "information_schema.table_constraints"
                 ) {
                     let plan = self.metadata_values(name, None, *span)?;
                     let LogicalPlan::Values { schema, .. } = &plan else {
@@ -5526,6 +5614,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // Implicit - use all columns in table definition order
             table.column_names().into_iter().map(String::from).collect()
         };
+        let returning = if stmt.returning.is_empty() {
+            None
+        } else {
+            Some(self.build_projection(&stmt.returning, table)?)
+        };
 
         match &stmt.source {
             InsertSource::Values { values } => {
@@ -5547,17 +5640,80 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     table: table.name.clone(),
                     columns,
                     values: typed_values,
+                    conflict: self.plan_on_conflict(stmt.on_conflict.as_ref(), table)?,
+                    returning,
                 })
             }
             InsertSource::Select { select } => {
                 let source = self.plan_select_relation(select, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
             InsertSource::Query { query } => {
                 let source = self.plan_query_body_relation(query, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
         }
+    }
+
+    fn plan_on_conflict(
+        &self,
+        conflict: Option<&crate::ast::dml::OnConflict>,
+        table: &TableMetadata,
+    ) -> Result<Option<crate::planner::logical_plan::OnConflictPlan>, PlannerError> {
+        let Some(conflict) = conflict else {
+            return Ok(None);
+        };
+        for column in &conflict.columns {
+            self.name_resolver
+                .resolve_column(table, column, conflict.span)?;
+        }
+        let action = match &conflict.action {
+            OnConflictAction::DoNothing => OnConflictActionPlan::DoNothing,
+            OnConflictAction::DoUpdate {
+                assignments,
+                selection,
+            } => {
+                let mut typed = Vec::with_capacity(assignments.len());
+                for assignment in assignments {
+                    let column_meta = self.name_resolver.resolve_column(
+                        table,
+                        &assignment.column,
+                        assignment.span,
+                    )?;
+                    let column_index = table
+                        .get_column_index(&assignment.column)
+                        .expect("resolved column");
+                    let value = self.type_checker.infer_type(&assignment.value, table)?;
+                    self.validate_type_assignment(
+                        &value,
+                        &column_meta.data_type,
+                        assignment.value.span,
+                    )?;
+                    typed.push(TypedAssignment::new(
+                        assignment.column.clone(),
+                        column_index,
+                        self.coerce_assignment_value(
+                            value,
+                            &column_meta.data_type,
+                            assignment.value.span,
+                        ),
+                    ));
+                }
+                let selection = selection
+                    .as_ref()
+                    .map(|expr| self.type_checker.infer_type(expr, table))
+                    .transpose()?;
+                OnConflictActionPlan::DoUpdate {
+                    assignments: typed,
+                    selection,
+                }
+            }
+        };
+        Ok(Some(OnConflictPlan {
+            columns: conflict.columns.clone(),
+            constraint: conflict.constraint.clone(),
+            action,
+        }))
     }
 
     fn finish_insert_query(
@@ -5566,6 +5722,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         table: &TableMetadata,
         columns: Vec<String>,
         source: PlannedRelation,
+        returning: Option<Projection>,
     ) -> Result<LogicalPlan, PlannerError> {
         if source.schema.len() != columns.len() {
             return Err(PlannerError::column_value_count_mismatch(
@@ -5596,6 +5753,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table: table.name.clone(),
             columns,
             source: Box::new(source.plan),
+            conflict: self.plan_on_conflict(stmt.on_conflict.as_ref(), table)?,
+            returning,
         })
     }
 
@@ -5738,6 +5897,72 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
 
+        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.from.first() {
+            let source = self.name_resolver.resolve_table(name, *span)?;
+            let scope = [
+                ScopedTable::new(table.clone(), 0),
+                ScopedTable::new(source.clone(), table.column_count()),
+            ];
+            let assignments = stmt
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let column_meta = self.name_resolver.resolve_column(
+                        table,
+                        &assignment.column,
+                        assignment.span,
+                    )?;
+                    let value = self.type_checker.infer_type_with_scope(
+                        &assignment.value,
+                        &scope,
+                        &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        },
+                    )?;
+                    self.validate_type_assignment(
+                        &value,
+                        &column_meta.data_type,
+                        assignment.value.span,
+                    )?;
+                    Ok(TypedAssignment::new(
+                        assignment.column.clone(),
+                        table.get_column_index(&assignment.column).unwrap(),
+                        self.coerce_assignment_value(
+                            value,
+                            &column_meta.data_type,
+                            assignment.value.span,
+                        ),
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+            let condition = stmt
+                .selection
+                .as_ref()
+                .map(|expr| {
+                    self.type_checker
+                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        })
+                })
+                .transpose()?;
+            return Ok(LogicalPlan::Update {
+                table: table.name.clone(),
+                assignments,
+                filter: None,
+                join_source: Some(JoinedDmlSource {
+                    table: source.name.clone(),
+                    condition,
+                }),
+                returning: if stmt.returning.is_empty() {
+                    None
+                } else {
+                    Some(self.build_projection(&stmt.returning, table)?)
+                },
+            });
+        }
+
         // Process assignments
         let mut typed_assignments = Vec::new();
 
@@ -5803,6 +6028,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table: table.name.clone(),
             assignments: typed_assignments,
             filter,
+            join_source: None,
+            returning: if stmt.returning.is_empty() {
+                None
+            } else {
+                Some(self.build_projection(&stmt.returning, table)?)
+            },
         })
     }
 
@@ -5813,6 +6044,38 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "DELETE", stmt.span)?;
+
+        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.using.first() {
+            let source = self.name_resolver.resolve_table(name, *span)?;
+            let scope = [
+                ScopedTable::new(table.clone(), 0),
+                ScopedTable::new(source.clone(), table.column_count()),
+            ];
+            let condition = stmt
+                .selection
+                .as_ref()
+                .map(|expr| {
+                    self.type_checker
+                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        })
+                })
+                .transpose()?;
+            return Ok(LogicalPlan::Delete {
+                table: table.name.clone(),
+                filter: None,
+                join_source: Some(JoinedDmlSource {
+                    table: source.name.clone(),
+                    condition,
+                }),
+                returning: if stmt.returning.is_empty() {
+                    None
+                } else {
+                    Some(self.build_projection(&stmt.returning, table)?)
+                },
+            });
+        }
 
         // Process optional WHERE clause
         let filter = if let Some(ref selection) = stmt.selection {
@@ -5835,6 +6098,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(LogicalPlan::Delete {
             table: table.name.clone(),
             filter,
+            join_source: None,
+            returning: if stmt.returning.is_empty() {
+                None
+            } else {
+                Some(self.build_projection(&stmt.returning, table)?)
+            },
         })
     }
 }

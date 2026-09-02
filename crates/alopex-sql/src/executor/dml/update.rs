@@ -2,15 +2,19 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
 use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute UPDATE statements.
+#[allow(dead_code)]
 pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
@@ -18,23 +22,29 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     assignments: Vec<TypedAssignment>,
     filter: Option<TypedExpr>,
 ) -> Result<ExecutionResult> {
+    execute_update_with_returning(txn, catalog, table_name, assignments, filter, None, None)
+}
+
+pub fn execute_update_with_returning<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    assignments: Vec<TypedAssignment>,
+    filter: Option<TypedExpr>,
+    _join_source: Option<crate::planner::JoinedDmlSource>,
+    returning: Option<Projection>,
+) -> Result<ExecutionResult> {
     let table = catalog
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
-    let indexes: Vec<IndexMetadata> = catalog
-        .get_indexes_for_table(table_name)
-        .into_iter()
-        .cloned()
-        .collect();
-    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
-        .into_iter()
-        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
-    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
-        .into_iter()
-        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
-
     let mut rows_affected = 0u64;
+    let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;
     const BATCH: usize = 512;
 
@@ -49,11 +59,30 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
 
         for (row_id, row) in batch {
             next_row_id = row_id.saturating_add(1);
-            if !predicate_matches(&filter, &row)? {
+            let joined = if let Some(source) = &_join_source {
+                let source_table = catalog
+                    .get_table(&source.table)
+                    .ok_or_else(|| ExecutorError::TableNotFound(source.table.clone()))?;
+                find_join_row(txn, source_table, source.condition.as_ref(), &row)?
+            } else {
+                None
+            };
+            let eval_row = joined.as_ref().map_or_else(
+                || row.clone(),
+                |source| {
+                    let mut values = row.clone();
+                    values.extend(source.clone());
+                    values
+                },
+            );
+            if _join_source.is_some() && joined.is_none() {
+                continue;
+            }
+            if !predicate_matches(&filter, &eval_row)? {
                 continue;
             }
 
-            let ctx = EvalContext::new(&row);
+            let ctx = EvalContext::new(&eval_row);
             let mut new_row = row.clone();
 
             for assignment in &assignments {
@@ -75,6 +104,8 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
                 continue;
             }
 
+            super::constraints::validate_row::<S, C, T>(txn, catalog, &table, &new_row, &[])?;
+
             changes.push((row_id, row, new_row));
         }
 
@@ -82,15 +113,95 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
             continue;
         }
 
-        update_indexes_batch(txn, &btree_indexes, &changes)?;
-        update_fts_indexes(txn, &fts_indexes, &changes)?;
-        update_hnsw_indexes(txn, &table, &hnsw_indexes, &changes)?;
-        apply_table_updates(txn, &table, &changes)?;
+        for (_, old_row, new_row) in &changes {
+            super::constraints::apply_parent_update::<S, C, T>(
+                txn, catalog, &table, old_row, new_row, 0,
+            )?;
+        }
+        apply_changes(txn, catalog, &table, &changes)?;
 
         rows_affected += changes.len() as u64;
+        if returning.is_some() {
+            updated_rows.extend(
+                changes
+                    .into_iter()
+                    .map(|(row_id, _, new_row)| (row_id, new_row)),
+            );
+        }
     }
 
-    Ok(ExecutionResult::RowsAffected(rows_affected))
+    if let Some(projection) = returning {
+        let columns = projected_columns(&projection, &table.columns)?;
+        let rows = updated_rows
+            .iter()
+            .map(|(row_id, values)| {
+                project_row_values(
+                    &Row::new(*row_id, values.clone()),
+                    &projection,
+                    &table.columns,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ExecutionResult::Query(crate::executor::QueryResult::new(
+            columns, rows,
+        )))
+    } else {
+        Ok(ExecutionResult::RowsAffected(rows_affected))
+    }
+}
+
+fn find_join_row<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    source: &TableMetadata,
+    condition: Option<&TypedExpr>,
+    target: &[SqlValue],
+) -> Result<Option<Vec<SqlValue>>> {
+    let mut storage = txn.table_storage(source);
+    let mut iter = storage.range_scan(0, u64::MAX)?;
+    while let Some(item) = iter.next() {
+        let (_, source_row) = item?;
+        let mut joined = target.to_vec();
+        joined.extend(source_row.clone());
+        let matches_condition = match condition {
+            None => true,
+            Some(expr) => matches!(
+                evaluate(expr, &EvalContext::new(&joined))?,
+                SqlValue::Boolean(true)
+            ),
+        };
+        if matches_condition {
+            return Ok(Some(source_row));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn apply_changes<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
+    let indexes: Vec<IndexMetadata> = catalog
+        .get_indexes_for_table(&table.name)
+        .into_iter()
+        .cloned()
+        .collect();
+    let (hnsw, indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|index| matches!(index.method, Some(IndexMethod::Hnsw)));
+    let (fts, btree): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|index| matches!(index.method, Some(IndexMethod::Fts)));
+    update_indexes_batch(txn, &btree, changes)?;
+    update_fts_indexes(txn, &fts, changes)?;
+    update_hnsw_indexes(txn, table, &hnsw, changes)?;
+    apply_table_updates(txn, table, changes)
 }
 
 fn update_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(

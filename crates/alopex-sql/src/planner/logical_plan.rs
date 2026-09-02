@@ -434,6 +434,8 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Values to insert (one Vec per row, each value corresponds to a column).
         values: Vec<Vec<TypedExpr>>,
+        conflict: Option<OnConflictPlan>,
+        returning: Option<Projection>,
     },
 
     /// INSERT rows produced by a SELECT query.
@@ -444,6 +446,8 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Query that produces one row per inserted row.
         source: Box<LogicalPlan>,
+        conflict: Option<OnConflictPlan>,
+        returning: Option<Projection>,
     },
 
     /// UPDATE operation.
@@ -456,6 +460,8 @@ pub enum LogicalPlan {
         assignments: Vec<TypedAssignment>,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        join_source: Option<JoinedDmlSource>,
+        returning: Option<Projection>,
     },
 
     /// DELETE operation.
@@ -466,6 +472,8 @@ pub enum LogicalPlan {
         table: String,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        join_source: Option<JoinedDmlSource>,
+        returning: Option<Projection>,
     },
 
     // === DDL Plans ===
@@ -530,6 +538,29 @@ pub enum LogicalPlan {
         /// If true, don't error if index doesn't exist.
         if_exists: bool,
     },
+}
+
+/// Type-checked INSERT conflict behavior.
+#[derive(Debug, Clone)]
+pub struct OnConflictPlan {
+    pub columns: Vec<String>,
+    pub constraint: Option<String>,
+    pub action: OnConflictActionPlan,
+}
+
+#[derive(Debug, Clone)]
+pub enum OnConflictActionPlan {
+    DoNothing,
+    DoUpdate {
+        assignments: Vec<TypedAssignment>,
+        selection: Option<TypedExpr>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinedDmlSource {
+    pub table: String,
+    pub condition: Option<TypedExpr>,
 }
 
 impl LogicalPlan {
@@ -747,6 +778,8 @@ impl LogicalPlan {
             table,
             columns,
             values,
+            conflict: None,
+            returning: None,
         }
     }
 
@@ -760,12 +793,19 @@ impl LogicalPlan {
             table,
             assignments,
             filter,
+            join_source: None,
+            returning: None,
         }
     }
 
     /// Creates a new Delete plan.
     pub fn delete(table: String, filter: Option<TypedExpr>) -> Self {
-        LogicalPlan::Delete { table, filter }
+        LogicalPlan::Delete {
+            table,
+            filter,
+            join_source: None,
+            returning: None,
+        }
     }
 
     /// Creates a new CreateTable plan.

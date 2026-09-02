@@ -3,21 +3,42 @@ use alopex_core::kv::KVStore;
 use crate::ast::ddl::IndexMethod;
 use crate::ast::expr::Expr;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
+use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
 use crate::planner::type_checker::TypeChecker;
+use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute INSERT statements.
+#[allow(dead_code)]
 pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     table_name: &str,
     columns: Vec<String>,
     values: Vec<Vec<TypedExpr>>,
+) -> Result<ExecutionResult> {
+    execute_insert_with_returning(txn, catalog, table_name, columns, values, None)
+}
+
+pub fn execute_insert_with_returning<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<TypedExpr>>,
+    returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
     let table = catalog
         .get_table(table_name)
@@ -33,7 +54,7 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .map(|row_exprs| build_row(catalog, &table, &columns, row_exprs, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
-    insert_rows(txn, catalog, &table, table_name, rows)
+    insert_rows(txn, catalog, &table, table_name, rows, None, returning)
 }
 
 fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
@@ -62,12 +83,29 @@ fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
 }
 
 /// Insert already-evaluated SELECT output rows.
+#[allow(dead_code)]
 pub fn execute_insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     table_name: &str,
     columns: Vec<String>,
     values: Vec<Vec<SqlValue>>,
+) -> Result<ExecutionResult> {
+    execute_insert_rows_with_returning(txn, catalog, table_name, columns, values, None)
+}
+
+pub fn execute_insert_rows_with_returning<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<SqlValue>>,
+    returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
     let table = catalog
         .get_table(table_name)
@@ -82,7 +120,77 @@ pub fn execute_insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
         .map(|row_values| build_row_from_values(catalog, &table, &columns, row_values, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
-    insert_rows(txn, catalog, &table, table_name, rows)
+    insert_rows(txn, catalog, &table, table_name, rows, None, returning)
+}
+
+pub fn execute_insert_rows_with_plan<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<SqlValue>>,
+    conflict: Option<OnConflictPlan>,
+    returning: Option<Projection>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    validate_columns(&table, &columns)?;
+    let ctx = EvalContext::new(&[]);
+    let rows = values
+        .into_iter()
+        .map(|row| build_row_from_values(catalog, &table, &columns, row, &ctx))
+        .collect::<Result<Vec<_>>>()?;
+    insert_rows(
+        txn,
+        catalog,
+        &table,
+        table_name,
+        rows,
+        conflict.as_ref(),
+        returning,
+    )
+}
+
+pub fn execute_insert_with_plan<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<TypedExpr>>,
+    conflict: Option<OnConflictPlan>,
+    returning: Option<Projection>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    validate_columns(&table, &columns)?;
+    let ctx = EvalContext::new(&[]);
+    let rows = values
+        .into_iter()
+        .map(|row| build_row(catalog, &table, &columns, row, &ctx))
+        .collect::<Result<Vec<_>>>()?;
+    insert_rows(
+        txn,
+        catalog,
+        &table,
+        table_name,
+        rows,
+        conflict.as_ref(),
+        returning,
+    )
 }
 
 fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
@@ -91,7 +199,57 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     table: &TableMetadata,
     table_name: &str,
     rows: Vec<Vec<SqlValue>>,
+    conflict: Option<&OnConflictPlan>,
+    returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
+    let mut insert_rows = Vec::with_capacity(rows.len());
+    let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
+    for row in rows {
+        if let Some(plan) = conflict {
+            if let Some((row_id, old_row)) = find_conflict(txn, table, plan, &row)? {
+                match &plan.action {
+                    OnConflictActionPlan::DoNothing => continue,
+                    OnConflictActionPlan::DoUpdate {
+                        assignments,
+                        selection,
+                    } => {
+                        if !predicate_matches(selection, &old_row)? {
+                            continue;
+                        }
+                        let ctx = EvalContext::new(&old_row);
+                        let mut new_row = old_row.clone();
+                        for assignment in assignments {
+                            let value = evaluate(&assignment.value, &ctx)?;
+                            new_row[assignment.column_index] = normalize_assignment_value(
+                                value,
+                                &table.columns[assignment.column_index].data_type,
+                            )?;
+                        }
+                        super::constraints::validate_row::<S, C, T>(
+                            txn,
+                            catalog,
+                            table,
+                            &new_row,
+                            &[],
+                        )?;
+                        super::constraints::apply_parent_update::<S, C, T>(
+                            txn, catalog, table, &old_row, &new_row, 0,
+                        )?;
+                        super::update::apply_changes(
+                            txn,
+                            catalog,
+                            table,
+                            &[(row_id, old_row, new_row.clone())],
+                        )?;
+                        updated_rows.push((row_id, new_row));
+                        continue;
+                    }
+                }
+            }
+        }
+        super::constraints::validate_row::<S, C, T>(txn, catalog, table, &row, &insert_rows)?;
+        insert_rows.push(row);
+    }
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)
         .into_iter()
@@ -104,12 +262,12 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
-    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(insert_rows.len());
 
     // Insert into table using a single handle; stage for index population.
     {
         let mut table_storage = txn.table_storage(table);
-        for row in rows {
+        for row in insert_rows {
             let row_id = table_storage
                 .next_row_id()
                 .map_err(|e| map_storage_error(table, e))?;
@@ -125,7 +283,82 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
-    Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+    if let Some(projection) = returning {
+        let columns = projected_columns(&projection, &table.columns)?;
+        let mut rows = updated_rows
+            .iter()
+            .map(|(row_id, values)| {
+                project_row_values(
+                    &Row::new(*row_id, values.clone()),
+                    &projection,
+                    &table.columns,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        rows.extend(
+            staged
+                .iter()
+                .map(|(row_id, values)| {
+                    project_row_values(
+                        &Row::new(*row_id, values.clone()),
+                        &projection,
+                        &table.columns,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+        Ok(ExecutionResult::Query(crate::executor::QueryResult::new(
+            columns, rows,
+        )))
+    } else {
+        Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+    }
+}
+
+fn find_conflict<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    table: &TableMetadata,
+    plan: &OnConflictPlan,
+    row: &[SqlValue],
+) -> Result<Option<(u64, Vec<SqlValue>)>> {
+    let names = if plan.columns.is_empty() {
+        table.primary_key.clone().unwrap_or_default()
+    } else {
+        plan.columns.clone()
+    };
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let indices = names
+        .iter()
+        .filter_map(|name| table.get_column_index(name))
+        .collect::<Vec<_>>();
+    if indices.len() != names.len() {
+        return Ok(None);
+    }
+    let mut storage = txn.table_storage(table);
+    let mut iter = storage.range_scan(0, u64::MAX)?;
+    while let Some(item) = iter.next() {
+        let (row_id, existing) = item?;
+        if indices
+            .iter()
+            .all(|&idx| !row[idx].is_null() && row[idx] == existing[idx])
+        {
+            return Ok(Some((row_id, existing)));
+        }
+    }
+    Ok(None)
+}
+
+fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
+    if let Some(expr) = filter {
+        Ok(matches!(
+            evaluate(expr, &EvalContext::new(row))?,
+            SqlValue::Boolean(true)
+        ))
+    } else {
+        Ok(true)
+    }
 }
 
 fn populate_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(

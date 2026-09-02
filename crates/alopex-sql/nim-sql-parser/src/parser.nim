@@ -167,6 +167,9 @@ proc parseQueryStmt(p: var Parser): SqlNode
 proc parseInsertStmt(p: var Parser): SqlNode
 proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
+proc parseMergeStmt(p: var Parser): SqlNode
+proc parseCopyStmt(p: var Parser): SqlNode
+proc parseConstraintColumns(p: var Parser; label: string): seq[string]
 proc parseCreateStmt(p: var Parser): SqlNode
 proc parseDropStmt(p: var Parser): SqlNode
 proc parseAlterStmt(p: var Parser): SqlNode
@@ -1509,6 +1512,48 @@ proc parseQueryStmt(p: var Parser): SqlNode =
 
 # --- DML parsing ---
 
+proc parseReturningClause(p: var Parser): SqlNode =
+  let start = p.expectContextual("RETURNING")
+  result = newNode(nkReturningClause, tokenSpan(start))
+  result.children = p.parseSelectList()
+
+proc parseAssignments(p: var Parser): SqlNode =
+  result = newNode(nkExprList)
+  while true:
+    let col = p.expectIdent("column name")
+    discard p.expect(tkEq)
+    result.children.add(newBinaryOp(opEq, newIdent(col.value, tokenSpan(col)), p.parseExpr()))
+    if not p.check(tkComma):
+      break
+    discard p.advance()
+
+proc parseOnConflictClause(p: var Parser): SqlNode =
+  let start = p.expect(tkOn)
+  discard p.expectContextual("CONFLICT")
+  result = newNode(nkOnConflict, tokenSpan(start))
+  if p.check(tkLParen):
+    result.constraintColumns = p.parseConstraintColumns("conflict target column")
+  elif p.check(tkOn):
+    discard p.advance()
+    discard p.expect(tkConstraint)
+    result.constraintName = p.expectIdent("conflict constraint name").value
+  discard p.expectContextual("DO")
+  if p.checkContextual("NOTHING"):
+    discard p.advance()
+    result.statementAction = "NOTHING"
+  elif p.check(tkUpdate):
+    discard p.advance()
+    result.statementAction = "UPDATE"
+    discard p.expect(tkSet)
+    result.children.add(p.parseAssignments())
+    if p.check(tkWhere):
+      discard p.advance()
+      let selection = newNode(nkWhereClause)
+      selection.children.add(p.parseExpr())
+      result.children.add(selection)
+  else:
+    p.error("expected NOTHING or UPDATE after ON CONFLICT DO")
+
 proc parseInsertStmt(p: var Parser): SqlNode =
   let start = p.expect(tkInsert)
   discard p.expect(tkInto)
@@ -1551,27 +1596,28 @@ proc parseInsertStmt(p: var Parser): SqlNode =
   else:
     discard p.expect(tkValues)
 
+  if p.check(tkOn) and p.peekNextIsContextual("conflict"):
+    result.children.add(p.parseOnConflictClause())
+  if p.checkContextual("RETURNING"):
+    result.children.add(p.parseReturningClause())
+
 proc parseUpdateStmt(p: var Parser): SqlNode =
   let start = p.expect(tkUpdate)
   result = newNode(nkUpdate, tokenSpan(start))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
   discard p.expect(tkSet)
-  let setList = newNode(nkExprList)
-  while true:
-    let col = p.expectIdent("column name")
-    discard p.expect(tkEq)
-    setList.children.add(newBinaryOp(opEq, newIdent(col.value, tokenSpan(col)), p.parseExpr()))
-    if p.check(tkComma):
-      discard p.advance()
-    else:
-      break
-  result.children.add(setList)
+  result.children.add(p.parseAssignments())
+  if p.check(tkFrom):
+    discard p.advance()
+    result.children.add(p.parseFromClause())
   if p.check(tkWhere):
     discard p.advance()
     let whereNode = newNode(nkWhereClause)
     whereNode.children.add(p.parseExpr())
     result.children.add(whereNode)
+  if p.checkContextual("RETURNING"):
+    result.children.add(p.parseReturningClause())
 
 proc parseDeleteStmt(p: var Parser): SqlNode =
   let start = p.expect(tkDelete)
@@ -1579,11 +1625,117 @@ proc parseDeleteStmt(p: var Parser): SqlNode =
   result = newNode(nkDelete, tokenSpan(start))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
+  if p.check(tkUsing):
+    discard p.advance()
+    result.children.add(p.parseFromClause())
   if p.check(tkWhere):
     discard p.advance()
     let whereNode = newNode(nkWhereClause)
     whereNode.children.add(p.parseExpr())
     result.children.add(whereNode)
+  if p.checkContextual("RETURNING"):
+    result.children.add(p.parseReturningClause())
+
+proc parseMergeStmt(p: var Parser): SqlNode =
+  let start = p.expectContextual("MERGE")
+  discard p.expect(tkInto)
+  result = newNode(nkMerge, tokenSpan(start))
+  result.children.add(p.parseFromItem())
+  discard p.expect(tkUsing)
+  result.children.add(p.parseFromItem())
+  discard p.expect(tkOn)
+  result.children.add(p.parseExpr())
+  while p.check(tkWhen):
+    let whenStart = p.advance()
+    let clause = newNode(nkMergeWhen, tokenSpan(whenStart))
+    if p.check(tkNot):
+      discard p.advance()
+      discard p.expectContextual("MATCHED")
+      clause.constraintKind = "NOT MATCHED"
+    else:
+      discard p.expectContextual("MATCHED")
+      clause.constraintKind = "MATCHED"
+    if p.check(tkAnd):
+      discard p.advance()
+      clause.constraintExpression = p.parseExpr()
+    discard p.expect(tkThen)
+    if p.check(tkUpdate):
+      discard p.advance()
+      clause.statementAction = "UPDATE"
+      discard p.expect(tkSet)
+      clause.children.add(p.parseAssignments())
+    elif p.check(tkDelete):
+      discard p.advance()
+      clause.statementAction = "DELETE"
+    elif p.check(tkInsert):
+      discard p.advance()
+      clause.statementAction = "INSERT"
+      if p.check(tkLParen):
+        let columns = newNode(nkColumnList)
+        for column in p.parseConstraintColumns("MERGE INSERT column"):
+          columns.children.add(newIdent(column))
+        clause.children.add(columns)
+      discard p.expect(tkValues)
+      discard p.expect(tkLParen)
+      let values = newNode(nkExprList)
+      values.children.add(p.parseExpr())
+      while p.check(tkComma):
+        discard p.advance()
+        values.children.add(p.parseExpr())
+      discard p.expect(tkRParen)
+      clause.children.add(values)
+    elif p.checkContextual("DO"):
+      discard p.advance()
+      discard p.expectContextual("NOTHING")
+      clause.statementAction = "NOTHING"
+    else:
+      p.error("expected UPDATE, DELETE, INSERT, or DO NOTHING in MERGE")
+    result.children.add(clause)
+  if result.children.len == 3:
+    p.error("MERGE requires at least one WHEN clause")
+  if p.checkContextual("RETURNING"):
+    result.children.add(p.parseReturningClause())
+
+proc parseCopyStmt(p: var Parser): SqlNode =
+  let start = p.expectContextual("COPY")
+  result = newNode(nkCopy, tokenSpan(start))
+  if p.check(tkLParen):
+    discard p.advance()
+    result.children.add(p.parseQueryStmt())
+    discard p.expect(tkRParen)
+  else:
+    let table = p.expectIdent("COPY table name")
+    result.children.add(newIdent(table.value, tokenSpan(table)))
+    if p.check(tkLParen):
+      result.constraintColumns = p.parseConstraintColumns("COPY column")
+  if p.check(tkFrom):
+    discard p.advance()
+    result.copyDirection = "FROM"
+  elif p.check(tkTo):
+    discard p.advance()
+    result.copyDirection = "TO"
+  else:
+    p.error("expected FROM or TO in COPY")
+  if p.check(tkString):
+    result.copyTarget = "FILE"
+    result.statementAction = p.advance().value
+  elif p.checkContextual("STDIN") or p.checkContextual("STDOUT"):
+    result.copyTarget = p.advance().value.toUpperAscii()
+  else:
+    p.error("expected file path, STDIN, or STDOUT in COPY")
+  if p.check(tkWith): discard p.advance()
+  if p.check(tkLParen):
+    discard p.advance()
+    while true:
+      let key = p.expectIdent("COPY option").value.toUpperAscii()
+      var value = "TRUE"
+      if not p.check(tkComma) and not p.check(tkRParen):
+        value = p.advance().value.toUpperAscii()
+      if key == "FORMAT": result.copyFormat = value
+      result.copyOptions.add(key & "=" & value)
+      if not p.check(tkComma): break
+      discard p.advance()
+    discard p.expect(tkRParen)
 
 # --- DDL parsing ---
 
@@ -1627,6 +1779,133 @@ proc parseTypeName(p: var Parser): SqlNode =
         result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
 
+proc parseConstraintColumns(p: var Parser; label: string): seq[string] =
+  discard p.expect(tkLParen)
+  result.add(p.expectIdent(label).value)
+  while p.check(tkComma):
+    discard p.advance()
+    result.add(p.expectIdent(label).value)
+  discard p.expect(tkRParen)
+
+proc parseReferentialAction(p: var Parser): string =
+  if p.checkContextual("CASCADE") or p.checkContextual("RESTRICT"):
+    return p.advance().value.toUpperAscii()
+  if p.check(tkSet):
+    discard p.advance()
+    discard p.expect(tkNull)
+    return "SET NULL"
+  if p.checkContextual("NO"):
+    discard p.advance()
+    discard p.expectContextual("ACTION")
+    return "NO ACTION"
+  p.error("expected NO ACTION, RESTRICT, CASCADE, or SET NULL")
+
+proc parseReferenceTail(p: var Parser; constraint: SqlNode) =
+  let table = p.expectIdent("referenced table")
+  constraint.referencedTable = table.value
+  if p.check(tkLParen):
+    constraint.referencedColumns = p.parseConstraintColumns("referenced column")
+  while true:
+    if p.check(tkOn):
+      discard p.advance()
+      if p.check(tkDelete):
+        discard p.advance()
+        constraint.onDeleteAction = p.parseReferentialAction()
+      elif p.check(tkUpdate):
+        discard p.advance()
+        constraint.onUpdateAction = p.parseReferentialAction()
+      else:
+        p.error("expected DELETE or UPDATE after ON")
+    elif p.checkContextual("DEFERRABLE"):
+      discard p.advance()
+      constraint.constraintDeferrable = true
+    elif p.checkContextual("INITIALLY"):
+      discard p.advance()
+      if p.checkContextual("DEFERRED"):
+        discard p.advance()
+        constraint.constraintDeferrable = true
+        constraint.initiallyDeferred = true
+      elif p.checkContextual("IMMEDIATE"):
+        discard p.advance()
+        constraint.constraintDeferrable = true
+      else:
+        p.error("expected DEFERRED or IMMEDIATE after INITIALLY")
+    else:
+      break
+
+proc parseSequenceNumber(p: var Parser): string =
+  var sign = ""
+  if p.check(tkMinus):
+    sign = "-"
+    discard p.advance()
+  elif p.check(tkPlus):
+    discard p.advance()
+  if not p.check(tkInteger):
+    p.error("expected sequence integer")
+  sign & p.advance().value
+
+proc parseSequenceOptions(p: var Parser): seq[string] =
+  while true:
+    if p.check(tkStart) or p.checkContextual("START"):
+      discard p.advance()
+      if p.check(tkWith): discard p.advance()
+      result.add("START=" & p.parseSequenceNumber())
+    elif p.checkContextual("INCREMENT"):
+      discard p.advance()
+      if p.check(tkBy): discard p.advance()
+      result.add("INCREMENT=" & p.parseSequenceNumber())
+    elif p.checkContextual("MINVALUE"):
+      discard p.advance()
+      result.add("MINVALUE=" & p.parseSequenceNumber())
+    elif p.checkContextual("MAXVALUE"):
+      discard p.advance()
+      result.add("MAXVALUE=" & p.parseSequenceNumber())
+    elif p.checkContextual("CACHE"):
+      discard p.advance()
+      result.add("CACHE=" & p.parseSequenceNumber())
+    elif p.checkContextual("CYCLE"):
+      discard p.advance()
+      result.add("CYCLE")
+    elif p.checkContextual("NO"):
+      discard p.advance()
+      if p.checkContextual("CYCLE"):
+        discard p.advance()
+        result.add("NO CYCLE")
+      elif p.checkContextual("MINVALUE"):
+        discard p.advance()
+        result.add("NO MINVALUE")
+      elif p.checkContextual("MAXVALUE"):
+        discard p.advance()
+        result.add("NO MAXVALUE")
+      else:
+        p.error("expected CYCLE, MINVALUE, or MAXVALUE after NO")
+    elif p.checkContextual("RESTART"):
+      discard p.advance()
+      if p.check(tkWith): discard p.advance()
+      if p.check(tkInteger) or p.check(tkMinus) or p.check(tkPlus):
+        result.add("RESTART=" & p.parseSequenceNumber())
+      else:
+        result.add("RESTART")
+    elif p.checkContextual("OWNED"):
+      discard p.advance()
+      discard p.expect(tkBy)
+      if p.checkContextual("NONE"):
+        result.add("OWNED BY NONE")
+        discard p.advance()
+      else:
+        let table = p.expectIdent("sequence owner table")
+        discard p.expect(tkDot)
+        let column = p.expectIdent("sequence owner column")
+        result.add("OWNED BY=" & table.value & "." & column.value)
+    else:
+      break
+
+proc newConstraint(kind, name: string; span: Span): SqlNode =
+  result = newNode(nkConstraint, span)
+  result.constraintKind = kind
+  result.constraintName = name
+  result.children.add(newIdent(kind, span))
+
 proc parseColumnDef(p: var Parser): SqlNode =
   let name = p.expectIdent("column name")
   let typeName = p.parseTypeName()
@@ -1635,30 +1914,63 @@ proc parseColumnDef(p: var Parser): SqlNode =
                    orderAsc: -1, nullsFirst: -1)
 
   while true:
-    if p.check(tkPrimary):
+    var constraintName = ""
+    if p.check(tkConstraint):
       discard p.advance()
+      constraintName = p.expectIdent("constraint name").value
+    if p.check(tkPrimary):
+      let start = p.advance()
       discard p.expect(tkKey)
-      let c = newNode(nkConstraint)
-      c.children.add(newIdent("PRIMARY KEY"))
+      let c = newConstraint("PRIMARY KEY", constraintName, tokenSpan(start))
       result.colConstraints.add(c)
     elif p.check(tkNot):
-      discard p.advance()
+      let start = p.advance()
       discard p.expect(tkNull)
-      let c = newNode(nkConstraint)
-      c.children.add(newIdent("NOT NULL"))
+      let c = newConstraint("NOT NULL", constraintName, tokenSpan(start))
       result.colConstraints.add(c)
     elif p.check(tkUnique):
-      discard p.advance()
-      let c = newNode(nkConstraint)
-      c.children.add(newIdent("UNIQUE"))
+      let start = p.advance()
+      let c = newConstraint("UNIQUE", constraintName, tokenSpan(start))
       result.colConstraints.add(c)
     elif p.check(tkDefault):
-      discard p.advance()
-      let c = newNode(nkConstraint)
-      c.children.add(newIdent("DEFAULT"))
+      let start = p.advance()
+      let c = newConstraint("DEFAULT", constraintName, tokenSpan(start))
       c.children.add(p.parseExpr())
       result.colConstraints.add(c)
+    elif p.check(tkCheck):
+      let start = p.advance()
+      let c = newConstraint("CHECK", constraintName, tokenSpan(start))
+      discard p.expect(tkLParen)
+      c.constraintExpression = p.parseExpr()
+      discard p.expect(tkRParen)
+      result.colConstraints.add(c)
+    elif p.check(tkReferences):
+      let start = p.advance()
+      let c = newConstraint("REFERENCES", constraintName, tokenSpan(start))
+      p.parseReferenceTail(c)
+      result.colConstraints.add(c)
+    elif p.checkContextual("GENERATED"):
+      let start = p.advance()
+      let c = newConstraint("IDENTITY", constraintName, tokenSpan(start))
+      if p.checkContextual("ALWAYS"):
+        discard p.advance()
+        c.statementAction = "ALWAYS"
+      elif p.check(tkBy):
+        discard p.advance()
+        discard p.expect(tkDefault)
+        c.statementAction = "BY DEFAULT"
+      else:
+        p.error("expected ALWAYS or BY DEFAULT after GENERATED")
+      discard p.expect(tkAs)
+      discard p.expectContextual("IDENTITY")
+      if p.check(tkLParen):
+        discard p.advance()
+        c.sequenceOptions = p.parseSequenceOptions()
+        discard p.expect(tkRParen)
+      result.colConstraints.add(c)
     else:
+      if constraintName.len > 0:
+        p.error("expected constraint after CONSTRAINT name")
       break
 
 proc parseWithOptions(p: var Parser): SqlNode =
@@ -1788,18 +2100,40 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
   result.children.add(p.parseColumnDef())
   while p.check(tkComma):
     discard p.advance()
-    if p.check(tkPrimary) or p.check(tkUnique) or p.check(tkForeign) or p.check(tkConstraint):
-      let c = newNode(nkConstraint)
-      c.children.add(newIdent(p.advance().value))
-      if p.check(tkKey): discard p.advance()
-      if p.check(tkLParen):
+    if p.check(tkPrimary) or p.check(tkUnique) or p.check(tkForeign) or
+        p.check(tkCheck) or p.check(tkConstraint):
+      var constraintName = ""
+      if p.check(tkConstraint):
         discard p.advance()
-        c.children.add(newIdent(p.expectIdent("constraint column").value))
-        while p.check(tkComma):
-          discard p.advance()
-          c.children.add(newIdent(p.expectIdent("constraint column").value))
+        constraintName = p.expectIdent("constraint name").value
+      if p.check(tkPrimary):
+        let start = p.advance()
+        discard p.expect(tkKey)
+        let c = newConstraint("PRIMARY KEY", constraintName, tokenSpan(start))
+        c.constraintColumns = p.parseConstraintColumns("constraint column")
+        result.children.add(c)
+      elif p.check(tkUnique):
+        let start = p.advance()
+        let c = newConstraint("UNIQUE", constraintName, tokenSpan(start))
+        c.constraintColumns = p.parseConstraintColumns("constraint column")
+        result.children.add(c)
+      elif p.check(tkForeign):
+        let start = p.advance()
+        discard p.expect(tkKey)
+        let c = newConstraint("FOREIGN KEY", constraintName, tokenSpan(start))
+        c.constraintColumns = p.parseConstraintColumns("foreign key column")
+        discard p.expect(tkReferences)
+        p.parseReferenceTail(c)
+        result.children.add(c)
+      elif p.check(tkCheck):
+        let start = p.advance()
+        let c = newConstraint("CHECK", constraintName, tokenSpan(start))
+        discard p.expect(tkLParen)
+        c.constraintExpression = p.parseExpr()
         discard p.expect(tkRParen)
-      result.children.add(c)
+        result.children.add(c)
+      else:
+        p.error("expected PRIMARY KEY, UNIQUE, FOREIGN KEY, or CHECK constraint")
     else:
       result.children.add(p.parseColumnDef())
   discard p.expect(tkRParen)
@@ -1834,7 +2168,18 @@ proc parseCreateIndexAfterCreate(p: var Parser; start: Token): SqlNode =
 
 proc parseCreateStmt(p: var Parser): SqlNode =
   let start = p.expect(tkCreate)
-  if p.check(tkTable):
+  if p.checkContextual("sequence"):
+    discard p.advance()
+    result = newNode(nkCreateSequence, tokenSpan(start))
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkNot)
+      discard p.expect(tkExists)
+      result.children.add(newIdent("IF NOT EXISTS"))
+    let name = p.expectIdent("sequence name")
+    result.children.add(newIdent(name.value, tokenSpan(name)))
+    result.sequenceOptions = p.parseSequenceOptions()
+  elif p.check(tkTable):
     result = p.parseCreateTableAfterCreate(start)
   elif p.checkContextual("temp") or p.checkContextual("temporary"):
     discard p.advance()
@@ -1869,7 +2214,7 @@ proc parseCreateStmt(p: var Parser): SqlNode =
   elif p.checkContextual("CONTINUOUS"):
     result = p.parseCreateContinuousAggregateAfterCreate(start)
   else:
-    p.error("expected TABLE, VIEW, INDEX, or CONTINUOUS AGGREGATE after CREATE")
+    p.error("expected TABLE, VIEW, INDEX, SEQUENCE, or CONTINUOUS AGGREGATE after CREATE")
 
 proc parseDropTableAfterDrop(p: var Parser; start: Token): SqlNode =
   discard p.expect(tkTable)
@@ -1893,7 +2238,16 @@ proc parseDropIndexAfterDrop(p: var Parser; start: Token): SqlNode =
 
 proc parseDropStmt(p: var Parser): SqlNode =
   let start = p.expect(tkDrop)
-  if p.check(tkTable):
+  if p.checkContextual("sequence"):
+    discard p.advance()
+    result = newNode(nkDropSequence, tokenSpan(start))
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkExists)
+      result.children.add(newIdent("IF EXISTS"))
+    let name = p.expectIdent("sequence name")
+    result.children.add(newIdent(name.value, tokenSpan(name)))
+  elif p.check(tkTable):
     result = p.parseDropTableAfterDrop(start)
   elif p.check(tkIndex):
     result = p.parseDropIndexAfterDrop(start)
@@ -1907,10 +2261,21 @@ proc parseDropStmt(p: var Parser): SqlNode =
     let name = p.expectIdent("view name")
     result.children.add(newIdent(name.value, tokenSpan(name)))
   else:
-    p.error("expected TABLE, VIEW, or INDEX after DROP")
+    p.error("expected TABLE, VIEW, INDEX, or SEQUENCE after DROP")
 
 proc parseAlterStmt(p: var Parser): SqlNode =
   let start = p.expect(tkAlter)
+  if p.checkContextual("sequence"):
+    discard p.advance()
+    result = newNode(nkAlterSequence, tokenSpan(start))
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkExists)
+      result.children.add(newIdent("IF EXISTS"))
+    let name = p.expectIdent("sequence name")
+    result.children.add(newIdent(name.value, tokenSpan(name)))
+    result.sequenceOptions = p.parseSequenceOptions()
+    return
   discard p.expect(tkTable)
   result = newNode(nkAlterTable, tokenSpan(start))
   if p.check(tkIf):
@@ -2216,7 +2581,11 @@ proc parseDescribeStmt(p: var Parser): SqlNode =
   metadataPragma(start, "describe", p.expectIdent("table name"))
 
 proc parseStatement*(p: var Parser): SqlNode =
-  if p.checkContextual("show"):
+  if p.checkContextual("merge"):
+    result = p.parseMergeStmt()
+  elif p.checkContextual("copy"):
+    result = p.parseCopyStmt()
+  elif p.checkContextual("show"):
     result = p.parseShowStmt()
   elif p.checkContextual("describe") or p.checkContextual("desc") or p.check(tkDesc):
     result = p.parseDescribeStmt()
@@ -2256,7 +2625,7 @@ proc parseStatement*(p: var Parser): SqlNode =
       if p.checkContextual("truncate"):
         result = p.parseTruncateStmt()
       else:
-        p.error("expected SQL statement (SHOW, DESCRIBE, EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
+        p.error("expected SQL statement (SHOW, DESCRIBE, EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, MERGE, COPY, CREATE, DROP, ALTER, TRUNCATE, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()
