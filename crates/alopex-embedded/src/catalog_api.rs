@@ -1494,6 +1494,7 @@ fn resolve_storage_location(
             Ok(Some(storage_root))
         }
         TableType::Temporary => Ok(None),
+        TableType::View => Ok(None),
     }
 }
 
@@ -1794,6 +1795,7 @@ pub enum CatalogManifestTableType {
     Managed,
     External,
     Temporary,
+    View,
 }
 
 impl From<TableType> for CatalogManifestTableType {
@@ -1802,6 +1804,7 @@ impl From<TableType> for CatalogManifestTableType {
             TableType::Managed => Self::Managed,
             TableType::External => Self::External,
             TableType::Temporary => Self::Temporary,
+            TableType::View => Self::View,
         }
     }
 }
@@ -1812,6 +1815,7 @@ impl From<CatalogManifestTableType> for TableType {
             CatalogManifestTableType::Managed => Self::Managed,
             CatalogManifestTableType::External => Self::External,
             CatalogManifestTableType::Temporary => Self::Temporary,
+            CatalogManifestTableType::View => Self::View,
         }
     }
 }

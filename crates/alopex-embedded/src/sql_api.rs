@@ -145,6 +145,9 @@ fn stmt_changes_catalog(stmt: &Statement) -> bool {
         stmt.kind,
         StatementKind::CreateTable(_)
             | StatementKind::DropTable(_)
+            | StatementKind::CreateView(_)
+            | StatementKind::DropView(_)
+            | StatementKind::AlterTable(_)
             | StatementKind::CreateIndex(_)
             | StatementKind::DropIndex(_)
     )
@@ -161,7 +164,11 @@ fn stmt_changes_user_data(stmt: &Statement) -> bool {
     }
     matches!(
         stmt.kind,
-        StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_)
+        StatementKind::Insert(_)
+            | StatementKind::Update(_)
+            | StatementKind::Delete(_)
+            | StatementKind::AlterTable(_)
+            | StatementKind::Truncate(_)
     )
 }
 

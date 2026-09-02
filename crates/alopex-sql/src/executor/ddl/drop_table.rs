@@ -7,6 +7,7 @@ use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTxn};
 
 use super::persistence::{delete_index, delete_table};
+use super::schema_evolution::ensure_no_dependent_views;
 /// Execute DROP TABLE.
 pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
@@ -31,6 +32,13 @@ pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
             Err(ExecutorError::TableNotFound(table_name.to_string()))
         };
     }
+    if table_meta.table_type == crate::TableType::View {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "DROP TABLE".into(),
+            reason: format!("'{}' is a view; use DROP VIEW", table_meta.name),
+        });
+    }
+    ensure_no_dependent_views(catalog, table_name)?;
 
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)

@@ -43,9 +43,9 @@ before MessagePack decode because it cannot represent the semantic distinction.
 
 | Path or artifact | Current responsibility | v0.8.8 action | Replacement condition | Verification |
 | --- | --- | --- | --- | --- |
-| Nim source, descriptor, Rust consumer | emit and require contract `0.23.0` | keep synchronized | every wire-schema change | parser, MessagePack, exported-version tests |
+| Nim source, descriptor, Rust consumer | emit and require contract `0.24.0` | keep synchronized | every wire-schema change | parser, MessagePack, exported-version tests |
 | historical vendor files | immutable released evidence | preserve; never relabel | never during development | manifest and checksum tests |
-| four parser archives and manifest | native producer identity | stage fresh contract-0.23.0 Linux x86_64, macOS x86_64/arm64, Windows x86_64 assets | all target records and native smoke pass | release join verifier |
+| four parser archives and manifest | native producer identity | stage fresh contract-0.24.0 Linux x86_64, macOS x86_64/arm64, Windows x86_64 assets | all target records and native smoke pass | release join verifier |
 | Python wheel native copies | target runtime parser | copy the same verified bytes and sidecars | target digest and contract match | wheel-content verifier and Python demo |
 
 Rollback returns the whole release candidate to its previous source and asset

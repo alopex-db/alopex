@@ -212,6 +212,17 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
+            LogicalPlan::CreateView {
+                table,
+                if_not_exists,
+            } => self.execute_create_table(table, Vec::new(), if_not_exists),
+            LogicalPlan::DropView { name, if_exists } => self.execute_drop_view(&name, if_exists),
+            LogicalPlan::AlterTable {
+                name,
+                if_exists,
+                action,
+            } => self.execute_alter_table(&name, if_exists, action),
+            LogicalPlan::Truncate { name } => self.execute_truncate(&name),
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,
@@ -282,6 +293,45 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         self.run_in_write_txn(|txn| {
             ddl::drop_table::execute_drop_table(txn, &mut *catalog, name, if_exists)
         })
+    }
+
+    fn execute_drop_view(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            let Some(view) =
+                ddl::schema_evolution::prepare_drop_view(txn, &*catalog, name, if_exists)?
+            else {
+                return Ok(ExecutionResult::Success);
+            };
+            catalog.drop_table(&view.name)?;
+            Ok(ExecutionResult::Success)
+        })
+    }
+
+    fn execute_alter_table(
+        &mut self,
+        name: &str,
+        if_exists: bool,
+        action: crate::ast::AlterTableAction,
+    ) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        if !catalog.table_exists(name) && if_exists {
+            return Ok(ExecutionResult::Success);
+        }
+        self.run_in_write_txn(|txn| {
+            let outcome = ddl::schema_evolution::prepare_alter(txn, &*catalog, name, action)?;
+            catalog.drop_table(&outcome.old_table.name)?;
+            catalog.create_table(outcome.new_table)?;
+            for (_, index) in outcome.updated_indexes {
+                catalog.create_index(index)?;
+            }
+            Ok(ExecutionResult::Success)
+        })
+    }
+
+    fn execute_truncate(&mut self, name: &str) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| ddl::schema_evolution::execute_truncate(txn, &*catalog, name))
     }
 
     fn execute_create_index(
@@ -445,6 +495,40 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 &name,
                 if_exists,
             ),
+            LogicalPlan::CreateView {
+                table,
+                if_not_exists,
+            } => self.execute_create_table_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                table,
+                Vec::new(),
+                if_not_exists,
+            ),
+            LogicalPlan::DropView { name, if_exists } => self.execute_drop_view_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                &name,
+                if_exists,
+            ),
+            LogicalPlan::AlterTable {
+                name,
+                if_exists,
+                action,
+            } => self.execute_alter_table_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                &name,
+                if_exists,
+                action,
+            ),
+            LogicalPlan::Truncate { name } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                ddl::schema_evolution::execute_truncate(&mut sql_txn, &view, &name)
+            }
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,
@@ -650,6 +734,17 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             };
         }
 
+        if table_meta.table_type == crate::TableType::View {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "DROP TABLE".into(),
+                reason: format!("'{}' is a view; use DROP VIEW", table_meta.name),
+            });
+        }
+        ddl::schema_evolution::ensure_no_dependent_views(
+            &TxnCatalogView::new(catalog, overlay),
+            table_name,
+        )?;
+
         let indexes = TxnCatalogView::new(catalog, overlay)
             .get_indexes_for_table(table_name)
             .into_iter()
@@ -673,6 +768,53 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         overlay.drop_table(&TableFqn::from(&table_meta));
 
+        Ok(ExecutionResult::Success)
+    }
+
+    fn execute_drop_view_in_txn<'txn>(
+        &self,
+        catalog: &mut PersistentCatalog<S>,
+        txn: &mut impl crate::storage::SqlTxn<'txn, S>,
+        overlay: &mut CatalogOverlay,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<ExecutionResult>
+    where
+        S: 'txn,
+    {
+        let view = TxnCatalogView::new(catalog, overlay);
+        let Some(metadata) = ddl::schema_evolution::prepare_drop_view(txn, &view, name, if_exists)?
+        else {
+            return Ok(ExecutionResult::Success);
+        };
+        overlay.drop_table(&TableFqn::from(&metadata));
+        Ok(ExecutionResult::Success)
+    }
+
+    fn execute_alter_table_in_txn<'txn>(
+        &self,
+        catalog: &mut PersistentCatalog<S>,
+        txn: &mut impl crate::storage::SqlTxn<'txn, S>,
+        overlay: &mut CatalogOverlay,
+        name: &str,
+        if_exists: bool,
+        action: crate::ast::AlterTableAction,
+    ) -> Result<ExecutionResult>
+    where
+        S: 'txn,
+    {
+        if catalog.get_table_in_txn(name, overlay).is_none() && if_exists {
+            return Ok(ExecutionResult::Success);
+        }
+        let view = TxnCatalogView::new(catalog, overlay);
+        let outcome = ddl::schema_evolution::prepare_alter(txn, &view, name, action)?;
+        if outcome.old_table.name != outcome.new_table.name {
+            overlay.drop_table(&TableFqn::from(&outcome.old_table));
+        }
+        overlay.add_table(TableFqn::from(&outcome.new_table), outcome.new_table);
+        for (_, index) in outcome.updated_indexes {
+            overlay.add_index(IndexFqn::from(&index), index);
+        }
         Ok(ExecutionResult::Success)
     }
 

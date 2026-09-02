@@ -23,6 +23,10 @@ DESCRIBE, `information_schema`, quoted names, defaults, and indexes. The exact
 schemas and visibility model are documented in
 [`docs/sql-metadata.md`](../../../docs/sql-metadata.md).
 
+`demo_schema_evolution.sql` is the v0.8.11 VIEW, ALTER TABLE, and TRUNCATE
+fixture. The dependency, transaction, and compatibility contract is documented
+in [`docs/sql-schema-evolution.md`](../../../docs/sql-schema-evolution.md).
+
 | Scenario | Observable capability | Requirements/design source |
 | --- | --- | --- |
 | `EMB-01-storage-durability` | memory options/limits, snapshot, clone, clear, persist, file URI reopen and flush | inherited local compatibility; Phase 1 R5 |

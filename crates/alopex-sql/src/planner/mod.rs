@@ -37,7 +37,8 @@ pub use typed_expr::{
 pub use types::ResolvedType;
 
 use crate::ast::ddl::{
-    ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
+    AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateTable, CreateView, DropIndex,
+    DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
     Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
@@ -133,6 +134,103 @@ fn metadata_default(expr: &Expr) -> Option<String> {
         // ponytail: expose only stable SQL literals until the AST owns a canonical SQL formatter.
         _ => return None,
     })
+}
+
+fn view_dependencies(query: &Select) -> Result<Vec<String>, PlannerError> {
+    fn visit_query(
+        value: &serde_json::Value,
+        outer_ctes: &HashSet<String>,
+        dependencies: &mut HashSet<String>,
+    ) {
+        let Some(fields) = value.as_object() else {
+            return;
+        };
+        let mut visible_ctes = outer_ctes.clone();
+        if let Some(with) = fields.get("with").and_then(serde_json::Value::as_object)
+            && let Some(ctes) = with.get("ctes").and_then(serde_json::Value::as_array)
+        {
+            if with
+                .get("recursive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                visible_ctes.extend(ctes.iter().filter_map(|cte| {
+                    cte.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }));
+            }
+            for cte in ctes {
+                if let Some(cte_query) = cte.get("query") {
+                    visit_query(cte_query, &visible_ctes, dependencies);
+                }
+                if let Some(name) = cte.get("name").and_then(serde_json::Value::as_str) {
+                    visible_ctes.insert(name.to_string());
+                }
+            }
+        }
+        for (name, value) in fields {
+            if name != "with" {
+                visit(value, &visible_ctes, dependencies);
+            }
+        }
+    }
+
+    fn visit(
+        value: &serde_json::Value,
+        visible_ctes: &HashSet<String>,
+        dependencies: &mut HashSet<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let variant = fields.get("variant").and_then(serde_json::Value::as_str);
+                if fields.contains_key("from") || matches!(variant, Some("Select" | "Values")) {
+                    visit_query(value, visible_ctes, dependencies);
+                    return;
+                }
+                if fields.get("variant").and_then(serde_json::Value::as_str) == Some("Table")
+                    && let Some(name) = fields.get("name").and_then(serde_json::Value::as_str)
+                    && !visible_ctes.contains(name)
+                {
+                    dependencies.insert(name.to_string());
+                }
+                for value in fields.values() {
+                    visit(value, visible_ctes, dependencies);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, visible_ctes, dependencies);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let value = serde_json::to_value(query).map_err(|error| PlannerError::InvalidExpression {
+        message: format!("cannot serialize view definition: {error}"),
+    })?;
+    let mut dependencies = HashSet::new();
+    visit_query(&value, &HashSet::new(), &mut dependencies);
+    let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+    dependencies.sort();
+    Ok(dependencies)
+}
+
+pub(crate) fn column_metadata_from_def(col: &ColumnDef) -> ColumnMetadata {
+    let mut meta = ColumnMetadata::new(col.name.clone(), ResolvedType::from_ast(&col.data_type));
+    for constraint in &col.constraints {
+        match constraint {
+            ColumnConstraint::NotNull { .. } => meta.not_null = true,
+            ColumnConstraint::PrimaryKey { .. } => {
+                meta.primary_key = true;
+                meta.not_null = true;
+            }
+            ColumnConstraint::Unique { .. } => meta.unique = true,
+            ColumnConstraint::Default { value, .. } => meta.default = Some(value.clone()),
+        }
+    }
+    meta
 }
 
 fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
@@ -914,6 +1012,20 @@ impl TableReferenceExtractor {
                 root_access,
                 TableReferenceSource::LogicalPlanDdlTarget,
             ),
+            LogicalPlan::CreateView { table, .. } => push_table_reference(
+                references,
+                &table.name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
+            LogicalPlan::DropView { name, .. }
+            | LogicalPlan::AlterTable { name, .. }
+            | LogicalPlan::Truncate { name } => push_table_reference(
+                references,
+                name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
             LogicalPlan::CreateIndex { index, .. } => push_table_reference(
                 references,
                 &index.table,
@@ -1077,6 +1189,10 @@ fn push_table_reference(
 enum GenericHostStatement<'a> {
     CreateTable(&'a CreateTable),
     DropTable(&'a DropTable),
+    CreateView(&'a CreateView),
+    DropView(&'a DropView),
+    AlterTable(&'a AlterTable),
+    Truncate(&'a Truncate),
     CreateIndex(&'a CreateIndex),
     DropIndex(&'a DropIndex),
     Pragma {
@@ -1097,6 +1213,10 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
     match statement_kind {
         StatementKind::CreateTable(statement) => GenericHostStatement::CreateTable(statement),
         StatementKind::DropTable(statement) => GenericHostStatement::DropTable(statement),
+        StatementKind::CreateView(statement) => GenericHostStatement::CreateView(statement),
+        StatementKind::DropView(statement) => GenericHostStatement::DropView(statement),
+        StatementKind::AlterTable(statement) => GenericHostStatement::AlterTable(statement),
+        StatementKind::Truncate(statement) => GenericHostStatement::Truncate(statement),
         StatementKind::CreateIndex(statement) => GenericHostStatement::CreateIndex(statement),
         StatementKind::DropIndex(statement) => GenericHostStatement::DropIndex(statement),
         StatementKind::Pragma { name, value } => GenericHostStatement::Pragma { name, value },
@@ -1137,6 +1257,10 @@ fn table_reference_access_for_classified(
         | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
+        GenericHostStatement::CreateView(_)
+        | GenericHostStatement::DropView(_)
+        | GenericHostStatement::AlterTable(_)
+        | GenericHostStatement::Truncate(_) => Ok(TableReferenceAccess::Metadata),
         GenericHostStatement::CreateIndex(_)
         | GenericHostStatement::DropIndex(_)
         | GenericHostStatement::Pragma { .. } => Ok(TableReferenceAccess::Metadata),
@@ -1221,6 +1345,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // DDL statements
             GenericHostStatement::CreateTable(statement) => self.plan_create_table(statement),
             GenericHostStatement::DropTable(statement) => self.plan_drop_table(statement),
+            GenericHostStatement::CreateView(statement) => self.plan_create_view(statement),
+            GenericHostStatement::DropView(statement) => self.plan_drop_view(statement),
+            GenericHostStatement::AlterTable(statement) => self.plan_alter_table(statement),
+            GenericHostStatement::Truncate(statement) => self.plan_truncate(statement),
             GenericHostStatement::CreateIndex(statement) => self.plan_create_index(statement),
             GenericHostStatement::DropIndex(statement) => self.plan_drop_index(statement),
             GenericHostStatement::Pragma { name, value } => self.plan_pragma(name, value),
@@ -1419,6 +1547,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                                     TableType::Managed => "BASE TABLE",
                                     TableType::External => "FOREIGN TABLE",
                                     TableType::Temporary => "LOCAL TEMPORARY",
+                                    TableType::View => "VIEW",
                                 }
                                 .into(),
                             )),
@@ -1517,11 +1646,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Convert column definitions to metadata
-        let columns: Vec<ColumnMetadata> = stmt
-            .columns
-            .iter()
-            .map(|col| self.convert_column_def(col))
-            .collect();
+        let columns: Vec<ColumnMetadata> =
+            stmt.columns.iter().map(column_metadata_from_def).collect();
 
         // Collect primary key from table constraints
         let primary_key = Self::extract_primary_key(stmt);
@@ -1551,42 +1677,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .map(|opt| (opt.key.clone(), opt.value.clone()))
                 .collect(),
         })
-    }
-
-    /// Convert an AST column definition to catalog column metadata.
-    fn convert_column_def(&self, col: &ColumnDef) -> ColumnMetadata {
-        let data_type = ResolvedType::from_ast(&col.data_type);
-        let mut meta = ColumnMetadata::new(col.name.clone(), data_type);
-
-        // Process constraints
-        for constraint in &col.constraints {
-            meta = Self::apply_column_constraint(meta, constraint);
-        }
-
-        meta
-    }
-
-    /// Apply a column constraint to column metadata.
-    fn apply_column_constraint(
-        mut meta: ColumnMetadata,
-        constraint: &ColumnConstraint,
-    ) -> ColumnMetadata {
-        match constraint {
-            ColumnConstraint::NotNull { .. } => {
-                meta.not_null = true;
-            }
-            ColumnConstraint::PrimaryKey { .. } => {
-                meta.primary_key = true;
-                meta.not_null = true; // PRIMARY KEY implies NOT NULL
-            }
-            ColumnConstraint::Unique { .. } => {
-                meta.unique = true;
-            }
-            ColumnConstraint::Default { value: expr, .. } => {
-                meta.default = Some(expr.clone());
-            }
-        }
-        meta
     }
 
     /// Extract primary key columns from table constraints.
@@ -1639,10 +1729,101 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         })
     }
 
+    fn plan_create_view(&self, stmt: &CreateView) -> Result<LogicalPlan, PlannerError> {
+        if let Some(existing) = self.catalog.get_table(&stmt.name) {
+            if !stmt.if_not_exists {
+                return Err(PlannerError::table_already_exists(&stmt.name));
+            }
+            return Ok(LogicalPlan::CreateView {
+                table: existing.clone(),
+                if_not_exists: true,
+            });
+        }
+
+        let StatementKind::Select(query) = &stmt.query.kind else {
+            return Err(PlannerError::unsupported_feature(
+                "non-SELECT view definition",
+                "a future version",
+                stmt.span,
+            ));
+        };
+        let relation = self.plan_select_relation(query, &[], &HashMap::new())?;
+        let mut columns = relation.schema;
+        apply_alias_columns(&stmt.name, &stmt.columns, &mut columns, stmt.span)?;
+        let mut table = TableMetadata::new(&stmt.name, columns);
+        table.table_type = TableType::View;
+        table.properties.insert(
+            crate::catalog::VIEW_DEFINITION_PROPERTY.to_string(),
+            serde_json::to_string(&stmt.query).map_err(|error| {
+                PlannerError::InvalidExpression {
+                    message: format!("cannot serialize view definition: {error}"),
+                }
+            })?,
+        );
+        table.properties.insert(
+            crate::catalog::VIEW_DEPENDENCIES_PROPERTY.to_string(),
+            serde_json::to_string(&view_dependencies(query)?).expect("string list serializes"),
+        );
+        Ok(LogicalPlan::CreateView {
+            table,
+            if_not_exists: stmt.if_not_exists,
+        })
+    }
+
+    fn plan_drop_view(&self, stmt: &DropView) -> Result<LogicalPlan, PlannerError> {
+        let is_view = self
+            .catalog
+            .get_table(&stmt.name)
+            .is_some_and(|table| table.table_type == TableType::View);
+        if !stmt.if_exists && !is_view {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::DropView {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+        })
+    }
+
+    fn plan_alter_table(&self, stmt: &AlterTable) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.if_exists && !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::AlterTable {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+            action: stmt.action.clone(),
+        })
+    }
+
+    fn plan_truncate(&self, stmt: &Truncate) -> Result<LogicalPlan, PlannerError> {
+        if !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::Truncate {
+            name: stmt.name.clone(),
+        })
+    }
+
     fn table_exists_in_default(&self, name: &str) -> bool {
         match self.catalog.get_table(name) {
             Some(table) => table.catalog_name == "default" && table.namespace_name == "default",
             None => false,
+        }
+    }
+
+    fn ensure_writable_table(
+        table: &TableMetadata,
+        operation: &str,
+        span: crate::ast::Span,
+    ) -> Result<(), PlannerError> {
+        if table.table_type == TableType::View {
+            Err(PlannerError::unsupported_feature(
+                format!("{operation} on view '{}'", table.name),
+                "views are read-only",
+                span,
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -1660,6 +1841,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Validate table exists
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "CREATE INDEX", stmt.span)?;
 
         // Validate column exists
         self.name_resolver
@@ -3187,6 +3369,50 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     return Ok(relation);
                 }
                 let table = self.name_resolver.resolve_table(name, *span)?.clone();
+                if table.table_type == TableType::View {
+                    let definition = table
+                        .properties
+                        .get(crate::catalog::VIEW_DEFINITION_PROPERTY)
+                        .ok_or_else(|| PlannerError::InvalidExpression {
+                            message: format!("view '{}' has no stored definition", table.name),
+                        })?;
+                    let statement: Statement =
+                        serde_json::from_str(definition).map_err(|error| {
+                            PlannerError::InvalidExpression {
+                                message: format!(
+                                    "view '{}' definition is invalid: {error}",
+                                    table.name
+                                ),
+                            }
+                        })?;
+                    let StatementKind::Select(query) = &statement.kind else {
+                        return Err(PlannerError::InvalidExpression {
+                            message: format!("view '{}' is not a SELECT", table.name),
+                        });
+                    };
+                    let mut relation = self.plan_select_relation(query, outer_scope, ctes)?;
+                    // Keep the view's projection as an optimization boundary.
+                    // Otherwise an outer SELECT can replace a projected base
+                    // Scan and resolve its column indexes against the view.
+                    relation.plan = LogicalPlan::Project {
+                        input: Box::new(relation.plan),
+                        projection: Projection::All(
+                            relation
+                                .schema
+                                .iter()
+                                .map(|column| column.name.clone())
+                                .collect(),
+                        ),
+                    };
+                    relation.schema = table.columns.clone();
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut relation.schema, *span)?;
+                    relation.scope = vec![ScopedTable::new(
+                        TableMetadata::new(relation_name, relation.schema.clone()),
+                        start_index,
+                    )];
+                    return Ok(relation);
+                }
                 let mut scope_table = table.clone();
                 if let Some(alias) = alias {
                     scope_table.name = alias.clone();
@@ -5287,6 +5513,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_insert(&self, stmt: &Insert) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "INSERT", stmt.span)?;
 
         // Determine the column list
         let columns: Vec<String> = if let Some(ref cols) = stmt.columns {
@@ -5509,6 +5736,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_update(&self, stmt: &Update) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
 
         // Process assignments
         let mut typed_assignments = Vec::new();
@@ -5584,6 +5812,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_delete(&self, stmt: &Delete) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "DELETE", stmt.span)?;
 
         // Process optional WHERE clause
         let filter = if let Some(ref selection) = stmt.selection {

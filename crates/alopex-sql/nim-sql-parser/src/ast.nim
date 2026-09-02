@@ -27,6 +27,20 @@ type
     nkDelete
     nkCreateTable
     nkDropTable
+    nkCreateView
+    nkDropView
+    nkAlterTable
+    nkAlterAddColumn
+    nkAlterDropColumn
+    nkAlterRenameColumn
+    nkAlterRenameTable
+    nkAlterColumn
+    nkAlterSetDataType
+    nkAlterSetDefault
+    nkAlterDropDefault
+    nkAlterSetNotNull
+    nkAlterDropNotNull
+    nkTruncate
     nkCreateIndex
     nkCreateContinuousAggregate
     nkDropIndex

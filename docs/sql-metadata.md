@@ -66,7 +66,7 @@ planning. Distributed-read validation already classifies the resulting
 returning stale or partially merged rows. No partial-success metadata response
 exists in v0.8.11.
 
-Parser contract `0.23.0` adds the defaulted `temporary` field to `CreateTable`.
+Parser contract `0.24.0` adds the defaulted `temporary` field to `CreateTable`.
 Older durable table and index records remain readable because existing enum
 discriminants are unchanged and the new table type is appended. Metadata is a
 query surface only; no durable catalog migration is required for ordinary

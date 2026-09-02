@@ -169,6 +169,8 @@ proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
 proc parseCreateStmt(p: var Parser): SqlNode
 proc parseDropStmt(p: var Parser): SqlNode
+proc parseAlterStmt(p: var Parser): SqlNode
+proc parseTruncateStmt(p: var Parser): SqlNode
 proc parsePragmaStmt(p: var Parser): SqlNode
 proc parseTypeName(p: var Parser): SqlNode
 proc parseOrderByItem(p: var Parser): SqlNode
@@ -1839,10 +1841,35 @@ proc parseCreateStmt(p: var Parser): SqlNode =
     result = p.parseCreateTableAfterCreate(start, true)
   elif p.check(tkIndex):
     result = p.parseCreateIndexAfterCreate(start)
+  elif p.checkContextual("view"):
+    discard p.advance()
+    result = newNode(nkCreateView, tokenSpan(start))
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkNot)
+      discard p.expect(tkExists)
+      result.children.add(newIdent("IF NOT EXISTS"))
+    let name = p.expectIdent("view name")
+    result.children.add(newIdent(name.value, tokenSpan(name)))
+    let columns = newNode(nkColumnList)
+    if p.check(tkLParen):
+      discard p.advance()
+      let first = p.expectIdent("view column name")
+      columns.children.add(newIdent(first.value, tokenSpan(first)))
+      while p.check(tkComma):
+        discard p.advance()
+        let column = p.expectIdent("view column name")
+        columns.children.add(newIdent(column.value, tokenSpan(column)))
+      discard p.expect(tkRParen)
+    result.children.add(columns)
+    discard p.expect(tkAs)
+    if p.current.kind notin {tkSelect, tkWith}:
+      p.error("CREATE VIEW requires a SELECT query")
+    result.children.add(p.parseQueryStmt())
   elif p.checkContextual("CONTINUOUS"):
     result = p.parseCreateContinuousAggregateAfterCreate(start)
   else:
-    p.error("expected TABLE, INDEX, or CONTINUOUS AGGREGATE after CREATE")
+    p.error("expected TABLE, VIEW, INDEX, or CONTINUOUS AGGREGATE after CREATE")
 
 proc parseDropTableAfterDrop(p: var Parser; start: Token): SqlNode =
   discard p.expect(tkTable)
@@ -1870,8 +1897,121 @@ proc parseDropStmt(p: var Parser): SqlNode =
     result = p.parseDropTableAfterDrop(start)
   elif p.check(tkIndex):
     result = p.parseDropIndexAfterDrop(start)
+  elif p.checkContextual("view"):
+    discard p.advance()
+    result = newNode(nkDropView, tokenSpan(start))
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkExists)
+      result.children.add(newIdent("IF EXISTS"))
+    let name = p.expectIdent("view name")
+    result.children.add(newIdent(name.value, tokenSpan(name)))
   else:
-    p.error("expected TABLE or INDEX after DROP")
+    p.error("expected TABLE, VIEW, or INDEX after DROP")
+
+proc parseAlterStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkAlter)
+  discard p.expect(tkTable)
+  result = newNode(nkAlterTable, tokenSpan(start))
+  if p.check(tkIf):
+    discard p.advance()
+    discard p.expect(tkExists)
+    result.children.add(newIdent("IF EXISTS"))
+  let table = p.expectIdent("table name")
+  result.children.add(newIdent(table.value, tokenSpan(table)))
+
+  if p.checkContextual("add"):
+    discard p.advance()
+    if p.checkContextual("column"): discard p.advance()
+    let action = newNode(nkAlterAddColumn)
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkNot)
+      discard p.expect(tkExists)
+      action.children.add(newIdent("IF NOT EXISTS"))
+    action.children.add(p.parseColumnDef())
+    result.children.add(action)
+  elif p.check(tkDrop):
+    discard p.advance()
+    if p.checkContextual("column"): discard p.advance()
+    let action = newNode(nkAlterDropColumn)
+    if p.check(tkIf):
+      discard p.advance()
+      discard p.expect(tkExists)
+      action.children.add(newIdent("IF EXISTS"))
+    let column = p.expectIdent("column name")
+    action.children.add(newIdent(column.value, tokenSpan(column)))
+    result.children.add(action)
+  elif p.checkContextual("rename"):
+    discard p.advance()
+    if p.checkContextual("column"):
+      discard p.advance()
+      let oldName = p.expectIdent("column name")
+      discard p.expect(tkTo)
+      let newName = p.expectIdent("new column name")
+      let action = newNode(nkAlterRenameColumn)
+      action.children.add(newIdent(oldName.value, tokenSpan(oldName)))
+      action.children.add(newIdent(newName.value, tokenSpan(newName)))
+      result.children.add(action)
+    else:
+      discard p.expect(tkTo)
+      let newName = p.expectIdent("new table name")
+      let action = newNode(nkAlterRenameTable)
+      action.children.add(newIdent(newName.value, tokenSpan(newName)))
+      result.children.add(action)
+  elif p.check(tkAlter):
+    discard p.advance()
+    if p.checkContextual("column"): discard p.advance()
+    let column = p.expectIdent("column name")
+    let action = newNode(nkAlterColumn)
+    action.children.add(newIdent(column.value, tokenSpan(column)))
+    if p.checkContextual("type"):
+      discard p.advance()
+      let operation = newNode(nkAlterSetDataType)
+      operation.children.add(p.parseTypeName())
+      action.children.add(operation)
+    elif p.check(tkSet):
+      discard p.advance()
+      if p.checkContextual("data"):
+        discard p.advance()
+        discard p.expectContextual("type")
+        let operation = newNode(nkAlterSetDataType)
+        operation.children.add(p.parseTypeName())
+        action.children.add(operation)
+      elif p.check(tkDefault):
+        discard p.advance()
+        let operation = newNode(nkAlterSetDefault)
+        operation.children.add(p.parseExpr())
+        action.children.add(operation)
+      elif p.check(tkNot):
+        discard p.advance()
+        discard p.expect(tkNull)
+        action.children.add(newNode(nkAlterSetNotNull))
+      else:
+        p.error("expected DATA TYPE, DEFAULT, or NOT NULL after SET")
+    elif p.check(tkDrop):
+      discard p.advance()
+      if p.check(tkDefault):
+        discard p.advance()
+        action.children.add(newNode(nkAlterDropDefault))
+      elif p.check(tkNot):
+        discard p.advance()
+        discard p.expect(tkNull)
+        action.children.add(newNode(nkAlterDropNotNull))
+      else:
+        p.error("expected DEFAULT or NOT NULL after DROP")
+    else:
+      p.error("expected TYPE, SET, or DROP after ALTER COLUMN")
+    result.children.add(action)
+  else:
+    p.error("expected ADD, DROP, RENAME, or ALTER action")
+
+proc parseTruncateStmt(p: var Parser): SqlNode =
+  let start = p.expectContextual("truncate")
+  result = newNode(nkTruncate, tokenSpan(start))
+  if p.check(tkTable): discard p.advance()
+  let table = p.expectIdent("table name")
+  result.children.add(newIdent(table.value, tokenSpan(table)))
 
 proc parsePragmaStmt(p: var Parser): SqlNode =
   let start = p.expect(tkPragma)
@@ -2096,6 +2236,8 @@ proc parseStatement*(p: var Parser): SqlNode =
       result = p.parseCreateStmt()
     of tkDrop:
       result = p.parseDropStmt()
+    of tkAlter:
+      result = p.parseAlterStmt()
     of tkPragma:
       result = p.parsePragmaStmt()
     of tkBegin, tkStart:
@@ -2111,7 +2253,10 @@ proc parseStatement*(p: var Parser): SqlNode =
     of tkRelease:
       result = p.parseReleaseSavepointStmt()
     else:
-      p.error("expected SQL statement (SHOW, DESCRIBE, EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
+      if p.checkContextual("truncate"):
+        result = p.parseTruncateStmt()
+      else:
+        p.error("expected SQL statement (SHOW, DESCRIBE, EXPLAIN, WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, PRAGMA, BEGIN, START TRANSACTION, SET TRANSACTION, COMMIT, ROLLBACK, SAVEPOINT, RELEASE)")
 
   if p.check(tkSemicolon):
     discard p.advance()

@@ -73,6 +73,10 @@ pub enum StatementKind {
     // DDL
     CreateTable(CreateTable),
     DropTable(DropTable),
+    CreateView(CreateView),
+    DropView(DropView),
+    AlterTable(AlterTable),
+    Truncate(Truncate),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
     /// A Skulk-owned continuous aggregate definition carried but not executed by Alopex.

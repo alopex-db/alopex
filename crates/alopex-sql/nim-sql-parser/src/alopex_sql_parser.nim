@@ -24,7 +24,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.23.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.24.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -1434,6 +1434,138 @@ proc writeDropTableKind(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writeCreateViewKind(s: Stream; node: SqlNode) =
+  let ifNotExists = node.children[0].kind == nkIdentifier and
+    node.children[0].strVal == "IF NOT EXISTS"
+  let nameIdx = if ifNotExists: 1 else: 0
+  let columns = node.children[nameIdx + 1]
+  let query = node.children[nameIdx + 2]
+  s.pack_map(6)
+  s.writeKey("variant")
+  s.pack_type("CreateView")
+  s.writeKey("if_not_exists")
+  s.pack_type(ifNotExists)
+  s.writeKey("name")
+  s.pack_type(node.children[nameIdx].firstIdent())
+  s.writeKey("columns")
+  s.pack_array(columns.children.len)
+  for column in columns.children:
+    s.pack_type(column.firstIdent())
+  s.writeKey("query")
+  s.writeStatement(query)
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeDropViewKind(s: Stream; node: SqlNode) =
+  let ifExists = node.children[0].kind == nkIdentifier and
+    node.children[0].strVal == "IF EXISTS"
+  let nameIdx = if ifExists: 1 else: 0
+  s.pack_map(4)
+  s.writeKey("variant")
+  s.pack_type("DropView")
+  s.writeKey("if_exists")
+  s.pack_type(ifExists)
+  s.writeKey("name")
+  s.pack_type(node.children[nameIdx].firstIdent())
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeAlterTableAction(s: Stream; node: SqlNode) =
+  case node.kind
+  of nkAlterAddColumn:
+    let ifNotExists = node.children[0].kind == nkIdentifier and
+      node.children[0].strVal == "IF NOT EXISTS"
+    let columnIdx = if ifNotExists: 1 else: 0
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("AddColumn")
+    s.writeKey("if_not_exists")
+    s.pack_type(ifNotExists)
+    s.writeKey("column")
+    s.writeColumnDef(node.children[columnIdx])
+  of nkAlterDropColumn:
+    let ifExists = node.children[0].kind == nkIdentifier and
+      node.children[0].strVal == "IF EXISTS"
+    let columnIdx = if ifExists: 1 else: 0
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("DropColumn")
+    s.writeKey("if_exists")
+    s.pack_type(ifExists)
+    s.writeKey("name")
+    s.pack_type(node.children[columnIdx].firstIdent())
+  of nkAlterRenameColumn:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("RenameColumn")
+    s.writeKey("old_name")
+    s.pack_type(node.children[0].firstIdent())
+    s.writeKey("new_name")
+    s.pack_type(node.children[1].firstIdent())
+  of nkAlterRenameTable:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("RenameTable")
+    s.writeKey("new_name")
+    s.pack_type(node.children[0].firstIdent())
+  of nkAlterColumn:
+    let operation = node.children[1]
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("AlterColumn")
+    s.writeKey("name")
+    s.pack_type(node.children[0].firstIdent())
+    s.writeKey("action")
+    case operation.kind
+    of nkAlterSetDataType:
+      s.pack_map(2)
+      s.writeKey("variant")
+      s.pack_type("SetDataType")
+      s.writeKey("data_type")
+      s.writeDataType(operation.children[0])
+    of nkAlterSetDefault:
+      s.pack_map(2)
+      s.writeKey("variant")
+      s.pack_type("SetDefault")
+      s.writeKey("value")
+      s.writeExpr(operation.children[0])
+    of nkAlterDropDefault, nkAlterSetNotNull, nkAlterDropNotNull:
+      s.pack_map(1)
+      s.writeKey("variant")
+      case operation.kind
+      of nkAlterDropDefault: s.pack_type("DropDefault")
+      of nkAlterSetNotNull: s.pack_type("SetNotNull")
+      else: s.pack_type("DropNotNull")
+    else:
+      raise newException(ParseError, "invalid ALTER COLUMN operation")
+  else:
+    raise newException(ParseError, "invalid ALTER TABLE action")
+
+proc writeAlterTableKind(s: Stream; node: SqlNode) =
+  let ifExists = node.children[0].kind == nkIdentifier and
+    node.children[0].strVal == "IF EXISTS"
+  let nameIdx = if ifExists: 1 else: 0
+  s.pack_map(5)
+  s.writeKey("variant")
+  s.pack_type("AlterTable")
+  s.writeKey("if_exists")
+  s.pack_type(ifExists)
+  s.writeKey("name")
+  s.pack_type(node.children[nameIdx].firstIdent())
+  s.writeKey("action")
+  s.writeAlterTableAction(node.children[nameIdx + 1])
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeTruncateKind(s: Stream; node: SqlNode) =
+  s.pack_map(3)
+  s.writeKey("variant")
+  s.pack_type("Truncate")
+  s.writeKey("name")
+  s.pack_type(node.children[0].firstIdent())
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
 proc writeCreateIndexKind(s: Stream; node: SqlNode) =
   var idx = 0
   let ifNotExistsFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
@@ -2007,6 +2139,14 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeCreateTableKind(node)
   of nkDropTable:
     s.writeDropTableKind(node)
+  of nkCreateView:
+    s.writeCreateViewKind(node)
+  of nkDropView:
+    s.writeDropViewKind(node)
+  of nkAlterTable:
+    s.writeAlterTableKind(node)
+  of nkTruncate:
+    s.writeTruncateKind(node)
   of nkCreateIndex:
     s.writeCreateIndexKind(node)
   of nkDropIndex:

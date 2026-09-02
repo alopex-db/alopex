@@ -358,7 +358,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.23.0");
+    assert_eq!(parser_contract_version(), "0.24.0");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.23.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.24.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -508,7 +508,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.23.0");
+    assert_eq!(parser_contract_version(), "0.24.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -1204,4 +1204,105 @@ fn parses_temporary_table_lifetime_marker() {
         panic!("expected CREATE TABLE");
     };
     assert!(!table.temporary);
+}
+
+#[test]
+fn parses_view_and_truncate_schema_evolution_contract() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE VIEW IF NOT EXISTS labels (name) AS SELECT label FROM items; \
+         DROP VIEW IF EXISTS labels; TRUNCATE TABLE items",
+    )
+    .unwrap();
+    let StatementKind::CreateView(view) = &statements[0].kind else {
+        panic!("expected CREATE VIEW");
+    };
+    assert!(view.if_not_exists);
+    assert_eq!(view.name, "labels");
+    assert_eq!(view.columns, ["name"]);
+    assert!(matches!(view.query.kind, StatementKind::Select(_)));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::DropView(view) if view.if_exists && view.name == "labels"
+    ));
+    assert!(matches!(
+        &statements[2].kind,
+        StatementKind::Truncate(table) if table.name == "items"
+    ));
+}
+
+#[test]
+fn parses_each_alter_table_action_across_the_nim_boundary() {
+    use alopex_sql::{AlterColumnAction, AlterTableAction};
+
+    let cases = [
+        "ALTER TABLE items ADD COLUMN IF NOT EXISTS score BIGINT DEFAULT 0",
+        "ALTER TABLE items DROP COLUMN IF EXISTS score",
+        "ALTER TABLE items RENAME COLUMN label TO name",
+        "ALTER TABLE items RENAME TO products",
+        "ALTER TABLE items ALTER COLUMN score SET DATA TYPE TEXT",
+        "ALTER TABLE items ALTER COLUMN score SET DEFAULT '0'",
+        "ALTER TABLE items ALTER COLUMN score DROP DEFAULT",
+        "ALTER TABLE items ALTER COLUMN score SET NOT NULL",
+        "ALTER TABLE items ALTER COLUMN score DROP NOT NULL",
+    ];
+    for (index, sql) in cases.into_iter().enumerate() {
+        let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+        let StatementKind::AlterTable(table) = statement.kind else {
+            panic!("expected ALTER TABLE for {sql}");
+        };
+        let matches_expected = matches!(
+            (index, table.action),
+            (
+                0,
+                AlterTableAction::AddColumn {
+                    if_not_exists: true,
+                    ..
+                },
+            ) | (
+                1,
+                AlterTableAction::DropColumn {
+                    if_exists: true,
+                    ..
+                },
+            ) | (2, AlterTableAction::RenameColumn { .. })
+                | (3, AlterTableAction::RenameTable { .. })
+                | (
+                    4,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetDataType { .. },
+                        ..
+                    },
+                )
+                | (
+                    5,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetDefault { .. },
+                        ..
+                    },
+                )
+                | (
+                    6,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::DropDefault,
+                        ..
+                    },
+                )
+                | (
+                    7,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetNotNull,
+                        ..
+                    },
+                )
+                | (
+                    8,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::DropNotNull,
+                        ..
+                    },
+                )
+        );
+        assert!(matches_expected, "wrong action for {sql}");
+    }
 }

@@ -130,15 +130,15 @@ For each target the library, `CONTRACT_VERSION`, `SHA256SUMS`, and
 `BUILD_IDENTITY.json` feed the parser archive, asset envelope, vendor manifest,
 Python wheel native copy, and release evidence. Historical v0.8.4 contract
 `0.4.0` vendor binaries and sidecars remain unchanged and are rejected by the
-current `0.23.0` requirement. Alopex version, source-tree digest, archive digest,
+current `0.24.0` requirement. Alopex version, source-tree digest, archive digest,
 and library digest must all match. The release verifier runs the Python and
 Rust v0.8 demos with positive aggregate/value ROWS/RANGE and distribution
 result checks, so a stale parser asset fails closed.
 
 The explicit local-development override proves only a regular target library
 and self-consistent `CONTRACT_VERSION`/`SHA256SUMS` sidecars. It cannot prove
-that bytes relabeled as `0.23.0` export that contract. Rust therefore compares
-`alopex_parser_version()` with the compiled `0.23.0` descriptor before payload
+that bytes relabeled as `0.24.0` export that contract. Rust therefore compares
+`alopex_parser_version()` with the compiled `0.24.0` descriptor before payload
 preflight or decode. Only strict four-target release staging proves asset
 identity. The release workflow may use the explicit path to link a target CLI
 after that same job verifies the freshly generated target record and runs its

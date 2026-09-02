@@ -48,7 +48,11 @@ fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
         && let Some(missing) = table
             .columns
             .iter()
-            .find(|c| !columns.iter().any(|col| col == &c.name) && c.default.is_none())
+            .find(|c| {
+                !columns.iter().any(|col| col == &c.name)
+                    && c.default.is_none()
+                    && (c.not_null || c.primary_key)
+            })
             .map(|c| c.name.clone())
     {
         return Err(ExecutorError::ColumnRequired { column: missing });
@@ -72,9 +76,10 @@ pub fn execute_insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
 
     validate_columns(&table, &columns)?;
 
+    let ctx = EvalContext::new(&[]);
     let rows = values
         .into_iter()
-        .map(|row_values| build_row_from_values(&table, &columns, row_values))
+        .map(|row_values| build_row_from_values(catalog, &table, &columns, row_values, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
     insert_rows(txn, catalog, &table, table_name, rows)
@@ -136,10 +141,12 @@ fn populate_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     Ok(())
 }
 
-fn build_row_from_values(
+fn build_row_from_values<C: Catalog + ?Sized>(
+    catalog: &C,
     table: &TableMetadata,
     columns: &[String],
     values: Vec<SqlValue>,
+    ctx: &EvalContext<'_>,
 ) -> Result<Vec<SqlValue>> {
     if values.len() != columns.len() {
         return Err(ExecutorError::InvalidOperation {
@@ -159,6 +166,15 @@ fn build_row_from_values(
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
         row[col_index] = normalize_assignment_value(value, &table.columns[col_index].data_type)?;
+    }
+
+    for (col_index, column) in table.columns.iter().enumerate() {
+        if columns.iter().any(|name| name == &column.name) {
+            continue;
+        }
+        if let Some(default) = column.default.as_ref() {
+            row[col_index] = evaluate_default(catalog, table, default, column, ctx)?;
+        }
     }
 
     Ok(row)
@@ -198,19 +214,15 @@ fn build_row<C: Catalog + ?Sized>(
         if columns.iter().any(|name| name == &column.name) {
             continue;
         }
-        let default = column
-            .default
-            .as_ref()
-            .ok_or_else(|| ExecutorError::ColumnRequired {
-                column: column.name.clone(),
-            })?;
-        row[col_index] = evaluate_default(catalog, table, default, column, ctx)?;
+        if let Some(default) = column.default.as_ref() {
+            row[col_index] = evaluate_default(catalog, table, default, column, ctx)?;
+        }
     }
 
     Ok(row)
 }
 
-fn normalize_assignment_value(
+pub(crate) fn normalize_assignment_value(
     value: SqlValue,
     target_type: &crate::planner::types::ResolvedType,
 ) -> Result<SqlValue> {
@@ -228,7 +240,7 @@ fn normalize_assignment_value(
     }
 }
 
-fn evaluate_default<C: Catalog + ?Sized>(
+pub(crate) fn evaluate_default<C: Catalog + ?Sized>(
     catalog: &C,
     table: &TableMetadata,
     default: &Expr,
@@ -418,7 +430,7 @@ mod tests {
             &mut txn,
             &catalog,
             "items",
-            vec![], // omitting columns should error (DEFAULT unsupported)
+            vec![], // omitting a primary key must fail
             vec![vec![]],
         )
         .unwrap_err();

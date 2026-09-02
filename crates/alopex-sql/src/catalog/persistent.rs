@@ -128,6 +128,7 @@ pub enum TableType {
     Managed,
     External,
     Temporary,
+    View,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

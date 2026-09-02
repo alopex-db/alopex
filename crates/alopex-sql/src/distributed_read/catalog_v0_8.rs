@@ -726,6 +726,10 @@ fn validate_plan(
         )),
         LogicalPlan::CreateTable { .. }
         | LogicalPlan::DropTable { .. }
+        | LogicalPlan::CreateView { .. }
+        | LogicalPlan::DropView { .. }
+        | LogicalPlan::AlterTable { .. }
+        | LogicalPlan::Truncate { .. }
         | LogicalPlan::CreateIndex { .. }
         | LogicalPlan::DropIndex { .. } => Err(RemoteReadRejection::unsupported(
             "ddl_not_supported_remote",

@@ -1,3 +1,4 @@
+use super::Statement;
 use super::dml::Select;
 use super::expr::Expr;
 use super::span::{Span, Spanned};
@@ -127,6 +128,70 @@ pub struct DropTable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateView {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub columns: Vec<String>,
+    pub query: Box<Statement>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropView {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterTable {
+    pub if_exists: bool,
+    pub name: String,
+    pub action: AlterTableAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum AlterTableAction {
+    AddColumn {
+        if_not_exists: bool,
+        column: ColumnDef,
+    },
+    DropColumn {
+        if_exists: bool,
+        name: String,
+    },
+    RenameColumn {
+        old_name: String,
+        new_name: String,
+    },
+    RenameTable {
+        new_name: String,
+    },
+    AlterColumn {
+        name: String,
+        action: AlterColumnAction,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum AlterColumnAction {
+    SetDataType { data_type: DataType },
+    SetDefault { value: Box<Expr> },
+    DropDefault,
+    SetNotNull,
+    DropNotNull,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Truncate {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateIndex {
     pub if_not_exists: bool,
     pub name: String,
@@ -202,6 +267,30 @@ impl Spanned for TableConstraint {
 }
 
 impl Spanned for DropTable {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for CreateView {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for DropView {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for AlterTable {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for Truncate {
     fn span(&self) -> Span {
         self.span
     }

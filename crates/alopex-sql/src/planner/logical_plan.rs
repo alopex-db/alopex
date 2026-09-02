@@ -44,6 +44,7 @@
 //! };
 //! ```
 
+use crate::ast::AlterTableAction;
 use crate::ast::expr::WindowFrame;
 use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
@@ -490,6 +491,26 @@ pub enum LogicalPlan {
         if_exists: bool,
     },
 
+    CreateView {
+        table: TableMetadata,
+        if_not_exists: bool,
+    },
+
+    DropView {
+        name: String,
+        if_exists: bool,
+    },
+
+    AlterTable {
+        name: String,
+        if_exists: bool,
+        action: AlterTableAction,
+    },
+
+    Truncate {
+        name: String,
+    },
+
     /// CREATE INDEX operation.
     ///
     /// Creates a new index on a table column.
@@ -628,6 +649,10 @@ impl LogicalPlan {
             LogicalPlan::Delete { .. } => "DELETE",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
+            LogicalPlan::CreateView { .. } => "CREATE VIEW",
+            LogicalPlan::DropView { .. } => "DROP VIEW",
+            LogicalPlan::AlterTable { .. } => "ALTER TABLE",
+            LogicalPlan::Truncate { .. } => "TRUNCATE",
             LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
             LogicalPlan::DropIndex { .. } => "DROP INDEX",
         }
@@ -800,6 +825,10 @@ impl LogicalPlan {
             LogicalPlan::Delete { .. } => "Delete",
             LogicalPlan::CreateTable { .. } => "CreateTable",
             LogicalPlan::DropTable { .. } => "DropTable",
+            LogicalPlan::CreateView { .. } => "CreateView",
+            LogicalPlan::DropView { .. } => "DropView",
+            LogicalPlan::AlterTable { .. } => "AlterTable",
+            LogicalPlan::Truncate { .. } => "Truncate",
             LogicalPlan::CreateIndex { .. } => "CreateIndex",
             LogicalPlan::DropIndex { .. } => "DropIndex",
         }
@@ -845,6 +874,10 @@ impl LogicalPlan {
             self,
             LogicalPlan::CreateTable { .. }
                 | LogicalPlan::DropTable { .. }
+                | LogicalPlan::CreateView { .. }
+                | LogicalPlan::DropView { .. }
+                | LogicalPlan::AlterTable { .. }
+                | LogicalPlan::Truncate { .. }
                 | LogicalPlan::CreateIndex { .. }
                 | LogicalPlan::DropIndex { .. }
                 | LogicalPlan::Pragma { .. }
@@ -883,6 +916,10 @@ impl LogicalPlan {
             | LogicalPlan::Delete { table, .. } => Some(table),
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),
             LogicalPlan::DropTable { name, .. } => Some(name),
+            LogicalPlan::CreateView { table, .. } => Some(&table.name),
+            LogicalPlan::DropView { name, .. }
+            | LogicalPlan::AlterTable { name, .. }
+            | LogicalPlan::Truncate { name } => Some(name),
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Pragma { .. } => None,

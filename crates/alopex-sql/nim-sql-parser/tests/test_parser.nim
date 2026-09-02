@@ -1484,6 +1484,61 @@ suite "DDL — DROP TABLE":
     check ast.children[1].strVal == "users"
 
 # ---------------------------------------------------------------------------
+# DDL tests — schema evolution
+# PostgreSQL/DuckDB-compatible spellings form the public parser contract.
+# ---------------------------------------------------------------------------
+
+suite "DDL — schema evolution":
+
+  test "CREATE and DROP VIEW preserve flags, aliases, and query":
+    let created = parseSql(
+      "CREATE VIEW IF NOT EXISTS active_users (id, name) AS " &
+      "SELECT id, name FROM users WHERE active = TRUE")
+    check created.kind == nkCreateView
+    check created.children[0].strVal == "IF NOT EXISTS"
+    check created.children[1].strVal == "active_users"
+    check created.children[2].kind == nkColumnList
+    check created.children[2].children.len == 2
+    check created.children[3].kind == nkSelect
+
+    let withQuery = parseSql(
+      "CREATE VIEW recent_users AS " &
+      "WITH recent AS (SELECT id FROM users) SELECT id FROM recent")
+    check withQuery.kind == nkCreateView
+    check withQuery.children[1].kind == nkColumnList
+    check withQuery.children[2].kind == nkSelect
+    check withQuery.children[2].children[0].kind == nkWithClause
+
+    let dropped = parseSql("DROP VIEW IF EXISTS active_users")
+    check dropped.kind == nkDropView
+    check dropped.children[0].strVal == "IF EXISTS"
+    check dropped.children[1].strVal == "active_users"
+
+  test "ALTER TABLE parses PostgreSQL and DuckDB action spellings":
+    let cases = [
+      ("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS age INT DEFAULT 0", nkAlterAddColumn),
+      ("ALTER TABLE users DROP COLUMN IF EXISTS age", nkAlterDropColumn),
+      ("ALTER TABLE users RENAME COLUMN name TO display_name", nkAlterRenameColumn),
+      ("ALTER TABLE users RENAME TO people", nkAlterRenameTable),
+      ("ALTER TABLE users ALTER COLUMN age TYPE BIGINT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET DATA TYPE TEXT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET DEFAULT 1", nkAlterColumn),
+      ("ALTER TABLE users ALTER age DROP DEFAULT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET NOT NULL", nkAlterColumn),
+      ("ALTER TABLE users ALTER age DROP NOT NULL", nkAlterColumn)
+    ]
+    for (sql, actionKind) in cases:
+      let ast = parseSql(sql)
+      check ast.kind == nkAlterTable
+      check ast.children[^1].kind == actionKind
+
+  test "TRUNCATE accepts optional TABLE":
+    for sql in ["TRUNCATE users", "TRUNCATE TABLE users"]:
+      let ast = parseSql(sql)
+      check ast.kind == nkTruncate
+      check ast.children[0].strVal == "users"
+
+# ---------------------------------------------------------------------------
 # Roadmap coverage tests — Phase 2
 # ---------------------------------------------------------------------------
 

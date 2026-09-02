@@ -6,6 +6,9 @@
 use crate::ast::expr::Expr;
 use crate::catalog::persistent::{DataSourceFormat, TableType};
 use crate::planner::types::ResolvedType;
+
+pub const VIEW_DEFINITION_PROPERTY: &str = "alopex.view.definition";
+pub const VIEW_DEPENDENCIES_PROPERTY: &str = "alopex.view.dependencies";
 use std::collections::HashMap;
 
 /// Storage layout for a table.
