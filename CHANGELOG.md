@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
   temporary tables.
 - SQL adds one-based positional `?` parameters and reusable prepared statement
   lifecycles across Rust, embedded, Python, and CLI surfaces (issue #166).
-- The Nim parser wire contract is `0.24.0`.
+- The Nim parser wire contract is `0.25.0`.
 - SQL adds dynamic persistent views, transactional schema evolution through
   `ALTER TABLE`, and transactional `TRUNCATE` (issue #169).
 - Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with

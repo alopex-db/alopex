@@ -4,7 +4,7 @@
 
 Alopex accepts only positional `?` parameters. Bind indices are one-based. `$1`, named parameters such as `:name`, and parameters in identifier positions are rejected. Parameters represent values only.
 
-The Nim/Rust MessagePack parser contract is `0.24.0`; it carries each placeholder as `Parameter { index }`.
+The Nim/Rust MessagePack parser contract is `0.25.0`; it carries each placeholder as `Parameter { index }`.
 
 Rust callers use `Arc<Database>::prepare` for auto-commit execution or `SqlSession::prepare` for execution inside the session's active transaction. Both statement types expose `parameter_count`, `bind`, `execute`, `reset`, and `finalize`. `reset` clears bindings for reuse; `finalize` permanently closes the statement. Missing and out-of-range bindings return typed errors.
 

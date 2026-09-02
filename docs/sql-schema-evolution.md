@@ -48,7 +48,7 @@ the new VIEW catalog variant; they must not be used to write a database after
 v0.8.11 creates a view. Tables changed only by ALTER TABLE/TRUNCATE retain the
 existing table metadata envelope.
 
-The parser wire contract is `0.24.0`. A parser asset with another contract is
+The parser wire contract is `0.25.0`. A parser asset with another contract is
 rejected before MessagePack decoding.
 
 ## Verification
