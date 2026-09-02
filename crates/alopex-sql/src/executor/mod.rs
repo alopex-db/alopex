@@ -228,6 +228,39 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 if_not_exists,
             } => self.execute_create_index(index, if_not_exists),
             LogicalPlan::DropIndex { name, if_exists } => self.execute_drop_index(&name, if_exists),
+            LogicalPlan::Copy { direction, .. } if direction == crate::ast::CopyDirection::To => {
+                Err(ExecutorError::UnsupportedOperation(
+                    "COPY TO is not implemented".into(),
+                ))
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                ..
+            } => {
+                let catalog = self.catalog.read().expect("catalog lock poisoned");
+                self.run_in_write_txn(|txn| {
+                    let format = if path.ends_with(".parquet") {
+                        bulk::FileFormat::Parquet
+                    } else {
+                        bulk::FileFormat::Csv
+                    };
+                    let header = options.iter().any(|option| {
+                        option.name.eq_ignore_ascii_case("header")
+                            && option.value.eq_ignore_ascii_case("true")
+                    });
+                    bulk::execute_copy(
+                        txn,
+                        &*catalog,
+                        &table,
+                        &path,
+                        format,
+                        bulk::CopyOptions { header },
+                        &bulk::CopySecurityConfig::default(),
+                    )
+                })
+            }
 
             // DML Operations
             LogicalPlan::Insert {
@@ -615,6 +648,37 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     values,
                     conflict,
                     returning,
+                )
+            }
+            LogicalPlan::Copy { direction, .. } if direction == crate::ast::CopyDirection::To => {
+                Err(ExecutorError::UnsupportedOperation(
+                    "COPY TO is not implemented".into(),
+                ))
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                ..
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let format = if path.ends_with(".parquet") {
+                    bulk::FileFormat::Parquet
+                } else {
+                    bulk::FileFormat::Csv
+                };
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                bulk::execute_copy(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
                 )
             }
             LogicalPlan::InsertSelect {

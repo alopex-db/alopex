@@ -1,0 +1,19 @@
+{
+  "schema": "alopex.sql-conformance/v1",
+  "references": {"sqlite":"3.46.1", "postgresql":"16.14", "duckdb":"1.4.0", "datafusion":"50.0.0"},
+  "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "not-yet-implemented", "unsupported"],
+  "entries": [
+    {"api":"parser/lexer","status":"reference-compatible","reference":"sqlite:test","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs"},
+    {"api":"transactions/savepoints","status":"reference-compatible","reference":"sqlite:lang_transaction","evidence":"crates/alopex-embedded/src/sql_session.rs"},
+    {"api":"prepared statements","status":"reference-compatible","reference":"sqlite:c3ref/bind_blob","evidence":"crates/alopex-embedded/src/prepared.rs"},
+    {"api":"EXPLAIN JSON","status":"reference-compatible","reference":"postgresql:sql-explain","evidence":"docs/sql-explain.md"},
+    {"api":"RETURNING","status":"reference-compatible","reference":"postgresql:dml-returning","evidence":"crates/alopex-embedded/tests/advanced_dml.rs"},
+    {"api":"ON CONFLICT","status":"reference-compatible","reference":"postgresql:sql-insert","evidence":"crates/alopex-embedded/tests/advanced_dml.rs"},
+    {"api":"CHECK/FK constraints","status":"reference-compatible","reference":"sqlite:foreignkeys","evidence":"crates/alopex-embedded/tests/constraints.rs"},
+    {"api":"COPY","status":"not-yet-implemented","reference":"postgresql:sql-copy","evidence":"crates/alopex-sql/tests/copy_bulk_load.rs","issue":172},
+    {"api":"SERIAL/IDENTITY/SEQUENCE","status":"not-yet-implemented","reference":"postgresql:ddl-rowsecurity","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs","issue":173},
+    {"api":"VECTOR/HNSW","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/tests"},
+    {"api":"PRAGMA","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/src/planner/mod.rs"},
+    {"api":"information_schema","status":"reference-compatible","reference":"postgresql:infoschema","evidence":"crates/alopex-sql/tests"}
+  ]
+}

@@ -1,0 +1,28 @@
+name: Post-release HNSW diagnostics
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    # Advisory evidence only: this job never gates publication or rollback.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Generate reproducible diagnostic artifacts
+        run: python scripts/performance/hnsw_v0811_contract.py --output artifacts/hnsw-diagnostic
+      - name: Upload diagnostic artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hnsw-diagnostic-${{ github.sha }}
+          path: artifacts/hnsw-diagnostic
+          if-no-files-found: error

@@ -1,0 +1,24 @@
+{
+  "schema": "alopex.hnsw-conformance/v1",
+  "references": {
+    "paper": "arxiv:1603.09320",
+    "hnswlib": "nmslib/hnswlib@master",
+    "pgvector": "pgvector/pgvector@v0.8.0",
+    "qdrant": "qdrant/qdrant@v1.15.0"
+  },
+  "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "not-yet-implemented"],
+  "entries": [
+    {"api":"HnswConfig","status":"reference-compatible","reference":"hnswlib:ALGO_PARAMS.md","evidence":"crates/alopex-core/src/vector/hnsw/types.rs"},
+    {"api":"HnswIndex.create","status":"reference-compatible","reference":"hnswlib:README.md","evidence":"crates/alopex-core/src/vector/hnsw/mod.rs"},
+    {"api":"HnswIndex.upsert","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-embedded/tests"},
+    {"api":"HnswIndex.search","status":"reference-compatible","reference":"qdrant:ann-recall","evidence":"crates/alopex-core/benches/hnsw_bench.rs"},
+    {"api":"HnswIndex.delete","status":"reference-compatible","reference":"hnswlib:mark_deleted","evidence":"crates/alopex-core/src/vector/hnsw"},
+    {"api":"HnswIndex.compact","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-core/src/vector/hnsw"},
+    {"api":"HnswIndex.stats","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-py/tests/test_hnsw.py"},
+    {"api":"SearchStats","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-py/tests/test_hnsw.py"},
+    {"api":"Python.search_hnsw","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-py/tests/test_hnsw.py"},
+    {"api":"SQL CREATE INDEX USING HNSW","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-sql/tests"},
+    {"api":"cosine distance","status":"known-divergence","reference":"pgvector:vector","evidence":"crates/alopex-core/src/vector/hnsw/types.rs","issue":302},
+    {"api":"upsert reconnect","status":"reference-compatible","reference":"hnswlib:update","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs","issue":301}
+  ]
+}

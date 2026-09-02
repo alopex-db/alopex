@@ -560,6 +560,11 @@ where
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_delete(txn, &*guard, &table, filter)?
             }
+            LogicalPlan::Copy { .. } => {
+                return Err(ExecutorError::UnsupportedOperation(
+                    "COPY is not available through the async executor".into(),
+                ));
+            }
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");
                 let policy = txn.memory_policy().cloned();

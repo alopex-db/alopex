@@ -1,0 +1,24 @@
+{
+  "schema": "alopex.polars-parity/v1",
+  "polars_version": "1.43.2",
+  "status_values": ["implemented-compatible", "not-yet-implemented", "alopex-extension"],
+  "entries": [
+    {"surface":"DataFrame","api":"DataFrame","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.select","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.filter","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.with_columns","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.to_dict","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.collect","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Series","api":"Series","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Series","api":"Series.cast","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Series","api":"Series.to_list","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"LazyFrame","api":"LazyFrame.collect","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Expr","api":"col","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Expr","api":"lit","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"Expr","api":"Expr.alias","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"IO","api":"read_csv","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"IO","api":"read_parquet","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"streaming","api":"collect_batches","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"extension","api":"Database","status":"alopex-extension","evidence":"crates/alopex-py/tests"}
+  ]
+}

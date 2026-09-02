@@ -138,7 +138,8 @@ fn exact_top_k(data: &[(Vec<u8>, Vec<f32>)], queries: &[Vec<f32>], k: usize) -> 
                 .iter()
                 .map(|(k, v)| (kernel.l2(q, v), k.clone()))
                 .collect();
-            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+            // L2 is a distance: nearest neighbors have the smallest score.
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0));
             scored
                 .into_iter()
                 .take(k)

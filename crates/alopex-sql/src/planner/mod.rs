@@ -42,9 +42,9 @@ use crate::ast::ddl::{
     DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
-    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OnConflictAction,
-    OrderByExpr, QueryBody, Select, SelectItem, SetOperation as AstSetOperation,
-    SetOperator as AstSetOperator, Update, Values,
+    CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
+    LITERAL_TABLE, OnConflictAction, OrderByExpr, QueryBody, Select, SelectItem,
+    SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -1005,6 +1005,16 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
+            LogicalPlan::Copy { table, direction, .. } => push_table_reference(
+                references,
+                table,
+                if *direction == CopyDirection::From {
+                    root_access
+                } else {
+                    TableReferenceAccess::Read
+                },
+                TableReferenceSource::LogicalPlanMutationTarget,
+            ),
             LogicalPlan::CreateTable { table, .. } => push_table_reference(
                 references,
                 &table.name,
@@ -1209,6 +1219,7 @@ enum GenericHostStatement<'a> {
     Insert(&'a Insert),
     Update(&'a Update),
     Delete(&'a Delete),
+    Copy(&'a crate::ast::CopyStatement),
     Unsupported,
 }
 
@@ -1230,6 +1241,7 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
+        StatementKind::Copy(statement) => GenericHostStatement::Copy(statement),
         _ => GenericHostStatement::Unsupported,
     }
 }
@@ -1260,6 +1272,10 @@ fn table_reference_access_for_classified(
         GenericHostStatement::Insert(_)
         | GenericHostStatement::Update(_)
         | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
+        GenericHostStatement::Copy(statement) => Ok(match statement.direction {
+            CopyDirection::From => TableReferenceAccess::Write,
+            CopyDirection::To => TableReferenceAccess::Read,
+        }),
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
         GenericHostStatement::CreateView(_)
@@ -1364,6 +1380,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
+            GenericHostStatement::Copy(statement) => self.plan_copy(statement),
             GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
     }
@@ -1888,6 +1905,42 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
         Ok(LogicalPlan::Truncate {
             name: stmt.name.clone(),
+        })
+    }
+
+    fn plan_copy(&self, stmt: &crate::ast::CopyStatement) -> Result<LogicalPlan, PlannerError> {
+        let CopySource::Table { name, columns } = &stmt.source else {
+            return Err(PlannerError::unsupported_feature(
+                "COPY query source",
+                "COPY table",
+                stmt.span,
+            ));
+        };
+        let CopyTarget::File { path } = &stmt.target else {
+            return Err(PlannerError::unsupported_feature(
+                "COPY stdin/stdout",
+                "COPY file",
+                stmt.span,
+            ));
+        };
+        let table = self
+            .catalog
+            .get_table(name)
+            .ok_or_else(|| PlannerError::table_not_found(name, stmt.span))?;
+        if !columns.is_empty()
+            && columns
+                .iter()
+                .any(|column| !table.columns.iter().any(|c| c.name == *column))
+        {
+            return Err(PlannerError::invalid_expression(
+                "COPY column does not exist".to_string(),
+            ));
+        }
+        Ok(LogicalPlan::Copy {
+            table: name.clone(),
+            path: path.clone(),
+            direction: stmt.direction,
+            options: stmt.options.clone(),
         })
     }
 

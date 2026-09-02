@@ -476,6 +476,14 @@ pub enum LogicalPlan {
         returning: Option<Projection>,
     },
 
+    /// COPY table data to or from a local file.
+    Copy {
+        table: String,
+        path: String,
+        direction: crate::ast::CopyDirection,
+        options: Vec<crate::ast::CopyOption>,
+    },
+
     // === DDL Plans ===
     /// CREATE TABLE operation.
     ///
@@ -638,7 +646,6 @@ impl LogicalPlan {
             | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
-            | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. }
@@ -678,6 +685,7 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "INSERT",
             LogicalPlan::Update { .. } => "UPDATE",
             LogicalPlan::Delete { .. } => "DELETE",
+            LogicalPlan::Copy { .. } => "COPY",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
             LogicalPlan::CreateView { .. } => "CREATE VIEW",
@@ -863,6 +871,7 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "InsertSelect",
             LogicalPlan::Update { .. } => "Update",
             LogicalPlan::Delete { .. } => "Delete",
+            LogicalPlan::Copy { .. } => "Copy",
             LogicalPlan::CreateTable { .. } => "CreateTable",
             LogicalPlan::DropTable { .. } => "DropTable",
             LogicalPlan::CreateView { .. } => "CreateView",
@@ -905,6 +914,7 @@ impl LogicalPlan {
                 | LogicalPlan::InsertSelect { .. }
                 | LogicalPlan::Update { .. }
                 | LogicalPlan::Delete { .. }
+                | LogicalPlan::Copy { .. }
         )
     }
 
@@ -954,6 +964,7 @@ impl LogicalPlan {
             | LogicalPlan::InsertSelect { table, .. }
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
+            LogicalPlan::Copy { table, .. } => Some(table),
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),
             LogicalPlan::DropTable { name, .. } => Some(name),
             LogicalPlan::CreateView { table, .. } => Some(&table.name),

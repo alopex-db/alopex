@@ -720,7 +720,8 @@ fn validate_plan(
         LogicalPlan::Insert { .. }
         | LogicalPlan::InsertSelect { .. }
         | LogicalPlan::Update { .. }
-        | LogicalPlan::Delete { .. } => Err(RemoteReadRejection::unsupported(
+        | LogicalPlan::Delete { .. }
+        | LogicalPlan::Copy { .. } => Err(RemoteReadRejection::unsupported(
             "dml_not_supported_remote",
             "DML is outside the read-only remote-read catalog",
         )),
