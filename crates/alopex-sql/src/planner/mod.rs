@@ -1005,7 +1005,9 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
-            LogicalPlan::Copy { table, direction, .. } => push_table_reference(
+            LogicalPlan::Copy {
+                table, direction, ..
+            } => push_table_reference(
                 references,
                 table,
                 if *direction == CopyDirection::From {
