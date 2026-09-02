@@ -167,6 +167,7 @@ fn stmt_changes_user_data(stmt: &Statement) -> bool {
         StatementKind::Insert(_)
             | StatementKind::Update(_)
             | StatementKind::Delete(_)
+            | StatementKind::Copy(_)
             | StatementKind::AlterTable(_)
             | StatementKind::Truncate(_)
     )
