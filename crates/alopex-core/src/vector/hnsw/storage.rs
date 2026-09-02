@@ -251,6 +251,7 @@ impl HnswStorage {
                 nodes.push(Some(HnswNode {
                     key: node_data.key,
                     vector: node_data.vector,
+                    norm: node_data.norm,
                     metadata: node_data.metadata,
                     neighbors: node_data.neighbors,
                     deleted: node_data.deleted,
@@ -346,6 +347,7 @@ impl HnswStorage {
         HnswNodeData {
             key: node.key.clone(),
             vector: node.vector.clone(),
+            norm: node.norm,
             metadata: node.metadata.clone(),
             neighbors: node.neighbors.clone(),
             deleted: node.deleted,

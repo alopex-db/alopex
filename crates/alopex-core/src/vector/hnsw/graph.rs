@@ -75,6 +75,7 @@ impl HnswGraph {
         let node = HnswNode {
             key: key.to_vec(),
             vector: vector.to_vec(),
+            norm: vector.iter().map(|value| value * value).sum::<f32>().sqrt(),
             metadata: metadata.to_vec(),
             neighbors,
             deleted: false,
@@ -193,6 +194,7 @@ impl HnswGraph {
             };
             node.vector.clear();
             node.vector.extend_from_slice(vector);
+            node.norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
             node.metadata.clear();
             node.metadata.extend_from_slice(metadata);
             if node.deleted {
@@ -706,6 +708,18 @@ impl HnswGraph {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
         if let Some(node) = self.node(node_id) {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
+            if self.config.metric == Metric::Cosine {
+                let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
+                if query_norm == 0.0 || node.norm == 0.0 {
+                    return 0.0;
+                }
+                let dot = query
+                    .iter()
+                    .zip(&node.vector)
+                    .map(|(left, right)| left * right)
+                    .sum::<f32>();
+                return dot / (query_norm * node.norm);
+            }
             return self.distance_raw(query, &node.vector);
         }
         f32::NEG_INFINITY
