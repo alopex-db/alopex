@@ -141,6 +141,7 @@ pub fn alter<'txn, S: KVStore + 'txn>(
 }
 
 /// Allocate and persist the next value for a sequence in the current transaction.
+#[allow(dead_code)]
 pub fn next_value<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     name: &str,
