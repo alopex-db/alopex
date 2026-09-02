@@ -1,22 +1,22 @@
-use alopex_core::KVTransaction;
 use alopex_core::kv::RangeChangeJournalCapability;
-use alopex_core::kv::{KVStore, OwnedKVTransactionAdapter, ReadAtPoint, any::AnyKVTransaction};
+use alopex_core::kv::{any::AnyKVTransaction, KVStore, OwnedKVTransactionAdapter, ReadAtPoint};
 use alopex_core::types::TxnMode;
+use alopex_core::KVTransaction;
+use alopex_sql::catalog::TxnCatalogView;
+use alopex_sql::catalog::{Catalog, CatalogOverlay};
+use alopex_sql::executor::query::execute_query_streaming;
+use alopex_sql::executor::query::iterator::VecIterator;
+use alopex_sql::executor::query::RowIterator;
+use alopex_sql::executor::{
+    build_streaming_pipeline, ColumnInfo, ExecutionResult, Executor, QueryRowIterator, Row,
+};
+use alopex_sql::planner::typed_expr::Projection;
+use alopex_sql::storage::{LocalRangeChangeJournal, RangeChangeJournalScope, SqlValue, TxnBridge};
 use alopex_sql::AlopexDialect;
 use alopex_sql::Parser;
 use alopex_sql::Planner;
 use alopex_sql::Statement;
 use alopex_sql::StatementKind;
-use alopex_sql::catalog::TxnCatalogView;
-use alopex_sql::catalog::{Catalog, CatalogOverlay};
-use alopex_sql::executor::query::RowIterator;
-use alopex_sql::executor::query::execute_query_streaming;
-use alopex_sql::executor::query::iterator::VecIterator;
-use alopex_sql::executor::{
-    ColumnInfo, ExecutionResult, Executor, QueryRowIterator, Row, build_streaming_pipeline,
-};
-use alopex_sql::planner::typed_expr::Projection;
-use alopex_sql::storage::{LocalRangeChangeJournal, RangeChangeJournalScope, SqlValue, TxnBridge};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -81,7 +81,7 @@ impl<'a> StreamingRows<'a> {
                 Ok(result)
             }
             Projection::Columns(cols) => {
-                use alopex_sql::executor::evaluator::{EvalContext, evaluate};
+                use alopex_sql::executor::evaluator::{evaluate, EvalContext};
                 let ctx = EvalContext::new(&row.values);
                 let mut result = Vec::with_capacity(cols.len());
                 for col in cols {
@@ -735,8 +735,8 @@ impl Database {
             alopex_sql::ExecutionResult::RowsAffected(n) => Ok(SqlStreamingResult::RowsAffected(n)),
             alopex_sql::ExecutionResult::Query(qr) => {
                 // Convert materialized result to streaming iterator
-                use alopex_sql::executor::Row;
                 use alopex_sql::executor::query::iterator::VecIterator;
+                use alopex_sql::executor::Row;
                 use alopex_sql::planner::typed_expr::Projection;
 
                 let column_names: Vec<String> = qr.columns.iter().map(|c| c.name.clone()).collect();
@@ -838,8 +838,8 @@ impl<'a> Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alopex_core::kv::RangeChangePayload;
     use alopex_core::kv::decode_range_change;
+    use alopex_core::kv::RangeChangePayload;
 
     #[test]
     fn auto_commit_stages_sql_row_and_index_changes_before_visibility() {
@@ -858,18 +858,14 @@ mod tests {
             .filter_map(|(_, value)| decode_range_change(&value).ok())
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
-        assert!(
-            records[0]
-                .payload
-                .iter()
-                .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. }))
-        );
-        assert!(
-            records[0]
-                .payload
-                .iter()
-                .any(|payload| matches!(payload, RangeChangePayload::UpsertIndex { .. }))
-        );
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. })));
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertIndex { .. })));
     }
 
     #[test]
@@ -889,12 +885,10 @@ mod tests {
             .filter_map(|(_, value)| decode_range_change(&value).ok())
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
-        assert!(
-            records[0]
-                .payload
-                .iter()
-                .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. }))
-        );
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. })));
     }
 
     #[test]
