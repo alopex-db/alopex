@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
   `ALTER TABLE`, and transactional `TRUNCATE` (issue #169).
 - Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with
   versioned, secret-free logical/physical/distributed plan output (#167).
+- Added relational constraints and advanced DML (`RETURNING`, `ON CONFLICT`,
+  joined DML, and MERGE validation) with transactional enforcement (#170,
+  #171).
+- Added transactional table/file CSV COPY, sequence DDL, and SQL `nextval`
+  allocation (#172, #173).
 - Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of
   truncating eager CSV results at the first 1,024-row batch (#304).
 
