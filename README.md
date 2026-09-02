@@ -179,7 +179,8 @@ for the current and planned capability boundaries.
 Alopex DB is an open-source project under the **Apache 2.0 License**.
 We welcome contributions from engineers interested in Rust, Distributed Systems, and Vector Search.
 
-See [CONTRIBUTING.md](https://www.google.com/search?q=CONTRIBUTING.md) for details.
+Compatibility-sensitive development must follow the
+[reference compatibility development policy](docs/reference-compatibility-development-policy.md).
 
 -----
 
