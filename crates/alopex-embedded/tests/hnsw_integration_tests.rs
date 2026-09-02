@@ -97,6 +97,27 @@ fn hnsw_index_persists_across_reopen() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn hnsw_upsert_reconnects_existing_key_without_duplicate_results() {
+    let db = Database::new();
+    db.create_hnsw_index("vec_idx", config()).unwrap();
+    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    txn.upsert_to_hnsw("vec_idx", b"a", &[0.0, 0.0], b"old").unwrap();
+    txn.upsert_to_hnsw("vec_idx", b"b", &[100.0, 0.0], b"b").unwrap();
+    txn.commit().unwrap();
+
+    let mut update = db.begin(TxnMode::ReadWrite).unwrap();
+    update
+        .upsert_to_hnsw("vec_idx", b"b", &[0.1, 0.0], b"new")
+        .unwrap();
+    update.commit().unwrap();
+
+    let (results, _) = db.search_hnsw("vec_idx", &[0.1, 0.0], 2, Some(8)).unwrap();
+    assert_eq!(results.iter().filter(|result| result.key == b"b").count(), 1);
+    assert_eq!(results[0].key, b"b");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn callbacks_fire_on_core_index() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let searches = Arc::new(Mutex::new(Vec::new()));
