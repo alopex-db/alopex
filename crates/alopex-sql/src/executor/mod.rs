@@ -816,7 +816,15 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                query::execute_query(&mut sql_txn, &view, plan)
+                if let Some(name) = system::direct_nextval_name(&plan) {
+                    let value = ddl::sequence::next_value(&mut sql_txn, name)?;
+                    Ok(ExecutionResult::Query(QueryResult::new(
+                        vec![ColumnInfo::new("nextval", ResolvedType::BigInt)],
+                        vec![vec![SqlValue::BigInt(value)]],
+                    )))
+                } else {
+                    query::execute_query(&mut sql_txn, &view, plan)
+                }
             }
         };
 

@@ -1,5 +1,7 @@
 use alopex_core::kv::{KVStore, RuntimeStats};
 
+use crate::ast::expr::Literal;
+use crate::executor::ddl::sequence;
 use crate::executor::{ColumnInfo, ExecutionResult, ExecutorError, QueryResult, Result};
 use crate::planner::ResolvedType;
 use crate::planner::logical_plan::LogicalPlan;
@@ -13,6 +15,15 @@ pub(crate) fn try_execute<S: KVStore>(
     bridge: &TxnBridge<S>,
     plan: &LogicalPlan,
 ) -> Result<Option<ExecutionResult>> {
+    if let Some(name) = direct_nextval_name(plan) {
+        let mut txn = bridge.begin_write().map_err(ExecutorError::from)?;
+        let value = sequence::next_value(&mut txn, name)?;
+        txn.commit().map_err(ExecutorError::from)?;
+        return Ok(Some(ExecutionResult::Query(QueryResult::new(
+            vec![ColumnInfo::new("nextval", ResolvedType::BigInt)],
+            vec![vec![SqlValue::BigInt(value)]],
+        ))));
+    }
     let Some((name, return_type)) = direct_system_call(plan) else {
         return Ok(None);
     };
@@ -28,10 +39,44 @@ pub(crate) fn try_execute<S: KVStore>(
     ))))
 }
 
+pub(crate) fn direct_nextval_name(plan: &LogicalPlan) -> Option<&str> {
+    let expression = match plan {
+        LogicalPlan::Explain { input, .. } => return direct_nextval_name(input),
+        LogicalPlan::Scan { projection, .. } | LogicalPlan::Project { projection, .. } => {
+            let Projection::Columns(columns) = projection else {
+                return None;
+            };
+            if columns.len() != 1 {
+                return None;
+            }
+            &columns[0].expr
+        }
+        LogicalPlan::Values { rows, .. } => rows.first()?.first()?,
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. } => return direct_nextval_name(input),
+        _ => return None,
+    };
+    let Some(TypedExpr {
+        kind: TypedExprKind::FunctionCall { name, args, .. },
+        ..
+    }) = Some(expression)
+    else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("nextval") || args.len() != 1 {
+        return None;
+    }
+    match &args[0].kind {
+        TypedExprKind::Literal(Literal::String(name)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// Returns whether a plan is a standalone system function that needs the
 /// executor's store-backed path rather than an external transaction bridge.
 pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
-    direct_system_call(plan).is_some()
+    direct_system_call(plan).is_some() || direct_nextval_name(plan).is_some()
 }
 
 fn direct_system_call(plan: &LogicalPlan) -> Option<(&str, ResolvedType)> {

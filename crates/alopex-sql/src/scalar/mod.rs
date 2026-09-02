@@ -1761,6 +1761,13 @@ static SIGNATURES: &[ScalarSignature] = &[
         ReturnRule::Fixed(ResolvedType::BigInt),
         SYSTEM_SIDE_EFFECT_META,
     ),
+    sig_meta(
+        "nextval",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::BigInt),
+        SYSTEM_SIDE_EFFECT_META,
+    ),
 ];
 
 fn check_numeric_or_text_substr(args: &[TypedExpr]) -> Result<(), PlannerError> {
