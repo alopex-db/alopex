@@ -228,10 +228,33 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 if_not_exists,
             } => self.execute_create_index(index, if_not_exists),
             LogicalPlan::DropIndex { name, if_exists } => self.execute_drop_index(&name, if_exists),
-            LogicalPlan::Copy { direction, .. } if direction == crate::ast::CopyDirection::To => {
-                Err(ExecutorError::UnsupportedOperation(
-                    "COPY TO is not implemented".into(),
-                ))
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction,
+            } if direction == crate::ast::CopyDirection::To => {
+                let catalog = self.catalog.read().expect("catalog lock poisoned");
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = if path.ends_with(".parquet") {
+                    bulk::FileFormat::Parquet
+                } else {
+                    bulk::FileFormat::Csv
+                };
+                self.run_in_write_txn(|txn| {
+                    bulk::execute_copy_to(
+                        txn,
+                        &*catalog,
+                        &table,
+                        &path,
+                        format,
+                        bulk::CopyOptions { header },
+                        &bulk::CopySecurityConfig::default(),
+                    )
+                })
             }
             LogicalPlan::Copy {
                 table,
@@ -660,10 +683,31 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     returning,
                 )
             }
-            LogicalPlan::Copy { direction, .. } if direction == crate::ast::CopyDirection::To => {
-                Err(ExecutorError::UnsupportedOperation(
-                    "COPY TO is not implemented".into(),
-                ))
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction,
+            } if direction == crate::ast::CopyDirection::To => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = if path.ends_with(".parquet") {
+                    bulk::FileFormat::Parquet
+                } else {
+                    bulk::FileFormat::Csv
+                };
+                bulk::execute_copy_to(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
             }
             LogicalPlan::Copy {
                 table,

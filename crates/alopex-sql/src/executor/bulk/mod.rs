@@ -4,7 +4,8 @@
 //! `SqlValue` へ変換する。Columnar ストレージも Row ストレージと同じ経路で
 //! 取り込み、将来の columnar エンジン実装で差し替え可能な構造にしている。
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use alopex_core::columnar::encoding::{Column, LogicalType};
@@ -131,6 +132,114 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     };
 
     Ok(ExecutionResult::RowsAffected(rows_loaded))
+}
+
+/// COPY table rows to a local CSV file.
+pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    file_path: &str,
+    format: FileFormat,
+    options: CopyOptions,
+    config: &CopySecurityConfig,
+) -> Result<ExecutionResult> {
+    if format != FileFormat::Csv {
+        return Err(ExecutorError::UnsupportedFormat(
+            "COPY TO currently supports CSV only".into(),
+        ));
+    }
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    validate_output_path(file_path, config)?;
+    let mut file =
+        File::create(file_path).map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    if options.header {
+        writeln!(
+            file,
+            "{}",
+            table
+                .columns
+                .iter()
+                .map(|column| csv_escape(&column.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    }
+    let mut rows = 0u64;
+    let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+    let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
+    for (key, encoded) in entries {
+        let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+        if table_id != table.table_id {
+            continue;
+        }
+        let values = crate::storage::RowCodec::decode(&encoded)?;
+        let line = values.iter().map(csv_value).collect::<Vec<_>>().join(",");
+        writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        rows = rows.saturating_add(1);
+    }
+    Ok(ExecutionResult::RowsAffected(rows))
+}
+
+fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
+    let path = Path::new(file_path);
+    if path.exists() && !config.allow_symlinks && path.is_symlink() {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "symbolic links not allowed".into(),
+        });
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent =
+        parent
+            .canonicalize()
+            .map_err(|error| ExecutorError::PathValidationFailed {
+                path: file_path.into(),
+                reason: error.to_string(),
+            })?;
+    if let Some(base_dirs) = &config.allowed_base_dirs {
+        if !base_dirs
+            .iter()
+            .any(|base| canonical_parent.starts_with(base))
+        {
+            return Err(ExecutorError::PathValidationFailed {
+                path: file_path.into(),
+                reason: "path not in allowed directories".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn csv_value(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Null => String::new(),
+        SqlValue::Integer(value) => value.to_string(),
+        SqlValue::BigInt(value) => value.to_string(),
+        SqlValue::Float(value) => value.to_string(),
+        SqlValue::Double(value) => value.to_string(),
+        SqlValue::Text(value) => csv_escape(value),
+        SqlValue::Boolean(value) => value.to_string(),
+        SqlValue::Decimal(value) => value.to_string(),
+        SqlValue::Json(value) => csv_escape(value.as_str()),
+        SqlValue::Blob(value) => csv_escape(&String::from_utf8_lossy(value)),
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => {
+            csv_escape(&value.nested_json_text().unwrap_or_default())
+        }
+        other => csv_escape(&format!("{other:?}")),
+    }
 }
 
 /// パスセキュリティ検証。

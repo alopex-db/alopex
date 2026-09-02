@@ -140,6 +140,42 @@ pub fn alter<'txn, S: KVStore + 'txn>(
     Ok(ExecutionResult::Success)
 }
 
+/// Allocate and persist the next value for a sequence in the current transaction.
+pub fn next_value<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    name: &str,
+) -> Result<i64> {
+    txn.ensure_write_txn()?;
+    let sequence_key = key(name);
+    let bytes =
+        txn.inner_mut()
+            .get(&sequence_key)?
+            .ok_or_else(|| ExecutorError::InvalidOperation {
+                operation: "nextval".into(),
+                reason: format!("sequence not found: {name}"),
+            })?;
+    let mut state = decode(&bytes)?;
+    let value = state.next_value;
+    state.next_value = match value.checked_add(state.increment) {
+        Some(next) if next >= state.min_value && next <= state.max_value => next,
+        Some(_) if state.cycle => {
+            if state.increment > 0 {
+                state.min_value
+            } else {
+                state.max_value
+            }
+        }
+        _ => {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "nextval".into(),
+                reason: "sequence exhausted".into(),
+            });
+        }
+    };
+    txn.inner_mut().put(sequence_key, encode(&state)?)?;
+    Ok(value)
+}
+
 pub fn drop<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     statement: DropSequence,
@@ -163,6 +199,12 @@ pub fn drop<'txn, S: KVStore + 'txn>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use alopex_core::kv::memory::MemoryKV;
+
+    use crate::ast::Span;
+    use crate::storage::TxnBridge;
 
     #[test]
     fn validates_increment_and_bounds() {
@@ -183,5 +225,28 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn next_value_is_monotonic_and_transactional() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut txn = bridge.begin_write().unwrap();
+        create(
+            &mut txn,
+            CreateSequence {
+                if_not_exists: false,
+                name: "ids".into(),
+                options: SequenceOptions {
+                    start: Some(10),
+                    increment: Some(2),
+                    ..Default::default()
+                },
+                span: Span::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(next_value(&mut txn, "ids").unwrap(), 10);
+        assert_eq!(next_value(&mut txn, "ids").unwrap(), 12);
+        txn.commit().unwrap();
     }
 }
