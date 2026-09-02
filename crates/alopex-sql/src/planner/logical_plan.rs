@@ -484,6 +484,13 @@ pub enum LogicalPlan {
         options: Vec<crate::ast::CopyOption>,
     },
 
+    /// CREATE SEQUENCE metadata operation.
+    CreateSequence(crate::ast::CreateSequence),
+    /// ALTER SEQUENCE metadata operation.
+    AlterSequence(crate::ast::AlterSequence),
+    /// DROP SEQUENCE metadata operation.
+    DropSequence(crate::ast::DropSequence),
+
     // === DDL Plans ===
     /// CREATE TABLE operation.
     ///
@@ -694,6 +701,9 @@ impl LogicalPlan {
             LogicalPlan::Truncate { .. } => "TRUNCATE",
             LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
             LogicalPlan::DropIndex { .. } => "DROP INDEX",
+            LogicalPlan::CreateSequence(_) => "CREATE SEQUENCE",
+            LogicalPlan::AlterSequence(_) => "ALTER SEQUENCE",
+            LogicalPlan::DropSequence(_) => "DROP SEQUENCE",
         }
     }
 
@@ -872,6 +882,9 @@ impl LogicalPlan {
             LogicalPlan::Update { .. } => "Update",
             LogicalPlan::Delete { .. } => "Delete",
             LogicalPlan::Copy { .. } => "Copy",
+            LogicalPlan::CreateSequence(_) => "CreateSequence",
+            LogicalPlan::AlterSequence(_) => "AlterSequence",
+            LogicalPlan::DropSequence(_) => "DropSequence",
             LogicalPlan::CreateTable { .. } => "CreateTable",
             LogicalPlan::DropTable { .. } => "DropTable",
             LogicalPlan::CreateView { .. } => "CreateView",
@@ -931,6 +944,9 @@ impl LogicalPlan {
                 | LogicalPlan::CreateIndex { .. }
                 | LogicalPlan::DropIndex { .. }
                 | LogicalPlan::Pragma { .. }
+                | LogicalPlan::CreateSequence(_)
+                | LogicalPlan::AlterSequence(_)
+                | LogicalPlan::DropSequence(_)
         )
     }
 
@@ -965,6 +981,9 @@ impl LogicalPlan {
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
             LogicalPlan::Copy { table, .. } => Some(table),
+            LogicalPlan::CreateSequence(_)
+            | LogicalPlan::AlterSequence(_)
+            | LogicalPlan::DropSequence(_) => None,
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),
             LogicalPlan::DropTable { name, .. } => Some(name),
             LogicalPlan::CreateView { table, .. } => Some(&table.name),

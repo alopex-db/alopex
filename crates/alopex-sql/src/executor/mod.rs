@@ -262,6 +262,16 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 })
             }
 
+            LogicalPlan::CreateSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::create(txn, statement))
+            }
+            LogicalPlan::AlterSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::alter(txn, statement))
+            }
+            LogicalPlan::DropSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::drop(txn, statement))
+            }
+
             // DML Operations
             LogicalPlan::Insert {
                 table,
@@ -681,6 +691,11 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &bulk::CopySecurityConfig::default(),
                 )
             }
+            LogicalPlan::CreateSequence(statement) => {
+                ddl::sequence::create(&mut sql_txn, statement)
+            }
+            LogicalPlan::AlterSequence(statement) => ddl::sequence::alter(&mut sql_txn, statement),
+            LogicalPlan::DropSequence(statement) => ddl::sequence::drop(&mut sql_txn, statement),
             LogicalPlan::InsertSelect {
                 table,
                 columns,

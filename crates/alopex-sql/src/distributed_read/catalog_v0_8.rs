@@ -872,6 +872,12 @@ fn validate_plan(
             "distinct_on_local_only",
             "SELECT DISTINCT ON is not in the v0.8 remote-read catalog",
         )),
+        LogicalPlan::CreateSequence(_)
+        | LogicalPlan::AlterSequence(_)
+        | LogicalPlan::DropSequence(_) => Err(RemoteReadRejection::unsupported(
+            "sequence_not_supported_remote",
+            "SEQUENCE is outside the read-only remote-read catalog",
+        )),
     }
 }
 

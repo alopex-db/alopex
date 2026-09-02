@@ -27,7 +27,7 @@ use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::types::ResolvedType;
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 mod csv;
 mod parquet;
@@ -94,8 +94,8 @@ pub trait BulkReader {
 }
 
 /// COPY 文を実行する。
-pub fn execute_copy<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table_name: &str,
     file_path: &str,
@@ -238,8 +238,8 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
 }
 
 /// Row ストレージへの書き込み。
-fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table: &TableMetadata,
     mut reader: Box<dyn BulkReader>,
@@ -286,8 +286,8 @@ fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
     Ok(staged.len() as u64)
 }
 
-fn populate_fts_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_fts_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -300,8 +300,8 @@ fn populate_fts_indexes<S: KVStore>(
 }
 
 /// Columnar ストレージへの書き込み（現状は Row と同経路で処理）。
-fn bulk_load_columnar<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table: &TableMetadata,
     mut reader: Box<dyn BulkReader>,
@@ -839,8 +839,8 @@ fn build_column(
     }
 }
 
-fn persist_segment<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn persist_segment<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     mut segment: ColumnSegmentV2,
     row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
@@ -1084,8 +1084,8 @@ fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
     }
 }
 
-fn populate_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -1104,8 +1104,8 @@ fn populate_indexes<S: KVStore>(
     Ok(())
 }
 
-fn populate_hnsw_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],

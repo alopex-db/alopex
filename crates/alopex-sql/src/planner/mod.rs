@@ -38,8 +38,8 @@ pub use typed_expr::{
 pub use types::ResolvedType;
 
 use crate::ast::ddl::{
-    AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateTable, CreateView, DropIndex,
-    DropTable, DropView, Truncate,
+    AlterSequence, AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateSequence,
+    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
     CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
@@ -1056,6 +1056,9 @@ impl TableReferenceExtractor {
                 ),
             )),
             LogicalPlan::Pragma { .. } => {}
+            LogicalPlan::CreateSequence(_)
+            | LogicalPlan::AlterSequence(_)
+            | LogicalPlan::DropSequence(_) => {}
         }
     }
 
@@ -1222,6 +1225,9 @@ enum GenericHostStatement<'a> {
     Update(&'a Update),
     Delete(&'a Delete),
     Copy(&'a crate::ast::CopyStatement),
+    CreateSequence(&'a CreateSequence),
+    AlterSequence(&'a AlterSequence),
+    DropSequence(&'a DropSequence),
     Unsupported,
 }
 
@@ -1244,6 +1250,9 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
         StatementKind::Copy(statement) => GenericHostStatement::Copy(statement),
+        StatementKind::CreateSequence(statement) => GenericHostStatement::CreateSequence(statement),
+        StatementKind::AlterSequence(statement) => GenericHostStatement::AlterSequence(statement),
+        StatementKind::DropSequence(statement) => GenericHostStatement::DropSequence(statement),
         _ => GenericHostStatement::Unsupported,
     }
 }
@@ -1278,6 +1287,10 @@ fn table_reference_access_for_classified(
             CopyDirection::From => TableReferenceAccess::Write,
             CopyDirection::To => TableReferenceAccess::Read,
         }),
+        GenericHostStatement::CreateSequence(_) | GenericHostStatement::AlterSequence(_) => {
+            Ok(TableReferenceAccess::Metadata)
+        }
+        GenericHostStatement::DropSequence(_) => Ok(TableReferenceAccess::Metadata),
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
         GenericHostStatement::CreateView(_)
@@ -1383,6 +1396,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
             GenericHostStatement::Copy(statement) => self.plan_copy(statement),
+            GenericHostStatement::CreateSequence(statement) => {
+                Ok(LogicalPlan::CreateSequence(statement.clone()))
+            }
+            GenericHostStatement::AlterSequence(statement) => {
+                Ok(LogicalPlan::AlterSequence(statement.clone()))
+            }
+            GenericHostStatement::DropSequence(statement) => {
+                Ok(LogicalPlan::DropSequence(statement.clone()))
+            }
             GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
     }
