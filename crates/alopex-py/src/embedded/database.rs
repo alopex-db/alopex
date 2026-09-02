@@ -11,7 +11,7 @@ use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
 use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
-use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
+use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult, PySearchStats};
 use crate::vector;
 use crate::vector::SliceOrOwned;
 
@@ -523,14 +523,14 @@ impl PyDatabase {
         query: Py<PyAny>,
         k: usize,
         ef_search: Option<usize>,
-    ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
+    ) -> PyResult<(Vec<PySearchResult>, PySearchStats)> {
         let db = self.ensure_open()?;
         vector::require_numpy(py)?;
         let name = name.to_string();
         vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
             let db_clone = Arc::clone(&db);
             let name_clone = name.clone();
-            let (results, _stats) = match slice_or_owned {
+            let (results, stats) = match slice_or_owned {
                 SliceOrOwned::Borrowed { ptr, len, _guard } => {
                     let _guard = _guard;
                     let ptr = ptr as usize;
@@ -545,9 +545,8 @@ impl PyDatabase {
                 }
             }
             .map_err(error::embedded_err)?;
-            let stats = db.get_hnsw_stats(&name).map_err(error::embedded_err)?;
             let results = results.into_iter().map(PySearchResult::from).collect();
-            Ok((results, PyHnswStats::from(stats)))
+            Ok((results, PySearchStats::from(stats)))
         })
     }
 

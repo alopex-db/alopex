@@ -16,7 +16,9 @@ def test_hnsw_create_search_delete():
 
     results, stats = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 1)
     assert len(results) >= 1
-    assert stats.node_count >= 1
+    assert stats.nodes_visited >= 1
+    assert stats.distance_computations >= 1
+    assert stats.search_time_us >= 0
 
     with db.begin(TxnMode.READ_WRITE) as txn:
         txn.delete_from_hnsw("idx", b"k1")

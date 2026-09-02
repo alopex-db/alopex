@@ -17,7 +17,7 @@ pub use dataframe::{
     PyDataFrame, PyDataFrameStream, PyDatetimeNamespace, PyExpr, PyLazyFrame, PyListNamespace,
     PyStringNamespace,
 };
-pub use results::{PyHnswStats, PyMemoryStats, PySearchResult};
+pub use results::{PyHnswStats, PyMemoryStats, PySearchResult, PySearchStats};
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTxnMode>()?;
@@ -35,6 +35,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyListNamespace>()?;
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyHnswStats>()?;
+    m.add_class::<PySearchStats>()?;
     m.add_class::<PyMemoryStats>()?;
     m.add_class::<PyCatalogInfo>()?;
     m.add_class::<PyNamespaceInfo>()?;

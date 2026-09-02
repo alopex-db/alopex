@@ -229,6 +229,14 @@ class HnswStats:
     ) -> None: ...
 
 
+class SearchStats:
+    nodes_visited: int
+    distance_computations: int
+    search_time_us: int
+
+    def __init__(self) -> None: ...
+
+
 class MemoryStats:
     total_bytes: int
     used_bytes: int
@@ -513,7 +521,7 @@ class Database:
         query: Any,
         k: int,
         ef_search: Optional[int] = None,
-    ) -> Tuple[List[SearchResult], HnswStats]: ...
+    ) -> Tuple[List[SearchResult], SearchStats]: ...
     def drop_hnsw_index(self, name: str) -> None: ...
     def get_hnsw_stats(self, name: str) -> HnswStats: ...
 

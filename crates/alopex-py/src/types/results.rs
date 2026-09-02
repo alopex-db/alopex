@@ -116,6 +116,27 @@ pub struct PyHnswStats {
     pub avg_edges_per_node: f64,
 }
 
+#[pyclass(name = "SearchStats", skip_from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PySearchStats {
+    #[pyo3(get, set)]
+    pub nodes_visited: u64,
+    #[pyo3(get, set)]
+    pub distance_computations: u64,
+    #[pyo3(get, set)]
+    pub search_time_us: u64,
+}
+
+impl From<alopex_core::vector::hnsw::SearchStats> for PySearchStats {
+    fn from(value: alopex_core::vector::hnsw::SearchStats) -> Self {
+        Self {
+            nodes_visited: value.nodes_visited,
+            distance_computations: value.distance_computations,
+            search_time_us: value.search_time_us,
+        }
+    }
+}
+
 impl From<alopex_core::HnswStats> for PyHnswStats {
     fn from(value: alopex_core::HnswStats) -> Self {
         Self {
