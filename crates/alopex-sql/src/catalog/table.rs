@@ -54,6 +54,31 @@ impl Default for StorageOptions {
     }
 }
 
+/// Referential action for foreign key constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferentialAction {
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+    NoAction,
+}
+
+/// Foreign key constraint metadata.
+#[derive(Debug, Clone)]
+pub struct ForeignKeyConstraint {
+    /// Local columns that form the foreign key.
+    pub columns: Vec<String>,
+    /// Referenced table name.
+    pub ref_table: String,
+    /// Referenced columns in the foreign table.
+    pub ref_columns: Vec<String>,
+    /// Action on delete.
+    pub on_delete: Option<ReferentialAction>,
+    /// Action on update.
+    pub on_update: Option<ReferentialAction>,
+}
+
 /// Metadata for a table in the catalog.
 ///
 /// Contains the table ID, name, column definitions, and optional primary key constraint.
@@ -105,6 +130,8 @@ pub struct TableMetadata {
     pub comment: Option<String>,
     /// Custom properties.
     pub properties: HashMap<String, String>,
+    /// Foreign key constraints.
+    pub foreign_keys: Vec<ForeignKeyConstraint>,
 }
 
 impl TableMetadata {
@@ -126,6 +153,7 @@ impl TableMetadata {
             storage_location: None,
             comment: None,
             properties: HashMap::new(),
+            foreign_keys: Vec::new(),
         }
     }
 
@@ -138,6 +166,12 @@ impl TableMetadata {
     /// Set the primary key columns.
     pub fn with_primary_key(mut self, columns: Vec<String>) -> Self {
         self.primary_key = Some(columns);
+        self
+    }
+
+    /// Add a foreign key constraint.
+    pub fn with_foreign_key(mut self, fk: ForeignKeyConstraint) -> Self {
+        self.foreign_keys.push(fk);
         self
     }
 
@@ -229,12 +263,14 @@ pub struct ColumnMetadata {
     pub unique: bool,
     /// DEFAULT value expression.
     pub default: Option<Expr>,
+    /// CHECK constraint expression.
+    pub check_expr: Option<Expr>,
 }
 
 impl ColumnMetadata {
     /// Create a new column metadata with the given name and data type.
     ///
-    /// All constraints default to `false`, and `default` is `None`.
+    /// All constraints default to `false`, and `default` and `check_expr` are `None`.
     pub fn new(name: impl Into<String>, data_type: ResolvedType) -> Self {
         Self {
             name: name.into(),
@@ -243,6 +279,7 @@ impl ColumnMetadata {
             primary_key: false,
             unique: false,
             default: None,
+            check_expr: None,
         }
     }
 
@@ -267,6 +304,12 @@ impl ColumnMetadata {
     /// Set the DEFAULT value.
     pub fn with_default(mut self, default: Expr) -> Self {
         self.default = Some(default);
+        self
+    }
+
+    /// Set the CHECK constraint expression.
+    pub fn with_check(mut self, check_expr: Expr) -> Self {
+        self.check_expr = Some(check_expr);
         self
     }
 }

@@ -207,6 +207,7 @@ impl Spanned for TableConstraint {
     fn span(&self) -> Span {
         match self {
             TableConstraint::PrimaryKey { span, .. }
+            | TableConstraint::Unique { span, .. }
             | TableConstraint::ForeignKey { span, .. } => *span,
         }
     }

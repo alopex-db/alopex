@@ -556,6 +556,7 @@ proc writeTableConstraint(s: Stream; node: SqlNode) =
   var onDelete: string = ""
   var onUpdate: string = ""
   var startIdx = 0
+  var colCount = 0
   
   if node.children.len > 0 and node.children[0].kind == nkIdentifier:
     let typeStr = node.children[0].strVal.toUpperAscii()
@@ -568,11 +569,6 @@ proc writeTableConstraint(s: Stream; node: SqlNode) =
     elif typeStr == "FOREIGN":
       constraintType = "ForeignKey"
       startIdx = 1
-      # For FOREIGN KEY, we expect: FOREIGN KEY ( col1, col2, ... ) REFERENCES table ( refcol1, refcol2, ... )
-      # For now, we only extract the columns and table name; full parsing of ON DELETE/UPDATE would require
-      # more complex state tracking in the parser.
-      if node.children.len > 2:
-        refTable = node.children[node.children.len - 2].firstIdent()
     elif typeStr == "CONSTRAINT":
       startIdx = 1
       if node.children.len > 1:
@@ -587,18 +583,36 @@ proc writeTableConstraint(s: Stream; node: SqlNode) =
           constraintType = "ForeignKey"
           startIdx = 2
   
+  # For FOREIGN KEY constraints, find where columns end and ref_table begins
+  # For simpler constraints, all remaining children are column names
   if constraintType == "ForeignKey":
+    # Count column identifiers until we hit a non-identifier or the end
+    colCount = 0
+    for i in startIdx ..< node.children.len:
+      if node.children[i].kind == nkIdentifier:
+        colCount += 1
+      else:
+        break
+    # After columns, the next element should be the ref_table
+    if startIdx + colCount < node.children.len:
+      refTable = node.children[startIdx + colCount].firstIdent()
+      # The rest are ref_columns
+      for i in startIdx + colCount + 1 ..< node.children.len:
+        refColumns.add(node.children[i].firstIdent())
+    
     s.pack_map(6)
     s.writeKey("variant")
     s.pack_type("ForeignKey")
     s.writeKey("columns")
-    s.pack_array(max(node.children.len - startIdx - 1, 0))
-    for i in startIdx ..< node.children.len - 1:
+    s.pack_array(colCount)
+    for i in startIdx ..< startIdx + colCount:
       s.pack_type(node.children[i].firstIdent())
     s.writeKey("ref_table")
     s.pack_type(refTable)
     s.writeKey("ref_columns")
-    s.pack_array(0) # TODO: properly extract ref columns
+    s.pack_array(refColumns.len)
+    for refCol in refColumns:
+      s.pack_type(refCol)
     s.writeKey("on_delete")
     if onDelete.len > 0:
       s.pack_type(onDelete)
