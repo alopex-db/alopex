@@ -213,6 +213,12 @@ pub enum LogicalPlan {
         value: Option<crate::ast::PragmaValue>,
     },
 
+    /// EXPLAIN/EXPLAIN ANALYZE of an inner statement without executing it.
+    Explain {
+        analyze: bool,
+        input: Box<LogicalPlan>,
+    },
+
     // === Query Plans ===
     /// Table scan operation.
     ///
@@ -506,6 +512,7 @@ impl LogicalPlan {
     pub fn operation_name(&self) -> &'static str {
         match self {
             LogicalPlan::Pragma { .. } => "PRAGMA",
+            LogicalPlan::Explain { .. } => "EXPLAIN",
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }

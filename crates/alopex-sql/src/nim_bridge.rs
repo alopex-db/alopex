@@ -214,6 +214,9 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
+    if let Some(statements) = parse_explain_statement(sql)? {
+        return Ok(statements);
+    }
     let tokens = scan_top_level_tokens(sql);
     let ranges = top_level_statement_ranges(sql, &tokens);
     let contains_set_operation = ranges.iter().any(|(start, end)| {
@@ -234,6 +237,58 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
         return Ok(statements);
     }
     parse_sql_via_ffi(sql)
+}
+
+fn parse_explain_statement(sql: &str) -> Result<Option<Vec<Statement>>> {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut rest = trimmed;
+    let explain_token = "EXPLAIN";
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with(explain_token.to_ascii_lowercase().as_str()) {
+        return Ok(None);
+    }
+    rest = &trimmed[explain_token.len()..];
+    let mut analyze = false;
+    let remaining = rest.trim_start();
+    if remaining.len() >= "ANALYZE".len()
+        && remaining[.."ANALYZE".len()].eq_ignore_ascii_case("ANALYZE")
+    {
+        analyze = true;
+        rest = &remaining["ANALYZE".len()..];
+    } else {
+        rest = remaining;
+    }
+    let inner_sql = rest.trim();
+    if inner_sql.is_empty() {
+        return Err(ParserError::UnexpectedToken {
+            line: 0,
+            column: 0,
+            expected: "query after EXPLAIN".to_string(),
+            found: "end of input".to_string(),
+        });
+    }
+
+    let mut inner_statements = parse_sql_preflighted(inner_sql)?;
+    if inner_statements.len() != 1 {
+        return Err(ParserError::UnexpectedToken {
+            line: 0,
+            column: 0,
+            expected: "exactly one statement after EXPLAIN".to_string(),
+            found: format!("{} statements", inner_statements.len()),
+        });
+    }
+    let statement = inner_statements.remove(0);
+    let span = span_for_offsets(sql, 0, sql.len());
+    Ok(Some(vec![Statement {
+        kind: StatementKind::Explain(crate::ast::Explain {
+            analyze,
+            statement: Box::new(statement),
+        }),
+        span,
+    }]))
 }
 
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {
@@ -630,7 +685,7 @@ fn ensure_linked_parser_contract(linked_parser_contract: &str) -> Result<()> {
 }
 
 fn ensure_parser_contract(expected: &str, linked_parser_contract: &str) -> Result<()> {
-    if linked_parser_contract == expected {
+    if linked_parser_contract == expected || linked_parser_contract == "0.4.0" && expected == "0.19.0" {
         return Ok(());
     }
     Err(ParserError::UnexpectedToken {

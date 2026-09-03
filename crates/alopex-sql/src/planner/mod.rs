@@ -857,6 +857,15 @@ impl TableReferenceExtractor {
                 ),
             )),
             LogicalPlan::Pragma { .. } => {}
+            LogicalPlan::Explain { input, .. } => {
+                self.extract_plan(
+                    input,
+                    root_access,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
+            }
         }
     }
 
@@ -1018,6 +1027,10 @@ enum GenericHostStatement<'a> {
     Insert(&'a Insert),
     Update(&'a Update),
     Delete(&'a Delete),
+    Explain {
+        analyze: bool,
+        statement: &'a Statement,
+    },
     Unsupported,
 }
 
@@ -1036,6 +1049,10 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
+        StatementKind::Explain(explain) => GenericHostStatement::Explain {
+            analyze: explain.analyze,
+            statement: &explain.statement,
+        },
         _ => GenericHostStatement::Unsupported,
     }
 }
@@ -1066,6 +1083,9 @@ fn table_reference_access_for_classified(
         GenericHostStatement::Insert(_)
         | GenericHostStatement::Update(_)
         | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
+        GenericHostStatement::Explain { statement, .. } => {
+            table_reference_access_for_classified(statement, classify_generic_host_statement(&statement.kind))
+        }
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
         GenericHostStatement::CreateIndex(_)
@@ -1150,8 +1170,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
+            GenericHostStatement::Explain { analyze, statement } => self.plan_explain(*analyze, statement),
             GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
+    }
+
+    fn plan_explain(&self, analyze: bool, statement: &Statement) -> Result<LogicalPlan, PlannerError> {
+        let input = self.plan(statement)?;
+        Ok(LogicalPlan::Explain {
+            analyze,
+            input: Box::new(input),
+        })
     }
 
     fn plan_pragma(

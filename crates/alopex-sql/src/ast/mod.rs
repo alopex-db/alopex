@@ -33,6 +33,12 @@ impl Spanned for Statement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Explain {
+    pub analyze: bool,
+    pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
 #[allow(clippy::large_enum_variant)]
 pub enum StatementKind {
@@ -58,6 +64,7 @@ pub enum StatementKind {
     Insert(Insert),
     Update(Update),
     Delete(Delete),
+    Explain(Explain),
 }
 
 impl StatementKind {
