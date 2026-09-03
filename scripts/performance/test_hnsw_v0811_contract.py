@@ -61,6 +61,13 @@ class HnswDiagnosticContractTests(unittest.TestCase):
         self.assertIn("--only-binary=:all:", workflow)
         self.assertIn("--release-version", workflow)
         self.assertIn("artifacts-environment.txt", workflow)
+        release_workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github/workflows/alopex-py-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("post-release-hnsw:", release_workflow)
+        self.assertIn("needs: [final-release-join]", release_workflow)
+        self.assertIn("uses: ./.github/workflows/post-release-hnsw.yml", release_workflow)
 
 
 if __name__ == "__main__":

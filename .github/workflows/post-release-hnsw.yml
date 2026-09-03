@@ -1,6 +1,12 @@
 name: Post-release HNSW diagnostics
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release tag or version to benchmark"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:

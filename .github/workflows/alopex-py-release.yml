@@ -740,3 +740,11 @@ jobs:
     with:
       version: ${{ inputs.release_tag || github.ref_name }}
       publish_report: true
+
+  post-release-hnsw:
+    name: Post-release HNSW diagnostic
+    needs: [final-release-join]
+    if: ${{ needs.final-release-join.result == 'success' }}
+    uses: ./.github/workflows/post-release-hnsw.yml
+    with:
+      version: ${{ inputs.release_tag || github.ref_name }}
