@@ -14,15 +14,16 @@ on:
         required: true
         default: "v0.8.11"
         type: string
-  release:
-    types: [published]
-
 permissions:
   contents: read
 
 jobs:
   diagnostic:
     runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
     # Advisory evidence only: this job never gates publication or rollback.
     continue-on-error: true
     steps:
@@ -33,7 +34,7 @@ jobs:
       - name: Install the exact PyPI wheel
         id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.version }}
+          RELEASE_TAG: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -41,19 +42,37 @@ jobs:
           version="${version#v}"
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           python -m pip install --disable-pip-version-check --only-binary=:all: \
-            "alopex==${version}" numpy
+            "alopex==${version}" "numpy==2.4.6" "pandas==3.0.5" \
+            "scikit-learn==1.9.0" "faiss-cpu==1.15.0" "hnswlib==0.8.0"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "RELEASE_VERSION=${version}" >> "${GITHUB_ENV}"
+      - name: Download the issue 298 Amazon dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/amazon-product-dataset-2020.zip"
+          destination="${RUNNER_TEMP}/amazon-product-dataset-2020"
+          curl -fL https://github.com/user-attachments/files/31764184/archive.zip \
+            -o "${archive}"
+          echo "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea  ${archive}" \
+            | sha256sum --check --strict
+          mkdir -p "${destination}"
+          unzip -q "${archive}" -d "${destination}"
+          dataset="${destination}/home/sdf/marketing_sample_for_amazon_com-ecommerce__20200101_20200131__10k_data.csv"
+          echo "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291  ${dataset}" \
+            | sha256sum --check --strict
+          echo "DATASET_PATH=${dataset}" >> "${GITHUB_ENV}"
       - name: Record benchmark environment
         run: |
           {
             uname -a
             python --version
-            python -m pip show alopex numpy
+            python -m pip show alopex numpy pandas scikit-learn faiss-cpu hnswlib
           } > artifacts-environment.txt
       - name: Generate reproducible diagnostic artifacts
         run: >-
           python scripts/performance/hnsw_v0811_contract.py
+          --dataset "${DATASET_PATH}"
           --output artifacts/hnsw-diagnostic
           --release-version "${RELEASE_VERSION}"
       - name: Upload diagnostic artifacts
