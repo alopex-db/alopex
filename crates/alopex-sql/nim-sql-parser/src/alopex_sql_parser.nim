@@ -518,6 +518,17 @@ proc writeColumnConstraint(s: Stream; node: SqlNode) =
       s.writeNil()
     s.writeKey("span")
     s.writeSpan(node.span)
+  of "CHECK":
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Check")
+    s.writeKey("expression")
+    if node.children.len > 1:
+      s.writeExpr(node.children[1])
+    else:
+      s.writeNil()
+    s.writeKey("span")
+    s.writeSpan(node.span)
   else:
     s.pack_map(2)
     s.writeKey("variant")
@@ -539,17 +550,74 @@ proc writeColumnDef(s: Stream; node: SqlNode) =
   s.writeSpan(node.span)
 
 proc writeTableConstraint(s: Stream; node: SqlNode) =
-  s.pack_map(3)
-  s.writeKey("variant")
-  s.pack_type("PrimaryKey")
-  s.writeKey("columns")
+  var constraintType = "PrimaryKey"
+  var refTable = ""
+  var refColumns: seq[string] = @[]
+  var onDelete: string = ""
+  var onUpdate: string = ""
   var startIdx = 0
-  if node.children.len > 0 and node.children[0].kind == nkIdentifier and
-      node.children[0].strVal.toUpperAscii() in ["PRIMARY", "UNIQUE", "FOREIGN", "CONSTRAINT"]:
-    startIdx = 1
-  s.pack_array(max(node.children.len - startIdx, 0))
-  for i in startIdx ..< node.children.len:
-    s.pack_type(node.children[i].firstIdent())
+  
+  if node.children.len > 0 and node.children[0].kind == nkIdentifier:
+    let typeStr = node.children[0].strVal.toUpperAscii()
+    if typeStr == "PRIMARY":
+      constraintType = "PrimaryKey"
+      startIdx = 1
+    elif typeStr == "UNIQUE":
+      constraintType = "Unique"
+      startIdx = 1
+    elif typeStr == "FOREIGN":
+      constraintType = "ForeignKey"
+      startIdx = 1
+      # For FOREIGN KEY, we expect: FOREIGN KEY ( col1, col2, ... ) REFERENCES table ( refcol1, refcol2, ... )
+      # For now, we only extract the columns and table name; full parsing of ON DELETE/UPDATE would require
+      # more complex state tracking in the parser.
+      if node.children.len > 2:
+        refTable = node.children[node.children.len - 2].firstIdent()
+    elif typeStr == "CONSTRAINT":
+      startIdx = 1
+      if node.children.len > 1:
+        let nextType = node.children[1].strVal.toUpperAscii()
+        if nextType == "PRIMARY":
+          constraintType = "PrimaryKey"
+          startIdx = 2
+        elif nextType == "UNIQUE":
+          constraintType = "Unique"
+          startIdx = 2
+        elif nextType == "FOREIGN":
+          constraintType = "ForeignKey"
+          startIdx = 2
+  
+  if constraintType == "ForeignKey":
+    s.pack_map(6)
+    s.writeKey("variant")
+    s.pack_type("ForeignKey")
+    s.writeKey("columns")
+    s.pack_array(max(node.children.len - startIdx - 1, 0))
+    for i in startIdx ..< node.children.len - 1:
+      s.pack_type(node.children[i].firstIdent())
+    s.writeKey("ref_table")
+    s.pack_type(refTable)
+    s.writeKey("ref_columns")
+    s.pack_array(0) # TODO: properly extract ref columns
+    s.writeKey("on_delete")
+    if onDelete.len > 0:
+      s.pack_type(onDelete)
+    else:
+      s.writeNil()
+    s.writeKey("on_update")
+    if onUpdate.len > 0:
+      s.pack_type(onUpdate)
+    else:
+      s.writeNil()
+  else:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type(constraintType)
+    s.writeKey("columns")
+    s.pack_array(max(node.children.len - startIdx, 0))
+    for i in startIdx ..< node.children.len:
+      s.pack_type(node.children[i].firstIdent())
+  
   s.writeKey("span")
   s.writeSpan(node.span)
 

@@ -92,10 +92,12 @@ pub struct StructField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VectorMetric {
-    Cosine,
-    L2,
-    Inner,
+pub enum ReferentialAction {
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+    NoAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,12 +111,21 @@ pub enum ColumnConstraint {
     PrimaryKey { span: Span },
     Unique { span: Span },
     Default { value: Expr, span: Span },
+    Check { expression: Expr, span: Span },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
 pub enum TableConstraint {
     PrimaryKey { columns: Vec<String>, span: Span },
+    ForeignKey {
+        columns: Vec<String>,
+        ref_table: String,
+        ref_columns: Vec<String>,
+        on_delete: Option<ReferentialAction>,
+        on_update: Option<ReferentialAction>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,7 +197,8 @@ impl Spanned for ColumnConstraint {
             ColumnConstraint::NotNull { span }
             | ColumnConstraint::PrimaryKey { span }
             | ColumnConstraint::Unique { span }
-            | ColumnConstraint::Default { span, .. } => *span,
+            | ColumnConstraint::Default { span, .. }
+            | ColumnConstraint::Check { span, .. } => *span,
         }
     }
 }
@@ -194,7 +206,8 @@ impl Spanned for ColumnConstraint {
 impl Spanned for TableConstraint {
     fn span(&self) -> Span {
         match self {
-            TableConstraint::PrimaryKey { span, .. } => *span,
+            TableConstraint::PrimaryKey { span, .. }
+            | TableConstraint::ForeignKey { span, .. } => *span,
         }
     }
 }

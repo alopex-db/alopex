@@ -1642,6 +1642,14 @@ proc parseColumnDef(p: var Parser): SqlNode =
       c.children.add(newIdent("DEFAULT"))
       c.children.add(p.parseExpr())
       result.colConstraints.add(c)
+    elif p.check(tkCheck):
+      discard p.advance()
+      discard p.expect(tkLParen)
+      let c = newNode(nkConstraint)
+      c.children.add(newIdent("CHECK"))
+      c.children.add(p.parseExpr())
+      discard p.expect(tkRParen)
+      result.colConstraints.add(c)
     else:
       break
 
@@ -1772,7 +1780,8 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token): SqlNode =
     discard p.advance()
     if p.check(tkPrimary) or p.check(tkUnique) or p.check(tkForeign) or p.check(tkConstraint):
       let c = newNode(nkConstraint)
-      c.children.add(newIdent(p.advance().value))
+      let constraintTypeToken = p.advance()
+      c.children.add(newIdent(constraintTypeToken.value))
       if p.check(tkKey): discard p.advance()
       if p.check(tkLParen):
         discard p.advance()
@@ -1781,6 +1790,20 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token): SqlNode =
           discard p.advance()
           c.children.add(newIdent(p.expectIdent("constraint column").value))
         discard p.expect(tkRParen)
+      # Handle FOREIGN KEY REFERENCES clause
+      if constraintTypeToken.value.toLowerAscii() == "foreign" or
+         (c.children.len > 0 and c.children[0].strVal.toLowerAscii() == "foreign"):
+        if p.check(tkReferences):
+          discard p.advance()
+          let refTable = p.expectIdent("referenced table name")
+          c.children.add(newIdent(refTable.value, tokenSpan(refTable)))
+          if p.check(tkLParen):
+            discard p.advance()
+            c.children.add(newIdent(p.expectIdent("referenced column").value))
+            while p.check(tkComma):
+              discard p.advance()
+              c.children.add(newIdent(p.expectIdent("referenced column").value))
+            discard p.expect(tkRParen)
       result.children.add(c)
     else:
       result.children.add(p.parseColumnDef())
