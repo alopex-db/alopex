@@ -1870,8 +1870,47 @@ proc parsePragmaStmt(p: var Parser): SqlNode =
     else:
       p.error("expected integer or string pragma value")
 
+proc parseTransactionControlStmt(p: var Parser): SqlNode =
+  if p.checkContextual("begin"):
+    let start = p.advance()
+    result = newNode(nkBegin, tokenSpan(start))
+    if p.checkContextual("transaction"):
+      let transactionToken = p.advance()
+      result.span = spanThrough(tokenSpan(start), tokenSpan(transactionToken))
+    return
+
+  if p.checkContextual("start"):
+    let start = p.advance()
+    discard p.expectContextual("transaction")
+    result = newNode(nkStartTransaction, spanThrough(tokenSpan(start), tokenSpan(p.previous)))
+    return
+
+  if p.checkContextual("commit"):
+    let start = p.advance()
+    result = newNode(nkCommit, tokenSpan(start))
+    if p.checkContextual("transaction"):
+      let transactionToken = p.advance()
+      result.span = spanThrough(tokenSpan(start), tokenSpan(transactionToken))
+    return
+
+  if p.checkContextual("rollback"):
+    let start = p.advance()
+    result = newNode(nkRollback, tokenSpan(start))
+    if p.checkContextual("transaction"):
+      let transactionToken = p.advance()
+      result.span = spanThrough(tokenSpan(start), tokenSpan(transactionToken))
+    return
+
+  p.error("expected transaction control statement")
+
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
+  of tkIdent:
+    if p.checkContextual("begin") or p.checkContextual("start") or
+       p.checkContextual("commit") or p.checkContextual("rollback"):
+      result = p.parseTransactionControlStmt()
+    else:
+      p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK)")
   of tkWith, tkSelect, tkValues:
     result = p.parseQueryStmt()
   of tkInsert:
@@ -1887,7 +1926,7 @@ proc parseStatement*(p: var Parser): SqlNode =
   of tkPragma:
     result = p.parsePragmaStmt()
   else:
-    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
+    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA, BEGIN, START TRANSACTION, COMMIT, ROLLBACK)")
 
   if p.check(tkSemicolon):
     discard p.advance()

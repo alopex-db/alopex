@@ -1035,3 +1035,20 @@ fn clause_free_function_calls_still_decode_without_the_new_keys() {
     assert!(order_by.is_empty());
     assert!(within_group.is_empty());
 }
+
+#[test]
+fn parser_decodes_transaction_control_statement_variants() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "BEGIN; START TRANSACTION; COMMIT; ROLLBACK;",
+    )
+    .expect("transaction control statements should parse");
+    assert_eq!(statements.len(), 4);
+    assert!(matches!(statements[0].kind, StatementKind::Begin));
+    assert!(matches!(
+        statements[1].kind,
+        StatementKind::StartTransaction
+    ));
+    assert!(matches!(statements[2].kind, StatementKind::Commit));
+    assert!(matches!(statements[3].kind, StatementKind::Rollback));
+}

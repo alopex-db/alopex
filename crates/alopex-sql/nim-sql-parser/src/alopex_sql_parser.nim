@@ -1938,6 +1938,22 @@ proc writeContinuousAggregateV040Kind(s: Stream; statement: SqlNode) =
 
 proc writeStatementKind(s: Stream; node: SqlNode) =
   case node.kind
+  of nkBegin:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("Begin")
+  of nkStartTransaction:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("StartTransaction")
+  of nkCommit:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("Commit")
+  of nkRollback:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("Rollback")
   of nkSelect:
     s.writeSelectKind(node)
   of nkValues:

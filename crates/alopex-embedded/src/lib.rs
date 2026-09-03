@@ -30,7 +30,9 @@ pub use crate::columnar_api::{
 pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
-pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
+pub use crate::sql_api::{
+    SqlSession, SqlSessionState, SqlStreamingResult, StreamingQueryResult, StreamingRows,
+};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
@@ -130,6 +132,20 @@ pub enum Error {
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
+    /// SQL session internal state is inconsistent.
+    #[error("sql session internal state is inconsistent")]
+    SqlSessionInternalState,
+    /// SQL session state transition is invalid.
+    #[error("invalid sql session transition: state={state}, statement={statement}")]
+    SqlSessionInvalidTransition {
+        /// Current session state.
+        state: String,
+        /// Requested transaction-control statement.
+        statement: &'static str,
+    },
+    /// SQL session transaction is failed and requires rollback.
+    #[error("sql session transaction is failed; execute ROLLBACK before continuing")]
+    SqlSessionTransactionFailed,
     /// The requested data source format is not supported.
     #[error("unsupported data source format: {0}")]
     UnsupportedDataSourceFormat(String),

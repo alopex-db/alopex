@@ -36,6 +36,12 @@ impl Spanned for Statement {
 #[serde(tag = "variant")]
 #[allow(clippy::large_enum_variant)]
 pub enum StatementKind {
+    // Transaction control
+    Begin,
+    StartTransaction,
+    Commit,
+    Rollback,
+
     // DDL
     CreateTable(CreateTable),
     DropTable(DropTable),

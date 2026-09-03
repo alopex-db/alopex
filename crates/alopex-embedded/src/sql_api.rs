@@ -118,9 +118,174 @@ pub enum SqlStreamingResult {
     Query(QueryRowIterator<'static>),
 }
 
+/// SQL session transaction state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlSessionState {
+    /// No explicit transaction is active.
+    Idle,
+    /// An explicit transaction is active.
+    Active,
+    /// The active transaction has failed and must be rolled back.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionControlKind {
+    Begin,
+    StartTransaction,
+    Commit,
+    Rollback,
+}
+
+/// SQL session that can run explicit BEGIN/COMMIT/ROLLBACK lifecycles.
+pub struct SqlSession<'a> {
+    db: &'a Database,
+    state: SqlSessionState,
+    transaction: Option<Transaction<'a>>,
+}
+
+impl<'a> SqlSession<'a> {
+    fn new(db: &'a Database) -> Self {
+        Self {
+            db,
+            state: SqlSessionState::Idle,
+            transaction: None,
+        }
+    }
+
+    /// Returns the current transaction state.
+    pub fn state(&self) -> SqlSessionState {
+        self.state
+    }
+
+    /// Execute SQL and return the last statement result.
+    pub fn execute_sql(&mut self, sql: &str) -> Result<SqlResult> {
+        Ok(self
+            .execute_sql_multi(sql)?
+            .pop()
+            .unwrap_or(alopex_sql::ExecutionResult::Success))
+    }
+
+    /// Execute SQL and return each statement result.
+    pub fn execute_sql_multi(&mut self, sql: &str) -> Result<Vec<SqlResult>> {
+        let statements = parse_sql(sql)?;
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in &statements {
+            if let Some(control) = transaction_control_kind(statement) {
+                results.push(self.apply_transaction_control(control)?);
+                continue;
+            }
+            match self.state {
+                SqlSessionState::Idle => {
+                    let mut result =
+                        execute_statements_autocommit(self.db, std::slice::from_ref(statement))?;
+                    results.push(result.pop().unwrap_or(alopex_sql::ExecutionResult::Success));
+                }
+                SqlSessionState::Active => {
+                    let transaction = self
+                        .transaction
+                        .as_mut()
+                        .ok_or(Error::SqlSessionInternalState)?;
+                    match transaction.execute_parsed_sql(std::slice::from_ref(statement)) {
+                        Ok(result) => results.push(result),
+                        Err(error) => {
+                            self.state = SqlSessionState::Failed;
+                            return Err(error);
+                        }
+                    }
+                }
+                SqlSessionState::Failed => {
+                    return Err(Error::SqlSessionTransactionFailed);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    fn apply_transaction_control(&mut self, control: TransactionControlKind) -> Result<SqlResult> {
+        use SqlSessionState::{Active, Failed, Idle};
+        match (self.state, control) {
+            (Idle, TransactionControlKind::Begin | TransactionControlKind::StartTransaction) => {
+                self.transaction = Some(self.db.begin(TxnMode::ReadWrite)?);
+                self.state = Active;
+                Ok(alopex_sql::ExecutionResult::Success)
+            }
+            (Idle, TransactionControlKind::Commit | TransactionControlKind::Rollback) => {
+                Err(Error::SqlSessionInvalidTransition {
+                    state: "Idle".to_string(),
+                    statement: control.name(),
+                })
+            }
+            (Active, TransactionControlKind::Begin | TransactionControlKind::StartTransaction) => {
+                Err(Error::SqlSessionInvalidTransition {
+                    state: "Active".to_string(),
+                    statement: control.name(),
+                })
+            }
+            (Active, TransactionControlKind::Commit) => {
+                let transaction = self
+                    .transaction
+                    .take()
+                    .ok_or(Error::SqlSessionInternalState)?;
+                match transaction.commit() {
+                    Ok(()) => {
+                        self.state = Idle;
+                        Ok(alopex_sql::ExecutionResult::Success)
+                    }
+                    Err(error) => {
+                        self.state = Idle;
+                        Err(error)
+                    }
+                }
+            }
+            (Active | Failed, TransactionControlKind::Rollback) => {
+                let mut transaction = self
+                    .transaction
+                    .take()
+                    .ok_or(Error::SqlSessionInternalState)?;
+                transaction.rollback_in_place()?;
+                self.state = Idle;
+                Ok(alopex_sql::ExecutionResult::Success)
+            }
+            (Failed, TransactionControlKind::Begin | TransactionControlKind::StartTransaction) => {
+                Err(Error::SqlSessionInvalidTransition {
+                    state: "Failed".to_string(),
+                    statement: control.name(),
+                })
+            }
+            (Failed, TransactionControlKind::Commit) => Err(Error::SqlSessionTransactionFailed),
+        }
+    }
+}
+
+impl TransactionControlKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Begin => "BEGIN",
+            Self::StartTransaction => "START TRANSACTION",
+            Self::Commit => "COMMIT",
+            Self::Rollback => "ROLLBACK",
+        }
+    }
+}
+
 fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
     let dialect = AlopexDialect;
     Parser::parse_sql(&dialect, sql).map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
+}
+
+fn transaction_control_kind(statement: &Statement) -> Option<TransactionControlKind> {
+    match statement.kind {
+        StatementKind::Begin => Some(TransactionControlKind::Begin),
+        StatementKind::StartTransaction => Some(TransactionControlKind::StartTransaction),
+        StatementKind::Commit => Some(TransactionControlKind::Commit),
+        StatementKind::Rollback => Some(TransactionControlKind::Rollback),
+        _ => None,
+    }
 }
 
 fn stmt_requires_write(stmt: &Statement) -> bool {
@@ -142,6 +307,107 @@ fn stmt_changes_user_data(stmt: &Statement) -> bool {
         stmt.kind,
         StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_)
     )
+}
+
+fn execute_statements_autocommit(
+    db: &Database,
+    statements: &[Statement],
+) -> Result<Vec<SqlResult>> {
+    if statements.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // PRAGMA controls must execute against the store itself. Running them
+    // through the external-transaction bridge would hide the store from
+    // the executor and correctly reject the operation. Keep the
+    // auto-commit public API usable for a standalone PRAGMA.
+    if statements.len() == 1 {
+        let overlay = CatalogOverlay::new();
+        let plan = {
+            let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+            plan_stmt(&*catalog, &overlay, &statements[0])?
+        };
+        if matches!(statements[0].kind, StatementKind::Pragma { .. })
+            || alopex_sql::executor::is_store_direct_plan(&plan)
+        {
+            let mut executor: Executor<_, _> =
+                Executor::new(db.store.clone(), db.sql_catalog.clone());
+            return executor
+                .execute(plan)
+                .map(|result| vec![result])
+                .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)));
+        }
+    }
+
+    let requires_write = statements.iter().any(stmt_requires_write);
+    let mode = if requires_write {
+        TxnMode::ReadWrite
+    } else {
+        TxnMode::ReadOnly
+    };
+
+    let mut txn = db.store.begin(mode).map_err(Error::Core)?;
+    let journal = if mode == TxnMode::ReadWrite
+        && statements.iter().any(stmt_changes_user_data)
+        && db.store.range_change_journal_capability() == RangeChangeJournalCapability::Supported
+    {
+        let scope = {
+            let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+            local_journal_scope(&*catalog)
+        };
+        Some(LocalRangeChangeJournal::capture(&mut txn, scope).map_err(Error::Core)?)
+    } else {
+        None
+    };
+    let mut overlay = CatalogOverlay::new();
+    let mut borrowed =
+        TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+
+    let mut executor: Executor<_, _> = Executor::new(db.store.clone(), db.sql_catalog.clone());
+
+    let mut results = Vec::with_capacity(statements.len());
+    for (statement_index, statement) in statements.iter().enumerate() {
+        let plan = {
+            let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+            let (_, overlay) = borrowed.split_parts();
+            plan_stmt(&*catalog, &*overlay, statement)?
+        };
+
+        {
+            let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+            let (_, overlay) = borrowed.split_parts();
+            let view = TxnCatalogView::new(&*catalog, &*overlay);
+            db.record_routing(&view, statement, statement_index);
+        }
+
+        results.push(
+            executor
+                .execute_in_txn(plan, &mut borrowed)
+                .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
+        );
+    }
+
+    drop(borrowed);
+
+    if let Some(journal) = journal {
+        journal.stage(&mut txn).map_err(Error::Core)?;
+    }
+
+    txn.commit_self().map_err(Error::Core)?;
+    if mode == TxnMode::ReadWrite {
+        let mut catalog = db.sql_catalog.write().expect("catalog lock poisoned");
+        catalog.apply_overlay(overlay);
+    }
+    if statements.iter().any(stmt_changes_catalog) {
+        db.invalidate_table_info_cache();
+    }
+    if requires_write {
+        let mut cache = db.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        cache.clear();
+        let mut vector_cache = db.vector_cache.write().expect("vector cache lock poisoned");
+        *vector_cache = None;
+    }
+    Ok(results)
 }
 
 pub(crate) fn local_journal_scope<C: Catalog>(catalog: &C) -> RangeChangeJournalScope {
@@ -180,7 +446,13 @@ pub(crate) fn execute_sql_owned(
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
+    execute_sql_owned_statements(transaction, &statements)
+}
 
+fn execute_sql_owned_statements(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statements: &[Statement],
+) -> Result<SqlResult> {
     if statements.iter().any(stmt_requires_write) {
         let mut cache = transaction
             .db
@@ -288,6 +560,11 @@ fn build_column_info(
 }
 
 impl Database {
+    /// Begin a SQL session with explicit transaction state.
+    pub fn begin_sql_session(&self) -> SqlSession<'_> {
+        SqlSession::new(self)
+    }
+
     /// Opens a read-only SQL storage transaction at a cluster-issued fenced
     /// read point. The returned transaction retains data, metadata, schema,
     /// and index identities through [`ReadAtPoint`].
@@ -350,110 +627,7 @@ impl Database {
     /// ```
     pub fn execute_sql_multi(&self, sql: &str) -> Result<Vec<SqlResult>> {
         let stmts = parse_sql(sql)?;
-        if stmts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // PRAGMA controls must execute against the store itself. Running them
-        // through the external-transaction bridge would hide the store from
-        // the executor and correctly reject the operation. Keep the
-        // auto-commit public API usable for a standalone PRAGMA.
-        if stmts.len() == 1 {
-            let overlay = CatalogOverlay::new();
-            let plan = {
-                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                plan_stmt(&*catalog, &overlay, &stmts[0])?
-            };
-            if matches!(stmts[0].kind, StatementKind::Pragma { .. })
-                || alopex_sql::executor::is_store_direct_plan(&plan)
-            {
-                let mut executor: Executor<_, _> =
-                    Executor::new(self.store.clone(), self.sql_catalog.clone());
-                return executor
-                    .execute(plan)
-                    .map(|result| vec![result])
-                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)));
-            }
-        }
-
-        let requires_write = stmts.iter().any(stmt_requires_write);
-        let mode = if requires_write {
-            TxnMode::ReadWrite
-        } else {
-            TxnMode::ReadOnly
-        };
-
-        let mut txn = self.store.begin(mode).map_err(Error::Core)?;
-        let journal = if mode == TxnMode::ReadWrite
-            && stmts.iter().any(stmt_changes_user_data)
-            && self.store.range_change_journal_capability()
-                == RangeChangeJournalCapability::Supported
-        {
-            let scope = {
-                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                local_journal_scope(&*catalog)
-            };
-            Some(LocalRangeChangeJournal::capture(&mut txn, scope).map_err(Error::Core)?)
-        } else {
-            None
-        };
-        let mut overlay = CatalogOverlay::new();
-        let mut borrowed =
-            TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
-
-        let mut executor: Executor<_, _> =
-            Executor::new(self.store.clone(), self.sql_catalog.clone());
-
-        let mut results = Vec::with_capacity(stmts.len());
-        for (statement_index, stmt) in stmts.iter().enumerate() {
-            let plan = {
-                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
-            };
-
-            {
-                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                let (_, overlay) = borrowed.split_parts();
-                let view = TxnCatalogView::new(&*catalog, &*overlay);
-                self.record_routing(&view, stmt, statement_index);
-            }
-
-            results.push(
-                executor
-                    .execute_in_txn(plan, &mut borrowed)
-                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
-            );
-        }
-
-        drop(borrowed);
-
-        if let Some(journal) = journal {
-            journal.stage(&mut txn).map_err(Error::Core)?;
-        }
-
-        // `execute_in_txn()` 成功時に HNSW flush 済み（失敗時は abandon 済み）なので、
-        // ここでは KV commit と overlay 適用のみを行う。
-        //
-        // commit_self は `txn` を消費するため、失敗時に rollback はできない。
-        txn.commit_self().map_err(Error::Core)?;
-        if mode == TxnMode::ReadWrite {
-            let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
-            catalog.apply_overlay(overlay);
-        }
-        if stmts.iter().any(stmt_changes_catalog) {
-            self.invalidate_table_info_cache();
-        }
-        if requires_write {
-            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-            cache.clear();
-            let mut vector_cache = self
-                .vector_cache
-                .write()
-                .expect("vector cache lock poisoned");
-            *vector_cache = None;
-        }
-        Ok(results)
+        execute_statements_autocommit(self, &stmts)
     }
 
     /// Execute SQL with callback-based streaming for SELECT queries (FR-7).
@@ -730,7 +904,10 @@ impl<'a> Transaction<'a> {
         if stmts.is_empty() {
             return Ok(alopex_sql::ExecutionResult::Success);
         }
+        self.execute_parsed_sql(&stmts)
+    }
 
+    fn execute_parsed_sql(&mut self, stmts: &[Statement]) -> Result<SqlResult> {
         if stmts.iter().any(stmt_requires_write) {
             let mut cache = self
                 .db
@@ -848,5 +1025,137 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn sql_session_binds_reads_and_writes_to_explicit_transaction_context() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+
+        let mut session = db.begin_sql_session();
+        session.execute_sql("BEGIN").unwrap();
+        session
+            .execute_sql("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+
+        let ExecutionResult::Query(in_txn) = session
+            .execute_sql("SELECT name FROM users WHERE id = 1")
+            .unwrap()
+        else {
+            panic!("session select must return query");
+        };
+        assert_eq!(in_txn.rows.len(), 1);
+
+        let ExecutionResult::Query(outside) = db
+            .execute_sql("SELECT name FROM users WHERE id = 1")
+            .unwrap()
+        else {
+            panic!("database select must return query");
+        };
+        assert!(outside.rows.is_empty());
+
+        session.execute_sql("COMMIT").unwrap();
+
+        let ExecutionResult::Query(committed) = db
+            .execute_sql("SELECT name FROM users WHERE id = 1")
+            .unwrap()
+        else {
+            panic!("database select must return query");
+        };
+        assert_eq!(committed.rows.len(), 1);
+    }
+
+    #[test]
+    fn sql_session_rejects_invalid_transition_with_typed_error() {
+        let db = Database::open_in_memory().unwrap();
+        let mut session = db.begin_sql_session();
+
+        let error = session.execute_sql("COMMIT").unwrap_err();
+        assert!(matches!(
+            error,
+            Error::SqlSessionInvalidTransition {
+                state,
+                statement: "COMMIT"
+            } if state == "Idle"
+        ));
+    }
+
+    #[test]
+    fn sql_session_enters_failed_state_after_statement_error_until_rollback() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        let mut session = db.begin_sql_session();
+        session.execute_sql("BEGIN").unwrap();
+        session
+            .execute_sql("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
+
+        let execution_error = session
+            .execute_sql("INSERT INTO users (id, name) VALUES (1, 'duplicate')")
+            .unwrap_err();
+        assert!(matches!(execution_error, Error::Sql(_)));
+        assert_eq!(session.state(), SqlSessionState::Failed);
+
+        let commit_error = session.execute_sql("COMMIT").unwrap_err();
+        assert!(matches!(commit_error, Error::SqlSessionTransactionFailed));
+
+        session.execute_sql("ROLLBACK").unwrap();
+        assert_eq!(session.state(), SqlSessionState::Idle);
+
+        let ExecutionResult::Query(query) = db.execute_sql("SELECT name FROM users").unwrap()
+        else {
+            panic!("database select must return query");
+        };
+        assert!(query.rows.is_empty());
+    }
+
+    #[test]
+    fn sql_session_state_transition_table() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let mut session = db.begin_sql_session();
+
+        struct TransitionCase {
+            sql: &'static str,
+            expected_state: SqlSessionState,
+            expect_ok: bool,
+        }
+
+        let cases = [
+            TransitionCase {
+                sql: "BEGIN",
+                expected_state: SqlSessionState::Active,
+                expect_ok: true,
+            },
+            TransitionCase {
+                sql: "BEGIN",
+                expected_state: SqlSessionState::Active,
+                expect_ok: false,
+            },
+            TransitionCase {
+                sql: "ROLLBACK",
+                expected_state: SqlSessionState::Idle,
+                expect_ok: true,
+            },
+            TransitionCase {
+                sql: "START TRANSACTION",
+                expected_state: SqlSessionState::Active,
+                expect_ok: true,
+            },
+            TransitionCase {
+                sql: "COMMIT",
+                expected_state: SqlSessionState::Idle,
+                expect_ok: true,
+            },
+        ];
+
+        for case in cases {
+            let result = session.execute_sql(case.sql);
+            assert_eq!(result.is_ok(), case.expect_ok, "{}", case.sql);
+            assert_eq!(session.state(), case.expected_state, "{}", case.sql);
+        }
     }
 }

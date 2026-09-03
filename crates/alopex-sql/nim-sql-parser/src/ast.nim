@@ -16,6 +16,10 @@ type
     `end`*: Location
 
   SqlNodeKind* = enum
+    nkBegin
+    nkStartTransaction
+    nkCommit
+    nkRollback
     nkSelect
     nkValues
     nkWithClause
