@@ -336,6 +336,7 @@ dependencies = [
  "arrow-csv",
  "parquet",
  "regex",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",

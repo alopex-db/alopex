@@ -192,10 +192,12 @@ def _eager(engine: str, rows: int, warmups: int, runs: int) -> dict[str, float]:
 def _streaming(
     engine: str, fixture: Path, rows: int, warmups: int, runs: int
 ) -> dict[str, float]:
+    parquet = fixture.suffix == ".parquet"
     if engine == "alopex":
         from alopex import LazyFrame
 
-        build = lambda: LazyFrame.scan_csv(str(fixture))
+        scan = LazyFrame.scan_parquet if parquet else LazyFrame.scan_csv
+        build = lambda: scan(str(fixture))
 
         def consume():
             started = time.perf_counter()
@@ -215,7 +217,8 @@ def _streaming(
         if pl.__version__ != "1.43.2":
             raise RuntimeError(f"expected Polars 1.43.2, got {pl.__version__}")
 
-        build = lambda: pl.scan_csv(fixture)
+        scan = pl.scan_parquet if parquet else pl.scan_csv
+        build = lambda: scan(fixture)
 
         def consume():
             started = time.perf_counter()
@@ -417,7 +420,7 @@ def _sql_streaming(engine: str, rows: int, warmups: int, runs: int) -> dict[str,
 def _worker(args) -> int:
     if args.worker == "polars-eager-api":
         result = _eager(args.engine, args.rows, args.warmups, args.runs)
-    elif args.worker == "polars-lazy-streaming":
+    elif args.worker in ("polars-csv-streaming", "polars-parquet-streaming"):
         result = _streaming(args.engine, args.fixture, args.rows, args.warmups, args.runs)
     elif args.worker == "sql-streaming":
         result = _sql_streaming(args.engine, args.rows, args.warmups, args.runs)
@@ -470,6 +473,17 @@ def _write_csv(path: Path, rows: int) -> None:
         )
 
 
+def _write_parquet(path: Path, rows: int) -> None:
+    import polars as pl
+
+    pl.DataFrame(
+        {
+            "id": range(rows),
+            "label": [None if index % 10 == 0 else f"row-{index}" for index in range(rows)],
+        }
+    ).write_parquet(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite", choices=("curated", "full"), default="curated")
@@ -479,7 +493,8 @@ def main(argv: list[str] | None = None) -> int:
         "--worker",
         choices=(
             "polars-eager-api",
-            "polars-lazy-streaming",
+            "polars-csv-streaming",
+            "polars-parquet-streaming",
             "sql-sqlite-curated",
             "sql-postgresql-curated",
             "sql-streaming",
@@ -503,9 +518,9 @@ def main(argv: list[str] | None = None) -> int:
         fixture = Path(directory) / "rows.csv"
         _write_csv(fixture, args.rows)
         results = []
-        for contract, evidence, engines in (
+        workloads = [
             ("polars-eager-v1", "polars-eager-api", ("alopex", "polars")),
-            ("polars-lazy-streaming-v1", "polars-lazy-streaming", ("alopex", "polars")),
+            ("polars-lazy-streaming-v1", "polars-csv-streaming", ("alopex", "polars")),
             ("sql-sqlite-v1", "sql-sqlite-curated", ("alopex", "sqlite")),
             (
                 "sql-postgresql-v1",
@@ -517,10 +532,21 @@ def main(argv: list[str] | None = None) -> int:
                 "sql-streaming",
                 ("alopex", "datafusion"),
             ),
-        ):
-            subject = _run_worker(evidence, engines[0], fixture, args.rows, args.warmups, args.runs)
+        ]
+        if args.suite == "full":
+            workloads.append(
+                ("polars-lazy-streaming-v1", "polars-parquet-streaming", ("alopex", "polars"))
+            )
+        for contract, evidence, engines in workloads:
+            workload_fixture = fixture
+            if evidence == "polars-parquet-streaming":
+                workload_fixture = Path(directory) / "rows.parquet"
+                _write_parquet(workload_fixture, args.rows)
+            subject = _run_worker(
+                evidence, engines[0], workload_fixture, args.rows, args.warmups, args.runs
+            )
             reference = _run_worker(
-                evidence, engines[1], fixture, args.rows, args.warmups, args.runs
+                evidence, engines[1], workload_fixture, args.rows, args.warmups, args.runs
             )
             revision = {
                 "polars-eager-v1": "pola-rs/polars@py-1.43.2",

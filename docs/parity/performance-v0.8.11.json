@@ -39,7 +39,7 @@
       "kind": "streaming",
       "reference_revision": "pola-rs/polars@py-1.43.2",
       "evidence": "scripts/performance/parity_v0811_measure.py",
-      "evidence_ids": ["polars-lazy-streaming"],
+      "evidence_ids": ["polars-csv-streaming", "polars-parquet-streaming"],
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",

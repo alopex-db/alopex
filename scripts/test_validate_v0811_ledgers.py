@@ -151,6 +151,20 @@ class LedgerContractTests(unittest.TestCase):
         )
         self.assertEqual(contracts["sql-datafusion-streaming-v1"]["kind"], "streaming")
 
+    def test_full_polars_suite_has_distinct_parquet_streaming_evidence(self):
+        contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)["contracts"]
+        evidence = contracts["polars-lazy-streaming-v1"]["evidence_ids"]
+        self.assertEqual(
+            evidence,
+            ["polars-csv-streaming", "polars-parquet-streaming"],
+        )
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/performance/parity_v0811_measure.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('if args.suite == "full"', runner)
+        self.assertIn('"polars-parquet-streaming"', runner)
+
 
 if __name__ == "__main__":
     unittest.main()

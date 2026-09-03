@@ -243,7 +243,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11"]
-        polars: ["0.20.*", "latest"]
+        polars: ["0.20.*", "1.43.2"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -266,11 +266,7 @@ jobs:
           # The performance module's numeric values remain advisory, but its
           # scan/read/write correctness assertions stay in this required lane.
           python -m pip install pytest-benchmark
-          if [[ "${{ matrix.polars }}" == "latest" ]]; then
-            python -m pip install polars
-          else
-            python -m pip install "polars==${{ matrix.polars }}"
-          fi
+          python -m pip install "polars==${{ matrix.polars }}"
       - name: Install patchelf (Linux)
         run: |
           if command -v patchelf &> /dev/null; then
@@ -299,6 +295,13 @@ jobs:
       - name: Run polars tests
         run: |
           pytest crates/alopex-py/tests -m "requires_polars"
+      - name: Run exact Polars reference differential
+        if: matrix.polars == '1.43.2'
+        env:
+          ALOPEX_POLARS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: >-
+          cargo test -p alopex-dataframe --features lane_ci --test polars_reference
+          live_polars_1_43_2_matches_dataframe_contract -- --ignored --exact
 
   server-e2e:
     name: server-e2e
