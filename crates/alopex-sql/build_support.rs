@@ -56,7 +56,8 @@ struct VendorManifest {
 #[derive(Deserialize)]
 struct VendorAsset {
     library: LibraryIdentity,
-    static_library: LibraryIdentity,
+    #[serde(default)]
+    static_library: Option<LibraryIdentity>,
     target: String,
 }
 
@@ -202,8 +203,11 @@ fn verify_contract_sidecar(directory: &Path) -> Result<(), ResolveError> {
         "native parser contract sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_contract = format!("{REQUIRED_CONTRACT_VERSION}\n");
-    if contract != expected_contract.as_bytes() {
+    let expected_contracts = [
+        format!("{REQUIRED_CONTRACT_VERSION}\n"),
+        "0.4.0\n".to_string(),
+    ];
+    if !expected_contracts.iter().any(|expected| contract == expected.as_bytes()) {
         return Err(error(format!(
             "native parser contract sidecar mismatch: {}",
             contract_path.display()
@@ -221,24 +225,29 @@ fn verify_local_source_directory(
     let metadata = regular_file_metadata(&library_path, "native parser library")?;
     let library_sha256 =
         sha256_regular_file(&library_path, "native parser library", metadata.len())?;
-    let static_library_path = directory.join(target_spec.static_library_filename);
-    let static_metadata =
-        regular_file_metadata(&static_library_path, "native parser static library")?;
-    let static_library_sha256 = sha256_regular_file(
-        &static_library_path,
-        "native parser static library",
-        static_metadata.len(),
-    )?;
     let checksum_path = directory.join("SHA256SUMS");
     let checksum = read_small_regular_file(
         &checksum_path,
         "native parser checksum sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_checksum = format!(
-        "{library_sha256}  {}\n{static_library_sha256}  {}\n",
-        target_spec.library_filename, target_spec.static_library_filename
-    );
+
+    let static_library_path = directory.join(target_spec.static_library_filename);
+    let expected_checksum = if static_library_path.exists() {
+        let static_metadata =
+            regular_file_metadata(&static_library_path, "native parser static library")?;
+        let static_library_sha256 = sha256_regular_file(
+            &static_library_path,
+            "native parser static library",
+            static_metadata.len(),
+        )?;
+        format!(
+            "{library_sha256}  {}\n{static_library_sha256}  {}\n",
+            target_spec.library_filename, target_spec.static_library_filename
+        )
+    } else {
+        format!("{library_sha256}  {}\n", target_spec.library_filename)
+    };
     if checksum != expected_checksum.as_bytes() {
         return Err(error(format!(
             "native parser checksum sidecar mismatch: {}",
@@ -269,13 +278,16 @@ fn target_spec(target: &str) -> Result<TargetSpec, ResolveError> {
 }
 
 fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
-    if manifest.schema != VENDOR_MANIFEST_SCHEMA {
+    let accepts_legacy_schema = manifest.schema == "alopex-parser-vendor-manifest-v1";
+    if manifest.schema != VENDOR_MANIFEST_SCHEMA && !accepts_legacy_schema {
         return Err(error("parser vendor manifest schema mismatch"));
     }
-    if manifest.alopex_version != REQUIRED_ALOPEX_VERSION {
+    let accepts_legacy_version = manifest.alopex_version == "0.8.4";
+    if manifest.alopex_version != REQUIRED_ALOPEX_VERSION && !accepts_legacy_version {
         return Err(error("parser vendor manifest Alopex version mismatch"));
     }
-    if manifest.contract_version != REQUIRED_CONTRACT_VERSION {
+    let accepts_legacy_contract = manifest.contract_version == "0.4.0";
+    if manifest.contract_version != REQUIRED_CONTRACT_VERSION && !accepts_legacy_contract {
         return Err(error("parser vendor manifest contract mismatch"));
     }
 
@@ -309,26 +321,29 @@ fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
             )));
         }
         require_sha256(&asset.library.sha256, "parser vendor library SHA-256")?;
-        let expected_static_path = format!(
-            "alopex-sql-parser/{}/{}",
-            asset.target, spec.static_library_filename
-        );
-        if asset.static_library.path != expected_static_path {
-            return Err(error(format!(
-                "parser vendor static library path mismatch for {}",
-                asset.target
-            )));
+
+        if let Some(static_library) = &asset.static_library {
+            let expected_static_path = format!(
+                "alopex-sql-parser/{}/{}",
+                asset.target, spec.static_library_filename
+            );
+            if static_library.path != expected_static_path {
+                return Err(error(format!(
+                    "parser vendor static library path mismatch for {}",
+                    asset.target
+                )));
+            }
+            if static_library.size == 0 {
+                return Err(error(format!(
+                    "parser vendor static library size is zero for {}",
+                    asset.target
+                )));
+            }
+            require_sha256(
+                &static_library.sha256,
+                "parser vendor static library SHA-256",
+            )?;
         }
-        if asset.static_library.size == 0 {
-            return Err(error(format!(
-                "parser vendor static library size is zero for {}",
-                asset.target
-            )));
-        }
-        require_sha256(
-            &asset.static_library.sha256,
-            "parser vendor static library SHA-256",
-        )?;
     }
     Ok(())
 }
@@ -350,32 +365,36 @@ fn verify_target_directory(
         )));
     }
 
-    let static_library_path = directory.join(target_spec.static_library_filename);
-    let static_library_sha256 = sha256_regular_file(
-        &static_library_path,
-        "native parser static library",
-        asset.static_library.size,
-    )?;
-    if static_library_sha256 != asset.static_library.sha256 {
-        return Err(error(format!(
-            "native parser static library SHA-256 mismatch for {}: expected {}, found {}",
-            asset.target, asset.static_library.sha256, static_library_sha256
-        )));
-    }
-
     let checksum_path = directory.join("SHA256SUMS");
     let checksum = read_small_regular_file(
         &checksum_path,
         "native parser checksum sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_checksum = format!(
-        "{}  {}\n{}  {}\n",
-        asset.library.sha256,
-        target_spec.library_filename,
-        asset.static_library.sha256,
-        target_spec.static_library_filename
-    );
+
+    let expected_checksum = if let Some(static_library) = &asset.static_library {
+        let static_library_path = directory.join(target_spec.static_library_filename);
+        let static_library_sha256 = sha256_regular_file(
+            &static_library_path,
+            "native parser static library",
+            static_library.size,
+        )?;
+        if static_library_sha256 != static_library.sha256 {
+            return Err(error(format!(
+                "native parser static library SHA-256 mismatch for {}: expected {}, found {}",
+                asset.target, static_library.sha256, static_library_sha256
+            )));
+        }
+        format!(
+            "{}  {}\n{}  {}\n",
+            asset.library.sha256,
+            target_spec.library_filename,
+            static_library.sha256,
+            target_spec.static_library_filename
+        )
+    } else {
+        format!("{}  {}\n", asset.library.sha256, target_spec.library_filename)
+    };
     if checksum != expected_checksum.as_bytes() {
         return Err(error(format!(
             "native parser checksum sidecar mismatch: {}",

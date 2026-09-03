@@ -38,4 +38,8 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         resolved.directory.display()
     );
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        resolved.directory.display()
+    );
 }
