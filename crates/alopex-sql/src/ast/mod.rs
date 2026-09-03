@@ -51,6 +51,12 @@ pub enum StatementKind {
         /// Optional assignment value.
         value: Option<PragmaValue>,
     },
+    /// List the tables visible in the current catalog context.
+    ShowTables,
+    /// List indexes visible in the current catalog context.
+    ShowIndexes,
+    /// Describe a table schema.
+    Describe { table: String },
 
     // DML
     Select(Select),

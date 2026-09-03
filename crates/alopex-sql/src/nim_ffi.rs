@@ -20,7 +20,7 @@ pub struct CParseResult {
     pub error_len: c_int,
 }
 
-#[link(name = "alopex_sql_parser", kind = "static", modifiers = "+bundle")]
+#[link(name = "alopex_sql_parser", kind = "dylib")]
 unsafe extern "C" {
     fn alopex_parser_init();
     fn alopex_parse_sql(input: *const c_char, length: c_int) -> CParseResult;

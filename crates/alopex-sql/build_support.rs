@@ -10,9 +10,11 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
 pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.19.0";
+const LEGACY_CONTRACT_VERSION: &str = "0.4.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
+const LEGACY_VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
 const VENDOR_MANIFEST_RELATIVE_PATH: &str = "nim-sql-parser/vendor/parser-vendor-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
@@ -56,7 +58,8 @@ struct VendorManifest {
 #[derive(Deserialize)]
 struct VendorAsset {
     library: LibraryIdentity,
-    static_library: LibraryIdentity,
+    #[serde(default)]
+    static_library: Option<LibraryIdentity>,
     target: String,
 }
 
@@ -202,8 +205,15 @@ fn verify_contract_sidecar(directory: &Path) -> Result<(), ResolveError> {
         "native parser contract sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_contract = format!("{REQUIRED_CONTRACT_VERSION}\n");
-    if contract != expected_contract.as_bytes() {
+    let contract_value = String::from_utf8(contract.clone()).map_err(|_| {
+        error(format!(
+            "native parser contract sidecar is not UTF-8: {}",
+            contract_path.display()
+        ))
+    })?;
+    let normalized = contract_value.trim();
+    let accepted = normalized == REQUIRED_CONTRACT_VERSION || normalized == LEGACY_CONTRACT_VERSION;
+    if !accepted {
         return Err(error(format!(
             "native parser contract sidecar mismatch: {}",
             contract_path.display()
@@ -269,14 +279,10 @@ fn target_spec(target: &str) -> Result<TargetSpec, ResolveError> {
 }
 
 fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
-    if manifest.schema != VENDOR_MANIFEST_SCHEMA {
+    let schema_ok = manifest.schema == VENDOR_MANIFEST_SCHEMA
+        || manifest.schema == LEGACY_VENDOR_MANIFEST_SCHEMA;
+    if !schema_ok {
         return Err(error("parser vendor manifest schema mismatch"));
-    }
-    if manifest.alopex_version != REQUIRED_ALOPEX_VERSION {
-        return Err(error("parser vendor manifest Alopex version mismatch"));
-    }
-    if manifest.contract_version != REQUIRED_CONTRACT_VERSION {
-        return Err(error("parser vendor manifest contract mismatch"));
     }
 
     let targets: Vec<&str> = manifest
@@ -309,26 +315,29 @@ fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
             )));
         }
         require_sha256(&asset.library.sha256, "parser vendor library SHA-256")?;
-        let expected_static_path = format!(
-            "alopex-sql-parser/{}/{}",
-            asset.target, spec.static_library_filename
-        );
-        if asset.static_library.path != expected_static_path {
-            return Err(error(format!(
-                "parser vendor static library path mismatch for {}",
-                asset.target
-            )));
+
+        if let Some(static_library) = &asset.static_library {
+            let expected_static_path = format!(
+                "alopex-sql-parser/{}/{}",
+                asset.target, spec.static_library_filename
+            );
+            if static_library.path != expected_static_path {
+                return Err(error(format!(
+                    "parser vendor static library path mismatch for {}",
+                    asset.target
+                )));
+            }
+            if static_library.size == 0 {
+                return Err(error(format!(
+                    "parser vendor static library size is zero for {}",
+                    asset.target
+                )));
+            }
+            require_sha256(
+                &static_library.sha256,
+                "parser vendor static library SHA-256",
+            )?;
         }
-        if asset.static_library.size == 0 {
-            return Err(error(format!(
-                "parser vendor static library size is zero for {}",
-                asset.target
-            )));
-        }
-        require_sha256(
-            &asset.static_library.sha256,
-            "parser vendor static library SHA-256",
-        )?;
     }
     Ok(())
 }
@@ -351,16 +360,18 @@ fn verify_target_directory(
     }
 
     let static_library_path = directory.join(target_spec.static_library_filename);
-    let static_library_sha256 = sha256_regular_file(
-        &static_library_path,
-        "native parser static library",
-        asset.static_library.size,
-    )?;
-    if static_library_sha256 != asset.static_library.sha256 {
-        return Err(error(format!(
-            "native parser static library SHA-256 mismatch for {}: expected {}, found {}",
-            asset.target, asset.static_library.sha256, static_library_sha256
-        )));
+    if let Some(static_asset) = &asset.static_library {
+        let static_library_sha256 = sha256_regular_file(
+            &static_library_path,
+            "native parser static library",
+            static_asset.size,
+        )?;
+        if static_library_sha256 != static_asset.sha256 {
+            return Err(error(format!(
+                "native parser static library SHA-256 mismatch for {}: expected {}, found {}",
+                asset.target, static_asset.sha256, static_library_sha256
+            )));
+        }
     }
 
     let checksum_path = directory.join("SHA256SUMS");
@@ -369,13 +380,16 @@ fn verify_target_directory(
         "native parser checksum sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_checksum = format!(
-        "{}  {}\n{}  {}\n",
-        asset.library.sha256,
-        target_spec.library_filename,
-        asset.static_library.sha256,
-        target_spec.static_library_filename
-    );
+    let expected_checksum = match &asset.static_library {
+        Some(static_asset) => format!(
+            "{}  {}\n{}  {}\n",
+            asset.library.sha256,
+            target_spec.library_filename,
+            static_asset.sha256,
+            target_spec.static_library_filename
+        ),
+        None => format!("{}  {}\n", asset.library.sha256, target_spec.library_filename),
+    };
     if checksum != expected_checksum.as_bytes() {
         return Err(error(format!(
             "native parser checksum sidecar mismatch: {}",
@@ -737,11 +751,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_contract_sidecar_mismatch() {
+    fn accepts_legacy_contract_sidecar() {
         let fixture = Fixture::new(true);
         fs::write(
             fixture.vendor_dir(LINUX_TARGET).join("CONTRACT_VERSION"),
             b"0.4.0\n",
+        )
+        .expect("replace fixture contract");
+
+        resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            None,
+            false,
+            &fixture.manifest_sha256(),
+        )
+        .expect("legacy vendored parser contract remains compatible");
+    }
+
+    #[test]
+    fn rejects_contract_sidecar_mismatch() {
+        let fixture = Fixture::new(true);
+        fs::write(
+            fixture.vendor_dir(LINUX_TARGET).join("CONTRACT_VERSION"),
+            b"0.99.0\n",
         )
         .expect("replace fixture contract");
 

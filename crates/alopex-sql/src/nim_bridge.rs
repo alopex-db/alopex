@@ -630,7 +630,11 @@ fn ensure_linked_parser_contract(linked_parser_contract: &str) -> Result<()> {
 }
 
 fn ensure_parser_contract(expected: &str, linked_parser_contract: &str) -> Result<()> {
-    if linked_parser_contract == expected {
+    let legacy_contract = "0.4.0";
+    let is_compatible = linked_parser_contract == expected
+        || (expected == "0.19.0" && linked_parser_contract == legacy_contract)
+        || (expected == legacy_contract && linked_parser_contract == "0.19.0");
+    if is_compatible {
         return Ok(());
     }
     Err(ParserError::UnexpectedToken {
