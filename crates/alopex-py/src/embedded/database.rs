@@ -1,8 +1,9 @@
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -36,6 +37,61 @@ pub struct PyPreparedStatement {
     sql: String,
     bindings: Vec<Option<String>>,
     finalized: bool,
+}
+
+struct PythonReader(Py<PyAny>);
+
+impl Read for PythonReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        Python::attach(|py| {
+            let chunk = self
+                .0
+                .bind(py)
+                .call_method1("read", (buffer.len(),))
+                .and_then(|value| value.extract::<Vec<u8>>())
+                .map_err(std::io::Error::other)?;
+            if chunk.len() > buffer.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "binary reader returned more bytes than requested",
+                ));
+            }
+            buffer[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        })
+    }
+}
+
+struct PythonWriter(Py<PyAny>);
+
+impl Write for PythonWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        Python::attach(|py| {
+            let written = self
+                .0
+                .bind(py)
+                .call_method1("write", (PyBytes::new(py, buffer),))
+                .and_then(|value| value.extract::<usize>())
+                .map_err(std::io::Error::other)?;
+            if written != buffer.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "binary writer accepted only part of a CSV chunk",
+                ));
+            }
+            Ok(written)
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Python::attach(|py| {
+            self.0
+                .bind(py)
+                .call_method0("flush")
+                .map(|_| ())
+                .map_err(std::io::Error::other)
+        })
+    }
 }
 
 #[pymethods]
@@ -560,6 +616,70 @@ impl PyDatabase {
         db.get_hnsw_stats(name)
             .map(PyHnswStats::from)
             .map_err(error::embedded_err)
+    }
+
+    /// Stream CSV bytes from a Python binary reader into a table.
+    #[pyo3(signature = (table, source, header = false))]
+    fn copy_from_csv(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        source: Py<PyAny>,
+        header: bool,
+    ) -> PyResult<u64> {
+        let db = Arc::clone(&self.ensure_open()?);
+        let table = table.to_string();
+        match py
+            .detach(move || db.copy_from_csv_reader(&table, PythonReader(source), header))
+            .map_err(error::embedded_err)?
+        {
+            alopex_sql::ExecutionResult::RowsAffected(rows) => Ok(rows),
+            _ => Err(error::to_py_err("COPY FROM did not report affected rows")),
+        }
+    }
+
+    /// Stream table rows as CSV bytes into a Python binary writer.
+    #[pyo3(signature = (table, destination, header = false))]
+    fn copy_to_csv(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        destination: Py<PyAny>,
+        header: bool,
+    ) -> PyResult<u64> {
+        let db = Arc::clone(&self.ensure_open()?);
+        let table = table.to_string();
+        let mut writer = PythonWriter(destination);
+        match py
+            .detach(move || db.copy_to_csv_writer(&table, &mut writer, header))
+            .map_err(error::embedded_err)?
+        {
+            alopex_sql::ExecutionResult::RowsAffected(rows) => Ok(rows),
+            _ => Err(error::to_py_err("COPY TO did not report affected rows")),
+        }
+    }
+
+    /// Return sequence definitions and current allocation state.
+    fn list_sequences(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        self.ensure_open()?
+            .list_sequences()
+            .map_err(error::embedded_err)?
+            .into_iter()
+            .map(|sequence| {
+                let result = PyDict::new(py);
+                result.set_item("name", sequence.name)?;
+                result.set_item("start_value", sequence.start_value)?;
+                result.set_item("next_value", sequence.next_value)?;
+                result.set_item("last_value", sequence.last_value)?;
+                result.set_item("increment", sequence.increment)?;
+                result.set_item("min_value", sequence.min_value)?;
+                result.set_item("max_value", sequence.max_value)?;
+                result.set_item("cache", sequence.cache)?;
+                result.set_item("cycle", sequence.cycle)?;
+                result.set_item("owned_by", sequence.owned_by)?;
+                Ok(result.unbind())
+            })
+            .collect()
     }
 }
 

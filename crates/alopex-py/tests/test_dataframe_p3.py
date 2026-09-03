@@ -1,5 +1,4 @@
 import pytest
-
 from alopex import AlopexError, DataFrame, LazyFrame
 
 
@@ -12,7 +11,7 @@ def test_scan_csv_collect_to_dict_preserves_all_arrow_batches(tmp_path, row_coun
         encoding="utf-8",
     )
 
-    frame = LazyFrame.scan_csv(str(path)).collect(batch_rows=50_000)
+    frame = LazyFrame.scan_csv(str(path)).collect()
     values = frame.to_dict()
 
     assert frame.height() == row_count
@@ -27,14 +26,15 @@ def test_scan_csv_stream_is_publicly_iterable_across_batches(tmp_path):
         encoding="utf-8",
     )
 
-    with LazyFrame.scan_csv(str(path)).collect(
-        streaming=True, batch_rows=1024
-    ) as batches:
+    with LazyFrame.scan_csv(str(path)).collect_batches(chunk_size=1024) as batches:
         values = [
             value for batch in batches for value in batch.to_dict()["id"]
         ]
 
     assert values == list(range(1025))
+
+    with pytest.raises(TypeError):
+        LazyFrame.scan_csv(str(path)).collect(streaming=True)
 
 
 def test_python_string_namespace_operations():

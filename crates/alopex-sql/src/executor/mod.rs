@@ -52,6 +52,7 @@ mod system;
 
 #[cfg(feature = "tokio")]
 pub use async_executor::AsyncExecutor;
+pub use ddl::sequence::SequenceInfo;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
 pub use memory::{MemoryPolicy, SpillPolicy};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
@@ -148,6 +149,50 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             bridge: TxnBridge::new(store),
             catalog,
         }
+    }
+
+    /// Stream CSV from an application-owned reader into `table` atomically.
+    pub fn copy_from_csv_reader(
+        &self,
+        table: &str,
+        reader: impl std::io::Read + 'static,
+        header: bool,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            bulk::execute_copy_from_csv_reader(
+                txn,
+                &*catalog,
+                table,
+                reader,
+                bulk::CopyOptions { header },
+            )
+        })
+    }
+
+    /// Stream `table` as CSV to an application-owned writer.
+    pub fn copy_to_csv_writer(
+        &self,
+        table: &str,
+        writer: &mut impl std::io::Write,
+        header: bool,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            bulk::execute_copy_to_csv_writer(
+                txn,
+                &*catalog,
+                table,
+                writer,
+                bulk::CopyOptions { header },
+            )
+        })
+    }
+
+    /// List persisted sequences in deterministic name order.
+    pub fn list_sequences(&self) -> Result<Vec<SequenceInfo>> {
+        let mut transaction = self.bridge.begin_read().map_err(ExecutorError::from)?;
+        ddl::sequence::list(&mut transaction)
     }
 
     /// Execute a logical plan and return the result.
@@ -247,7 +292,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
-                let format = copy_format(&path, &options);
+                let format = copy_format(&path, &options)?;
                 let ExecutionResult::Query(result) = self.execute_query(*query)? else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "COPY TO".into(),
@@ -274,7 +319,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
-                let format = copy_format(&path, &options);
+                let format = copy_format(&path, &options)?;
                 self.run_in_write_txn(|txn| {
                     bulk::execute_copy_to(
                         txn,
@@ -297,11 +342,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             } => {
                 let catalog = self.catalog.read().expect("catalog lock poisoned");
                 self.run_in_write_txn(|txn| {
-                    let format = if path.ends_with(".parquet") {
-                        bulk::FileFormat::Parquet
-                    } else {
-                        bulk::FileFormat::Csv
-                    };
+                    let format = copy_format(&path, &options)?;
                     let header = options.iter().any(|option| {
                         option.name.eq_ignore_ascii_case("header")
                             && option.value.eq_ignore_ascii_case("true")
@@ -744,7 +785,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                         reason: "query source did not return rows".into(),
                     });
                 };
-                let format = copy_format(&path, &options);
+                let format = copy_format(&path, &options)?;
                 bulk::execute_copy_query_to(
                     &result,
                     &path,
@@ -765,7 +806,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
-                let format = copy_format(&path, &options);
+                let format = copy_format(&path, &options)?;
                 bulk::execute_copy_to(
                     &mut sql_txn,
                     &view,
@@ -785,11 +826,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 ..
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                let format = if path.ends_with(".parquet") {
-                    bulk::FileFormat::Parquet
-                } else {
-                    bulk::FileFormat::Csv
-                };
+                let format = copy_format(&path, &options)?;
                 let header = options.iter().any(|option| {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
@@ -885,10 +922,17 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                if let Some(name) = system::direct_nextval_name(&plan) {
-                    let value = ddl::sequence::next_value(&mut sql_txn, name)?;
+                if let Some((function, name, alias)) = system::direct_sequence_call(&plan) {
+                    let value = if function.eq_ignore_ascii_case("nextval") {
+                        ddl::sequence::next_value(&mut sql_txn, name)?
+                    } else {
+                        ddl::sequence::current_value(&mut sql_txn, name)?
+                    };
                     Ok(ExecutionResult::Query(QueryResult::new(
-                        vec![ColumnInfo::new("nextval", ResolvedType::BigInt)],
+                        vec![ColumnInfo::new(
+                            alias.unwrap_or(function),
+                            ResolvedType::BigInt,
+                        )],
                         vec![vec![SqlValue::BigInt(value)]],
                     )))
                 } else {
@@ -1065,6 +1109,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         txn.delete_prefix(&KeyEncoder::table_prefix(table_meta.table_id))?;
         txn.delete_prefix(&KeyEncoder::sequence_key(table_meta.table_id))?;
+        ddl::sequence::drop_owned_by(txn, table_name)?;
 
         catalog
             .persist_drop_table(txn.inner_mut(), &TableFqn::from(&table_meta))
@@ -1245,24 +1290,27 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
     }
 }
 
-fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> bulk::FileFormat {
-    options
+fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> Result<bulk::FileFormat> {
+    let Some(format) = options
         .iter()
         .find(|option| option.name.eq_ignore_ascii_case("format"))
-        .map(|option| {
-            if option.value.eq_ignore_ascii_case("parquet") {
-                bulk::FileFormat::Parquet
-            } else {
-                bulk::FileFormat::Csv
-            }
-        })
-        .unwrap_or_else(|| {
-            if path.ends_with(".parquet") {
-                bulk::FileFormat::Parquet
-            } else {
-                bulk::FileFormat::Csv
-            }
-        })
+        .map(|option| option.value.as_str())
+    else {
+        return Ok(if path.to_ascii_lowercase().ends_with(".parquet") {
+            bulk::FileFormat::Parquet
+        } else {
+            bulk::FileFormat::Csv
+        });
+    };
+    if format.eq_ignore_ascii_case("csv") {
+        Ok(bulk::FileFormat::Csv)
+    } else if format.eq_ignore_ascii_case("parquet") {
+        Ok(bulk::FileFormat::Parquet)
+    } else {
+        Err(ExecutorError::UnsupportedFormat(format!(
+            "COPY FORMAT {format}; supported formats are CSV and PARQUET"
+        )))
+    }
 }
 
 #[cfg(test)]

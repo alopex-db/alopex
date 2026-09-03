@@ -85,7 +85,14 @@ jobs:
           bash scripts/build-nim-parser.sh --backend docker
           maturin develop --release -m crates/alopex-py/Cargo.toml
       - name: Verify performance contracts
-        run: python scripts/validate_v0811_ledgers.py
+        run: |
+          python scripts/validate_v0811_ledgers.py
+          python scripts/reference_tests/polars_public_inventory.py \
+            docs/parity/polars-v1.43.2.json
+          python scripts/reference_tests/sql_public_inventory.py \
+            docs/parity/sql-v0.8.11.json
+          python scripts/reference_tests/hnsw_public_inventory.py \
+            docs/parity/hnsw-v0.8.11.json
       - name: Run pinned SQL live differential
         env:
           ALOPEX_REFERENCE_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf

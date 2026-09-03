@@ -61,6 +61,7 @@ pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn.delete_prefix(&table_prefix)?;
     let seq_key = KeyEncoder::sequence_key(table_meta.table_id);
     txn.delete_prefix(&seq_key)?;
+    super::sequence::drop_owned_by(txn, table_name)?;
 
     // Finally drop from catalog (removes metadata + indexes).
     catalog.drop_table(table_name)?;

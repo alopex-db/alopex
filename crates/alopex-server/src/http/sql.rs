@@ -165,6 +165,15 @@ pub async fn handle(
             &ctx,
         );
     }
+    if uses_remote_copy(&request.sql) {
+        return error_response(
+            ServerError::BadRequest(
+                "COPY is local-only and unavailable over remote SQL; use an explicit upload/download API"
+                    .into(),
+            ),
+            &ctx,
+        );
+    }
 
     if request.streaming {
         return stream_response(state, request, &ctx);
@@ -385,6 +394,12 @@ pub(crate) async fn execute_non_streaming(
 ) -> Result<SqlResponse> {
     let start = Instant::now();
     let sql = request.sql.as_str();
+    if uses_remote_copy(sql) {
+        return Err(ServerError::BadRequest(
+            "COPY is local-only and unavailable over remote SQL; use an explicit upload/download API"
+                .into(),
+        ));
+    }
     let is_ddl = is_ddl(sql);
     if is_write_sql(sql) {
         state.lifecycle_state.check_write_allowed()?;
@@ -1286,6 +1301,15 @@ fn is_write_sql(sql: &str) -> bool {
     statements.iter().any(|stmt| is_write(&stmt.kind))
 }
 
+fn uses_remote_copy(sql: &str) -> bool {
+    let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|statement| matches!(&statement.kind, alopex_sql::StatementKind::Copy(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1350,5 +1374,15 @@ mod tests {
         assert!(is_write_sql("EXPLAIN ANALYZE INSERT INTO items VALUES (1)"));
         assert!(!is_ddl("EXPLAIN CREATE TABLE items (id INT)"));
         assert!(is_ddl("EXPLAIN ANALYZE CREATE TABLE items (id INT)"));
+    }
+
+    #[test]
+    fn remote_sql_rejects_local_copy_targets() {
+        assert!(uses_remote_copy("COPY items FROM STDIN WITH (FORMAT CSV)"));
+        assert!(uses_remote_copy("COPY items TO STDOUT WITH (FORMAT CSV)"));
+        assert!(uses_remote_copy(
+            "COPY items TO '/server/export.csv' WITH (FORMAT CSV)"
+        ));
+        assert!(!uses_remote_copy("SELECT 1"));
     }
 }

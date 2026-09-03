@@ -1,22 +1,1162 @@
 {
   "schema": "alopex.sql-conformance/v1",
-  "references": {"sqlite":"sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3", "postgresql":"postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682", "duckdb":"duckdb/duckdb@b8a06e4a22672e254cd0baa68a3dbed2eb51c56e", "datafusion":"apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de"},
-  "inventory_sources": ["crates/alopex-sql/src", "crates/alopex-embedded/src/sql_api.rs", "crates/alopex-py/python/alopex/_alopex.pyi", "crates/alopex-cli/src/commands/sql.rs", "crates/alopex-server/src", "docs/parity/README.md"],
-  "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "known-performance-divergence", "not-yet-implemented", "unsupported"],
+  "references": {
+    "sqlite": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+    "postgresql": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+    "duckdb": "duckdb/duckdb@b8a06e4a22672e254cd0baa68a3dbed2eb51c56e",
+    "datafusion": "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de"
+  },
+  "inventory_sources": [
+    "crates/alopex-sql/src",
+    "crates/alopex-embedded/src/sql_api.rs",
+    "crates/alopex-py/python/alopex/_alopex.pyi",
+    "crates/alopex-cli/src/commands/sql.rs",
+    "crates/alopex-server/src",
+    "docs/parity/README.md"
+  ],
+  "status_values": [
+    "reference-compatible",
+    "alopex-extension",
+    "known-divergence",
+    "known-performance-divergence",
+    "not-yet-implemented",
+    "unsupported"
+  ],
   "entries": [
-    {"api":"portable SELECT/null/order/coercion","status":"known-performance-divergence","reference":"sqlite/postgresql/duckdb/datafusion pinned commits","evidence":"scripts/reference_tests/sql_v0811_differential.py;scripts/reference_tests/sql_v0811_curated.json","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307,"contracts":["column-order","row-order","null","unicode","boolean","coercion","aggregate","error"]},
-    {"api":"parser/lexer","status":"known-performance-divergence","reference":"sqlite:test","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
-    {"api":"transactions/savepoints","status":"known-performance-divergence","reference":"sqlite:lang_transaction","evidence":"crates/alopex-embedded/src/sql_session.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
-    {"api":"prepared statements","status":"known-performance-divergence","reference":"sqlite:c3ref/bind_blob","evidence":"crates/alopex-embedded/src/prepared.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
-    {"api":"EXPLAIN JSON","status":"known-performance-divergence","reference":"postgresql:sql-explain","evidence":"docs/sql-explain.md","performance_contract":"sql-postgresql-v1","performance_evidence":"sql-postgresql-curated","issue":307},
-    {"api":"RETURNING","status":"known-performance-divergence","reference":"postgresql:dml-returning","evidence":"crates/alopex-embedded/tests/advanced_dml.rs","performance_contract":"sql-postgresql-v1","performance_evidence":"sql-postgresql-curated","issue":307},
-    {"api":"ON CONFLICT","status":"known-performance-divergence","reference":"postgresql:sql-insert","evidence":"crates/alopex-embedded/tests/advanced_dml.rs","performance_contract":"sql-postgresql-v1","performance_evidence":"sql-postgresql-curated","issue":307},
-    {"api":"CHECK/FK constraints","status":"known-performance-divergence","reference":"sqlite:foreignkeys","evidence":"crates/alopex-embedded/tests/constraints.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
-    {"api":"COPY","status":"known-divergence","reference":"postgresql:sql-copy","evidence":"crates/alopex-embedded/tests/copy_sql.rs","issue":308,"notes":"Table/query-to-file or stdout CSV and file/stdin-to-table CSV/Parquet are implemented with atomic file replacement; COPY TO Parquet now round-trips primitive SQL columns. PostgreSQL wire-level COPY streaming protocol details remain outside the embedded SQL API."},
-    {"api":"SERIAL/IDENTITY/SEQUENCE","status":"known-performance-divergence","reference":"postgresql:create-sequence","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs;crates/alopex-embedded/tests/sequence.rs","issue":173,"performance_issue":307,"performance_contract":"sql-postgresql-v1","performance_evidence":"sql-postgresql-curated","notes":"Functional parity is implemented; the fixed SQL performance fixture remains outside the compatibility budget."},
-    {"api":"VECTOR/HNSW","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/tests"},
-    {"api":"PRAGMA","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-sql/src/planner/mod.rs"},
-    {"api":"information_schema","status":"known-performance-divergence","reference":"postgresql:infoschema","evidence":"crates/alopex-sql/tests","performance_contract":"sql-postgresql-v1","performance_evidence":"sql-postgresql-curated","issue":307},
-    {"api":"streaming query","status":"known-performance-divergence","reference":"datafusion:execute_stream","evidence":"crates/alopex-py/tests/test_sql.py;crates/alopex-py/src/embedded/stream.rs","performance_contract":"sql-datafusion-streaming-v1","performance_evidence":"sql-streaming","issue":307}
+    {
+      "api": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py;scripts/reference_tests/sql_v0811_curated.json",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307,
+      "contracts": [
+        "column-order",
+        "row-order",
+        "null",
+        "unicode",
+        "boolean",
+        "coercion",
+        "aggregate",
+        "error"
+      ]
+    },
+    {
+      "api": "parser/lexer",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:test",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307
+    },
+    {
+      "api": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/src/sql_session.rs",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307
+    },
+    {
+      "api": "prepared statements",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:c3ref/bind_blob",
+      "evidence": "crates/alopex-embedded/src/prepared.rs",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307
+    },
+    {
+      "api": "EXPLAIN JSON",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:sql-explain",
+      "evidence": "docs/sql-explain.md",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "issue": 307
+    },
+    {
+      "api": "RETURNING",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:dml-returning",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "issue": 307
+    },
+    {
+      "api": "ON CONFLICT",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:sql-insert",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "issue": 307
+    },
+    {
+      "api": "CHECK/FK constraints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:foreignkeys",
+      "evidence": "crates/alopex-embedded/tests/constraints.rs",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307
+    },
+    {
+      "api": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs",
+      "issue": 172,
+      "notes": "Embedded/CLI table/query-to-file CSV/Parquet, CLI CSV stdin/stdout, and application-owned Rust/Python CSV streams are implemented. File output uses atomic replacement; JSON is rejected explicitly; HTTP/gRPC reject COPY rather than exposing server paths or process stdio. PostgreSQL wire-level COPY remains a known divergence."
+    },
+    {
+      "api": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs;crates/alopex-embedded/tests/sequence.rs",
+      "issue": 173,
+      "performance_issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "notes": "Functional parity is implemented; the fixed SQL performance fixture remains outside the compatibility budget."
+    },
+    {
+      "api": "VIEW/ALTER TABLE/TRUNCATE",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs",
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated",
+      "issue": 307
+    },
+    {
+      "api": "MERGE/UPDATE FROM/DELETE USING",
+      "status": "known-performance-divergence",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "issue": 307
+    },
+    {
+      "api": "VECTOR/HNSW",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-sql/tests"
+    },
+    {
+      "api": "PRAGMA",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-sql/src/planner/mod.rs"
+    },
+    {
+      "api": "information_schema",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:infoschema",
+      "evidence": "crates/alopex-sql/tests",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
+      "issue": 307
+    },
+    {
+      "api": "streaming query",
+      "status": "known-performance-divergence",
+      "reference": "datafusion:execute_stream",
+      "evidence": "crates/alopex-py/tests/test_sql.py;crates/alopex-py/src/embedded/stream.rs",
+      "performance_contract": "sql-datafusion-streaming-v1",
+      "performance_evidence": "sql-streaming",
+      "issue": 307
+    }
+  ],
+  "upstream_cases": [
+    {
+      "feature": "transaction/savepoint",
+      "repository": "sqlite/sqlite",
+      "commit": "f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "file": "test/savepoint.test",
+      "case": "rollback/release/name stack",
+      "license": "blessing",
+      "evidence": "crates/alopex-embedded/src/sql_session.rs",
+      "issue": 280
+    },
+    {
+      "feature": "transaction isolation/failure",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/isolation/specs/transaction-timeouts.spec",
+      "case": "concurrent transaction termination",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-tools/src/bin/verify_sql_transaction_failures.rs",
+      "issue": 282
+    },
+    {
+      "feature": "prepared statements",
+      "repository": "duckdb/duckdb",
+      "commit": "b8a06e4a22672e254cd0baa68a3dbed2eb51c56e",
+      "file": "test/api/test_prepared_api.cpp",
+      "case": "bind/execute/reset and statement categories",
+      "license": "MIT",
+      "evidence": "crates/alopex-embedded/tests/prepared_statement.rs",
+      "issue": 166
+    },
+    {
+      "feature": "EXPLAIN",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/explain.sql",
+      "case": "plain/analyze/format and side effects",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/explain.rs",
+      "issue": 167
+    },
+    {
+      "feature": "metadata",
+      "repository": "apache/datafusion",
+      "commit": "d0a0c5a7d5867da949161b6065642d15293806de",
+      "file": "datafusion/sqllogictest/test_files/information_schema.slt",
+      "case": "tables/columns catalog rows",
+      "license": "Apache-2.0",
+      "evidence": "crates/alopex-embedded/tests/metadata.rs",
+      "issue": 168
+    },
+    {
+      "feature": "schema evolution",
+      "repository": "sqlite/sqlite",
+      "commit": "f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "file": "test/altertab.test",
+      "case": "rename/add/drop column and dependent objects",
+      "license": "blessing",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs",
+      "issue": 169
+    },
+    {
+      "feature": "CHECK/FK",
+      "repository": "sqlite/sqlite",
+      "commit": "f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "file": "test/fkey2.test",
+      "case": "NULL/composite/cascade/restrict",
+      "license": "blessing",
+      "evidence": "crates/alopex-embedded/tests/constraints.rs",
+      "issue": 170
+    },
+    {
+      "feature": "RETURNING",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/returning.sql",
+      "case": "insert/update/delete final rows",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "issue": 171
+    },
+    {
+      "feature": "ON CONFLICT",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/insert_conflict.sql",
+      "case": "do nothing/do update/conflict target",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "issue": 171
+    },
+    {
+      "feature": "MERGE",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/merge.sql",
+      "case": "matched update and multiple-match rejection",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/advanced_dml.rs",
+      "issue": 171
+    },
+    {
+      "feature": "COPY",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/copy.sql",
+      "case": "table/query CSV input/output and errors",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-sql/tests/copy_bulk_load.rs;crates/alopex-embedded/tests/copy_sql.rs",
+      "issue": 172
+    },
+    {
+      "feature": "IDENTITY",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/identity.sql",
+      "case": "generated values/default/returning/drop ownership",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs",
+      "issue": 173
+    },
+    {
+      "feature": "SEQUENCE",
+      "repository": "postgres/postgres",
+      "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+      "file": "src/test/regress/sql/sequence.sql",
+      "case": "nextval/currval/restart/bounds/cycle/ownership",
+      "license": "PostgreSQL",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs",
+      "issue": 173
+    }
+  ],
+  "public_api": [
+    {
+      "surface": "CLI",
+      "api": "CLI.sql"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Database.copy_from_csv"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Database.copy_to_csv"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Database.execute_sql"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Database.list_sequences"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Database.prepare"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.Transaction.execute_sql"
+    },
+    {
+      "surface": "Rust",
+      "api": "Executor.copy_from_csv_reader"
+    },
+    {
+      "surface": "Rust",
+      "api": "Executor.copy_to_csv_writer"
+    },
+    {
+      "surface": "Rust",
+      "api": "Executor.execute"
+    },
+    {
+      "surface": "Rust",
+      "api": "Parser.parse_sql"
+    },
+    {
+      "surface": "embedded",
+      "api": "Database.copy_from_csv_reader"
+    },
+    {
+      "surface": "embedded",
+      "api": "Database.copy_to_csv_writer"
+    },
+    {
+      "surface": "embedded",
+      "api": "Database.execute_sql"
+    },
+    {
+      "surface": "embedded",
+      "api": "Database.list_sequences"
+    },
+    {
+      "surface": "embedded",
+      "api": "Database.prepare"
+    },
+    {
+      "surface": "embedded",
+      "api": "SqlSession.execute"
+    },
+    {
+      "surface": "metadata",
+      "api": "information_schema.columns"
+    },
+    {
+      "surface": "metadata",
+      "api": "information_schema.indexes"
+    },
+    {
+      "surface": "metadata",
+      "api": "information_schema.table_constraints"
+    },
+    {
+      "surface": "metadata",
+      "api": "information_schema.tables"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.abs"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.acos"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.acosh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.age"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_append"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_cat"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_position"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_positions"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_prepend"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_remove"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_replace"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_slice"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_subscript"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_to_string"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.array_value"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ascii"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.asin"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.asinh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.atan"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.atan2"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.atanh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.bit_length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.cbrt"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ceil"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ceiling"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.char_length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.chr"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.clear_cache"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.coalesce"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.concat"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.concat_ws"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.cos"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.cosh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.cot"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.current_date"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.current_time"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.current_timestamp"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.currval"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date_add"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date_part"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date_sub"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date_trunc"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.datetime"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.decode"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.degrees"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.encode"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ends_with"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.exp"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.extract"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.floor"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.gen_random_uuid"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.greatest"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.hamming_distance"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.hex"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ifnull"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.iif"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.initcap"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.instr"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.io_stats"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.isnan"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_array"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_array_length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_extract"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_insert"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_object"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_remove"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_replace"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_set"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_type"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.json_valid"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_build_array"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_build_object"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_extract"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_extract_path"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_extract_path_text"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_extract_text"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_insert"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.jsonb_set"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.julianday"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.least"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.left"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.levenshtein"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.list_value"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ln"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.log"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.log10"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.log2"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.lower"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.lpad"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ltrim"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.make_date"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.make_interval"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.make_time"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.make_timestamp"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.map"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.md5"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.memory_stats"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.mod"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.nextval"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.now"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.nullif"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.octet_length"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.pg_typeof"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.pi"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.plainto_tsquery"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.pow"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.power"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.quote"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.radians"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.random"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.regexp_like"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.regexp_match"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.regexp_matches"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.regexp_replace"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.repeat"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.replace"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.reverse"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.right"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.round"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.rpad"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.rtrim"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.sha256"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.sign"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.simhash"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.sin"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.sinh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.split_part"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.sqrt"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.starts_with"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.strftime"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.string_to_array"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.strpos"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.struct_pack"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.substr"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.tan"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.tanh"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.time"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.to_char"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.to_date"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.to_timestamp"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.to_tsquery"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.to_tsvector"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.translate"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.trim"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.trunc"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ts_headline"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.ts_rank"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.typeof"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.unhex"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.unixepoch"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.upper"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.uuidv7"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.vector_dims"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.vector_distance"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.vector_norm"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.vector_similarity"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.websearch_to_tsquery"
+    },
+    {
+      "surface": "server",
+      "api": "HTTP.sql"
+    },
+    {
+      "surface": "server",
+      "api": "gRPC.sql"
+    },
+    {
+      "surface": "server",
+      "api": "server.COPY_local_only_rejection"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.AlterSequence"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.AlterTable"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Begin"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Commit"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Copy"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.CreateContinuousAggregate"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.CreateIndex"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.CreateSequence"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.CreateTable"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.CreateView"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Delete"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.DropIndex"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.DropSequence"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.DropTable"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.DropView"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Explain"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Insert"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Merge"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Pragma"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.ReleaseSavepoint"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Rollback"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.RollbackToSavepoint"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Savepoint"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Select"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.SetTransaction"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Truncate"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Update"
+    },
+    {
+      "surface": "statement",
+      "api": "statement.Values"
+    }
   ]
 }

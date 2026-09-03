@@ -148,3 +148,18 @@ fn concurrent_parent_delete_and_child_insert_cannot_both_commit() {
         vec![vec![SqlValue::BigInt(1)]]
     );
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn deferrable_constraints_are_rejected_instead_of_silently_enforced_immediately() {
+    let db = Database::new();
+    let error = db
+        .execute_sql(
+            "CREATE TABLE parent (id BIGINT PRIMARY KEY);
+             CREATE TABLE child (
+                 parent_id BIGINT REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+             )",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("DEFERRABLE constraints"));
+}

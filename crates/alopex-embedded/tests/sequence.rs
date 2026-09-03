@@ -64,3 +64,117 @@ fn serial_and_identity_columns_generate_values_when_omitted() {
     assert_eq!(identities.rows[0][0], alopex_sql::SqlValue::BigInt(1));
     assert_eq!(identities.rows[1][0], alopex_sql::SqlValue::BigInt(2));
 }
+
+#[test]
+fn currval_bounds_cycle_and_partial_alter_are_transactional() {
+    let db = Database::new();
+    db.execute_sql("CREATE SEQUENCE bounded START WITH 2 MINVALUE 2 MAXVALUE 3 CYCLE")
+        .unwrap();
+    let metadata = db.list_sequences().unwrap();
+    assert_eq!(metadata[0].name, "bounded");
+    assert_eq!(metadata[0].start_value, 2);
+    assert!(metadata[0].cycle);
+    assert!(db.execute_sql("SELECT currval('bounded')").is_err());
+
+    let ExecutionResult::Query(first) = db.execute_sql("SELECT nextval('bounded')").unwrap() else {
+        panic!("expected nextval query result")
+    };
+    assert_eq!(first.rows[0][0], alopex_sql::SqlValue::BigInt(2));
+    let ExecutionResult::Query(current) = db.execute_sql("SELECT currval('bounded')").unwrap()
+    else {
+        panic!("expected currval query result")
+    };
+    assert_eq!(current.rows[0][0], alopex_sql::SqlValue::BigInt(2));
+
+    db.execute_sql("ALTER SEQUENCE bounded INCREMENT BY 1")
+        .unwrap();
+    let ExecutionResult::Query(second) = db.execute_sql("SELECT nextval('bounded')").unwrap()
+    else {
+        panic!("expected nextval query result")
+    };
+    assert_eq!(second.rows[0][0], alopex_sql::SqlValue::BigInt(3));
+    let ExecutionResult::Query(wrapped) = db.execute_sql("SELECT nextval('bounded')").unwrap()
+    else {
+        panic!("expected wrapped nextval query result")
+    };
+    assert_eq!(wrapped.rows[0][0], alopex_sql::SqlValue::BigInt(2));
+}
+
+#[test]
+fn generated_sequence_is_dropped_with_table_and_composes_with_returning_and_conflict() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE generated (id SERIAL PRIMARY KEY, label TEXT)")
+        .unwrap();
+    let ExecutionResult::Query(inserted) = db
+        .execute_sql("INSERT INTO generated (label) VALUES ('first') RETURNING id")
+        .unwrap()
+    else {
+        panic!("expected RETURNING rows")
+    };
+    assert_eq!(inserted.rows[0][0], alopex_sql::SqlValue::Integer(1));
+    let ExecutionResult::Query(skipped) = db
+        .execute_sql(
+            "INSERT INTO generated (id, label) VALUES (1, 'duplicate') \
+             ON CONFLICT DO NOTHING RETURNING id",
+        )
+        .unwrap()
+    else {
+        panic!("expected RETURNING rows")
+    };
+    assert!(skipped.rows.is_empty());
+
+    db.execute_sql("DROP TABLE generated").unwrap();
+    assert!(db.list_sequences().unwrap().is_empty());
+    db.execute_sql("CREATE TABLE generated (id SERIAL PRIMARY KEY, label TEXT)")
+        .unwrap();
+    let ExecutionResult::Query(recreated) = db
+        .execute_sql("INSERT INTO generated (label) VALUES ('second') RETURNING id")
+        .unwrap()
+    else {
+        panic!("expected RETURNING rows")
+    };
+    assert_eq!(recreated.rows[0][0], alopex_sql::SqlValue::Integer(1));
+}
+
+#[test]
+fn sequence_state_survives_reopen_and_rollback_does_not_consume_value() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sequence.alopex");
+    {
+        let db = Database::open(&path).unwrap();
+        db.execute_sql("CREATE SEQUENCE durable START WITH 7 CACHE 4")
+            .unwrap();
+        let mut transaction = db.begin(alopex_embedded::TxnMode::ReadWrite).unwrap();
+        transaction
+            .execute_sql("SELECT nextval('durable')")
+            .unwrap();
+        transaction.rollback().unwrap();
+        db.close().unwrap();
+    }
+    {
+        let db = Database::open(&path).unwrap();
+        let ExecutionResult::Query(result) = db.execute_sql("SELECT nextval('durable')").unwrap()
+        else {
+            panic!("expected nextval rows")
+        };
+        assert_eq!(result.rows[0][0], alopex_sql::SqlValue::BigInt(7));
+        db.close().unwrap();
+    }
+}
+
+#[test]
+fn concurrent_sequence_allocations_conflict_instead_of_committing_duplicates() {
+    let db = Database::new();
+    db.execute_sql("CREATE SEQUENCE ids").unwrap();
+    let mut first = db.begin(alopex_embedded::TxnMode::ReadWrite).unwrap();
+    let mut second = db.begin(alopex_embedded::TxnMode::ReadWrite).unwrap();
+    first.execute_sql("SELECT nextval('ids')").unwrap();
+    second.execute_sql("SELECT nextval('ids')").unwrap();
+    first.commit().unwrap();
+    assert!(second.commit().is_err());
+
+    let ExecutionResult::Query(next) = db.execute_sql("SELECT nextval('ids')").unwrap() else {
+        panic!("expected nextval rows")
+    };
+    assert_eq!(next.rows[0][0], alopex_sql::SqlValue::BigInt(2));
+}

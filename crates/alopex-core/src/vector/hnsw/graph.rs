@@ -61,6 +61,7 @@ impl HnswGraph {
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
         validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)?;
 
         if self.key_to_node.contains_key(key) {
             return Err(Error::InvalidParameter {
@@ -177,6 +178,7 @@ impl HnswGraph {
     /// 既存ノードが deleted の場合は再有効化する。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
         validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)?;
         if let Some(node_id) = self.find_node_id(key) {
             let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
             for other in self.nodes.iter_mut().flatten() {
@@ -263,6 +265,7 @@ impl HnswGraph {
         ef_search: usize,
     ) -> Result<(Vec<HnswSearchResult>, SearchStats)> {
         validate_dimensions(self.config.dimension, query.len())?;
+        validate_hnsw_vector(self.config.metric, query)?;
         if k == 0 || self.entry_point.is_none() || self.active_count == 0 {
             return Ok((Vec::new(), SearchStats::default()));
         }
@@ -740,6 +743,22 @@ impl HnswGraph {
             Metric::L2 | Metric::InnerProduct => -score,
         }
     }
+}
+
+fn validate_hnsw_vector(metric: Metric, vector: &[f32]) -> Result<()> {
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(Error::InvalidParameter {
+            param: "vector".to_string(),
+            reason: "HNSW vectors must contain only finite values".to_string(),
+        });
+    }
+    if metric == Metric::Cosine && vector.iter().all(|value| *value == 0.0) {
+        return Err(Error::InvalidParameter {
+            param: "vector".to_string(),
+            reason: "cosine HNSW vectors must have a non-zero norm".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]

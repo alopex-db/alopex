@@ -230,6 +230,15 @@ for fts_surface in \
         exit 1
     fi
 done
+for mutation_surface in \
+    docs/sql-mutations-v0.8.11.md \
+    scripts/demo/v0811/demo_sql_mutations.py \
+    formal/tla/sql/SqlMutationLifecycle.tla; do
+    if [[ ! -s "${REPO_ROOT}/${mutation_surface}" ]]; then
+        echo "ERROR: missing v0.8.11 SQL mutation surface: ${mutation_surface}" >&2
+        exit 1
+    fi
+done
 if ! grep -Fq "USING FTS" "${REPO_ROOT}/scripts/demo/v08/demo_full_text_search.sql"; then
     echo "ERROR: the v0.8.10 full-text demo does not cover the FTS index" >&2
     exit 1
@@ -593,6 +602,10 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
 run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. native JSON/JSONB, JSON-on-TEXT, FETCH/WITH TIES pagination, TRY_CAST, standard predicates, frames, named WINDOW, and QUALIFY (demo_sql_v08.py)" \
     "PyPI 公開版で、v0.8 系の JSON-on-TEXT scalar/table/aggregate、FETCH FIRST/OFFSET/WITH TIES pagination、TRY_CAST/CAST failure contract、truth/distinctness/row-value predicate、TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
     -- run_in_container python3 scripts/demo/v08/demo_sql_v08.py
+
+run_step "v${ALOPEX_VERSION} v0.8.11 SQL mutation contracts" \
+    "PyPI公開版で、CHECK/FK、RETURNING/ON CONFLICT、SEQUENCE/CURRVAL、CSV COPY round-trip、未知FORMAT拒否、information_schema introspectionを自己検証する。" \
+    -- run_in_container python3 scripts/demo/v0811/demo_sql_mutations.py
 
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \

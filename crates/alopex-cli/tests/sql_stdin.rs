@@ -313,7 +313,7 @@ fn with_ties_without_order_by_and_bind_parameters_report_stable_errors() {
             "SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
             "FETCH ... WITH TIES requires ORDER BY",
         ),
-        ("SELECT 1 LIMIT ?;", "bind parameters are not yet supported"),
+        ("SELECT 1 LIMIT ?;", "prepared parameter ?1 is unbound"),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
             .args(["--in-memory", "--output", "json", "sql"])

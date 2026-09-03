@@ -15,12 +15,19 @@ pub(crate) fn try_execute<S: KVStore>(
     bridge: &TxnBridge<S>,
     plan: &LogicalPlan,
 ) -> Result<Option<ExecutionResult>> {
-    if let Some(name) = direct_nextval_name(plan) {
+    if let Some((function, name, alias)) = direct_sequence_call(plan) {
         let mut txn = bridge.begin_write().map_err(ExecutorError::from)?;
-        let value = sequence::next_value(&mut txn, name)?;
+        let value = if function == "nextval" {
+            sequence::next_value(&mut txn, name)?
+        } else {
+            sequence::current_value(&mut txn, name)?
+        };
         txn.commit().map_err(ExecutorError::from)?;
         return Ok(Some(ExecutionResult::Query(QueryResult::new(
-            vec![ColumnInfo::new("nextval", ResolvedType::BigInt)],
+            vec![ColumnInfo::new(
+                alias.unwrap_or(function),
+                ResolvedType::BigInt,
+            )],
             vec![vec![SqlValue::BigInt(value)]],
         ))));
     }
@@ -39,9 +46,9 @@ pub(crate) fn try_execute<S: KVStore>(
     ))))
 }
 
-pub(crate) fn direct_nextval_name(plan: &LogicalPlan) -> Option<&str> {
-    let expression = match plan {
-        LogicalPlan::Explain { input, .. } => return direct_nextval_name(input),
+pub(crate) fn direct_sequence_call(plan: &LogicalPlan) -> Option<(&str, &str, Option<&str>)> {
+    let (expression, alias) = match plan {
+        LogicalPlan::Explain { input, .. } => return direct_sequence_call(input),
         LogicalPlan::Scan { projection, .. } | LogicalPlan::Project { projection, .. } => {
             let Projection::Columns(columns) = projection else {
                 return None;
@@ -49,12 +56,12 @@ pub(crate) fn direct_nextval_name(plan: &LogicalPlan) -> Option<&str> {
             if columns.len() != 1 {
                 return None;
             }
-            &columns[0].expr
+            (&columns[0].expr, columns[0].alias.as_deref())
         }
-        LogicalPlan::Values { rows, .. } => rows.first()?.first()?,
+        LogicalPlan::Values { rows, .. } => (rows.first()?.first()?, None),
         LogicalPlan::Filter { input, .. }
         | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::Limit { input, .. } => return direct_nextval_name(input),
+        | LogicalPlan::Limit { input, .. } => return direct_sequence_call(input),
         _ => return None,
     };
     let Some(TypedExpr {
@@ -64,11 +71,13 @@ pub(crate) fn direct_nextval_name(plan: &LogicalPlan) -> Option<&str> {
     else {
         return None;
     };
-    if !name.eq_ignore_ascii_case("nextval") || args.len() != 1 {
+    if !matches!(name.to_ascii_lowercase().as_str(), "nextval" | "currval") || args.len() != 1 {
         return None;
     }
     match &args[0].kind {
-        TypedExprKind::Literal(Literal::String(name)) => Some(name.as_str()),
+        TypedExprKind::Literal(Literal::String(sequence)) => {
+            Some((name.as_str(), sequence.as_str(), alias))
+        }
         _ => None,
     }
 }
@@ -76,7 +85,7 @@ pub(crate) fn direct_nextval_name(plan: &LogicalPlan) -> Option<&str> {
 /// Returns whether a plan is a standalone system function that needs the
 /// executor's store-backed path rather than an external transaction bridge.
 pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
-    direct_system_call(plan).is_some() || direct_nextval_name(plan).is_some()
+    direct_system_call(plan).is_some() || direct_sequence_call(plan).is_some()
 }
 
 fn direct_system_call(plan: &LogicalPlan) -> Option<(&str, ResolvedType)> {

@@ -135,12 +135,8 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         }
         FileFormat::Csv => {
             if file_path == "-" {
-                let mut content = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut content)
-                    .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-                Box::new(CsvReader::from_content(
-                    content,
+                Box::new(CsvReader::from_reader(
+                    std::io::stdin(),
                     &table_meta,
                     options.header,
                 )?)
@@ -160,6 +156,75 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     };
 
     Ok(ExecutionResult::RowsAffected(rows_loaded))
+}
+
+/// Stream CSV from an application-owned reader into a table.
+pub fn execute_copy_from_csv_reader<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    reader: impl Read + 'static,
+    options: CopyOptions,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let reader: Box<dyn BulkReader> =
+        Box::new(CsvReader::from_reader(reader, &table, options.header)?);
+    validate_schema(reader.schema(), &table)?;
+    let rows = match table.storage_options.storage_type {
+        crate::catalog::StorageType::Columnar => bulk_load_columnar(txn, catalog, &table, reader)?,
+        crate::catalog::StorageType::Row => bulk_load_row(txn, catalog, &table, reader)?,
+    };
+    Ok(ExecutionResult::RowsAffected(rows))
+}
+
+/// Stream table rows as CSV to an application-owned writer.
+pub fn execute_copy_to_csv_writer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    writer: &mut impl Write,
+    options: CopyOptions,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+    let entries = txn.inner_mut().scan_prefix(&prefix)?;
+    if options.header {
+        writeln!(
+            writer,
+            "{}",
+            table
+                .columns
+                .iter()
+                .map(|column| csv_escape(&column.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    }
+    let mut rows = 0u64;
+    for (key, encoded) in entries {
+        let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+        if table_id == table.table_id {
+            let values = crate::storage::RowCodec::decode(&encoded)?;
+            writeln!(
+                writer,
+                "{}",
+                values.iter().map(csv_value).collect::<Vec<_>>().join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            rows = rows.saturating_add(1);
+        }
+    }
+    writer
+        .flush()
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    Ok(ExecutionResult::RowsAffected(rows))
 }
 
 /// COPY table rows to a local CSV file.
@@ -182,32 +247,13 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
                 "COPY TO STDOUT currently supports CSV only".into(),
             ));
         }
-        let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
-        let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
-        if options.header {
-            println!(
-                "{}",
-                table
-                    .columns
-                    .iter()
-                    .map(|column| csv_escape(&column.name))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        }
-        let mut rows = 0u64;
-        for (key, encoded) in entries {
-            let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
-            if table_id == table.table_id {
-                let values = crate::storage::RowCodec::decode(&encoded)?;
-                println!(
-                    "{}",
-                    values.iter().map(csv_value).collect::<Vec<_>>().join(",")
-                );
-                rows = rows.saturating_add(1);
-            }
-        }
-        return Ok(ExecutionResult::RowsAffected(rows));
+        return execute_copy_to_csv_writer(
+            txn,
+            catalog,
+            table_name,
+            &mut std::io::stdout().lock(),
+            options,
+        );
     }
     validate_output_path(file_path, config)?;
     if format == FileFormat::Parquet {

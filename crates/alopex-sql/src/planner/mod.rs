@@ -1780,6 +1780,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table = table.with_primary_key(pk);
         }
         table.constraints = Self::normalized_table_constraints(stmt);
+        if table.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                crate::ast::ddl::TableConstraint::ForeignKey {
+                    deferrable: true,
+                    ..
+                }
+            )
+        }) {
+            return Err(PlannerError::unsupported_feature(
+                "DEFERRABLE constraints",
+                "a future version",
+                stmt.span,
+            ));
+        }
         table.catalog_name = "default".to_string();
         table.namespace_name = "default".to_string();
         table.table_type = if stmt.temporary {

@@ -135,6 +135,9 @@ class LedgerContractTests(unittest.TestCase):
         self.assertIn("duckdb==1.4.0", workflow)
         self.assertIn("pysqlite3-binary==0.5.4", workflow)
         self.assertIn("sql_v0811_differential", workflow)
+        self.assertIn("polars_public_inventory.py", workflow)
+        self.assertIn("sql_public_inventory.py", workflow)
+        self.assertIn("hnsw_public_inventory.py", workflow)
         self.assertNotIn("continue-on-error: true", workflow)
 
     def test_sql_reference_engines_have_separate_runnable_contracts(self):
@@ -166,6 +169,23 @@ class LedgerContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('if args.suite == "full"', runner)
         self.assertIn('"polars-parquet-streaming"', runner)
+
+    def test_sql_ledger_has_generated_public_surface_and_upstream_provenance(self):
+        sql = next(path for path in LEDGERS if path.name.startswith("sql-"))
+        payload = json.loads(sql.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(payload["public_api"]), 200)
+        self.assertGreaterEqual(len(payload["upstream_cases"]), 12)
+        self.assertEqual(validate(sql), [])
+
+    def test_hnsw_ledger_has_generated_cross_language_public_surface(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(payload["public_api"]), 30)
+        self.assertEqual(
+            {row["surface"] for row in payload["public_api"]},
+            {"Rust", "embedded", "Python", "SQL", "docs"},
+        )
+        self.assertEqual(validate(hnsw), [])
 
 
 if __name__ == "__main__":

@@ -321,59 +321,78 @@ impl PyLazyFrame {
             .map_err(dataframe_err)
     }
 
-    fn select(&self, exprs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Self> {
+    #[pyo3(signature = (*exprs, **named_exprs))]
+    fn select(
+        &self,
+        exprs: &Bound<'_, PyTuple>,
+        named_exprs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
-        let exprs = expressions_from_py(exprs)?;
+        let exprs = expressions_from_args(exprs, named_exprs)?;
         Ok(Self::with_control(
             self.inner.clone().select(exprs),
             self.control.clone(),
         ))
     }
 
-    fn filter(&self, predicate: PyRef<'_, PyExpr>) -> PyResult<Self> {
+    #[pyo3(signature = (*predicates, **constraints))]
+    fn filter(
+        &self,
+        predicates: &Bound<'_, PyTuple>,
+        constraints: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
+        let mut predicates = expressions_from_args(predicates, None)?;
+        if let Some(constraints) = constraints {
+            for (name, value) in constraints.iter() {
+                predicates.push(col(&name.extract::<String>()?).eq(lit(py_scalar(&value)?)));
+            }
+        }
+        let predicate = predicates
+            .into_iter()
+            .reduce(Expr::and_)
+            .ok_or_else(|| PyTypeError::new_err("filter requires at least one predicate"))?;
         Ok(Self::with_control(
-            self.inner.clone().filter(predicate.clone_inner()?),
+            self.inner.clone().filter(predicate),
             self.control.clone(),
         ))
     }
 
-    fn with_columns(&self, exprs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Self> {
+    #[pyo3(signature = (*exprs, **named_exprs))]
+    fn with_columns(
+        &self,
+        exprs: &Bound<'_, PyTuple>,
+        named_exprs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
-        let exprs = expressions_from_py(exprs)?;
+        let exprs = expressions_from_args(exprs, named_exprs)?;
         Ok(Self::with_control(
             self.inner.clone().with_columns(exprs),
             self.control.clone(),
         ))
     }
 
-    #[pyo3(signature = (*, streaming = false, resource_limit_bytes = None, batch_rows = None))]
-    fn collect(
-        &self,
-        py: Python<'_>,
-        streaming: bool,
-        resource_limit_bytes: Option<u64>,
-        batch_rows: Option<usize>,
-    ) -> PyResult<Py<PyAny>> {
+    fn collect(&self) -> PyResult<PyDataFrame> {
         self.control.ensure_open()?;
-        if streaming {
-            let stream = self
-                .inner
-                .clone()
-                .collect_streaming(Self::options(resource_limit_bytes, batch_rows)?)
-                .map_err(dataframe_err)?;
-            return Py::new(
-                py,
-                PyDataFrameStream::with_control(stream, self.control.clone()),
-            )
-            .map(|stream| stream.into_any());
-        }
         self.inner
             .clone()
             .collect()
             .map(|frame| PyDataFrame::with_control(frame, self.control.clone()))
             .map_err(dataframe_err)
-            .and_then(|frame| Py::new(py, frame).map(|frame| frame.into_any()))
+    }
+
+    #[pyo3(signature = (*, chunk_size = None, resource_limit_bytes = None))]
+    fn collect_batches(
+        &self,
+        chunk_size: Option<usize>,
+        resource_limit_bytes: Option<u64>,
+    ) -> PyResult<PyDataFrameStream> {
+        self.control.ensure_open()?;
+        self.inner
+            .clone()
+            .collect_streaming(Self::options(resource_limit_bytes, chunk_size)?)
+            .map(|stream| PyDataFrameStream::with_control(stream, self.control.clone()))
+            .map_err(dataframe_err)
     }
 }
 
@@ -454,6 +473,47 @@ fn expressions_from_py(inputs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Vec<Expr>> {
         .into_iter()
         .map(|input| input.clone_inner())
         .collect()
+}
+
+fn expression_from_any(value: &Bound<'_, PyAny>) -> PyResult<Expr> {
+    if let Ok(expression) = value.extract::<PyRef<'_, PyExpr>>() {
+        return expression.clone_inner();
+    }
+    if let Ok(name) = value.extract::<String>() {
+        return Ok(col(&name));
+    }
+    py_scalar(value).map(lit)
+}
+
+fn append_expression_args(value: &Bound<'_, PyAny>, output: &mut Vec<Expr>) -> PyResult<()> {
+    if let Ok(items) = value.cast::<PyList>() {
+        for item in items.iter() {
+            append_expression_args(&item, output)?;
+        }
+    } else if let Ok(items) = value.cast::<PyTuple>() {
+        for item in items.iter() {
+            append_expression_args(&item, output)?;
+        }
+    } else {
+        output.push(expression_from_any(value)?);
+    }
+    Ok(())
+}
+
+fn expressions_from_args(
+    args: &Bound<'_, PyTuple>,
+    named: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Expr>> {
+    let mut expressions = Vec::new();
+    for value in args.iter() {
+        append_expression_args(&value, &mut expressions)?;
+    }
+    if let Some(named) = named {
+        for (name, value) in named.iter() {
+            expressions.push(expression_from_any(&value)?.alias(name.extract::<String>()?));
+        }
+    }
+    Ok(expressions)
 }
 
 fn py_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {

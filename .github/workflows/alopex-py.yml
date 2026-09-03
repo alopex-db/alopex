@@ -211,6 +211,9 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
+      - name: Verify HNSW runtime and source inventory
+        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
+        run: python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
       - name: Verify vector APIs remain exported without NumPy installed
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'without-numpy' }}
         run: |
@@ -297,7 +300,10 @@ jobs:
           pytest crates/alopex-py/tests -m "requires_polars and not polars_reference"
       - name: Run exact Polars Python differential
         if: matrix.polars == '1.43.2'
-        run: pytest crates/alopex-py/tests/test_polars_1432_reference.py
+        run: |
+          python scripts/reference_tests/polars_public_inventory.py \
+            docs/parity/polars-v1.43.2.json
+          pytest crates/alopex-py/tests/test_polars_1432_reference.py
       - name: Run exact Polars reference differential
         if: matrix.polars == '1.43.2'
         env:

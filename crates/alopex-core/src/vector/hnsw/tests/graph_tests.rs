@@ -71,6 +71,25 @@ fn cosine_and_inner_product_search_expose_lower_is_closer_distance() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search() {
+    let mut cosine = HnswGraph::new(base_config().with_metric(Metric::Cosine)).unwrap();
+    assert!(cosine.insert(b"zero", &[0.0, 0.0], b"").is_err());
+    assert!(cosine.insert(b"nan", &[f32::NAN, 1.0], b"").is_err());
+    assert!(cosine.insert(b"inf", &[f32::INFINITY, 1.0], b"").is_err());
+    cosine.insert(b"unit", &[1.0, 0.0], b"").unwrap();
+    assert!(cosine.search(&[0.0, 0.0], 1, 8).is_err());
+    assert!(cosine.search(&[1.0], 1, 8).is_err());
+
+    for metric in [Metric::L2, Metric::InnerProduct] {
+        let mut graph = HnswGraph::new(base_config().with_metric(metric)).unwrap();
+        graph.insert(b"zero", &[0.0, 0.0], b"").unwrap();
+        let (result, _) = graph.search(&[0.0, 0.0], 1, 8).unwrap();
+        assert_eq!(result[0].key, b"zero");
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn ef_search_is_auto_corrected() {
     let mut graph = make_graph();
     for i in 0..5u8 {

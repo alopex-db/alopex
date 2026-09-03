@@ -314,3 +314,15 @@ fn foreign_key_error(
     }
     .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cascade_depth_has_a_deterministic_bound() {
+        assert!(ensure_cascade_depth(MAX_CASCADE_DEPTH).is_ok());
+        let error = ensure_cascade_depth(MAX_CASCADE_DEPTH + 1).unwrap_err();
+        assert!(error.to_string().contains("cascade depth exceeds 64"));
+    }
+}

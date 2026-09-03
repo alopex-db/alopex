@@ -380,6 +380,40 @@ impl Database {
             .unwrap_or(alopex_sql::ExecutionResult::Success))
     }
 
+    /// Atomically import CSV from an application-owned reader.
+    pub fn copy_from_csv_reader(
+        &self,
+        table: &str,
+        reader: impl std::io::Read + 'static,
+        header: bool,
+    ) -> Result<SqlResult> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .copy_from_csv_reader(table, reader, header)
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+    }
+
+    /// Export CSV to an application-owned writer.
+    pub fn copy_to_csv_writer(
+        &self,
+        table: &str,
+        writer: &mut impl std::io::Write,
+        header: bool,
+    ) -> Result<SqlResult> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .copy_to_csv_writer(table, writer, header)
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+    }
+
+    /// Return persisted sequence definitions and current allocation state.
+    pub fn list_sequences(&self) -> Result<Vec<alopex_sql::executor::SequenceInfo>> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .list_sequences()
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+    }
+
     /// SQL を実行し、文ごとの実行結果を返す（auto-commit）。
     ///
     /// すべての文を同一トランザクションで実行し、成功時に自動コミットする。

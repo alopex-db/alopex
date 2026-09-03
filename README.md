@@ -128,6 +128,10 @@ the reproducible recall, latency, hybrid-search, and scale evidence. Public
 notebook timings are API demonstrations unless that document links them as a
 release artifact.
 
+The [v0.8.11 SQL mutation contract](docs/sql-mutations-v0.8.11.md) documents
+constraints, joined DML, COPY, sequences, their introspection surfaces, and
+their explicit single-node boundaries.
+
 ## 🧰 CLI (cargo)
 
 Run the CLI from source (local/embedded):

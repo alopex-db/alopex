@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.11] — 2026-09-04
 
 ### Added
 
@@ -20,9 +20,15 @@ All notable changes to this project will be documented in this file.
   joined DML, and MERGE validation) with transactional enforcement (#170,
   #171).
 - Added transactional table/query/file/stdin/stdout CSV COPY, sequence DDL,
-  SQL `nextval`, and persisted SERIAL/IDENTITY allocation (#172, #173).
+  SQL `nextval`/`currval`, persisted SERIAL/IDENTITY allocation, Parquet
+  round-trip, and application-owned CSV readers/writers (#172, #173).
 - Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of
   truncating eager CSV results at the first 1,024-row batch (#304).
+- Added source-generated Polars 1.43.2, HNSW, and SQL conformance inventories,
+  live reference comparisons, and dedicated performance contracts (#305–#307).
+- Fixed HNSW neighbor selection, candidate management, update reconnection,
+  cosine norm caching, per-search Python statistics, and invalid-vector
+  boundaries (#300–#303).
 
 ## [0.8.10] — 2026-08-28
 

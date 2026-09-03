@@ -138,3 +138,54 @@ fn copy_query_to_parquet_is_available_through_sql() {
         ExecutionResult::RowsAffected(2)
     );
 }
+
+#[test]
+fn copy_rejects_unknown_format_without_overwriting_output() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY)")
+        .unwrap();
+    db.execute_sql("INSERT INTO users VALUES (1)").unwrap();
+    let mut output = tempfile::NamedTempFile::new().unwrap();
+    writeln!(output, "sentinel").unwrap();
+    let sql = format!(
+        "COPY users TO '{}' WITH (FORMAT JSON)",
+        output.path().display()
+    );
+
+    let error = db.execute_sql(&sql).unwrap_err().to_string();
+
+    assert!(error.contains("COPY FORMAT JSON"), "{error}");
+    assert_eq!(fs::read_to_string(output.path()).unwrap(), "sentinel\n");
+}
+
+#[test]
+fn copy_reader_writer_streams_share_csv_quoting_and_atomicity() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE notes (id INT PRIMARY KEY, body TEXT)")
+        .unwrap();
+    db.copy_from_csv_reader(
+        "notes",
+        std::io::Cursor::new(b"id,body\n1,\"comma, quoted\"\n".to_vec()),
+        true,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    db.copy_to_csv_writer("notes", &mut output, true).unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "id,body\n1,\"comma, quoted\"\n"
+    );
+
+    assert!(db
+        .copy_from_csv_reader(
+            "notes",
+            std::io::Cursor::new(b"2,ok\n3,too,many\n".to_vec()),
+            false,
+        )
+        .is_err());
+    let ExecutionResult::Query(rows) = db.execute_sql("SELECT id FROM notes ORDER BY id").unwrap()
+    else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows.rows.len(), 1, "failed stream import must roll back");
+}

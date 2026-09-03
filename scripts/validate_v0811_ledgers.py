@@ -7,7 +7,6 @@ import re
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PERFORMANCE_CONTRACTS = ROOT / "docs/parity/performance-v0.8.11.json"
 LEDGERS = (
@@ -84,6 +83,16 @@ COMMON_THRESHOLDS = {
     "max_peak_memory_ratio",
 }
 MUTABLE_REVISIONS = {"main", "master", "latest", "current", "stable"}
+SQL_UPSTREAM_FIELDS = {
+    "feature",
+    "repository",
+    "commit",
+    "file",
+    "case",
+    "license",
+    "evidence",
+    "issue",
+}
 
 
 def load_performance_contracts(path: Path) -> dict[str, object]:
@@ -218,6 +227,72 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
             errors.append(f"{path}: performance divergence {api} has no issue")
     if not entries:
         errors.append(f"{path}: empty ledger")
+    if payload.get("schema") == "alopex.sql-conformance/v1":
+        public_api = payload.get("public_api", [])
+        names = [row.get("api") for row in public_api]
+        if not public_api or len(names) != len(set(names)):
+            errors.append(f"{path}: SQL public inventory is empty or duplicated")
+        required_surfaces = {"statement", "scalar", "metadata", "Rust", "embedded", "Python", "CLI", "server"}
+        missing_surfaces = required_surfaces.difference(
+            row.get("surface") for row in public_api
+        )
+        if missing_surfaces:
+            errors.append(f"{path}: SQL public inventory missing {sorted(missing_surfaces)}")
+        upstream = payload.get("upstream_cases", [])
+        features = {row.get("feature") for row in upstream}
+        required_features = {
+            "transaction/savepoint",
+            "prepared statements",
+            "EXPLAIN",
+            "metadata",
+            "schema evolution",
+            "CHECK/FK",
+            "RETURNING",
+            "ON CONFLICT",
+            "MERGE",
+            "COPY",
+            "IDENTITY",
+            "SEQUENCE",
+        }
+        if missing := required_features.difference(features):
+            errors.append(f"{path}: SQL upstream inventory missing {sorted(missing)}")
+        for row in upstream:
+            missing = SQL_UPSTREAM_FIELDS.difference(row)
+            if missing:
+                errors.append(f"{path}: upstream case missing {sorted(missing)}")
+            if not re.fullmatch(r"[0-9a-f]{40}", str(row.get("commit", ""))):
+                errors.append(f"{path}: upstream case needs an exact commit")
+            for evidence in str(row.get("evidence", "")).split(";"):
+                if evidence and not (ROOT / evidence).exists():
+                    errors.append(f"{path}: upstream evidence does not exist: {evidence}")
+    if payload.get("schema") == "alopex.hnsw-conformance/v1":
+        public_api = payload.get("public_api", [])
+        names = [row.get("api") for row in public_api]
+        if not public_api or len(names) != len(set(names)):
+            errors.append(f"{path}: HNSW public inventory is empty or duplicated")
+        missing_surfaces = {"Rust", "embedded", "Python", "SQL", "docs"}.difference(
+            row.get("surface") for row in public_api
+        )
+        if missing_surfaces:
+            errors.append(f"{path}: HNSW public inventory missing {sorted(missing_surfaces)}")
+        for row in public_api:
+            if not {"api", "surface", "reference", "status", "evidence", "issue"}.issubset(row):
+                errors.append(f"{path}: incomplete HNSW public row {row.get('api')}")
+                continue
+            if row["status"] not in statuses:
+                errors.append(f"{path}: invalid HNSW public status for {row['api']}")
+            if row["reference"] != "alopex" and not re.search(
+                r"@[0-9a-f]{40}(?::|$)", str(row["reference"])
+            ):
+                errors.append(f"{path}: mutable HNSW public reference for {row['api']}")
+            for evidence in str(row["evidence"]).split(";"):
+                if evidence and not (ROOT / evidence).exists():
+                    errors.append(f"{path}: missing HNSW public evidence {evidence}")
+            if row["status"] in PERFORMANCE_STATUSES and (
+                row.get("performance_contract") != "hnsw-pareto-v1"
+                or row.get("performance_evidence") != "hnsw-pareto"
+            ):
+                errors.append(f"{path}: missing HNSW Pareto evidence for {row['api']}")
     return errors
 
 
