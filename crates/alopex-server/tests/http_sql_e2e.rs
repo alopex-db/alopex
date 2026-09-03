@@ -264,7 +264,7 @@ async fn future_distributed_write_is_rejected_before_local_execution() {
 
     let select = serde_json::json!({
         "sql": "SELECT id, name FROM distributed_writes",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, body) = send_json(&app, "/sql", select).await;
@@ -299,7 +299,7 @@ async fn http_session_commit_and_rollback() {
 
     let insert = serde_json::json!({
         "sql": "INSERT INTO users (id, name) VALUES (1, 'alice')",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, _) = send_json(&app, "/sql", insert).await;
@@ -343,6 +343,313 @@ async fn http_session_commit_and_rollback() {
     let response = serde_json::from_str::<Value>(&body).expect("select");
     let rows = response["rows"].as_array().expect("rows");
     assert_eq!(rows.len(), 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_start_transaction_read_only_rejects_mutation_before_execution() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "CREATE TABLE session_ro_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = serde_json::from_str::<Value>(&body)
+        .expect("session")
+        .get("session_id")
+        .and_then(Value::as_str)
+        .expect("session_id")
+        .to_string();
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO session_ro_users (id, name) VALUES (1, 'blocked')",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(error["error"]["code"], "ALOPEX-E002");
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM session_ro_users",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = serde_json::from_str::<Value>(&body).expect("select")["rows"]
+        .as_array()
+        .expect("rows")
+        .len();
+    assert_eq!(rows, 0);
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/commit")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_transaction_characteristics_lock_after_first_statement() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = serde_json::from_str::<Value>(&body).expect("session")["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "BEGIN",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SET TRANSACTION READ ONLY",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT 1",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SET TRANSACTION READ WRITE",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = serde_json::from_str::<Value>(&body).expect("error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("before the first statement"));
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_unsupported_isolation_fails_without_locking_followup_characteristics() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = serde_json::from_str::<Value>(&body).expect("session")["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "START TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(error["error"]["code"], "ALOPEX-E005");
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "START TRANSACTION READ ONLY",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO missing_table_for_read_only_check (id) VALUES (1)",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(error["error"]["code"], "ALOPEX-E002");
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_repeatable_read_keeps_snapshot_visibility_across_concurrent_commit() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "CREATE TABLE session_visibility_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = serde_json::from_str::<Value>(&body).expect("session")["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "START TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM session_visibility_users",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("select")["rows"]
+            .as_array()
+            .expect("rows")
+            .len(),
+        0
+    );
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO session_visibility_users (id, name) VALUES (1, 'committed')",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM session_visibility_users",
+            "session_id": session_id.clone(),
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("select")["rows"]
+            .as_array()
+            .expect("rows")
+            .len(),
+        0
+    );
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/commit")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM session_visibility_users",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("select")["rows"]
+            .as_array()
+            .expect("rows")
+            .len(),
+        1
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -395,7 +702,7 @@ async fn session_ddl_then_select_uses_same_transaction_catalog_view() {
 
     let create = serde_json::json!({
         "sql": "CREATE TABLE session_ddl_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, _) = send_json(&app, "/sql", create).await;
@@ -403,7 +710,7 @@ async fn session_ddl_then_select_uses_same_transaction_catalog_view() {
 
     let select = serde_json::json!({
         "sql": "SELECT id, name FROM session_ddl_users",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, body) = send_json(&app, "/sql", select).await;
@@ -438,7 +745,7 @@ async fn session_ddl_commit_applies_placement_effects_idempotently() {
 
     let drop_table = serde_json::json!({
         "sql": "DROP TABLE lifecycle_commit_users",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, _) = send_json(&app, "/sql", drop_table).await;
@@ -489,7 +796,7 @@ async fn session_ddl_rollback_discards_placement_effects() {
 
     let drop_table = serde_json::json!({
         "sql": "DROP TABLE lifecycle_rollback_users",
-        "session_id": session_id,
+        "session_id": session_id.clone(),
         "streaming": false
     });
     let (status, _) = send_json(&app, "/sql", drop_table).await;

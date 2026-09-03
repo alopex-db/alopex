@@ -491,6 +491,14 @@ impl From<ExecutorError> for SqlError {
                 message: format!("resource exhausted: {message}"),
                 code: "ALOPEX-E003",
             },
+            ExecutorError::UnsupportedTransactionIsolationLevel { level } => Self::Execution {
+                message: format!("unsupported transaction isolation level: {level}"),
+                code: "ALOPEX-E005",
+            },
+            ExecutorError::UnsupportedTransactionCharacteristic { option } => Self::Execution {
+                message: format!("unsupported transaction characteristic: {option}"),
+                code: "ALOPEX-E006",
+            },
             ExecutorError::Evaluation(EvaluationError::CastFailed {
                 source_type,
                 target,
@@ -698,6 +706,34 @@ mod tests {
         assert_eq!(
             unified.message_with_location(),
             "error[ALOPEX-E003]: resource exhausted: recursive CTE 'numbers' reached row limit 100000"
+        );
+    }
+
+    #[test]
+    fn from_executor_unsupported_isolation_maps_to_stable_execution_code() {
+        let unified: SqlError = ExecutorError::UnsupportedTransactionIsolationLevel {
+            level: "READ COMMITTED".to_string(),
+        }
+        .into();
+
+        assert_eq!(unified.code(), "ALOPEX-E005");
+        assert_eq!(
+            unified.message_with_location(),
+            "error[ALOPEX-E005]: unsupported transaction isolation level: READ COMMITTED"
+        );
+    }
+
+    #[test]
+    fn from_executor_unsupported_characteristic_maps_to_stable_execution_code() {
+        let unified: SqlError = ExecutorError::UnsupportedTransactionCharacteristic {
+            option: "EXCLUSIVE".to_string(),
+        }
+        .into();
+
+        assert_eq!(unified.code(), "ALOPEX-E006");
+        assert_eq!(
+            unified.message_with_location(),
+            "error[ALOPEX-E006]: unsupported transaction characteristic: EXCLUSIVE"
         );
     }
 

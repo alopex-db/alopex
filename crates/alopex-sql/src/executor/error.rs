@@ -76,6 +76,14 @@ pub enum ExecutorError {
     #[error("resource exhausted: {message}")]
     ResourceExhausted { message: String },
 
+    /// Unsupported transaction isolation level requested by SQL transaction characteristics.
+    #[error("unsupported transaction isolation level: {level}")]
+    UnsupportedTransactionIsolationLevel { level: String },
+
+    /// Unsupported SQL transaction characteristic option.
+    #[error("unsupported transaction characteristic: {option}")]
+    UnsupportedTransactionCharacteristic { option: String },
+
     /// Input file not found.
     #[error("file not found: {0}")]
     FileNotFound(String),
