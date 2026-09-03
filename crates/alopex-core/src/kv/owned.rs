@@ -465,20 +465,25 @@ impl OwnedTransactionSession {
     /// Run one finite compatibility operation without exposing the active lease.
     ///
     /// This is intentionally distinct from a stream lease: the operation cannot retain a
-    /// cursor, and a successful or classified operation error releases the transaction as
-    /// committable.  A panic or an abandoned lease remains conservative and marks the session
-    /// `MustAbort` through [`OwnedTransactionLease::drop`].
+    /// cursor.  A successful operation releases the transaction as committable, while an
+    /// operation error poisons the session and forces a rollback path.  A panic or an
+    /// abandoned lease remains conservative and marks the session `MustAbort` through
+    /// [`OwnedTransactionLease::drop`].
     pub fn with_transaction<T>(
         &self,
         operation: impl FnOnce(&mut dyn OwnedKVTransaction) -> Result<T>,
     ) -> Result<T> {
         let lease = self.acquire_lease()?;
         let result = lease.with_transaction(operation);
-        let release = lease.finish(OwnedLeaseOutcome::Exhausted);
+        let outcome = match result {
+            Ok(_) => OwnedLeaseOutcome::Exhausted,
+            Err(_) => OwnedLeaseOutcome::Failed,
+        };
+        let release = lease.finish(outcome);
         match (result, release) {
             (Ok(value), Ok(_)) => Ok(value),
             (Err(error), Ok(_)) => Err(error),
-            (_, Err(error)) => Err(error),
+            (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
         }
     }
 
@@ -771,6 +776,32 @@ mod tests {
         assert_eq!(dropped.status(), OwnedTransactionSessionStatus::MustAbort);
         drop(dropped);
         assert_eq!(drop_calls.rollbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn operation_errors_poison_the_transaction_for_rollback() {
+        let calls = Arc::new(Calls::default());
+        let session = OwnedTransactionSession::new(Box::new(TestTransaction::new(
+            calls.clone(),
+            TxnMode::ReadWrite,
+        )));
+
+        let err = session
+            .with_transaction(|_| {
+                Err(crate::error::Error::InvalidParameter {
+                    param: "poisoned_lease".to_owned(),
+                    reason: "intentional failure".to_owned(),
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::InvalidParameter { .. }));
+        assert_eq!(session.status(), OwnedTransactionSessionStatus::MustAbort);
+        assert_eq!(
+            session.rollback().unwrap(),
+            OwnedTransactionSessionStatus::RolledBack
+        );
+        assert_eq!(calls.rollbacks.load(Ordering::SeqCst), 1);
+        assert!(session.commit().is_err());
     }
 
     #[test]
