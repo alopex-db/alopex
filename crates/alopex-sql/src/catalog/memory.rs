@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 
-use super::{Catalog, IndexMetadata, TableMetadata};
+use super::{Catalog, IndexMetadata, TableMetadata, ViewMetadata};
+use crate::ast::AlterTableAction;
 use crate::planner::PlannerError;
 
 /// In-memory catalog implementation using HashMaps.
@@ -44,6 +45,8 @@ pub struct MemoryCatalog {
     tables: HashMap<String, TableMetadata>,
     /// Indexes stored by name.
     indexes: HashMap<String, IndexMetadata>,
+    /// Views stored by name.
+    views: HashMap<String, ViewMetadata>,
     /// Counter for generating unique table IDs (starts at 0, first ID is 1).
     table_id_counter: u32,
     /// Counter for generating unique index IDs (starts at 0, first ID is 1).
@@ -80,6 +83,7 @@ impl MemoryCatalog {
     pub fn clear(&mut self) {
         self.tables.clear();
         self.indexes.clear();
+        self.views.clear();
     }
 
     pub(crate) fn counters(&self) -> (u32, u32) {
@@ -191,6 +195,126 @@ impl Catalog for MemoryCatalog {
 
     fn index_exists(&self, name: &str) -> bool {
         self.indexes.contains_key(name)
+    }
+
+    fn create_view(&mut self, view: ViewMetadata) -> Result<(), PlannerError> {
+        if self.views.contains_key(&view.name) {
+            return Err(PlannerError::unsupported_feature(
+                format!("view '{}' already exists", view.name),
+                "CREATE VIEW IF NOT EXISTS",
+                crate::ast::Span::default(),
+            ));
+        }
+        self.views.insert(view.name.clone(), view);
+        Ok(())
+    }
+
+    fn get_view(&self, name: &str) -> Option<&ViewMetadata> {
+        self.views.get(name)
+    }
+
+    fn drop_view(&mut self, name: &str) -> Result<(), PlannerError> {
+        if self.views.remove(name).is_none() {
+            return Err(PlannerError::unsupported_feature(
+                format!("view '{name}' not found"),
+                "DROP VIEW IF EXISTS",
+                crate::ast::Span::default(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn alter_table(&mut self, name: &str, action: &AlterTableAction) -> Result<(), PlannerError> {
+        match action {
+            AlterTableAction::AddColumn { column, .. } => {
+                let table = self.tables.get_mut(name).ok_or_else(|| {
+                    PlannerError::table_not_found(name, crate::ast::Span::default())
+                })?;
+                if table
+                    .columns
+                    .iter()
+                    .any(|existing| existing.name == column.name)
+                {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("column '{}' already exists", column.name),
+                        "ALTER TABLE ADD COLUMN with a unique name",
+                        crate::ast::Span::default(),
+                    ));
+                }
+                table.columns.push(crate::catalog::ColumnMetadata::new(
+                    column.name.clone(),
+                    crate::planner::ResolvedType::from_ast(&column.data_type),
+                ));
+                Ok(())
+            }
+            AlterTableAction::DropColumn {
+                name: column_name, ..
+            } => {
+                let table = self.tables.get_mut(name).ok_or_else(|| {
+                    PlannerError::table_not_found(name, crate::ast::Span::default())
+                })?;
+                let Some(index) = table
+                    .columns
+                    .iter()
+                    .position(|col| col.name == *column_name)
+                else {
+                    return Err(PlannerError::ColumnNotFound {
+                        column: column_name.clone(),
+                        table: name.to_string(),
+                        line: 0,
+                        col: 0,
+                    });
+                };
+                table.columns.remove(index);
+                self.indexes.retain(|_, idx| {
+                    idx.table != name || !idx.columns.iter().any(|col| col == column_name)
+                });
+                Ok(())
+            }
+            AlterTableAction::RenameColumn { from, to, .. } => {
+                let table = self.tables.get_mut(name).ok_or_else(|| {
+                    PlannerError::table_not_found(name, crate::ast::Span::default())
+                })?;
+                let Some(index) = table.columns.iter().position(|col| col.name == *from) else {
+                    return Err(PlannerError::ColumnNotFound {
+                        column: from.clone(),
+                        table: name.to_string(),
+                        line: 0,
+                        col: 0,
+                    });
+                };
+                if table.columns.iter().any(|col| col.name == *to) {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("column '{}' already exists", to),
+                        "ALTER TABLE RENAME COLUMN to a fresh name",
+                        crate::ast::Span::default(),
+                    ));
+                }
+                table.columns[index].name = to.clone();
+                for index_meta in self.indexes.values_mut().filter(|idx| idx.table == name) {
+                    for column in &mut index_meta.columns {
+                        if column == from {
+                            *column = to.clone();
+                        }
+                    }
+                }
+                Ok(())
+            }
+            AlterTableAction::RenameTable { to, .. } => {
+                if self.tables.contains_key(to) {
+                    return Err(PlannerError::table_already_exists(to));
+                }
+                let mut table = self.tables.remove(name).ok_or_else(|| {
+                    PlannerError::table_not_found(name, crate::ast::Span::default())
+                })?;
+                table.name = to.clone();
+                self.tables.insert(to.clone(), table);
+                for index in self.indexes.values_mut().filter(|idx| idx.table == name) {
+                    index.table = to.clone();
+                }
+                Ok(())
+            }
+        }
     }
 
     fn next_table_id(&mut self) -> u32 {

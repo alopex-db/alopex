@@ -160,6 +160,16 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
+            LogicalPlan::CreateView {
+                name,
+                query,
+                if_not_exists,
+            } => self.execute_create_view(name, query, if_not_exists),
+            LogicalPlan::DropView { name, if_exists } => self.execute_drop_view(&name, if_exists),
+            LogicalPlan::AlterTable { name, action } => self.execute_alter_table(&name, action),
+            LogicalPlan::TruncateTable { name, if_exists } => {
+                self.execute_truncate_table(&name, if_exists)
+            }
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,
@@ -247,6 +257,43 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         let mut catalog = self.catalog.write().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| {
             ddl::drop_index::execute_drop_index(txn, &mut *catalog, name, if_exists)
+        })
+    }
+
+    fn execute_create_view(
+        &mut self,
+        name: String,
+        query: crate::ast::Select,
+        if_not_exists: bool,
+    ) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::view::execute_create_view(txn, &mut *catalog, name, query, if_not_exists)
+        })
+    }
+
+    fn execute_drop_view(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::view::execute_drop_view(txn, &mut *catalog, name, if_exists)
+        })
+    }
+
+    fn execute_alter_table(
+        &mut self,
+        name: &str,
+        action: crate::ast::AlterTableAction,
+    ) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::alter_table::execute_alter_table(txn, &mut *catalog, name, action)
+        })
+    }
+
+    fn execute_truncate_table(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::truncate_table::execute_truncate_table(txn, &mut *catalog, name, if_exists)
         })
     }
 
@@ -370,6 +417,31 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 &name,
                 if_exists,
             ),
+            LogicalPlan::CreateView {
+                name,
+                query,
+                if_not_exists,
+            } => ddl::view::execute_create_view(
+                &mut sql_txn,
+                &mut *catalog,
+                name,
+                query,
+                if_not_exists,
+            ),
+            LogicalPlan::DropView { name, if_exists } => {
+                ddl::view::execute_drop_view(&mut sql_txn, &mut *catalog, &name, if_exists)
+            }
+            LogicalPlan::AlterTable { name, action } => {
+                ddl::alter_table::execute_alter_table(&mut sql_txn, &mut *catalog, &name, action)
+            }
+            LogicalPlan::TruncateTable { name, if_exists } => {
+                ddl::truncate_table::execute_truncate_table(
+                    &mut sql_txn,
+                    &mut *catalog,
+                    &name,
+                    if_exists,
+                )
+            }
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,

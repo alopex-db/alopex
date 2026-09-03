@@ -1,7 +1,9 @@
-use crate::ast::ddl::CreateContinuousAggregate;
+use crate::ast::ddl::{
+    AlterTable, AlterTableAction, CreateContinuousAggregate, CreateView, DropView, TruncateTable,
+};
 use crate::ast::dml::{FromItem, QueryBody, Select, SelectItem, SetOperation, SetOperator, Values};
 use crate::ast::expr::{Expr, ExprKind};
-use crate::ast::{Location, Span, Statement, StatementKind};
+use crate::ast::{ColumnDef, DataType, Location, Span, Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
 use serde::Deserialize;
@@ -216,6 +218,9 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
     let tokens = scan_top_level_tokens(sql);
     let ranges = top_level_statement_ranges(sql, &tokens);
+    if let Some(statements) = parse_schema_evolution_batch(sql, &ranges)? {
+        return Ok(statements);
+    }
     let contains_set_operation = ranges.iter().any(|(start, end)| {
         tokens.iter().any(|token| {
             token.start >= *start
@@ -234,6 +239,320 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
         return Ok(statements);
     }
     parse_sql_via_ffi(sql)
+}
+
+fn parse_schema_evolution_batch(
+    sql: &str,
+    ranges: &[(usize, usize)],
+) -> Result<Option<Vec<Statement>>> {
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+    let mut statements = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        let fragment = &sql[*start..*end];
+        let Some(statement) = parse_schema_evolution_statement(sql, *start, *end, fragment)? else {
+            return Ok(None);
+        };
+        statements.push(statement);
+    }
+    Ok(Some(statements))
+}
+
+fn parse_schema_evolution_statement(
+    full_sql: &str,
+    start: usize,
+    end: usize,
+    fragment: &str,
+) -> Result<Option<Statement>> {
+    let trimmed = fragment.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let span = span_for_offsets(full_sql, start, end);
+    let uppercase = trimmed.to_ascii_uppercase();
+    if uppercase.starts_with("CREATE VIEW ") {
+        return parse_create_view(trimmed, span).map(Some);
+    }
+    if uppercase.starts_with("DROP VIEW ") {
+        return parse_drop_view(trimmed, span).map(Some);
+    }
+    if uppercase.starts_with("ALTER TABLE ") {
+        return parse_alter_table(trimmed, span).map(Some);
+    }
+    if uppercase.starts_with("TRUNCATE ") {
+        return parse_truncate_table(trimmed, span).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_create_view(sql: &str, span: Span) -> Result<Statement> {
+    let rest = sql
+        .strip_prefix("CREATE VIEW ")
+        .or_else(|| sql.strip_prefix("create view "))
+        .or_else(|| strip_prefix_ascii_ci(sql, "CREATE VIEW "))
+        .ok_or_else(|| custom_parse_error(span, "CREATE VIEW statement", sql))?;
+    let (if_not_exists, rest) = if let Some(tail) = strip_prefix_ascii_ci(rest, "IF NOT EXISTS ") {
+        (true, tail)
+    } else {
+        (false, rest)
+    };
+    let (name, rest) = split_first_word(rest)
+        .ok_or_else(|| custom_parse_error(span, "view name after CREATE VIEW", rest))?;
+    let rest = rest.trim_start();
+    let query_sql = strip_prefix_ascii_ci(rest, "AS ")
+        .ok_or_else(|| custom_parse_error(span, "AS <query> in CREATE VIEW", rest))?;
+    let query_statements = parse_sql_preflighted(query_sql.trim())?;
+    if query_statements.len() != 1 {
+        return Err(custom_parse_error(
+            span,
+            "single SELECT query in CREATE VIEW",
+            query_sql.trim(),
+        ));
+    }
+    let query = match query_statements
+        .into_iter()
+        .next()
+        .expect("len checked")
+        .kind
+    {
+        StatementKind::Select(select) => select,
+        _ => {
+            return Err(custom_parse_error(
+                span,
+                "SELECT query in CREATE VIEW",
+                query_sql.trim(),
+            ));
+        }
+    };
+    Ok(Statement {
+        kind: StatementKind::CreateView(CreateView {
+            if_not_exists,
+            name: name.to_string(),
+            query,
+            span,
+        }),
+        span,
+    })
+}
+
+fn parse_drop_view(sql: &str, span: Span) -> Result<Statement> {
+    let rest = strip_prefix_ascii_ci(sql, "DROP VIEW ")
+        .ok_or_else(|| custom_parse_error(span, "DROP VIEW statement", sql))?;
+    let (if_exists, rest) = if let Some(tail) = strip_prefix_ascii_ci(rest, "IF EXISTS ") {
+        (true, tail)
+    } else {
+        (false, rest)
+    };
+    let (name, remainder) = split_first_word(rest)
+        .ok_or_else(|| custom_parse_error(span, "view name after DROP VIEW", rest))?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "end of DROP VIEW statement",
+            remainder.trim(),
+        ));
+    }
+    Ok(Statement {
+        kind: StatementKind::DropView(DropView {
+            if_exists,
+            name: name.to_string(),
+            span,
+        }),
+        span,
+    })
+}
+
+fn parse_truncate_table(sql: &str, span: Span) -> Result<Statement> {
+    let mut rest = strip_prefix_ascii_ci(sql, "TRUNCATE ")
+        .ok_or_else(|| custom_parse_error(span, "TRUNCATE statement", sql))?;
+    rest = strip_prefix_ascii_ci(rest, "TABLE ").unwrap_or(rest);
+    let (if_exists, tail) = if let Some(next) = strip_prefix_ascii_ci(rest, "IF EXISTS ") {
+        (true, next)
+    } else {
+        (false, rest)
+    };
+    let (name, remainder) = split_first_word(tail)
+        .ok_or_else(|| custom_parse_error(span, "table name after TRUNCATE", tail))?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "end of TRUNCATE statement",
+            remainder.trim(),
+        ));
+    }
+    Ok(Statement {
+        kind: StatementKind::TruncateTable(TruncateTable {
+            if_exists,
+            name: name.to_string(),
+            span,
+        }),
+        span,
+    })
+}
+
+fn parse_alter_table(sql: &str, span: Span) -> Result<Statement> {
+    let rest = strip_prefix_ascii_ci(sql, "ALTER TABLE ")
+        .ok_or_else(|| custom_parse_error(span, "ALTER TABLE statement", sql))?;
+    let (table_name, rest) = split_first_word(rest)
+        .ok_or_else(|| custom_parse_error(span, "table name after ALTER TABLE", rest))?;
+    let rest = rest.trim_start();
+    let action = if let Some(after) = strip_prefix_ascii_ci(rest, "ADD COLUMN ") {
+        parse_add_column_action(after, span)?
+    } else if let Some(after) = strip_prefix_ascii_ci(rest, "ADD ") {
+        parse_add_column_action(after, span)?
+    } else if let Some(after) = strip_prefix_ascii_ci(rest, "DROP COLUMN ") {
+        parse_drop_column_action(after, span)?
+    } else if let Some(after) = strip_prefix_ascii_ci(rest, "DROP ") {
+        parse_drop_column_action(after, span)?
+    } else if let Some(after) = strip_prefix_ascii_ci(rest, "RENAME COLUMN ") {
+        parse_rename_column_action(after, span)?
+    } else if let Some(after) = strip_prefix_ascii_ci(rest, "RENAME TO ") {
+        parse_rename_table_action(after, span)?
+    } else {
+        return Err(custom_parse_error(
+            span,
+            "ADD/DROP/RENAME COLUMN or RENAME TO in ALTER TABLE",
+            rest,
+        ));
+    };
+    Ok(Statement {
+        kind: StatementKind::AlterTable(AlterTable {
+            name: table_name.to_string(),
+            action,
+            span,
+        }),
+        span,
+    })
+}
+
+fn parse_add_column_action(sql: &str, span: Span) -> Result<AlterTableAction> {
+    let (name, rest) = split_first_word(sql)
+        .ok_or_else(|| custom_parse_error(span, "column name after ADD", sql))?;
+    let (data_type_token, remainder) = split_first_word(rest)
+        .ok_or_else(|| custom_parse_error(span, "column type after ADD COLUMN name", rest))?;
+    let data_type = parse_data_type_token(data_type_token)
+        .ok_or_else(|| custom_parse_error(span, "supported SQL data type", data_type_token))?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "ADD COLUMN without extra clauses",
+            remainder.trim(),
+        ));
+    }
+    Ok(AlterTableAction::AddColumn {
+        column: ColumnDef {
+            name: name.to_string(),
+            data_type,
+            constraints: Vec::new(),
+            span,
+        },
+        span,
+    })
+}
+
+fn parse_drop_column_action(sql: &str, span: Span) -> Result<AlterTableAction> {
+    let (name, remainder) = split_first_word(sql)
+        .ok_or_else(|| custom_parse_error(span, "column name after DROP COLUMN", sql))?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "end of DROP COLUMN action",
+            remainder.trim(),
+        ));
+    }
+    Ok(AlterTableAction::DropColumn {
+        name: name.to_string(),
+        span,
+    })
+}
+
+fn parse_rename_column_action(sql: &str, span: Span) -> Result<AlterTableAction> {
+    let (from, rest) = split_first_word(sql)
+        .ok_or_else(|| custom_parse_error(span, "source column name after RENAME COLUMN", sql))?;
+    let to_part = strip_prefix_ascii_ci(rest.trim_start(), "TO ")
+        .ok_or_else(|| custom_parse_error(span, "TO <column_name> in RENAME COLUMN", rest))?;
+    let (to, remainder) = split_first_word(to_part).ok_or_else(|| {
+        custom_parse_error(
+            span,
+            "target column name after RENAME COLUMN ... TO",
+            to_part,
+        )
+    })?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "end of RENAME COLUMN action",
+            remainder.trim(),
+        ));
+    }
+    Ok(AlterTableAction::RenameColumn {
+        from: from.to_string(),
+        to: to.to_string(),
+        span,
+    })
+}
+
+fn parse_rename_table_action(sql: &str, span: Span) -> Result<AlterTableAction> {
+    let (to, remainder) = split_first_word(sql)
+        .ok_or_else(|| custom_parse_error(span, "new table name after RENAME TO", sql))?;
+    if !remainder.trim().is_empty() {
+        return Err(custom_parse_error(
+            span,
+            "end of RENAME TO action",
+            remainder.trim(),
+        ));
+    }
+    Ok(AlterTableAction::RenameTable {
+        to: to.to_string(),
+        span,
+    })
+}
+
+fn parse_data_type_token(token: &str) -> Option<DataType> {
+    match token.to_ascii_uppercase().as_str() {
+        "INTEGER" => Some(DataType::Integer),
+        "INT" | "SMALLINT" => Some(DataType::Int),
+        "BIGINT" => Some(DataType::BigInt),
+        "FLOAT" | "REAL" => Some(DataType::Float),
+        "DOUBLE" => Some(DataType::Double),
+        "TEXT" | "VARCHAR" | "CHAR" => Some(DataType::Text),
+        "BLOB" => Some(DataType::Blob),
+        "BOOLEAN" => Some(DataType::Boolean),
+        "BOOL" => Some(DataType::Bool),
+        "TIMESTAMP" => Some(DataType::Timestamp),
+        "DATE" => Some(DataType::Date),
+        "TIME" => Some(DataType::Time),
+        "INTERVAL" => Some(DataType::Interval),
+        "JSON" | "JSONB" => Some(DataType::Json),
+        _ => None,
+    }
+}
+
+fn split_first_word(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..]))
+}
+
+fn strip_prefix_ascii_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    if input.len() >= prefix.len() && input[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&input[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn custom_parse_error(span: Span, expected: &str, found: &str) -> ParserError {
+    ParserError::UnexpectedToken {
+        line: span.start.line,
+        column: span.start.column,
+        expected: expected.to_string(),
+        found: found.to_string(),
+    }
 }
 
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {

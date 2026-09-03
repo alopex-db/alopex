@@ -156,6 +156,57 @@ pub struct DropIndex {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateView {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub query: Select,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropView {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterTable {
+    pub name: String,
+    pub action: AlterTableAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum AlterTableAction {
+    AddColumn {
+        column: ColumnDef,
+        span: Span,
+    },
+    DropColumn {
+        name: String,
+        span: Span,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
+        span: Span,
+    },
+    RenameTable {
+        to: String,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TruncateTable {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
 impl Spanned for CreateTable {
     fn span(&self) -> Span {
         self.span
@@ -218,6 +269,41 @@ impl Spanned for IndexOption {
 }
 
 impl Spanned for DropIndex {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for CreateView {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for DropView {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for AlterTable {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for AlterTableAction {
+    fn span(&self) -> Span {
+        match self {
+            Self::AddColumn { span, .. }
+            | Self::DropColumn { span, .. }
+            | Self::RenameColumn { span, .. }
+            | Self::RenameTable { span, .. } => *span,
+        }
+    }
+}
+
+impl Spanned for TruncateTable {
     fn span(&self) -> Span {
         self.span
     }

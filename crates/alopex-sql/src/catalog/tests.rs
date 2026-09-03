@@ -514,4 +514,125 @@ mod memory_catalog_tests {
         // Index IDs should be sequential: 1, 2
         assert_eq!((i1, i2), (1, 2));
     }
+
+    #[test]
+    fn test_create_and_drop_view() {
+        let mut catalog = MemoryCatalog::new();
+        let query = crate::ast::Select {
+            with: None,
+            distinct: false,
+            distinct_on: vec![],
+            projection: vec![],
+            from: vec![],
+            selection: None,
+            group_by: None,
+            having: None,
+            set_operations: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            span: crate::ast::Span::default(),
+            qualify: None,
+            windows: vec![],
+            limit_with_ties: false,
+        };
+        catalog
+            .create_view(ViewMetadata {
+                name: "v_users".to_string(),
+                query,
+            })
+            .unwrap();
+        assert!(catalog.view_exists("v_users"));
+        catalog.drop_view("v_users").unwrap();
+        assert!(!catalog.view_exists("v_users"));
+    }
+
+    #[test]
+    fn test_alter_table_add_drop_and_rename_column() {
+        let mut catalog = MemoryCatalog::new();
+        catalog.create_table(create_test_table("users")).unwrap();
+
+        catalog
+            .alter_table(
+                "users",
+                &crate::ast::AlterTableAction::AddColumn {
+                    column: crate::ast::ColumnDef {
+                        name: "email".to_string(),
+                        data_type: crate::ast::DataType::Text,
+                        constraints: vec![],
+                        span: crate::ast::Span::default(),
+                    },
+                    span: crate::ast::Span::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .get_table("users")
+                .unwrap()
+                .get_column("email")
+                .is_some()
+        );
+
+        catalog
+            .alter_table(
+                "users",
+                &crate::ast::AlterTableAction::RenameColumn {
+                    from: "email".to_string(),
+                    to: "email_address".to_string(),
+                    span: crate::ast::Span::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .get_table("users")
+                .unwrap()
+                .get_column("email_address")
+                .is_some()
+        );
+
+        catalog
+            .alter_table(
+                "users",
+                &crate::ast::AlterTableAction::DropColumn {
+                    name: "email_address".to_string(),
+                    span: crate::ast::Span::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .get_table("users")
+                .unwrap()
+                .get_column("email_address")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_alter_table_rename_table_updates_index_target() {
+        let mut catalog = MemoryCatalog::new();
+        catalog.create_table(create_test_table("users")).unwrap();
+        catalog
+            .create_index(create_test_index("idx_users_name", "users", "name"))
+            .unwrap();
+
+        catalog
+            .alter_table(
+                "users",
+                &crate::ast::AlterTableAction::RenameTable {
+                    to: "accounts".to_string(),
+                    span: crate::ast::Span::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(catalog.get_table("users").is_none());
+        assert!(catalog.get_table("accounts").is_some());
+        assert_eq!(
+            catalog.get_index("idx_users_name").unwrap().table,
+            "accounts".to_string()
+        );
+    }
 }

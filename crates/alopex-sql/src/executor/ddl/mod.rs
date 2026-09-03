@@ -3,11 +3,14 @@
 //! This module groups CREATE/DROP TABLE/INDEX executors and shared helpers
 //! such as implicit primary key index naming.
 
+pub mod alter_table;
 pub mod create_index;
 pub mod create_table;
 pub mod drop_index;
 pub mod drop_table;
 pub(crate) mod persistence;
+pub mod truncate_table;
+pub mod view;
 
 /// Prefix reserved for implicit primary key indexes.
 pub const PK_INDEX_PREFIX: &str = "__pk_";

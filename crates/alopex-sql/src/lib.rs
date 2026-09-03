@@ -65,7 +65,7 @@ pub use unified_error::SqlError;
 pub use catalog::persistent::{CatalogOverlay, DataSourceFormat, TableType};
 pub use catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, MemoryCatalog, RowIdMode, StorageOptions,
-    StorageType, TableMetadata,
+    StorageType, TableMetadata, ViewMetadata,
 };
 
 // Planner types (re-exported for convenience)

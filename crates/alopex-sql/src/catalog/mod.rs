@@ -58,7 +58,14 @@ pub use table::{
     ColumnMetadata, Compression, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
 
+use crate::ast::{AlterTableAction, Select};
 use crate::planner::PlannerError;
+
+#[derive(Debug, Clone)]
+pub struct ViewMetadata {
+    pub name: String,
+    pub query: Select,
+}
 
 /// Trait for catalog implementations.
 ///
@@ -127,6 +134,43 @@ pub trait Catalog {
 
     /// Check if an index exists.
     fn index_exists(&self, name: &str) -> bool;
+
+    /// Create a view in the catalog.
+    fn create_view(&mut self, _view: ViewMetadata) -> Result<(), PlannerError> {
+        Err(PlannerError::unsupported_feature(
+            "CREATE VIEW catalog mutation",
+            "a catalog backend with view support",
+            crate::ast::Span::default(),
+        ))
+    }
+
+    /// Return a view by name.
+    fn get_view(&self, _name: &str) -> Option<&ViewMetadata> {
+        None
+    }
+
+    /// Drop a view from the catalog.
+    fn drop_view(&mut self, _name: &str) -> Result<(), PlannerError> {
+        Err(PlannerError::unsupported_feature(
+            "DROP VIEW catalog mutation",
+            "a catalog backend with view support",
+            crate::ast::Span::default(),
+        ))
+    }
+
+    /// Check if a view exists.
+    fn view_exists(&self, name: &str) -> bool {
+        self.get_view(name).is_some()
+    }
+
+    /// Apply an ALTER TABLE action.
+    fn alter_table(&mut self, _name: &str, _action: &AlterTableAction) -> Result<(), PlannerError> {
+        Err(PlannerError::unsupported_feature(
+            "ALTER TABLE catalog mutation",
+            "a catalog backend with ALTER TABLE support",
+            crate::ast::Span::default(),
+        ))
+    }
 
     /// Generate the next unique table ID.
     ///

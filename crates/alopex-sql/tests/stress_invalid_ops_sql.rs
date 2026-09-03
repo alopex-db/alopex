@@ -2,7 +2,8 @@ use alopex_core::{KVStore, KVTransaction, MemoryKV, TxnMode};
 use alopex_sql::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::{
-    AlopexDialect, Parser, Planner, PlannerError, SqlValue, StorageError, TableStorage,
+    AlopexDialect, AlterTableAction, Parser, Planner, PlannerError, SqlValue, StatementKind,
+    StorageError, TableStorage,
 };
 
 fn build_catalog_with_table() -> MemoryCatalog {
@@ -102,4 +103,22 @@ fn fk_constraint_not_supported_reports_error() {
     );
     // Parser does not support ALTER ... ADD FOREIGN KEY; treat as unsupported SQL surface.
     assert!(res.is_err());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn truncate_and_alter_schema_statements_are_parsed() {
+    let dialect = AlopexDialect;
+    let truncate = Parser::parse_sql(&dialect, "TRUNCATE TABLE t").expect("TRUNCATE should parse");
+    assert!(matches!(truncate[0].kind, StatementKind::TruncateTable(_)));
+
+    let alter = Parser::parse_sql(&dialect, "ALTER TABLE t RENAME COLUMN name TO display_name")
+        .expect("ALTER TABLE should parse");
+    let StatementKind::AlterTable(alter_stmt) = &alter[0].kind else {
+        panic!("expected ALTER TABLE");
+    };
+    assert!(matches!(
+        alter_stmt.action,
+        AlterTableAction::RenameColumn { .. }
+    ));
 }

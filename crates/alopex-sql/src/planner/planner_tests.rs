@@ -8,8 +8,9 @@
 
 use super::*;
 use crate::ast::ddl::{
-    ColumnConstraint, ColumnDef, CreateContinuousAggregate, CreateIndex, CreateTable, DataType,
-    DropIndex, DropTable, IndexMethod,
+    AlterTable, AlterTableAction, ColumnConstraint, ColumnDef, CreateContinuousAggregate,
+    CreateIndex, CreateTable, CreateView, DataType, DropIndex, DropTable, DropView, IndexMethod,
+    TruncateTable,
 };
 use crate::ast::dml::{
     Assignment, Delete, FromItem, Insert, InsertSource, OrderByExpr, Select, SelectItem, Update,
@@ -518,6 +519,78 @@ fn test_plan_drop_index_if_exists_allows_non_default_namespace() {
 
     let result = planner.plan(&stmt(StatementKind::DropIndex(drop)));
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_plan_create_and_drop_view() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let select = Select {
+        with: None,
+        distinct: false,
+        distinct_on: vec![],
+        projection: vec![SelectItem::Wildcard { span: span() }],
+        from: vec![],
+        selection: None,
+        group_by: None,
+        having: None,
+        windows: vec![],
+        qualify: None,
+        set_operations: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        limit_with_ties: false,
+        span: span(),
+    };
+    let create = CreateView {
+        if_not_exists: true,
+        name: "v_users".to_string(),
+        query: select,
+        span: span(),
+    };
+    let drop = DropView {
+        if_exists: true,
+        name: "v_users".to_string(),
+        span: span(),
+    };
+
+    let create_plan = planner
+        .plan(&stmt(StatementKind::CreateView(create)))
+        .unwrap();
+    assert!(matches!(create_plan, LogicalPlan::CreateView { .. }));
+    let drop_plan = planner.plan(&stmt(StatementKind::DropView(drop))).unwrap();
+    assert!(matches!(drop_plan, LogicalPlan::DropView { .. }));
+}
+
+#[test]
+fn test_plan_alter_table_and_truncate() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let alter = AlterTable {
+        name: "users".to_string(),
+        action: AlterTableAction::RenameColumn {
+            from: "name".to_string(),
+            to: "display_name".to_string(),
+            span: span(),
+        },
+        span: span(),
+    };
+    let truncate = TruncateTable {
+        if_exists: false,
+        name: "users".to_string(),
+        span: span(),
+    };
+
+    let alter_plan = planner
+        .plan(&stmt(StatementKind::AlterTable(alter)))
+        .unwrap();
+    assert!(matches!(alter_plan, LogicalPlan::AlterTable { .. }));
+    let truncate_plan = planner
+        .plan(&stmt(StatementKind::TruncateTable(truncate)))
+        .unwrap();
+    assert!(matches!(truncate_plan, LogicalPlan::TruncateTable { .. }));
 }
 
 // ============================================================

@@ -45,6 +45,7 @@
 //! ```
 
 use crate::ast::expr::WindowFrame;
+use crate::ast::{AlterTableAction, Select};
 use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
 use crate::planner::typed_expr::{Projection, SortExpr, TypedAssignment, TypedExpr};
@@ -481,6 +482,25 @@ pub enum LogicalPlan {
         if_exists: bool,
     },
 
+    /// CREATE VIEW operation.
+    CreateView {
+        name: String,
+        query: Select,
+        if_not_exists: bool,
+    },
+
+    /// DROP VIEW operation.
+    DropView { name: String, if_exists: bool },
+
+    /// ALTER TABLE operation.
+    AlterTable {
+        name: String,
+        action: AlterTableAction,
+    },
+
+    /// TRUNCATE TABLE operation.
+    TruncateTable { name: String, if_exists: bool },
+
     /// CREATE INDEX operation.
     ///
     /// Creates a new index on a table column.
@@ -527,6 +547,10 @@ impl LogicalPlan {
             LogicalPlan::Delete { .. } => "DELETE",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
+            LogicalPlan::CreateView { .. } => "CREATE VIEW",
+            LogicalPlan::DropView { .. } => "DROP VIEW",
+            LogicalPlan::AlterTable { .. } => "ALTER TABLE",
+            LogicalPlan::TruncateTable { .. } => "TRUNCATE TABLE",
             LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
             LogicalPlan::DropIndex { .. } => "DROP INDEX",
         }
@@ -660,6 +684,30 @@ impl LogicalPlan {
         LogicalPlan::DropTable { name, if_exists }
     }
 
+    /// Creates a new CreateView plan.
+    pub fn create_view(name: String, query: Select, if_not_exists: bool) -> Self {
+        LogicalPlan::CreateView {
+            name,
+            query,
+            if_not_exists,
+        }
+    }
+
+    /// Creates a new DropView plan.
+    pub fn drop_view(name: String, if_exists: bool) -> Self {
+        LogicalPlan::DropView { name, if_exists }
+    }
+
+    /// Creates a new AlterTable plan.
+    pub fn alter_table(name: String, action: AlterTableAction) -> Self {
+        LogicalPlan::AlterTable { name, action }
+    }
+
+    /// Creates a new TruncateTable plan.
+    pub fn truncate_table(name: String, if_exists: bool) -> Self {
+        LogicalPlan::TruncateTable { name, if_exists }
+    }
+
     /// Creates a new CreateIndex plan.
     pub fn create_index(index: IndexMetadata, if_not_exists: bool) -> Self {
         LogicalPlan::CreateIndex {
@@ -698,6 +746,10 @@ impl LogicalPlan {
             LogicalPlan::Delete { .. } => "Delete",
             LogicalPlan::CreateTable { .. } => "CreateTable",
             LogicalPlan::DropTable { .. } => "DropTable",
+            LogicalPlan::CreateView { .. } => "CreateView",
+            LogicalPlan::DropView { .. } => "DropView",
+            LogicalPlan::AlterTable { .. } => "AlterTable",
+            LogicalPlan::TruncateTable { .. } => "TruncateTable",
             LogicalPlan::CreateIndex { .. } => "CreateIndex",
             LogicalPlan::DropIndex { .. } => "DropIndex",
         }
@@ -742,6 +794,10 @@ impl LogicalPlan {
             self,
             LogicalPlan::CreateTable { .. }
                 | LogicalPlan::DropTable { .. }
+                | LogicalPlan::CreateView { .. }
+                | LogicalPlan::DropView { .. }
+                | LogicalPlan::AlterTable { .. }
+                | LogicalPlan::TruncateTable { .. }
                 | LogicalPlan::CreateIndex { .. }
                 | LogicalPlan::DropIndex { .. }
                 | LogicalPlan::Pragma { .. }
@@ -778,6 +834,10 @@ impl LogicalPlan {
             | LogicalPlan::Delete { table, .. } => Some(table),
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),
             LogicalPlan::DropTable { name, .. } => Some(name),
+            LogicalPlan::CreateView { name, .. } => Some(name),
+            LogicalPlan::DropView { name, .. } => Some(name),
+            LogicalPlan::AlterTable { name, .. } => Some(name),
+            LogicalPlan::TruncateTable { name, .. } => Some(name),
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Pragma { .. } => None,

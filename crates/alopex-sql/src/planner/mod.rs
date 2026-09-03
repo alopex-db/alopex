@@ -37,7 +37,8 @@ pub use typed_expr::{
 pub use types::ResolvedType;
 
 use crate::ast::ddl::{
-    ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
+    AlterTable, AlterTableAction, ColumnConstraint, ColumnDef, CreateIndex, CreateTable,
+    CreateView, DropIndex, DropTable, DropView, TruncateTable,
 };
 use crate::ast::dml::{
     Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
@@ -844,6 +845,15 @@ impl TableReferenceExtractor {
                 root_access,
                 TableReferenceSource::LogicalPlanDdlTarget,
             ),
+            LogicalPlan::CreateView { name, .. }
+            | LogicalPlan::DropView { name, .. }
+            | LogicalPlan::AlterTable { name, .. }
+            | LogicalPlan::TruncateTable { name, .. } => push_table_reference(
+                references,
+                name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
             LogicalPlan::CreateIndex { index, .. } => push_table_reference(
                 references,
                 &index.table,
@@ -1007,6 +1017,10 @@ fn push_table_reference(
 enum GenericHostStatement<'a> {
     CreateTable(&'a CreateTable),
     DropTable(&'a DropTable),
+    CreateView(&'a CreateView),
+    DropView(&'a DropView),
+    AlterTable(&'a AlterTable),
+    TruncateTable(&'a TruncateTable),
     CreateIndex(&'a CreateIndex),
     DropIndex(&'a DropIndex),
     Pragma {
@@ -1028,6 +1042,10 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
     match statement_kind {
         StatementKind::CreateTable(statement) => GenericHostStatement::CreateTable(statement),
         StatementKind::DropTable(statement) => GenericHostStatement::DropTable(statement),
+        StatementKind::CreateView(statement) => GenericHostStatement::CreateView(statement),
+        StatementKind::DropView(statement) => GenericHostStatement::DropView(statement),
+        StatementKind::AlterTable(statement) => GenericHostStatement::AlterTable(statement),
+        StatementKind::TruncateTable(statement) => GenericHostStatement::TruncateTable(statement),
         StatementKind::CreateIndex(statement) => GenericHostStatement::CreateIndex(statement),
         StatementKind::DropIndex(statement) => GenericHostStatement::DropIndex(statement),
         StatementKind::Pragma { name, value } => GenericHostStatement::Pragma { name, value },
@@ -1068,6 +1086,11 @@ fn table_reference_access_for_classified(
         | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
+        GenericHostStatement::CreateView(_) => Ok(TableReferenceAccess::Create),
+        GenericHostStatement::DropView(_) => Ok(TableReferenceAccess::Drop),
+        GenericHostStatement::AlterTable(_) | GenericHostStatement::TruncateTable(_) => {
+            Ok(TableReferenceAccess::Write)
+        }
         GenericHostStatement::CreateIndex(_)
         | GenericHostStatement::DropIndex(_)
         | GenericHostStatement::Pragma { .. } => Ok(TableReferenceAccess::Metadata),
@@ -1140,6 +1163,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // DDL statements
             GenericHostStatement::CreateTable(statement) => self.plan_create_table(statement),
             GenericHostStatement::DropTable(statement) => self.plan_drop_table(statement),
+            GenericHostStatement::CreateView(statement) => self.plan_create_view(statement),
+            GenericHostStatement::DropView(statement) => self.plan_drop_view(statement),
+            GenericHostStatement::AlterTable(statement) => self.plan_alter_table(statement),
+            GenericHostStatement::TruncateTable(statement) => self.plan_truncate_table(statement),
             GenericHostStatement::CreateIndex(statement) => self.plan_create_index(statement),
             GenericHostStatement::DropIndex(statement) => self.plan_drop_index(statement),
             GenericHostStatement::Pragma { name, value } => self.plan_pragma(name, value),
@@ -1337,6 +1364,97 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         Ok(LogicalPlan::DropTable {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+        })
+    }
+
+    fn plan_create_view(&self, stmt: &CreateView) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.if_not_exists && self.catalog.view_exists(&stmt.name) {
+            return Err(PlannerError::unsupported_feature(
+                format!("view '{}' already exists", stmt.name),
+                "CREATE VIEW IF NOT EXISTS",
+                stmt.span,
+            ));
+        }
+        Ok(LogicalPlan::CreateView {
+            name: stmt.name.clone(),
+            query: stmt.query.clone(),
+            if_not_exists: stmt.if_not_exists,
+        })
+    }
+
+    fn plan_drop_view(&self, stmt: &DropView) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.if_exists && !self.catalog.view_exists(&stmt.name) {
+            return Err(PlannerError::unsupported_feature(
+                format!("view '{}' not found", stmt.name),
+                "DROP VIEW IF EXISTS",
+                stmt.span,
+            ));
+        }
+        Ok(LogicalPlan::DropView {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+        })
+    }
+
+    fn plan_alter_table(&self, stmt: &AlterTable) -> Result<LogicalPlan, PlannerError> {
+        if !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::TableNotFound {
+                name: stmt.name.clone(),
+                line: stmt.span.start.line,
+                column: stmt.span.start.column,
+            });
+        }
+        match &stmt.action {
+            AlterTableAction::AddColumn { column, .. } => {
+                if self.catalog.get_table(&stmt.name).is_some_and(|table| {
+                    table
+                        .columns
+                        .iter()
+                        .any(|existing| existing.name == column.name)
+                }) {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("column '{}' already exists", column.name),
+                        "ALTER TABLE ADD COLUMN with a unique name",
+                        stmt.span,
+                    ));
+                }
+            }
+            AlterTableAction::DropColumn { name, .. }
+            | AlterTableAction::RenameColumn { from: name, .. } => {
+                if self.catalog.get_table(&stmt.name).is_some_and(|table| {
+                    table.columns.iter().all(|existing| existing.name != *name)
+                }) {
+                    return Err(PlannerError::ColumnNotFound {
+                        column: name.clone(),
+                        table: stmt.name.clone(),
+                        line: stmt.span.start.line,
+                        col: stmt.span.start.column,
+                    });
+                }
+            }
+            AlterTableAction::RenameTable { to, .. } => {
+                if self.table_exists_in_default(to) {
+                    return Err(PlannerError::table_already_exists(to));
+                }
+            }
+        }
+        Ok(LogicalPlan::AlterTable {
+            name: stmt.name.clone(),
+            action: stmt.action.clone(),
+        })
+    }
+
+    fn plan_truncate_table(&self, stmt: &TruncateTable) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.if_exists && !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::TableNotFound {
+                name: stmt.name.clone(),
+                line: stmt.span.start.line,
+                column: stmt.span.start.column,
+            });
+        }
+        Ok(LogicalPlan::TruncateTable {
             name: stmt.name.clone(),
             if_exists: stmt.if_exists,
         })
