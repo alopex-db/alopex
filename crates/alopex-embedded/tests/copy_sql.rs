@@ -70,3 +70,71 @@ fn copy_query_to_csv_is_available_through_sql() {
     assert!(content.contains("alice,1"));
     assert!(content.contains("bob,2"));
 }
+
+#[test]
+fn copy_to_parquet_is_available_through_sql() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    db.execute_sql("INSERT INTO users VALUES (1, 'alice'), (2, 'bob'), (3, NULL)")
+        .unwrap();
+    let output = tempfile::Builder::new()
+        .suffix(".parquet")
+        .tempfile()
+        .unwrap();
+    let sql = format!(
+        "COPY users TO '{}' WITH (FORMAT PARQUET)",
+        output.path().display()
+    );
+    assert_eq!(
+        db.execute_sql(&sql).unwrap(),
+        ExecutionResult::RowsAffected(3)
+    );
+    let db2 = Database::new();
+    db2.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    let import = format!(
+        "COPY users FROM '{}' WITH (FORMAT PARQUET)",
+        output.path().display()
+    );
+    assert_eq!(
+        db2.execute_sql(&import).unwrap(),
+        ExecutionResult::RowsAffected(3)
+    );
+    let ExecutionResult::Query(result) = db2.execute_sql("SELECT * FROM users").unwrap() else {
+        panic!("expected restored query result")
+    };
+    assert_eq!(result.rows.len(), 3);
+}
+
+#[test]
+fn copy_query_to_parquet_is_available_through_sql() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    db.execute_sql("INSERT INTO users VALUES (1, 'alice'), (2, 'bob')")
+        .unwrap();
+    let output = tempfile::Builder::new()
+        .suffix(".parquet")
+        .tempfile()
+        .unwrap();
+    let sql = format!(
+        "COPY (SELECT name, id FROM users ORDER BY id) TO '{}' WITH (FORMAT PARQUET)",
+        output.path().display()
+    );
+    assert_eq!(
+        db.execute_sql(&sql).unwrap(),
+        ExecutionResult::RowsAffected(2)
+    );
+    let db2 = Database::new();
+    db2.execute_sql("CREATE TABLE users (name TEXT, id INT PRIMARY KEY)")
+        .unwrap();
+    let import = format!(
+        "COPY users FROM '{}' WITH (FORMAT PARQUET)",
+        output.path().display()
+    );
+    assert_eq!(
+        db2.execute_sql(&import).unwrap(),
+        ExecutionResult::RowsAffected(2)
+    );
+}

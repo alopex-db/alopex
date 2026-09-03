@@ -8,17 +8,17 @@
     {"surface":"DataFrame","api":"DataFrame.filter","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"DataFrame","api":"DataFrame.with_columns","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"DataFrame","api":"DataFrame.to_dict","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
-    {"surface":"DataFrame","api":"DataFrame.collect","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"DataFrame","api":"DataFrame.collect","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/src/lazy/lazyframe.rs;crates/alopex-dataframe/tests/polars_compat.rs","notes":"Eager DataFrame materialization is provided through LazyFrame.collect, matching the supported Polars execution surface."},
     {"surface":"Series","api":"Series","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"Series","api":"Series.cast","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"Series","api":"Series.to_list","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
-    {"surface":"LazyFrame","api":"LazyFrame.collect","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"LazyFrame","api":"LazyFrame.collect","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/src/lazy/lazyframe.rs;crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"Expr","api":"col","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"Expr","api":"lit","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"Expr","api":"Expr.alias","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"IO","api":"read_csv","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
     {"surface":"IO","api":"read_parquet","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
-    {"surface":"streaming","api":"collect_batches","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/tests/polars_compat.rs"},
+    {"surface":"streaming","api":"collect_batches","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/src/physical/executor.rs;crates/alopex-dataframe/tests/streaming_contract.rs"},
     {"surface":"extension","api":"Database","status":"alopex-extension","evidence":"crates/alopex-py/tests"}
   ]
 }

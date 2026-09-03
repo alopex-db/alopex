@@ -18,7 +18,7 @@
     {"api":"SearchStats","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-py/tests/test_hnsw.py"},
     {"api":"Python.search_hnsw","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-py/tests/test_hnsw.py"},
     {"api":"SQL CREATE INDEX USING HNSW","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-sql/tests"},
-    {"api":"cosine distance","status":"known-divergence","reference":"pgvector:vector","evidence":"crates/alopex-core/src/vector/hnsw/types.rs","issue":302},
+    {"api":"cosine distance","status":"reference-compatible","reference":"pgvector:vector","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs;crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs","issue":302,"notes":"Cosine similarity is normalized by both vector norms and exposed as distance (1 - similarity), including zero-norm vectors."},
     {"api":"upsert reconnect","status":"reference-compatible","reference":"hnswlib:update","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs","issue":301}
   ]
 }

@@ -247,6 +247,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
+                let format = copy_format(&path, &options);
                 let ExecutionResult::Query(result) = self.execute_query(*query)? else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "COPY TO".into(),
@@ -256,6 +257,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 bulk::execute_copy_query_to(
                     &result,
                     &path,
+                    format,
                     bulk::CopyOptions { header },
                     &bulk::CopySecurityConfig::default(),
                 )
@@ -272,11 +274,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
-                let format = if path.ends_with(".parquet") {
-                    bulk::FileFormat::Parquet
-                } else {
-                    bulk::FileFormat::Csv
-                };
+                let format = copy_format(&path, &options);
                 self.run_in_write_txn(|txn| {
                     bulk::execute_copy_to(
                         txn,
@@ -746,9 +744,11 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                         reason: "query source did not return rows".into(),
                     });
                 };
+                let format = copy_format(&path, &options);
                 bulk::execute_copy_query_to(
                     &result,
                     &path,
+                    format,
                     bulk::CopyOptions { header },
                     &bulk::CopySecurityConfig::default(),
                 )
@@ -765,11 +765,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     option.name.eq_ignore_ascii_case("header")
                         && option.value.eq_ignore_ascii_case("true")
                 });
-                let format = if path.ends_with(".parquet") {
-                    bulk::FileFormat::Parquet
-                } else {
-                    bulk::FileFormat::Csv
-                };
+                let format = copy_format(&path, &options);
                 bulk::execute_copy_to(
                     &mut sql_txn,
                     &view,
@@ -1247,6 +1243,26 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         Ok(ExecutionResult::Success)
     }
+}
+
+fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> bulk::FileFormat {
+    options
+        .iter()
+        .find(|option| option.name.eq_ignore_ascii_case("format"))
+        .map(|option| {
+            if option.value.eq_ignore_ascii_case("parquet") {
+                bulk::FileFormat::Parquet
+            } else {
+                bulk::FileFormat::Csv
+            }
+        })
+        .unwrap_or_else(|| {
+            if path.ends_with(".parquet") {
+                bulk::FileFormat::Parquet
+            } else {
+                bulk::FileFormat::Csv
+            }
+        })
 }
 
 #[cfg(test)]
