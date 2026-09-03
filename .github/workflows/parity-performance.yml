@@ -1,0 +1,122 @@
+name: Required parity performance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/alopex-core/src/vector/**'
+      - 'crates/alopex-dataframe/**'
+      - 'crates/alopex-py/**'
+      - 'crates/alopex-sql/**'
+      - 'docs/parity/**'
+      - 'scripts/performance/**'
+      - '.github/workflows/parity-performance.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/alopex-core/src/vector/**'
+      - 'crates/alopex-dataframe/**'
+      - 'crates/alopex-py/**'
+      - 'crates/alopex-sql/**'
+      - 'docs/parity/**'
+      - 'scripts/performance/**'
+      - '.github/workflows/parity-performance.yml'
+  schedule:
+    - cron: '23 2 * * 3'
+  workflow_dispatch:
+    inputs:
+      suite:
+        type: choice
+        options: [curated, full]
+        default: curated
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-performance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  POLARS_MAX_THREADS: "1"
+  RAYON_NUM_THREADS: "1"
+  ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+  NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+
+jobs:
+  performance:
+    name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
+    runs-on: [self-hosted, linux, x64, alopex-performance]
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_PASSWORD: alopex
+          POSTGRES_DB: alopex_perf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d alopex_perf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.11"
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install pinned reference engines
+        run: |
+          python -m pip install --disable-pip-version-check \
+            maturin==1.14.1 numpy==2.4.6 pandas==3.0.5 \
+            polars==1.43.2 scikit-learn==1.9.0 \
+            faiss-cpu==1.15.0 hnswlib==0.8.0 \
+            datafusion==50.0.0 pysqlite3-binary==0.5.4 \
+            'psycopg[binary]==3.2.10'
+      - name: Build release Alopex and pinned Nim parser
+        run: |
+          bash scripts/build-nim-parser.sh --backend docker
+          maturin develop --release -m crates/alopex-py/Cargo.toml
+      - name: Verify performance contracts
+        run: python scripts/validate_v0811_ledgers.py
+      - name: Download the checksum-pinned HNSW dataset
+        run: |
+          curl -fL https://github.com/user-attachments/files/31764184/archive.zip -o "$RUNNER_TEMP/amazon.zip"
+          echo "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea  $RUNNER_TEMP/amazon.zip" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/amazon"
+          unzip -q "$RUNNER_TEMP/amazon.zip" -d "$RUNNER_TEMP/amazon"
+          dataset="$RUNNER_TEMP/amazon/home/sdf/marketing_sample_for_amazon_com-ecommerce__20200101_20200131__10k_data.csv"
+          echo "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291  $dataset" | sha256sum --check --strict
+          echo "HNSW_DATASET=$dataset" >> "$GITHUB_ENV"
+      - name: Measure paired engines
+        env:
+          SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+          ALOPEX_PERF_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
+        run: |
+          mkdir -p performance-artifacts/hnsw
+          taskset -c 0 python scripts/performance/hnsw_v0811_contract.py \
+            --dataset "$HNSW_DATASET" --output performance-artifacts/hnsw
+          taskset -c 0 python scripts/performance/parity_v0811_measure.py \
+            --suite "$SUITE" \
+            --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
+            --output performance-artifacts/measurements.json
+      - name: Enforce curated/full performance contracts
+        env:
+          SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+        run: |
+          python scripts/performance/parity_v0811_gate.py \
+            --suite "$SUITE" \
+            --measurements performance-artifacts/measurements.json \
+            --output performance-artifacts/gate.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: performance-artifacts
+          if-no-files-found: error
+          retention-days: 30

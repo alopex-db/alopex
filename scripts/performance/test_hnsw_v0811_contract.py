@@ -61,6 +61,9 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         "checksum": None,
                         "recall_at_10": 1.0,
                         "latency_ms": 0.2,
+                        "query_latency_p50_us": 190.0,
+                        "query_latency_p95_us": 240.0,
+                        "query_latency_p99_us": 280.0,
                         "ef_search": 64,
                         "recall_by_ef_search": {"64": 1.0},
                         "latency_by_ef_search_ms": {"64": 0.2},
@@ -70,6 +73,17 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 ]
                 * 3,
                 release_version="0.8.11",
+                builds=[
+                    {
+                        "engine": "alopex-hnsw",
+                        "build_time_seconds": 1.0,
+                        "index_size_bytes": 1024,
+                        "peak_rss_bytes": 2048,
+                        "update_latency_ms": 0.1,
+                        "delete_latency_ms": 0.1,
+                        "reopen_latency_ms": 0.2,
+                    }
+                ],
             )
             self.assertTrue((Path(directory) / "hnsw-diagnostic.raw.json").is_file())
             self.assertTrue((Path(directory) / "hnsw-diagnostic.json").is_file())
@@ -81,8 +95,16 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 [
                     "recall_at_10",
                     "tie_aware_recall_at_10",
-                    "latency_us",
+                    "query_latency_p50_us",
+                    "query_latency_p95_us",
+                    "query_latency_p99_us",
                     "queries_per_second",
+                    "build_time_seconds",
+                    "index_size_bytes",
+                    "peak_rss_bytes",
+                    "update_latency_ms",
+                    "delete_latency_ms",
+                    "reopen_latency_ms",
                 ],
             )
             self.assertEqual(payload["release_version"], "0.8.11")

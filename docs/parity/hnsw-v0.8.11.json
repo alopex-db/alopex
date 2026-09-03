@@ -1,24 +1,19 @@
 {
   "schema": "alopex.hnsw-conformance/v1",
-  "references": {
-    "paper": "arxiv:1603.09320",
-    "hnswlib": "nmslib/hnswlib@master",
-    "pgvector": "pgvector/pgvector@v0.8.0",
-    "qdrant": "qdrant/qdrant@v1.15.0"
-  },
-  "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "not-yet-implemented"],
+  "references": {"paper":"arxiv:1603.09320", "hnswlib":"nmslib/hnswlib@v0.8.0", "pgvector":"pgvector/pgvector@v0.8.0", "qdrant":"qdrant/qdrant@v1.15.0"},
+  "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "known-performance-divergence", "not-yet-implemented"],
   "entries": [
-    {"api":"HnswConfig","status":"reference-compatible","reference":"hnswlib:ALGO_PARAMS.md","evidence":"crates/alopex-core/src/vector/hnsw/types.rs"},
-    {"api":"HnswIndex.create","status":"reference-compatible","reference":"hnswlib:README.md","evidence":"crates/alopex-core/src/vector/hnsw/mod.rs"},
-    {"api":"HnswIndex.upsert","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-embedded/tests"},
-    {"api":"HnswIndex.search","status":"reference-compatible","reference":"qdrant:ann-recall","evidence":"crates/alopex-core/benches/hnsw_bench.rs"},
-    {"api":"HnswIndex.delete","status":"reference-compatible","reference":"hnswlib:mark_deleted","evidence":"crates/alopex-core/src/vector/hnsw"},
+    {"api":"HnswConfig","status":"known-performance-divergence","reference":"hnswlib:ALGO_PARAMS.md","evidence":"crates/alopex-core/src/vector/hnsw/types.rs","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"HnswIndex.create","status":"known-performance-divergence","reference":"hnswlib:README.md","evidence":"crates/alopex-core/src/vector/hnsw/mod.rs","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"HnswIndex.upsert","status":"known-performance-divergence","reference":"pgvector:hnsw","evidence":"crates/alopex-embedded/tests","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"HnswIndex.search","status":"known-performance-divergence","reference":"qdrant:ann-recall","evidence":"crates/alopex-core/benches/hnsw_bench.rs","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"HnswIndex.delete","status":"known-performance-divergence","reference":"hnswlib:mark_deleted","evidence":"crates/alopex-core/src/vector/hnsw","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
     {"api":"HnswIndex.compact","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-core/src/vector/hnsw"},
     {"api":"HnswIndex.stats","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-py/tests/test_hnsw.py"},
     {"api":"SearchStats","status":"alopex-extension","reference":"alopex","evidence":"crates/alopex-py/tests/test_hnsw.py"},
-    {"api":"Python.search_hnsw","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-py/tests/test_hnsw.py"},
-    {"api":"SQL CREATE INDEX USING HNSW","status":"reference-compatible","reference":"pgvector:hnsw","evidence":"crates/alopex-sql/tests"},
-    {"api":"cosine distance","status":"reference-compatible","reference":"pgvector:vector","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs;crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs","issue":302,"notes":"Cosine similarity is normalized by both vector norms and exposed as distance (1 - similarity), including zero-norm vectors."},
-    {"api":"upsert reconnect","status":"reference-compatible","reference":"hnswlib:update","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs","issue":301}
+    {"api":"Python.search_hnsw","status":"known-performance-divergence","reference":"pgvector:hnsw","evidence":"crates/alopex-py/tests/test_hnsw.py","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"SQL CREATE INDEX USING HNSW","status":"known-performance-divergence","reference":"pgvector:hnsw","evidence":"crates/alopex-sql/tests","performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","issue":306},
+    {"api":"cosine distance","status":"known-performance-divergence","reference":"pgvector:vector","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs;crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs","issue":302,"performance_issue":306,"performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto","notes":"Functional distance parity is implemented; Pareto performance remains outside the compatibility budget."},
+    {"api":"upsert reconnect","status":"known-performance-divergence","reference":"hnswlib:update","evidence":"crates/alopex-core/src/vector/hnsw/graph.rs","issue":301,"performance_issue":306,"performance_contract":"hnsw-pareto-v1","performance_evidence":"hnsw-pareto"}
   ]
 }

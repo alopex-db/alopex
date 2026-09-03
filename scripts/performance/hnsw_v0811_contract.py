@@ -6,7 +6,9 @@ import csv
 import hashlib
 import json
 import re
+import resource
 import statistics
+import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -29,6 +31,15 @@ class SearchEngine:
     build_time_seconds: float
     search: Callable[[object, int, int], list[int]]
     close: Callable[[], None]
+    index_size_bytes: int
+    peak_rss_bytes: int
+    update_latency_ms: float | None = None
+    delete_latency_ms: float | None = None
+    reopen_latency_ms: float | None = None
+
+
+def peak_rss_bytes() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
 
 def load_amazon_products(path: Path):
@@ -125,7 +136,9 @@ def exact_ground_truth(vectors, queries, k: int):
 def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchEngine:
     import alopex
 
-    db = alopex.Database.new()
+    directory = tempfile.TemporaryDirectory()
+    database_path = Path(directory.name) / "index"
+    db = alopex.Database.open(str(database_path))
     name = f"products_m{m}_efc{ef_construction}"
     config = alopex.HnswConfig(
         DIMENSION,
@@ -139,7 +152,35 @@ def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchE
         for index, vector in enumerate(vectors):
             transaction.upsert_to_hnsw(name, str(index).encode(), vector, None)
         transaction.commit()
+    del transaction
+    db.flush()
     build_time = time.perf_counter() - started
+    db.close()
+    started = time.perf_counter()
+    db = alopex.Database.open(str(database_path))
+    reopen_latency_ms = (time.perf_counter() - started) * 1000
+    index_size_bytes = sum(
+        path.stat().st_blocks * 512
+        for path in database_path.rglob("*")
+        if path.is_file()
+    )
+    measured_rss = peak_rss_bytes()
+    started = time.perf_counter()
+    with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
+        transaction.upsert_to_hnsw(name, b"0", vectors[0], None)
+        transaction.commit()
+    del transaction
+    update_latency_ms = (time.perf_counter() - started) * 1000
+    started = time.perf_counter()
+    with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
+        transaction.delete_from_hnsw(name, b"1")
+        transaction.commit()
+    del transaction
+    delete_latency_ms = (time.perf_counter() - started) * 1000
+    with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
+        transaction.upsert_to_hnsw(name, b"1", vectors[1], None)
+        transaction.commit()
+    del transaction
 
     def search(query, k: int, ef_search: int) -> list[int]:
         results, _ = db.search_hnsw(name, query, k, ef_search=ef_search)
@@ -148,8 +189,19 @@ def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchE
     def close() -> None:
         db.drop_hnsw_index(name)
         db.close()
+        directory.cleanup()
 
-    return SearchEngine("alopex-hnsw", build_time, search, close)
+    return SearchEngine(
+        "alopex-hnsw",
+        build_time,
+        search,
+        close,
+        index_size_bytes,
+        measured_rss,
+        update_latency_ms,
+        delete_latency_ms,
+        reopen_latency_ms,
+    )
 
 
 def build_faiss_flat(vectors) -> SearchEngine:
@@ -165,7 +217,14 @@ def build_faiss_flat(vectors) -> SearchEngine:
         _, labels = index.search(query.reshape(1, -1), k)
         return labels[0].tolist()
 
-    return SearchEngine("faiss-flat-exact", build_time, search, lambda: None)
+    return SearchEngine(
+        "faiss-flat-exact",
+        build_time,
+        search,
+        lambda: None,
+        len(faiss.serialize_index(index)),
+        peak_rss_bytes(),
+    )
 
 
 def build_faiss_hnsw(vectors) -> SearchEngine:
@@ -187,7 +246,14 @@ def build_faiss_hnsw(vectors) -> SearchEngine:
         _, labels = index.search(query.reshape(1, -1), k)
         return labels[0].tolist()
 
-    return SearchEngine("faiss-hnsw", build_time, search, lambda: None)
+    return SearchEngine(
+        "faiss-hnsw",
+        build_time,
+        search,
+        lambda: None,
+        len(faiss.serialize_index(index)),
+        peak_rss_bytes(),
+    )
 
 
 def build_hnswlib(vectors) -> SearchEngine:
@@ -202,6 +268,23 @@ def build_hnswlib(vectors) -> SearchEngine:
     started = time.perf_counter()
     index.add_items(vectors, np.arange(len(vectors)))
     build_time = time.perf_counter() - started
+    started = time.perf_counter()
+    index.add_items(vectors[0].reshape(1, -1), np.array([0]))
+    update_latency_ms = (time.perf_counter() - started) * 1000
+    started = time.perf_counter()
+    index.mark_deleted(1)
+    index.unmark_deleted(1)
+    delete_latency_ms = (time.perf_counter() - started) * 1000
+    directory = tempfile.TemporaryDirectory()
+    index_path = Path(directory.name) / "index.bin"
+    index.save_index(str(index_path))
+    index_size_bytes = index_path.stat().st_size
+    reopened = hnswlib.Index(space="ip", dim=DIMENSION)
+    started = time.perf_counter()
+    reopened.load_index(str(index_path), max_elements=len(vectors))
+    reopen_latency_ms = (time.perf_counter() - started) * 1000
+    reopened.set_num_threads(1)
+    index = reopened
     configured_ef = None
 
     def search(query, k: int, ef_search: int) -> list[int]:
@@ -213,7 +296,17 @@ def build_hnswlib(vectors) -> SearchEngine:
         labels, _ = index.knn_query(query.reshape(1, -1), k=k)
         return labels[0].tolist()
 
-    return SearchEngine("hnswlib", build_time, search, lambda: None)
+    return SearchEngine(
+        "hnswlib",
+        build_time,
+        search,
+        directory.cleanup,
+        index_size_bytes,
+        peak_rss_bytes(),
+        update_latency_ms,
+        delete_latency_ms,
+        reopen_latency_ms,
+    )
 
 
 def measure_setting(
@@ -237,8 +330,11 @@ def measure_setting(
     for run in range(1, run_count + 1):
         started = time.perf_counter()
         executed = 0
+        latencies = []
         while executed < min_queries or time.perf_counter() - started < duration_seconds:
+            query_started = time.perf_counter_ns()
             engine.search(queries[executed % len(queries)], k, ef_search)
+            latencies.append((time.perf_counter_ns() - query_started) / 1000)
             executed += 1
         elapsed = time.perf_counter() - started
         rows.append(
@@ -252,6 +348,13 @@ def measure_setting(
                 "duration_seconds": elapsed,
                 "queries_per_second": executed / elapsed,
                 "latency_us": elapsed * 1_000_000 / executed,
+                "query_latency_p50_us": statistics.median(latencies),
+                "query_latency_p95_us": sorted(latencies)[
+                    max(0, (95 * len(latencies) + 99) // 100 - 1)
+                ],
+                "query_latency_p99_us": sorted(latencies)[
+                    max(0, (99 * len(latencies) + 99) // 100 - 1)
+                ],
                 "recall_at_10": recall,
                 "tie_aware_recall_at_10": tie_aware_recall,
                 "build_time_seconds": engine.build_time_seconds,
@@ -297,6 +400,18 @@ def summarize_by_engine(runs: list[dict[str, object]]) -> list[dict[str, object]
                         "latency_us", 1_000_000 / float(row["queries_per_second"])
                     )
                 )
+                for row in rows
+            ),
+            "median_query_latency_p50_us": statistics.median(
+                float(row.get("query_latency_p50_us", row.get("latency_us", 0.0)))
+                for row in rows
+            ),
+            "median_query_latency_p95_us": statistics.median(
+                float(row.get("query_latency_p95_us", row.get("latency_us", 0.0)))
+                for row in rows
+            ),
+            "median_query_latency_p99_us": statistics.median(
+                float(row.get("query_latency_p99_us", row.get("latency_us", 0.0)))
                 for row in rows
             ),
             "median_recall_at_10": statistics.median(
@@ -356,18 +471,19 @@ def run_benchmark(
     runs: list[dict[str, object]] = []
     builds = []
     recall_ceiling = []
-    engines = [
-        build_alopex(vectors),
-        build_faiss_flat(vectors),
-        build_faiss_hnsw(vectors),
-        build_hnswlib(vectors),
-    ]
-    try:
-        for engine in engines:
+    builders = (build_hnswlib, build_alopex, build_faiss_flat, build_faiss_hnsw)
+    for builder in builders:
+        engine = builder(vectors)
+        try:
             builds.append(
                 {
                     "engine": engine.name,
                     "build_time_seconds": engine.build_time_seconds,
+                    "index_size_bytes": engine.index_size_bytes,
+                    "peak_rss_bytes": engine.peak_rss_bytes,
+                    "update_latency_ms": engine.update_latency_ms,
+                    "delete_latency_ms": engine.delete_latency_ms,
+                    "reopen_latency_ms": engine.reopen_latency_ms,
                 }
             )
             ef_values = (
@@ -392,9 +508,9 @@ def run_benchmark(
                 recall_ceiling.extend(
                     recall_sweep(engine, queries, truth, acceptable_truth)
                 )
-    finally:
-        for engine in engines:
+        finally:
             engine.close()
+            del engine
     metadata = {
         "source": "Amazon Product Dataset 2020",
         "source_file": dataset.name,
@@ -433,8 +549,16 @@ def write_artifacts(
             "metrics": [
                 "recall_at_10",
                 "tie_aware_recall_at_10",
-                "latency_us",
-                "queries_per_second",
+                    "query_latency_p50_us",
+                    "query_latency_p95_us",
+                    "query_latency_p99_us",
+                    "queries_per_second",
+                    "build_time_seconds",
+                    "index_size_bytes",
+                    "peak_rss_bytes",
+                    "update_latency_ms",
+                    "delete_latency_ms",
+                    "reopen_latency_ms",
             ],
         },
         "dataset": dataset or {},
