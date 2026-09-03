@@ -1423,6 +1423,22 @@ fn parse_nim_line_col(message: &str) -> Option<(u64, u64)> {
 }
 
 #[cfg(test)]
+mod explain_parsing_tests {
+    use super::*;
+
+    #[test]
+    fn explain_statement_wraps_inner_query_without_executing_it() {
+        let statements = parse_sql("EXPLAIN ANALYZE SELECT * FROM users").unwrap();
+        assert_eq!(statements.len(), 1);
+        let StatementKind::Explain(explain) = &statements[0].kind else {
+            panic!("expected EXPLAIN statement");
+        };
+        assert!(explain.analyze);
+        assert!(matches!(explain.statement.as_ref().kind, StatementKind::Select(_)));
+    }
+}
+
+#[cfg(test)]
 mod input_preflight_tests {
     use super::*;
 

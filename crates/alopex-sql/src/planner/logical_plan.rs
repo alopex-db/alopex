@@ -684,6 +684,7 @@ impl LogicalPlan {
     pub fn name(&self) -> &'static str {
         match self {
             LogicalPlan::Pragma { .. } => "Pragma",
+            LogicalPlan::Explain { .. } => "Explain",
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Values { .. } => "Values",
             LogicalPlan::Filter { .. } => "Filter",
@@ -714,7 +715,8 @@ impl LogicalPlan {
     pub fn is_query(&self) -> bool {
         matches!(
             self,
-            LogicalPlan::Scan { .. }
+            LogicalPlan::Explain { .. }
+                | LogicalPlan::Scan { .. }
                 | LogicalPlan::Values { .. }
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
@@ -758,7 +760,8 @@ impl LogicalPlan {
     /// Returns the input plan if this is a transformation (Filter, Aggregate, Sort, Limit).
     pub fn input(&self) -> Option<&LogicalPlan> {
         match self {
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
@@ -789,7 +792,8 @@ impl LogicalPlan {
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Pragma { .. } => None,
             LogicalPlan::Values { .. } => None,
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
@@ -823,7 +827,8 @@ impl LogicalPlan {
                 recursive_term,
                 ..
             } => anchor.contains_join() || recursive_term.contains_join(),
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
@@ -838,7 +843,8 @@ impl LogicalPlan {
     pub fn contains_set_operation(&self) -> bool {
         match self {
             LogicalPlan::SetOperation { .. } | LogicalPlan::RecursiveCte { .. } => true,
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }

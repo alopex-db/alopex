@@ -153,6 +153,17 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             LogicalPlan::Pragma { name, value } => {
                 system::execute_pragma(&self.bridge, &name, value.as_ref())
             }
+            LogicalPlan::Explain { analyze, input } => {
+                let plan = input.as_ref();
+                let mut description = format!("EXPLAIN{} {}", if analyze { " ANALYZE" } else { "" }, plan.name());
+                if let Some(table) = plan.table_name() {
+                    description.push_str(&format!(" on {table}"));
+                }
+                Ok(ExecutionResult::Query(QueryResult::new(
+                    vec![ColumnInfo::new("plan", crate::planner::ResolvedType::Text)],
+                    vec![vec![crate::storage::SqlValue::Text(description)]],
+                )))
+            }
             // DDL Operations
             LogicalPlan::CreateTable {
                 table,
@@ -324,7 +335,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         if txn.mode() == TxnMode::ReadOnly
             && !matches!(
                 plan,
-                LogicalPlan::Scan { .. }
+                LogicalPlan::Explain { .. }
+                    | LogicalPlan::Scan { .. }
                     | LogicalPlan::Values { .. }
                     | LogicalPlan::Filter { .. }
                     | LogicalPlan::Project { .. }
@@ -425,6 +437,17 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             LogicalPlan::Delete { table, filter } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 dml::execute_delete(&mut sql_txn, &view, &table, filter)
+            }
+            LogicalPlan::Explain { analyze, input } => {
+                let plan = input.as_ref();
+                let mut description = format!("EXPLAIN{} {}", if analyze { " ANALYZE" } else { "" }, plan.name());
+                if let Some(table) = plan.table_name() {
+                    description.push_str(&format!(" on {table}"));
+                }
+                Ok(ExecutionResult::Query(QueryResult::new(
+                    vec![ColumnInfo::new("plan", crate::planner::ResolvedType::Text)],
+                    vec![vec![crate::storage::SqlValue::Text(description)]],
+                )))
             }
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }

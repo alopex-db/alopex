@@ -1170,7 +1170,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
-            GenericHostStatement::Explain { analyze, statement } => self.plan_explain(*analyze, statement),
+            GenericHostStatement::Explain { analyze, statement } => self.plan_explain(analyze, statement),
             GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
     }

@@ -713,6 +713,10 @@ fn validate_plan(
             "pragma_local_only",
             "PRAGMA remains available only to the local executor",
         )),
+        LogicalPlan::Explain { .. } => Err(RemoteReadRejection::local_only(
+            "explain_local_only",
+            "EXPLAIN and EXPLAIN ANALYZE are local introspection statements",
+        )),
         LogicalPlan::Insert { .. }
         | LogicalPlan::InsertSelect { .. }
         | LogicalPlan::Update { .. }
