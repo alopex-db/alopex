@@ -807,6 +807,7 @@ impl TableReferenceExtractor {
                 table,
                 assignments,
                 filter,
+                ..
             } => {
                 push_table_reference(
                     references,
@@ -821,7 +822,7 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete { table, filter, .. } => {
                 push_table_reference(
                     references,
                     table,
@@ -4981,6 +4982,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table.column_names().into_iter().map(String::from).collect()
         };
 
+        let returning = if stmt.returning.is_empty() {
+            None
+        } else {
+            Some(
+                stmt.returning
+                    .iter()
+                    .map(|expr| self.type_checker.infer_type(expr, table))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
+
         match &stmt.source {
             InsertSource::Values { values } => {
                 let mut typed_values: Vec<Vec<TypedExpr>> = Vec::new();
@@ -5001,15 +5013,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     table: table.name.clone(),
                     columns,
                     values: typed_values,
+                    on_conflict: stmt.on_conflict.as_ref().map(|_| "UPSERT".to_string()),
+                    returning,
                 })
             }
             InsertSource::Select { select } => {
                 let source = self.plan_select_relation(select, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
             InsertSource::Query { query } => {
                 let source = self.plan_query_body_relation(query, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
         }
     }
@@ -5020,6 +5034,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         table: &TableMetadata,
         columns: Vec<String>,
         source: PlannedRelation,
+        returning: Option<Vec<TypedExpr>>,
     ) -> Result<LogicalPlan, PlannerError> {
         if source.schema.len() != columns.len() {
             return Err(PlannerError::column_value_count_mismatch(
@@ -5050,6 +5065,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table: table.name.clone(),
             columns,
             source: Box::new(source.plan),
+            on_conflict: stmt.on_conflict.as_ref().map(|_| "UPSERT".to_string()),
+            returning,
         })
     }
 
@@ -5252,10 +5269,23 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             None
         };
 
+        let returning = if stmt.returning.is_empty() {
+            None
+        } else {
+            Some(
+                stmt.returning
+                    .iter()
+                    .map(|expr| self.type_checker.infer_type(expr, table))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
+
         Ok(LogicalPlan::Update {
             table: table.name.clone(),
             assignments: typed_assignments,
             filter,
+            from: stmt.from.clone(),
+            returning,
         })
     }
 
@@ -5284,9 +5314,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             None
         };
 
+        let returning = if stmt.returning.is_empty() {
+            None
+        } else {
+            Some(
+                stmt.returning
+                    .iter()
+                    .map(|expr| self.type_checker.infer_type(expr, table))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
+
         Ok(LogicalPlan::Delete {
             table: table.name.clone(),
             filter,
+            using: stmt.using.clone(),
+            returning,
         })
     }
 }

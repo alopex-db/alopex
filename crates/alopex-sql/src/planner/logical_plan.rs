@@ -424,6 +424,10 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Values to insert (one Vec per row, each value corresponds to a column).
         values: Vec<Vec<TypedExpr>>,
+        /// Optional `ON CONFLICT` / UPSERT path.
+        on_conflict: Option<String>,
+        /// Optional `RETURNING` expressions to emit after the mutation.
+        returning: Option<Vec<TypedExpr>>,
     },
 
     /// INSERT rows produced by a SELECT query.
@@ -434,6 +438,10 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Query that produces one row per inserted row.
         source: Box<LogicalPlan>,
+        /// Optional `ON CONFLICT` / UPSERT path.
+        on_conflict: Option<String>,
+        /// Optional `RETURNING` expressions to emit after the mutation.
+        returning: Option<Vec<TypedExpr>>,
     },
 
     /// UPDATE operation.
@@ -446,6 +454,10 @@ pub enum LogicalPlan {
         assignments: Vec<TypedAssignment>,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        /// Optional `FROM` source tables used by correlated UPDATE.
+        from: Vec<String>,
+        /// Optional `RETURNING` expressions to emit after the mutation.
+        returning: Option<Vec<TypedExpr>>,
     },
 
     /// DELETE operation.
@@ -456,6 +468,10 @@ pub enum LogicalPlan {
         table: String,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        /// Optional `USING` tables used by correlated DELETE.
+        using: Vec<String>,
+        /// Optional `RETURNING` expressions to emit after the mutation.
+        returning: Option<Vec<TypedExpr>>,
     },
 
     // === DDL Plans ===

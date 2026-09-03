@@ -240,7 +240,27 @@ pub struct Insert {
     pub table: String,
     pub columns: Option<Vec<String>>,
     pub source: InsertSource,
+    #[serde(default)]
+    pub on_conflict: Option<OnConflict>,
+    #[serde(default)]
+    pub returning: Vec<Expr>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnConflict {
+    #[serde(default)]
+    pub target: Option<Vec<String>>,
+    #[serde(default)]
+    pub action: OnConflictAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum OnConflictAction {
+    DoNothing,
+    DoUpdate { assignments: Vec<Assignment> },
 }
 
 /// The row source for an INSERT statement.
@@ -257,6 +277,10 @@ pub struct Update {
     pub table: String,
     pub assignments: Vec<Assignment>,
     pub selection: Option<Expr>,
+    #[serde(default)]
+    pub from: Vec<String>,
+    #[serde(default)]
+    pub returning: Vec<Expr>,
     pub span: Span,
 }
 
@@ -271,6 +295,10 @@ pub struct Assignment {
 pub struct Delete {
     pub table: String,
     pub selection: Option<Expr>,
+    #[serde(default)]
+    pub using: Vec<String>,
+    #[serde(default)]
+    pub returning: Vec<Expr>,
     pub span: Span,
 }
 

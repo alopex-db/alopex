@@ -171,18 +171,29 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 columns,
                 values,
-            } => self.execute_insert(&table, columns, values),
+                returning,
+                ..
+            } => self.execute_insert(&table, columns, values, returning),
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
-            } => self.execute_insert_select(&table, columns, *source),
+                returning,
+                ..
+            } => self.execute_insert_select(&table, columns, *source, returning),
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
-            } => self.execute_update(&table, assignments, filter),
-            LogicalPlan::Delete { table, filter } => self.execute_delete(&table, filter),
+                returning,
+                ..
+            } => self.execute_update(&table, assignments, filter, returning),
+            LogicalPlan::Delete {
+                table,
+                filter,
+                returning,
+                ..
+            } => self.execute_delete(&table, filter, returning),
 
             // Query Operations
             LogicalPlan::Scan { .. }

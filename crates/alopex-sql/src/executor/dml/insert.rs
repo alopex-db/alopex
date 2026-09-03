@@ -6,7 +6,9 @@ use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::executor::{
+    ColumnInfo, ConstraintViolation, ExecutionResult, ExecutorError, QueryResult, Result,
+};
 use crate::planner::type_checker::TypeChecker;
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
@@ -18,6 +20,7 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     table_name: &str,
     columns: Vec<String>,
     values: Vec<Vec<TypedExpr>>,
+    returning: Option<Vec<TypedExpr>>,
 ) -> Result<ExecutionResult> {
     let table = catalog
         .get_table(table_name)
@@ -33,7 +36,11 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .map(|row_exprs| build_row(catalog, &table, &columns, row_exprs, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
-    insert_rows(txn, catalog, &table, table_name, rows)
+    let result = insert_rows(txn, catalog, &table, table_name, rows.clone())?;
+    if let Some(exprs) = returning {
+        return Ok(build_returning_result(&exprs, &rows));
+    }
+    Ok(result)
 }
 
 fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
