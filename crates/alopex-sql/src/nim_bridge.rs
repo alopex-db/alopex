@@ -216,6 +216,9 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
     let tokens = scan_top_level_tokens(sql);
     let ranges = top_level_statement_ranges(sql, &tokens);
+    if let Some(statements) = parse_transaction_control_batch(sql, &tokens, &ranges)? {
+        return Ok(statements);
+    }
     let contains_set_operation = ranges.iter().any(|(start, end)| {
         tokens.iter().any(|token| {
             token.start >= *start
@@ -234,6 +237,137 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
         return Ok(statements);
     }
     parse_sql_via_ffi(sql)
+}
+
+fn parse_transaction_control_batch(
+    sql: &str,
+    tokens: &[TopLevelToken],
+    ranges: &[(usize, usize)],
+) -> Result<Option<Vec<Statement>>> {
+    let mut saw_transaction_control = false;
+    let mut statements = Vec::new();
+    for (start, end) in ranges.iter().copied() {
+        if let Some(statement) = parse_transaction_control_statement(sql, start, end)? {
+            saw_transaction_control = true;
+            statements.push(statement);
+            continue;
+        }
+        let words = tokens
+            .iter()
+            .copied()
+            .filter(|token| {
+                token.start >= start
+                    && token.end <= end
+                    && matches!(token.kind, TopLevelTokenKind::Word)
+            })
+            .collect::<Vec<_>>();
+        if words
+            .iter()
+            .any(|word| set_operator(&sql[word.start..word.end]).is_some())
+        {
+            statements.push(parse_set_operation_statement(sql, start, end, &words)?);
+        } else {
+            statements.extend(parse_sql_via_ffi(&sql[start..end])?);
+        }
+    }
+    if saw_transaction_control {
+        Ok(Some(statements))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_transaction_control_statement(
+    sql: &str,
+    start: usize,
+    end: usize,
+) -> Result<Option<Statement>> {
+    let fragment = &sql[start..end];
+    let Some(first_non_ws) = fragment.find(|ch: char| !ch.is_ascii_whitespace()) else {
+        return Ok(None);
+    };
+    let Some(last_non_ws) = fragment.rfind(|ch: char| !ch.is_ascii_whitespace()) else {
+        return Ok(None);
+    };
+    let trimmed_start = start + first_non_ws;
+    let trimmed_end = start + last_non_ws + 1;
+    let trimmed = &sql[trimmed_start..trimmed_end];
+    let words = trimmed.split_ascii_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return Ok(None);
+    }
+
+    fn parse_savepoint_name(words: &[&str], expected_len: usize) -> Result<String> {
+        if words.len() != expected_len {
+            return Err(set_operation_parser_error(
+                "savepoint name",
+                words.get(expected_len).copied().unwrap_or("EOF"),
+            ));
+        }
+        let name = words[expected_len - 1];
+        let mut chars = name.chars();
+        let Some(head) = chars.next() else {
+            return Err(set_operation_parser_error("savepoint name", "EOF"));
+        };
+        if !(head.is_ascii_alphabetic() || head == '_')
+            || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(set_operation_parser_error(
+                "savepoint identifier ([A-Za-z_][A-Za-z0-9_]*)",
+                name,
+            ));
+        }
+        Ok(name.to_ascii_lowercase())
+    }
+
+    let span = span_for_offsets(sql, trimmed_start, trimmed_end);
+    if words[0].eq_ignore_ascii_case("savepoint") {
+        return Ok(Some(Statement {
+            kind: StatementKind::Savepoint(crate::ast::Savepoint {
+                name: parse_savepoint_name(&words, 2)?,
+            }),
+            span,
+        }));
+    }
+    if words[0].eq_ignore_ascii_case("rollback")
+        && words
+            .get(1)
+            .is_some_and(|word| word.eq_ignore_ascii_case("to"))
+    {
+        if !words
+            .get(2)
+            .is_some_and(|word| word.eq_ignore_ascii_case("savepoint"))
+        {
+            return Err(set_operation_parser_error(
+                "SAVEPOINT keyword",
+                words.get(2).copied().unwrap_or("EOF"),
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::RollbackToSavepoint(crate::ast::Savepoint {
+                name: parse_savepoint_name(&words, 4)?,
+            }),
+            span,
+        }));
+    }
+    if words[0].eq_ignore_ascii_case("release") {
+        if !words
+            .get(1)
+            .is_some_and(|word| word.eq_ignore_ascii_case("savepoint"))
+        {
+            return Err(set_operation_parser_error(
+                "SAVEPOINT keyword",
+                words.get(1).copied().unwrap_or("EOF"),
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::ReleaseSavepoint(crate::ast::Savepoint {
+                name: parse_savepoint_name(&words, 3)?,
+            }),
+            span,
+        }));
+    }
+    Ok(None)
 }
 
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {

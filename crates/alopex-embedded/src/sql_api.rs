@@ -25,6 +25,7 @@ use crate::Error;
 use crate::OwnedEmbeddedTransaction;
 use crate::Result;
 use crate::SqlResult;
+use crate::SqlSavepoint;
 use crate::Transaction;
 
 /// Streaming row access for FR-7 compliance.
@@ -144,6 +145,24 @@ fn stmt_changes_user_data(stmt: &Statement) -> bool {
     )
 }
 
+const SAVEPOINT_MISSING_CODE: &str = "ALOPEX-T001";
+const SAVEPOINT_FAILED_STATE_CODE: &str = "ALOPEX-T002";
+
+fn savepoint_missing_error(name: &str) -> Error {
+    Error::Sql(alopex_sql::SqlError::Execution {
+        message: format!("savepoint not found: {name}"),
+        code: SAVEPOINT_MISSING_CODE,
+    })
+}
+
+fn savepoint_failed_state_error() -> Error {
+    Error::Sql(alopex_sql::SqlError::Execution {
+        message: "transaction is in failed state; rollback to a savepoint before continuing"
+            .to_string(),
+        code: SAVEPOINT_FAILED_STATE_CODE,
+    })
+}
+
 pub(crate) fn local_journal_scope<C: Catalog>(catalog: &C) -> RangeChangeJournalScope {
     let mut index_tables = BTreeMap::new();
     for table in catalog.list_tables() {
@@ -164,6 +183,166 @@ fn plan_stmt<'a, S: KVStore>(
     planner
         .plan(stmt)
         .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
+}
+
+fn execute_borrowed_statement(
+    transaction: &mut Transaction<'_>,
+    stmt: &Statement,
+    statement_index: usize,
+) -> Result<SqlResult> {
+    let store = transaction.db.store.clone();
+    let sql_catalog = transaction.db.sql_catalog.clone();
+    let txn = transaction.inner.as_mut().ok_or(Error::TxnCompleted)?;
+    let mode = txn.mode();
+    let mut borrowed =
+        TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(txn, mode, &mut transaction.overlay);
+    let plan = {
+        let catalog = sql_catalog.read().expect("catalog lock poisoned");
+        let (_, overlay) = borrowed.split_parts();
+        plan_stmt(&*catalog, &*overlay, stmt)?
+    };
+    {
+        let catalog = sql_catalog.read().expect("catalog lock poisoned");
+        let (_, overlay) = borrowed.split_parts();
+        let view = TxnCatalogView::new(&*catalog, &*overlay);
+        transaction.db.record_routing(&view, stmt, statement_index);
+    }
+    let mut executor: Executor<_, _> = Executor::new(store, sql_catalog);
+    executor
+        .execute_in_txn(plan, &mut borrowed)
+        .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+}
+
+fn execute_owned_statement(
+    transaction: &mut OwnedEmbeddedTransaction,
+    stmt: &Statement,
+    statement_index: usize,
+) -> Result<SqlResult> {
+    let db = Arc::clone(&transaction.db);
+    let session = transaction.session.clone();
+    let overlay = &mut transaction.overlay;
+    let mut result = Ok(alopex_sql::ExecutionResult::Success);
+    session
+        .with_transaction(|owned| {
+            result = (|| {
+                let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
+                let mode = raw.mode();
+                let mut borrowed =
+                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let plan = {
+                    let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                    let (_, overlay) = borrowed.split_parts();
+                    plan_stmt(&*catalog, &*overlay, stmt)?
+                };
+                {
+                    let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                    let (_, overlay) = borrowed.split_parts();
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    db.record_routing(&view, stmt, statement_index);
+                }
+                let mut executor: Executor<_, _> =
+                    Executor::new(db.store.clone(), db.sql_catalog.clone());
+                executor
+                    .execute_in_txn(plan, &mut borrowed)
+                    .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+            })();
+            Ok(())
+        })
+        .map_err(Error::Core)?;
+    result
+}
+
+fn rebuild_borrowed_transaction(transaction: &mut Transaction<'_>) -> Result<()> {
+    if let Some(txn) = transaction.inner.take() {
+        txn.rollback_self().map_err(Error::Core)?;
+    }
+    transaction.inner = Some(
+        transaction
+            .db
+            .store
+            .begin(transaction.mode)
+            .map_err(Error::Core)?,
+    );
+    for (index, state) in transaction.hnsw_indices.values_mut() {
+        let _ = index.rollback(state);
+    }
+    transaction.hnsw_indices.clear();
+    transaction.overlay = CatalogOverlay::default();
+    transaction.catalog_modified = false;
+    transaction.vector_cache_invalidated = false;
+    transaction.journal = if transaction.mode == TxnMode::ReadWrite
+        && transaction.db.store.range_change_journal_capability()
+            == RangeChangeJournalCapability::Supported
+    {
+        let scope = {
+            let catalog = transaction
+                .db
+                .sql_catalog
+                .read()
+                .expect("catalog lock poisoned");
+            local_journal_scope(&*catalog)
+        };
+        Some(
+            LocalRangeChangeJournal::capture(
+                transaction.inner.as_mut().ok_or(Error::TxnCompleted)?,
+                scope,
+            )
+            .map_err(Error::Core)?,
+        )
+    } else {
+        None
+    };
+    let replay = transaction.sql_replay.clone();
+    for (index, stmt) in replay.iter().enumerate() {
+        execute_borrowed_statement(transaction, stmt, index)?;
+    }
+    transaction.catalog_modified = transaction.sql_replay.iter().any(stmt_changes_catalog);
+    transaction.vector_cache_invalidated = transaction.sql_replay.iter().any(stmt_requires_write);
+    Ok(())
+}
+
+fn rebuild_owned_transaction(transaction: &mut OwnedEmbeddedTransaction) -> Result<()> {
+    transaction.session.rollback().map_err(Error::Core)?;
+    transaction.session = transaction.db.begin_owned_transaction(transaction.mode)?;
+    for (index, state) in transaction.hnsw_indices.values_mut() {
+        let _ = index.rollback(state);
+    }
+    transaction.hnsw_indices.clear();
+    transaction.overlay = CatalogOverlay::default();
+    transaction.catalog_modified = false;
+    transaction.vector_cache_invalidated = false;
+    transaction.journal = if transaction.mode == TxnMode::ReadWrite
+        && transaction.db.store.range_change_journal_capability()
+            == RangeChangeJournalCapability::Supported
+    {
+        let scope = {
+            let catalog = transaction
+                .db
+                .sql_catalog
+                .read()
+                .expect("catalog lock poisoned");
+            local_journal_scope(&*catalog)
+        };
+        Some(
+            transaction
+                .session
+                .with_transaction(|owned| {
+                    let mut borrowed =
+                        AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
+                    LocalRangeChangeJournal::capture(&mut borrowed, scope)
+                })
+                .map_err(Error::Core)?,
+        )
+    } else {
+        None
+    };
+    let replay = transaction.sql_replay.clone();
+    for (index, stmt) in replay.iter().enumerate() {
+        execute_owned_statement(transaction, stmt, index)?;
+    }
+    transaction.catalog_modified = transaction.sql_replay.iter().any(stmt_changes_catalog);
+    transaction.vector_cache_invalidated = transaction.sql_replay.iter().any(stmt_requires_write);
+    Ok(())
 }
 
 /// Execute one SQL string inside an [`OwnedEmbeddedTransaction`] without committing it.
@@ -196,51 +375,66 @@ pub(crate) fn execute_sql_owned(
         *vector_cache = None;
     }
 
-    let db = Arc::clone(&transaction.db);
-    let session = transaction.session.clone();
-    let overlay = &mut transaction.overlay;
-    let catalog_modified = &mut transaction.catalog_modified;
-    let mut outcome = Ok(alopex_sql::ExecutionResult::Success);
-
-    session
-        .with_transaction(|owned| {
-            outcome = (|| {
-                let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
-                let mode = raw.mode();
-                let mut borrowed =
-                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
-                let mut executor: Executor<_, _> =
-                    Executor::new(db.store.clone(), db.sql_catalog.clone());
-                let mut last = alopex_sql::ExecutionResult::Success;
-
-                for (statement_index, stmt) in statements.iter().enumerate() {
-                    let plan = {
-                        let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
-                        let (_, overlay) = borrowed.split_parts();
-                        plan_stmt(&*catalog, &*overlay, stmt)?
-                    };
-
-                    {
-                        let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
-                        let (_, overlay) = borrowed.split_parts();
-                        let view = TxnCatalogView::new(&*catalog, &*overlay);
-                        db.record_routing(&view, stmt, statement_index);
+    let mut last = alopex_sql::ExecutionResult::Success;
+    for (statement_index, stmt) in statements.into_iter().enumerate() {
+        if transaction.sql_failed && !matches!(stmt.kind, StatementKind::RollbackToSavepoint(_)) {
+            return Err(savepoint_failed_state_error());
+        }
+        match &stmt.kind {
+            StatementKind::Savepoint(savepoint) => {
+                transaction.sql_savepoints.push(SqlSavepoint {
+                    name: savepoint.name.clone(),
+                    replay_len: transaction.sql_replay.len(),
+                });
+                last = alopex_sql::ExecutionResult::Success;
+            }
+            StatementKind::RollbackToSavepoint(savepoint) => {
+                let Some(index) = transaction
+                    .sql_savepoints
+                    .iter()
+                    .rposition(|frame| frame.name == savepoint.name)
+                else {
+                    return Err(savepoint_missing_error(&savepoint.name));
+                };
+                let replay_len = transaction.sql_savepoints[index].replay_len;
+                transaction.sql_replay.truncate(replay_len);
+                transaction.sql_savepoints.truncate(index + 1);
+                rebuild_owned_transaction(transaction)?;
+                transaction.sql_failed = false;
+                last = alopex_sql::ExecutionResult::Success;
+            }
+            StatementKind::ReleaseSavepoint(savepoint) => {
+                let Some(index) = transaction
+                    .sql_savepoints
+                    .iter()
+                    .rposition(|frame| frame.name == savepoint.name)
+                else {
+                    return Err(savepoint_missing_error(&savepoint.name));
+                };
+                transaction.sql_savepoints.truncate(index);
+                last = alopex_sql::ExecutionResult::Success;
+            }
+            _ => match execute_owned_statement(transaction, &stmt, statement_index) {
+                Ok(result) => {
+                    if stmt_changes_catalog(&stmt) {
+                        transaction.catalog_modified = true;
                     }
-
-                    last = executor
-                        .execute_in_txn(plan, &mut borrowed)
-                        .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))?;
+                    if stmt_requires_write(&stmt) {
+                        transaction.vector_cache_invalidated = true;
+                    }
+                    if stmt_requires_write(&stmt) || stmt_changes_catalog(&stmt) {
+                        transaction.sql_replay.push(stmt.clone());
+                    }
+                    last = result;
                 }
-
-                if statements.iter().any(stmt_changes_catalog) {
-                    *catalog_modified = true;
+                Err(error) => {
+                    transaction.sql_failed = true;
+                    return Err(error);
                 }
-                Ok(last)
-            })();
-            Ok(())
-        })
-        .map_err(Error::Core)?;
-    outcome
+            },
+        }
+    }
+    Ok(last)
 }
 
 /// Build column info from projection and schema.
@@ -746,38 +940,64 @@ impl<'a> Transaction<'a> {
             *vector_cache = None;
         }
 
-        let store = self.db.store.clone();
-        let sql_catalog = self.db.sql_catalog.clone();
-
-        let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
-        let mode = txn.mode();
-
-        let mut borrowed =
-            TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(txn, mode, &mut self.overlay);
-        let mut executor: Executor<_, _> = Executor::new(store, sql_catalog.clone());
-
         let mut last = alopex_sql::ExecutionResult::Success;
-        for (statement_index, stmt) in stmts.iter().enumerate() {
-            let plan = {
-                let catalog = sql_catalog.read().expect("catalog lock poisoned");
-                let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
-            };
-
-            {
-                let catalog = sql_catalog.read().expect("catalog lock poisoned");
-                let (_, overlay) = borrowed.split_parts();
-                let view = TxnCatalogView::new(&*catalog, &*overlay);
-                self.db.record_routing(&view, stmt, statement_index);
+        for (statement_index, stmt) in stmts.into_iter().enumerate() {
+            if self.sql_failed && !matches!(stmt.kind, StatementKind::RollbackToSavepoint(_)) {
+                return Err(savepoint_failed_state_error());
             }
-
-            last = executor
-                .execute_in_txn(plan, &mut borrowed)
-                .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
-        }
-
-        if stmts.iter().any(stmt_changes_catalog) {
-            self.catalog_modified = true;
+            match &stmt.kind {
+                StatementKind::Savepoint(savepoint) => {
+                    self.sql_savepoints.push(SqlSavepoint {
+                        name: savepoint.name.clone(),
+                        replay_len: self.sql_replay.len(),
+                    });
+                    last = alopex_sql::ExecutionResult::Success;
+                }
+                StatementKind::RollbackToSavepoint(savepoint) => {
+                    let Some(index) = self
+                        .sql_savepoints
+                        .iter()
+                        .rposition(|frame| frame.name == savepoint.name)
+                    else {
+                        return Err(savepoint_missing_error(&savepoint.name));
+                    };
+                    let replay_len = self.sql_savepoints[index].replay_len;
+                    self.sql_replay.truncate(replay_len);
+                    self.sql_savepoints.truncate(index + 1);
+                    rebuild_borrowed_transaction(self)?;
+                    self.sql_failed = false;
+                    last = alopex_sql::ExecutionResult::Success;
+                }
+                StatementKind::ReleaseSavepoint(savepoint) => {
+                    let Some(index) = self
+                        .sql_savepoints
+                        .iter()
+                        .rposition(|frame| frame.name == savepoint.name)
+                    else {
+                        return Err(savepoint_missing_error(&savepoint.name));
+                    };
+                    self.sql_savepoints.truncate(index);
+                    last = alopex_sql::ExecutionResult::Success;
+                }
+                _ => match execute_borrowed_statement(self, &stmt, statement_index) {
+                    Ok(result) => {
+                        if stmt_changes_catalog(&stmt) {
+                            self.catalog_modified = true;
+                        }
+                        if stmt_requires_write(&stmt) {
+                            self.vector_cache_invalidated = true;
+                        }
+                        if stmt_requires_write(&stmt) || stmt_changes_catalog(&stmt) {
+                            self.sql_replay.push(stmt.clone());
+                        }
+                        last = result;
+                    }
+                    Err(error) => {
+                        self.sql_failed = true;
+                        return Err(error);
+                    }
+                },
+            }
         }
         Ok(last)
     }
@@ -848,5 +1068,83 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn explicit_sql_transaction_savepoint_supports_nested_shadowing_and_rollback() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);")
+            .unwrap();
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+
+        transaction.execute_sql("SAVEPOINT a;").unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (1, 'outer');")
+            .unwrap();
+        transaction.execute_sql("SAVEPOINT a;").unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (2, 'inner');")
+            .unwrap();
+        transaction.execute_sql("ROLLBACK TO SAVEPOINT a;").unwrap();
+
+        let ExecutionResult::Query(query) = transaction.execute_sql("SELECT id FROM t;").unwrap()
+        else {
+            panic!("expected query result")
+        };
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rows[0].values[0], alopex_sql::SqlValue::Integer(1));
+
+        transaction.execute_sql("RELEASE SAVEPOINT a;").unwrap();
+        transaction.execute_sql("ROLLBACK TO SAVEPOINT a;").unwrap();
+        let ExecutionResult::Query(empty) = transaction.execute_sql("SELECT id FROM t;").unwrap()
+        else {
+            panic!("expected query result")
+        };
+        assert!(empty.rows.is_empty());
+    }
+
+    #[test]
+    fn explicit_sql_transaction_rejects_missing_savepoint_with_typed_error() {
+        let db = Database::open_in_memory().unwrap();
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+        let error = transaction
+            .execute_sql("ROLLBACK TO SAVEPOINT missing;")
+            .unwrap_err();
+        assert_eq!(error.sql_error_code(), Some(SAVEPOINT_MISSING_CODE));
+    }
+
+    #[test]
+    fn explicit_sql_transaction_recovers_from_failed_state_via_rollback_to_savepoint() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);")
+            .unwrap();
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+
+        transaction.execute_sql("SAVEPOINT sp;").unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (1, 'ok');")
+            .unwrap();
+        assert!(transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (1, 'dup');")
+            .is_err());
+
+        let failed = transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (2, 'blocked');")
+            .unwrap_err();
+        assert_eq!(failed.sql_error_code(), Some(SAVEPOINT_FAILED_STATE_CODE));
+
+        transaction
+            .execute_sql("ROLLBACK TO SAVEPOINT sp;")
+            .unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (2, 'recovered');")
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let ExecutionResult::Query(query) = db.execute_sql("SELECT id FROM t;").unwrap() else {
+            panic!("expected query result")
+        };
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rows[0].values[0], alopex_sql::SqlValue::Integer(2));
     }
 }

@@ -101,11 +101,15 @@ impl Database {
         Ok(OwnedEmbeddedTransaction {
             db: self,
             session,
+            mode,
             overlay: CatalogOverlay::new(),
             catalog_modified: false,
             journal,
             hnsw_indices: HashMap::new(),
             vector_cache_invalidated: false,
+            sql_replay: Vec::new(),
+            sql_savepoints: Vec::new(),
+            sql_failed: false,
         })
     }
 }
@@ -118,11 +122,15 @@ impl Database {
 pub struct OwnedEmbeddedTransaction {
     pub(crate) db: Arc<Database>,
     pub(crate) session: OwnedTransactionSession,
+    pub(crate) mode: TxnMode,
     pub(crate) overlay: CatalogOverlay,
     pub(crate) catalog_modified: bool,
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
+    pub(crate) sql_replay: Vec<alopex_sql::Statement>,
+    pub(crate) sql_savepoints: Vec<crate::SqlSavepoint>,
+    pub(crate) sql_failed: bool,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -206,6 +214,9 @@ impl OwnedEmbeddedTransaction {
         preparation?;
 
         self.session.commit().map_err(Error::Core)?;
+        self.sql_replay.clear();
+        self.sql_savepoints.clear();
+        self.sql_failed = false;
         let overlay = std::mem::take(&mut self.overlay);
         let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
         catalog.apply_overlay(overlay);
@@ -243,6 +254,9 @@ impl OwnedEmbeddedTransaction {
         }
         self.hnsw_indices.clear();
         self.overlay = CatalogOverlay::default();
+        self.sql_replay.clear();
+        self.sql_savepoints.clear();
+        self.sql_failed = false;
         Ok(())
     }
 }
@@ -380,5 +394,37 @@ mod tests {
             Some(vec![0.0, 1.0])
         );
         reader.rollback().unwrap();
+    }
+
+    #[test]
+    fn owned_embedded_transaction_supports_savepoint_recovery() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)")
+            .unwrap();
+
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction.execute_sql("SAVEPOINT sp").unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (1, 'ok')")
+            .unwrap();
+        assert!(transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (1, 'dup')")
+            .is_err());
+        transaction.execute_sql("ROLLBACK TO SAVEPOINT sp").unwrap();
+        transaction
+            .execute_sql("INSERT INTO t (id, value) VALUES (2, 'ok')")
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let alopex_sql::ExecutionResult::Query(query) =
+            database.execute_sql("SELECT id FROM t").unwrap()
+        else {
+            panic!("expected query result")
+        };
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rows[0].values[0], alopex_sql::SqlValue::Integer(2));
     }
 }

@@ -1035,3 +1035,22 @@ fn clause_free_function_calls_still_decode_without_the_new_keys() {
     assert!(order_by.is_empty());
     assert!(within_group.is_empty());
 }
+
+#[test]
+fn savepoint_statements_parse_without_nim_ast_support() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SAVEPOINT a; ROLLBACK TO SAVEPOINT a; RELEASE SAVEPOINT a;",
+    )
+    .expect("savepoint control statements should parse");
+    assert_eq!(statements.len(), 3);
+    assert!(matches!(statements[0].kind, StatementKind::Savepoint(_)));
+    assert!(matches!(
+        statements[1].kind,
+        StatementKind::RollbackToSavepoint(_)
+    ));
+    assert!(matches!(
+        statements[2].kind,
+        StatementKind::ReleaseSavepoint(_)
+    ));
+}

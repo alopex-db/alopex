@@ -58,6 +58,11 @@ pub enum StatementKind {
     Insert(Insert),
     Update(Update),
     Delete(Delete),
+
+    // Transaction control (explicit transaction scope only).
+    Savepoint(Savepoint),
+    RollbackToSavepoint(Savepoint),
+    ReleaseSavepoint(Savepoint),
 }
 
 impl StatementKind {
@@ -65,4 +70,9 @@ impl StatementKind {
     pub const fn is_query(&self) -> bool {
         matches!(self, Self::Select(_) | Self::Values(_))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Savepoint {
+    pub name: String,
 }

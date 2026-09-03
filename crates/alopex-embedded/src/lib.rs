@@ -33,7 +33,7 @@ pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
-pub use alopex_sql::{DataSourceFormat, TableType};
+pub use alopex_sql::{DataSourceFormat, Statement, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
 pub use alopex_core::kv::{
@@ -842,6 +842,7 @@ impl Database {
         Ok(Transaction {
             inner: Some(txn),
             db: self,
+            mode,
             hnsw_indices: HashMap::new(),
             overlay: alopex_sql::catalog::CatalogOverlay::new(),
             vector_cache_updates: HashMap::new(),
@@ -849,6 +850,9 @@ impl Database {
             vector_cache_invalidated: false,
             catalog_modified: false,
             journal,
+            sql_replay: Vec::new(),
+            sql_savepoints: Vec::new(),
+            sql_failed: false,
         })
     }
 }
@@ -863,6 +867,7 @@ impl Default for Database {
 pub struct Transaction<'a> {
     inner: Option<AnyKVTransaction<'a>>,
     db: &'a Database,
+    pub(crate) mode: TxnMode,
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
     overlay: alopex_sql::catalog::CatalogOverlay,
     vector_cache_updates: HashMap<Key, CachedVector>,
@@ -872,6 +877,15 @@ pub struct Transaction<'a> {
     pub(crate) catalog_modified: bool,
     /// SQL row/index state captured before a read-write local transaction.
     journal: Option<LocalRangeChangeJournal>,
+    pub(crate) sql_replay: Vec<Statement>,
+    pub(crate) sql_savepoints: Vec<SqlSavepoint>,
+    pub(crate) sql_failed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SqlSavepoint {
+    pub(crate) name: String,
+    pub(crate) replay_len: usize,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -1382,6 +1396,9 @@ impl<'a> Transaction<'a> {
         }
         self.hnsw_indices.clear();
         self.overlay = alopex_sql::catalog::CatalogOverlay::default();
+        self.sql_replay.clear();
+        self.sql_savepoints.clear();
+        self.sql_failed = false;
         self.inner = None;
         Ok(())
     }
@@ -1393,6 +1410,9 @@ impl<'a> Transaction<'a> {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
+            self.sql_replay.clear();
+            self.sql_savepoints.clear();
+            self.sql_failed = false;
             txn.rollback_self().map_err(Error::Core)
         } else {
             Err(Error::TxnCompleted)
