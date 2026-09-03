@@ -250,8 +250,8 @@ fn duckdb_and_datafusion_reference_fixture_matches_exact_rows() {
     let reference: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/window_composition_reference.json"))
             .expect("parse reference fixture");
-    assert_eq!(reference["verified_with"]["duckdb"], "1.5.5");
-    assert_eq!(reference["verified_with"]["datafusion"], "54.0.0");
+    assert_eq!(reference["documented_against"]["duckdb"], "1.5.5");
+    assert_eq!(reference["documented_against"]["datafusion"], "54.0.0");
 
     let (store, catalog) = setup();
     for case in reference["cases"].as_array().expect("reference cases") {

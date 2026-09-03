@@ -1,6 +1,8 @@
 {
   "schema": "alopex.polars-parity/v1",
   "polars_version": "1.43.2",
+  "polars_commit": "ae588a9f2c91171f45bace43a99fb7b80b90847b",
+  "inventory_sources": ["crates/alopex-dataframe/src/lib.rs", "crates/alopex-py/python/alopex/_alopex.pyi", "crates/alopex-py/src/types/dataframe.rs", "docs/parity/README.md"],
   "status_values": ["implemented-compatible", "not-yet-implemented", "alopex-extension", "known-performance-divergence"],
   "entries": [
     {"surface":"DataFrame","api":"DataFrame","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_reference.rs","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api"},
@@ -8,6 +10,7 @@
     {"surface":"DataFrame","api":"DataFrame.filter","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_reference.rs","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api"},
     {"surface":"DataFrame","api":"DataFrame.with_columns","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_reference.rs","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api"},
     {"surface":"DataFrame","api":"DataFrame.to_dict","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api"},
+    {"surface":"DataFrame","api":"Python DataFrame/LazyFrame live differential","status":"implemented-compatible","reference":"polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b","evidence":"crates/alopex-py/tests/test_polars_1432_reference.py","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api","contracts":["return-type","schema","dtype","null","column-order","row-order","value","error","csv","parquet","streaming"]},
     {"surface":"DataFrame","api":"DataFrame.collect","status":"known-performance-divergence","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/src/lazy/lazyframe.rs;crates/alopex-dataframe/tests/polars_compat.rs","performance_contract":"polars-lazy-streaming-v1","performance_evidence":"polars-csv-streaming","issue":305,"notes":"Functional parity is implemented; the fixed performance fixture remains outside the compatibility budget."},
     {"surface":"Series","api":"Series","status":"implemented-compatible","reference":"polars:1.43.2","evidence":"crates/alopex-dataframe/tests/polars_compat.rs","performance_contract":"polars-eager-v1","performance_evidence":"polars-eager-api"},
     {"surface":"Series","api":"Series.cast","status":"not-yet-implemented","evidence":"crates/alopex-dataframe/src/dataframe/series.rs","issue":305},

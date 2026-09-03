@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -109,9 +110,17 @@ def validate_performance_contracts(path: Path, payload: dict[str, object]) -> li
             errors.append(f"{path}: {name} has invalid kind {kind}")
             continue
         revision = str(contract.get("reference_revision", ""))
-        if not revision or any(
-            token in MUTABLE_REVISIONS
-            for token in revision.lower().replace("/", "@").split("@")
+        pinned_revisions = revision.split(";")
+        if (
+            not revision
+            or any(
+                token in MUTABLE_REVISIONS
+                for token in revision.lower().replace("/", "@").split("@")
+            )
+            or any(
+                not re.fullmatch(r"[0-9a-f]{40}", pin.rsplit("@", 1)[-1])
+                for pin in pinned_revisions
+            )
         ):
             errors.append(f"{path}: {name} needs an exact reference_revision")
         fixture = contract.get("fixture", {})

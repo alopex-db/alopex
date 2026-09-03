@@ -1,4 +1,5 @@
 {
+  "test_provenance": {"relationship":"handwritten-regression","generation":{"command":null,"result_format":"documented expected rows; not external execution"}},
   "reference_versions": {
     "duckdb": "1.5.5",
     "datafusion": "54.0.0",

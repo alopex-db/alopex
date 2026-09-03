@@ -8,8 +8,8 @@ use alopex_dataframe::{
     ConcatStrNullBehavior, DataFrame, DataFrameStream, Expr, LazyFrame, Series, StreamOptions,
 };
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, ListBuilder, StringArray,
-    StringBuilder, TimestampMicrosecondArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, LargeStringArray, ListArray,
+    ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -1268,6 +1268,7 @@ fn dataframe_to_py_dict(py: Python<'_>, df: &DataFrame) -> PyResult<Py<PyDict>> 
 fn array_to_py_list(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
     match array.data_type() {
         DataType::Utf8 => utf8_array_to_py(py, array),
+        DataType::LargeUtf8 => large_utf8_array_to_py(py, array),
         DataType::Boolean => bool_array_to_py(py, array),
         DataType::Int32 => int32_array_to_py(py, array),
         DataType::Int64 => int64_array_to_py(py, array),
@@ -1280,6 +1281,19 @@ fn array_to_py_list(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
             "unsupported DataFrame column type for Python conversion: {other}"
         ))),
     }
+}
+
+fn large_utf8_array_to_py(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
+    let array = downcast_array::<LargeStringArray>(array, "LargeStringArray")?;
+    let values = PyList::empty(py);
+    for idx in 0..array.len() {
+        if array.is_null(idx) {
+            values.append(py.None())?;
+        } else {
+            values.append(array.value(idx))?;
+        }
+    }
+    Ok(values.unbind())
 }
 
 fn utf8_array_to_py(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
@@ -1393,13 +1407,27 @@ mod tests {
     use std::sync::Arc;
 
     use alopex_dataframe::{DataFrame, LazyFrame, Series, StreamOptions};
-    use arrow::array::{ArrayRef, Int64Array, StringArray};
+    use arrow::array::{ArrayRef, Int64Array, LargeStringArray, StringArray};
     use pyo3::types::{PyAnyMethods, PyDictMethods, PyList, PyModule};
     use pyo3::{Py, Python};
 
     use super::{
-        DataFrameStreamRegistry, DatabaseControl, PyDataFrame, PyDataFrameStream, ThreadMode,
+        array_to_py_list, DataFrameStreamRegistry, DatabaseControl, PyDataFrame, PyDataFrameStream,
+        ThreadMode,
     };
+
+    #[test]
+    fn large_utf8_arrow_values_convert_to_python_lists() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let array: ArrayRef = Arc::new(LargeStringArray::from(vec![Some("a"), None]));
+            let values = array_to_py_list(py, &array).unwrap();
+            assert_eq!(
+                values.bind(py).extract::<Vec<Option<String>>>().unwrap(),
+                vec![Some("a".into()), None]
+            );
+        });
+    }
 
     fn expression_dataframe(values: Vec<i64>, labels: Vec<&str>) -> DataFrame {
         DataFrame::new(vec![

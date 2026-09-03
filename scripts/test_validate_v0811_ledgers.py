@@ -132,22 +132,24 @@ class LedgerContractTests(unittest.TestCase):
         self.assertIn('--suite "$SUITE"', workflow)
         self.assertIn("postgres:16.14", workflow)
         self.assertIn("datafusion==50.0.0", workflow)
+        self.assertIn("duckdb==1.4.0", workflow)
         self.assertIn("pysqlite3-binary==0.5.4", workflow)
+        self.assertIn("sql_v0811_differential", workflow)
         self.assertNotIn("continue-on-error: true", workflow)
 
     def test_sql_reference_engines_have_separate_runnable_contracts(self):
         contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)["contracts"]
         self.assertEqual(
             contracts["sql-sqlite-v1"]["reference_revision"],
-            "sqlite/sqlite@version-3.46.1",
+            "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
         )
         self.assertEqual(
             contracts["sql-postgresql-v1"]["reference_revision"],
-            "postgres/postgres@REL_16_14",
+            "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
         )
         self.assertEqual(
             contracts["sql-datafusion-streaming-v1"]["reference_revision"],
-            "apache/datafusion@50.0.0",
+            "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de",
         )
         self.assertEqual(contracts["sql-datafusion-streaming-v1"]["kind"], "streaming")
 

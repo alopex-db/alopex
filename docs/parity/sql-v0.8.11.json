@@ -1,8 +1,10 @@
 {
   "schema": "alopex.sql-conformance/v1",
-  "references": {"sqlite":"3.46.1", "postgresql":"16.14", "duckdb":"1.4.0", "datafusion":"50.0.0"},
+  "references": {"sqlite":"sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3", "postgresql":"postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682", "duckdb":"duckdb/duckdb@b8a06e4a22672e254cd0baa68a3dbed2eb51c56e", "datafusion":"apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de"},
+  "inventory_sources": ["crates/alopex-sql/src", "crates/alopex-embedded/src/sql_api.rs", "crates/alopex-py/python/alopex/_alopex.pyi", "crates/alopex-cli/src/commands/sql.rs", "crates/alopex-server/src", "docs/parity/README.md"],
   "status_values": ["reference-compatible", "alopex-extension", "known-divergence", "known-performance-divergence", "not-yet-implemented", "unsupported"],
   "entries": [
+    {"api":"portable SELECT/null/order/coercion","status":"known-performance-divergence","reference":"sqlite/postgresql/duckdb/datafusion pinned commits","evidence":"scripts/reference_tests/sql_v0811_differential.py;scripts/reference_tests/sql_v0811_curated.json","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307,"contracts":["column-order","row-order","null","unicode","boolean","coercion","aggregate","error"]},
     {"api":"parser/lexer","status":"known-performance-divergence","reference":"sqlite:test","evidence":"crates/alopex-sql/tests/nim_bridge_test.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
     {"api":"transactions/savepoints","status":"known-performance-divergence","reference":"sqlite:lang_transaction","evidence":"crates/alopex-embedded/src/sql_session.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},
     {"api":"prepared statements","status":"known-performance-divergence","reference":"sqlite:c3ref/bind_blob","evidence":"crates/alopex-embedded/src/prepared.rs","performance_contract":"sql-sqlite-v1","performance_evidence":"sql-sqlite-curated","issue":307},

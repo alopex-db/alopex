@@ -13,7 +13,7 @@
   "contracts": {
     "polars-eager-v1": {
       "kind": "tabular",
-      "reference_revision": "pola-rs/polars@py-1.43.2",
+      "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["polars-eager-api"],
       "fixture": {
@@ -37,7 +37,7 @@
     },
     "polars-lazy-streaming-v1": {
       "kind": "streaming",
-      "reference_revision": "pola-rs/polars@py-1.43.2",
+      "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["polars-csv-streaming", "polars-parquet-streaming"],
       "fixture": {
@@ -62,7 +62,7 @@
     },
     "hnsw-pareto-v1": {
       "kind": "hnsw",
-      "reference_revision": "nmslib/hnswlib@v0.8.0;facebookresearch/faiss@v1.15.0",
+      "reference_revision": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d;facebookresearch/faiss@20f14b31a6d54e243a3d1de6ae193fc4c3ec18ed",
       "evidence": "scripts/performance/hnsw_v0811_contract.py",
       "evidence_ids": ["hnsw-pareto"],
       "fixture": {
@@ -96,7 +96,7 @@
     },
     "sql-sqlite-v1": {
       "kind": "sql",
-      "reference_revision": "sqlite/sqlite@version-3.46.1",
+      "reference_revision": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-sqlite-curated"],
       "fixture": {
@@ -124,7 +124,7 @@
     },
     "sql-postgresql-v1": {
       "kind": "sql",
-      "reference_revision": "postgres/postgres@REL_16_14",
+      "reference_revision": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-postgresql-curated"],
       "fixture": {
@@ -152,7 +152,7 @@
     },
     "sql-datafusion-streaming-v1": {
       "kind": "streaming",
-      "reference_revision": "apache/datafusion@50.0.0",
+      "reference_revision": "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-streaming"],
       "fixture": {

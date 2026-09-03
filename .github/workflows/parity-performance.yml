@@ -10,6 +10,7 @@ on:
       - 'crates/alopex-sql/**'
       - 'docs/parity/**'
       - 'scripts/performance/**'
+      - 'scripts/reference_tests/**'
       - '.github/workflows/parity-performance.yml'
   push:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - 'crates/alopex-sql/**'
       - 'docs/parity/**'
       - 'scripts/performance/**'
+      - 'scripts/reference_tests/**'
       - '.github/workflows/parity-performance.yml'
   schedule:
     - cron: '23 2 * * 3'
@@ -76,7 +78,7 @@ jobs:
             maturin==1.14.1 numpy==2.4.6 pandas==3.0.5 \
             polars==1.43.2 scikit-learn==1.9.0 \
             faiss-cpu==1.15.0 hnswlib==0.8.0 \
-            datafusion==50.0.0 pysqlite3-binary==0.5.4 \
+            datafusion==50.0.0 duckdb==1.4.0 pysqlite3-binary==0.5.4 \
             'psycopg[binary]==3.2.10'
       - name: Build release Alopex and pinned Nim parser
         run: |
@@ -84,6 +86,13 @@ jobs:
           maturin develop --release -m crates/alopex-py/Cargo.toml
       - name: Verify performance contracts
         run: python scripts/validate_v0811_ledgers.py
+      - name: Run pinned SQL live differential
+        env:
+          ALOPEX_REFERENCE_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
+        run: |
+          python -m scripts.reference_tests.sql_v0811_differential \
+            --engine sqlite --engine postgresql --engine duckdb --engine datafusion \
+            --output performance-artifacts/sql/reference-evidence.json
       - name: Download the checksum-pinned HNSW dataset
         run: |
           curl -fL https://github.com/user-attachments/files/31764184/archive.zip -o "$RUNNER_TEMP/amazon.zip"

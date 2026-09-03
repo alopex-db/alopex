@@ -294,7 +294,10 @@ jobs:
           maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run polars tests
         run: |
-          pytest crates/alopex-py/tests -m "requires_polars"
+          pytest crates/alopex-py/tests -m "requires_polars and not polars_reference"
+      - name: Run exact Polars Python differential
+        if: matrix.polars == '1.43.2'
+        run: pytest crates/alopex-py/tests/test_polars_1432_reference.py
       - name: Run exact Polars reference differential
         if: matrix.polars == '1.43.2'
         env:

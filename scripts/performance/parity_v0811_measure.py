@@ -63,7 +63,7 @@ def normalize_hnsw(payload: dict[str, object], checksum: str) -> dict[str, objec
     return {
         "contract": "hnsw-pareto-v1",
         "evidence_id": "hnsw-pareto",
-        "reference_revision": "nmslib/hnswlib@v0.8.0;facebookresearch/faiss@v1.15.0",
+        "reference_revision": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d;facebookresearch/faiss@20f14b31a6d54e243a3d1de6ae193fc4c3ec18ed",
         "dataset_sha256": checksum,
         "subject": metrics("alopex-hnsw"),
         "reference": metrics("hnswlib"),
@@ -549,11 +549,11 @@ def main(argv: list[str] | None = None) -> int:
                 evidence, engines[1], workload_fixture, args.rows, args.warmups, args.runs
             )
             revision = {
-                "polars-eager-v1": "pola-rs/polars@py-1.43.2",
-                "polars-lazy-streaming-v1": "pola-rs/polars@py-1.43.2",
-                "sql-sqlite-v1": "sqlite/sqlite@version-3.46.1",
-                "sql-postgresql-v1": "postgres/postgres@REL_16_14",
-                "sql-datafusion-streaming-v1": "apache/datafusion@50.0.0",
+                "polars-eager-v1": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+                "polars-lazy-streaming-v1": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+                "sql-sqlite-v1": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+                "sql-postgresql-v1": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+                "sql-datafusion-streaming-v1": "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de",
             }[contract]
             checksum = (
                 "eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff"
