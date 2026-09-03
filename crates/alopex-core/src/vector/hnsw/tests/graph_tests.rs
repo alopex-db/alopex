@@ -125,6 +125,26 @@ fn returns_less_than_k_when_insufficient() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn full_ef_self_search_reaches_every_active_node() {
+    const COUNT: usize = 64;
+    let mut graph = make_graph();
+    let vectors: Vec<[f32; 2]> = (0..COUNT)
+        .map(|index| [index as f32, (index * index) as f32])
+        .collect();
+    for (index, vector) in vectors.iter().enumerate() {
+        graph
+            .insert(&(index as u64).to_be_bytes(), vector, b"")
+            .unwrap();
+    }
+
+    for (index, vector) in vectors.iter().enumerate() {
+        let (results, _) = graph.search(vector, 1, COUNT).unwrap();
+        assert_eq!(results[0].key, (index as u64).to_be_bytes());
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn delete_marks_node_and_compact_removes_it() {
     let mut graph = make_graph();
     graph.insert(b"a", &[0.0, 0.0], b"ma").unwrap();

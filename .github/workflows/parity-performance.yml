@@ -109,7 +109,7 @@ jobs:
         run: |
           mkdir -p performance-artifacts/hnsw
           taskset -c 0 python scripts/performance/hnsw_v0811_contract.py \
-            --dataset "$HNSW_DATASET" --output performance-artifacts/hnsw
+            --dataset "$HNSW_DATASET" --output performance-artifacts/hnsw --baseline-only
           taskset -c 0 python scripts/performance/parity_v0811_measure.py \
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \

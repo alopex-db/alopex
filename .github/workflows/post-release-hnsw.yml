@@ -24,6 +24,7 @@ jobs:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
+      RAYON_NUM_THREADS: "1"
     # Advisory evidence only: this job never gates publication or rollback.
     continue-on-error: true
     steps:
@@ -43,7 +44,8 @@ jobs:
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           python -m pip install --disable-pip-version-check --only-binary=:all: \
             "alopex==${version}" "numpy==2.4.6" "pandas==3.0.5" \
-            "scikit-learn==1.9.0" "faiss-cpu==1.15.0" "hnswlib==0.8.0"
+            "scikit-learn==1.9.0" "faiss-cpu==1.15.0" "hnswlib==0.8.0" \
+            "h5py==3.15.1"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "RELEASE_VERSION=${version}" >> "${GITHUB_ENV}"
       - name: Download the issue 298 Amazon dataset
@@ -62,17 +64,28 @@ jobs:
           echo "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291  ${dataset}" \
             | sha256sum --check --strict
           echo "DATASET_PATH=${dataset}" >> "${GITHUB_ENV}"
+      - name: Download the checksum-pinned glove scale dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          dataset="${RUNNER_TEMP}/glove-100-angular.hdf5"
+          curl -fL https://ann-benchmarks.com/glove-100-angular.hdf5 -o "${dataset}"
+          echo "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4  ${dataset}" \
+            | sha256sum --check --strict
+          echo "GLOVE_DATASET_PATH=${dataset}" >> "${GITHUB_ENV}"
       - name: Record benchmark environment
         run: |
           {
             uname -a
             python --version
-            python -m pip show alopex numpy pandas scikit-learn faiss-cpu hnswlib
+            python -m pip show alopex numpy pandas scikit-learn faiss-cpu hnswlib h5py
           } > artifacts-environment.txt
       - name: Generate reproducible diagnostic artifacts
         run: >-
           python scripts/performance/hnsw_v0811_contract.py
           --dataset "${DATASET_PATH}"
+          --glove-dataset "${GLOVE_DATASET_PATH}"
+          --max-scale-n 50000
           --output artifacts/hnsw-diagnostic
           --release-version "${RELEASE_VERSION}"
       - name: Upload diagnostic artifacts

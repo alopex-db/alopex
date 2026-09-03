@@ -123,6 +123,11 @@ What it does:
 - Runs a flat search benchmark (`search_flat`) on 10k×128 vectors (cosine / L2) to show baseline performance.
 - Executes embedded API E2E tests: vector upsert/search with filters and checksum corruption detection.
 
+The [v0.8.11 HNSW diagnostic contract](docs/hnsw-v0811-diagnostics.md) defines
+the reproducible recall, latency, hybrid-search, and scale evidence. Public
+notebook timings are API demonstrations unless that document links them as a
+release artifact.
+
 ## 🧰 CLI (cargo)
 
 Run the CLI from source (local/embedded):
