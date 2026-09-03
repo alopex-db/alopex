@@ -150,7 +150,20 @@ pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Resul
         })?;
 
     if let Some(base_dirs) = &config.allowed_base_dirs {
-        let allowed = base_dirs.iter().any(|base| canonical.starts_with(base));
+        let canonical_base_dirs = base_dirs
+            .iter()
+            .map(|base| {
+                base.canonicalize()
+                    .map_err(|e| ExecutorError::PathValidationFailed {
+                        path: file_path.into(),
+                        reason: format!("invalid allowed base directory '{base:?}': {e}"),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let allowed = canonical_base_dirs
+            .iter()
+            .any(|base| canonical.starts_with(base));
         if !allowed {
             return Err(ExecutorError::PathValidationFailed {
                 path: file_path.into(),
@@ -1196,6 +1209,24 @@ mod tests {
             let err = validate_file_path(link.to_str().unwrap(), &config).unwrap_err();
             assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
         }
+    }
+
+    #[test]
+    fn validate_file_path_accepts_canonicalized_allowed_base_dirs() {
+        let root = std::env::temp_dir().join("alopex_copy_base_dirs");
+        let _ = std::fs::remove_dir_all(&root);
+        let allowed = root.join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let file = allowed.join("users.csv");
+        std::fs::write(&file, "id,name\n1,alice\n").unwrap();
+
+        let config = CopySecurityConfig {
+            allowed_base_dirs: Some(vec![root.join("allowed").join("..").join("allowed")]),
+            allow_symlinks: false,
+        };
+
+        validate_file_path(file.to_str().unwrap(), &config).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
