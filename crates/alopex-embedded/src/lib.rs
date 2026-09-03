@@ -11,6 +11,7 @@ mod dataframe_api;
 pub mod options;
 pub mod owned_session;
 pub mod owned_sql;
+mod prepared;
 mod sql_api;
 mod txn_manager;
 
@@ -30,6 +31,7 @@ pub use crate::columnar_api::{
 pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
+pub use crate::prepared::PreparedStatement;
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use crate::Database;
 use crate::Error;
 use crate::OwnedEmbeddedTransaction;
+use crate::PreparedStatement;
 use crate::Result;
 use crate::SqlResult;
 use crate::Transaction;
@@ -288,6 +289,14 @@ fn build_column_info(
 }
 
 impl Database {
+    /// Prepares a SQL statement with positional `?` bind placeholders.
+    ///
+    /// The returned statement is tied to this database instance and can be
+    /// executed repeatedly with different bound values via rebind/reset.
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement<'_>> {
+        PreparedStatement::prepare(self, sql)
+    }
+
     /// Opens a read-only SQL storage transaction at a cluster-issued fenced
     /// read point. The returned transaction retains data, metadata, schema,
     /// and index identities through [`ReadAtPoint`].
