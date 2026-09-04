@@ -1,0 +1,3 @@
+[submodule "reference/duckdb-wasm"]
+	path = reference/duckdb-wasm
+	url = https://github.com/duckdb/duckdb-wasm.git
