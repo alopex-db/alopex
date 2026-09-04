@@ -187,8 +187,63 @@ message SqlResultSet {
   bool success = 5;
 }
 
+// Structured, ordered execution contract. Existing ExecuteSql and explicit
+// transaction RPCs remain unchanged for backward compatibility.
+message SharedExecutionRequest {
+  string execution_id = 1;
+  string transaction_id = 2;
+  repeated SharedExecutionStep steps = 3;
+}
+
+message SharedExecutionStep {
+  string step_id = 1;
+  oneof kind {
+    string transaction_statement = 2;
+    CommitBarrier commit_barrier = 3;
+    string post_commit_read = 4;
+  }
+}
+
+message CommitBarrier {}
+
+message SharedExecutionReport {
+  string execution_id = 1;
+  string transaction_id = 2;
+  repeated SharedExecutionStepResult steps = 3;
+}
+
+message SharedExecutionStepResult {
+  string execution_id = 1;
+  string transaction_id = 2;
+  string step_id = 3;
+  uint64 step_index = 4;
+  oneof outcome {
+    SqlResultSet execution = 5;
+    SharedCommitMetadata commit = 6;
+    SharedExecutionStepError error = 7;
+  }
+}
+
+message SharedCommitMetadata {
+  string transaction_id = 1;
+}
+
+message SharedExecutionStepError {
+  SharedExecutionStepErrorKind kind = 1;
+  string message = 2;
+}
+
+enum SharedExecutionStepErrorKind {
+  SHARED_EXECUTION_STEP_ERROR_KIND_UNSPECIFIED = 0;
+  SHARED_EXECUTION_STEP_ERROR_KIND_TRANSACTION = 1;
+  SHARED_EXECUTION_STEP_ERROR_KIND_COMMIT = 2;
+  SHARED_EXECUTION_STEP_ERROR_KIND_POST_COMMIT_READ = 3;
+  SHARED_EXECUTION_STEP_ERROR_KIND_INVALID_ORDER = 4;
+}
+
 service AlopexService {
   rpc ExecuteSql(SqlRequest) returns (stream SqlResultSet);
+  rpc ExecuteShared(SharedExecutionRequest) returns (SharedExecutionReport);
   rpc ExecuteDdl(DdlRequest) returns (DdlResponse);
   rpc ExecuteDml(DmlRequest) returns (DmlResponse);
   rpc BeginTransaction(BeginRequest) returns (TransactionHandle);

@@ -163,6 +163,47 @@ fn sequence_state_survives_reopen_and_rollback_does_not_consume_value() {
 }
 
 #[test]
+fn sequence_state_and_ownership_survive_single_file_backup_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("sequence-source.alopex");
+    let restored = directory.path().join("sequence-restored.alopex");
+    {
+        let db = Database::open(&source).unwrap();
+        db.execute_sql("CREATE TABLE owned (id SERIAL PRIMARY KEY, label TEXT)")
+            .unwrap();
+        db.execute_sql("INSERT INTO owned (label) VALUES ('first')")
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    std::fs::copy(&source, &restored).unwrap();
+    let db = Database::open(&restored).unwrap();
+    let sequence = db.list_sequences().unwrap().remove(0);
+    assert_eq!(sequence.name, "__alopex_auto__owned__id");
+    assert_eq!(sequence.owned_by.as_deref(), Some("owned.id"));
+    let ExecutionResult::Query(current) = db
+        .execute_sql("SELECT currval('__alopex_auto__owned__id')")
+        .unwrap()
+    else {
+        panic!("expected restored currval rows")
+    };
+    assert_eq!(current.rows[0][0], alopex_sql::SqlValue::BigInt(1));
+    db.execute_sql("INSERT INTO owned (label) VALUES ('second')")
+        .unwrap();
+    let ExecutionResult::Query(rows) = db.execute_sql("SELECT id FROM owned ORDER BY id").unwrap()
+    else {
+        panic!("expected restored rows")
+    };
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![alopex_sql::SqlValue::Integer(1)],
+            vec![alopex_sql::SqlValue::Integer(2)],
+        ]
+    );
+}
+
+#[test]
 fn concurrent_sequence_allocations_conflict_instead_of_committing_duplicates() {
     let db = Database::new();
     db.execute_sql("CREATE SEQUENCE ids").unwrap();

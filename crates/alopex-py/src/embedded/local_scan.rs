@@ -481,11 +481,7 @@ mod tests {
                 assert_eq!(stream.get_type().name().unwrap(), "DataFrameStream");
                 let batch = stream.call_method0("__next__").unwrap();
                 assert_eq!(
-                    batch
-                        .call_method0("height")
-                        .unwrap()
-                        .extract::<usize>()
-                        .unwrap(),
+                    batch.getattr("height").unwrap().extract::<usize>().unwrap(),
                     2
                 );
 

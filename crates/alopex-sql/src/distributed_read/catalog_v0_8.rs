@@ -724,6 +724,7 @@ fn validate_plan(
         | LogicalPlan::InsertSelect { .. }
         | LogicalPlan::Update { .. }
         | LogicalPlan::Delete { .. }
+        | LogicalPlan::Merge { .. }
         | LogicalPlan::Copy { .. } => Err(RemoteReadRejection::unsupported(
             "dml_not_supported_remote",
             "DML is outside the read-only remote-read catalog",
@@ -1222,6 +1223,25 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "vector_sql_local_only"
         ));
+    }
+
+    #[test]
+    fn sequence_allocation_remains_local_only_before_remote_transport() {
+        for name in ["nextval", "currval"] {
+            let expression = TypedExpr::function_call(
+                name.to_string(),
+                vec![],
+                false,
+                false,
+                ResolvedType::Integer,
+                Span::default(),
+            );
+            assert!(matches!(
+                classify(&LogicalPlan::filter(scan(), expression), &references()),
+                RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                    if code == "stateful_function_local_only"
+            ));
+        }
     }
 
     #[test]

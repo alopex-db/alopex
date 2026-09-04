@@ -151,6 +151,32 @@ fn concurrent_parent_delete_and_child_insert_cannot_both_commit() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn concurrent_parent_delete_then_child_insert_cannot_both_commit() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE parents (id BIGINT PRIMARY KEY);
+         CREATE TABLE children (parent_id BIGINT REFERENCES parents (id));
+         INSERT INTO parents VALUES (1)",
+    )
+    .unwrap();
+
+    let mut delete_parent = db.begin(TxnMode::ReadWrite).unwrap();
+    let mut insert_child = db.begin(TxnMode::ReadWrite).unwrap();
+    delete_parent
+        .execute_sql("DELETE FROM parents WHERE id = 1")
+        .unwrap();
+    insert_child
+        .execute_sql("INSERT INTO children VALUES (1)")
+        .unwrap();
+    delete_parent.commit().unwrap();
+    assert!(insert_child.commit().is_err());
+
+    assert!(rows(&db, "SELECT parent_id FROM children").is_empty());
+    assert!(rows(&db, "SELECT id FROM parents").is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn deferrable_constraints_are_rejected_instead_of_silently_enforced_immediately() {
     let db = Database::new();
     let error = db

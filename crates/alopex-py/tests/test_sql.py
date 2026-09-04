@@ -86,6 +86,46 @@ def test_execute_sql_insert_returns_rows_affected(users_db):
     assert result == 1
 
 
+def test_execute_sql_merge_updates_matches_and_inserts_non_matches(db):
+    db.execute_sql("CREATE TABLE target (id BIGINT PRIMARY KEY, value TEXT)")
+    db.execute_sql("CREATE TABLE source (id BIGINT, value TEXT)")
+    db.execute_sql("INSERT INTO target VALUES (1, 'old')")
+    db.execute_sql("INSERT INTO source VALUES (1, 'updated'), (2, 'inserted')")
+
+    assert (
+        db.execute_sql(
+            "MERGE INTO target USING source ON target.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET value = source.value "
+            "WHEN NOT MATCHED THEN INSERT (id, value) "
+            "VALUES (source.id, source.value)"
+        )
+        == 2
+    )
+    assert db.execute_sql("SELECT id, value FROM target ORDER BY id") == [
+        {"id": 1, "value": "updated"},
+        {"id": 2, "value": "inserted"},
+    ]
+
+
+def test_execute_sql_merge_matched_only_matches_reference_corpus(db):
+    db.execute_sql("CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)")
+    db.execute_sql("CREATE TABLE dml_source (id INTEGER, value TEXT)")
+    db.execute_sql("INSERT INTO dml_target VALUES (1, 'old')")
+    db.execute_sql("INSERT INTO dml_source VALUES (1, 'updated')")
+
+    assert (
+        db.execute_sql(
+            "MERGE INTO dml_target USING dml_source "
+            "ON dml_target.id = dml_source.id "
+            "WHEN MATCHED THEN UPDATE SET value = dml_source.value"
+        )
+        == 1
+    )
+    assert db.execute_sql("SELECT id, value FROM dml_target ORDER BY id") == [
+        {"id": 1, "value": "updated"}
+    ]
+
+
 def test_execute_sql_select_returns_list_of_name_accessible_rows(users_db):
     users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')"

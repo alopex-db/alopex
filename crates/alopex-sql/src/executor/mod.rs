@@ -56,7 +56,11 @@ pub use ddl::sequence::SequenceInfo;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
 pub use memory::{MemoryPolicy, SpillPolicy};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
-pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
+pub use result::{
+    ColumnInfo, CommitMetadata, ExecutionResult, ExecutionStep, ExecutionStepError,
+    ExecutionStepErrorKind, ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult,
+    QueryResult, QueryRowIterator, Row, SharedExecutionReport, SharedExecutionRequest,
+};
 
 /// Returns whether a plan requires direct access to the backing KV store.
 pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
@@ -397,6 +401,12 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 join_source,
                 returning,
             } => self.execute_delete(&table, filter, join_source, returning),
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => self.execute_merge(&target, &source, on, clauses),
 
             // Query Operations
             LogicalPlan::Scan { .. }
@@ -592,6 +602,17 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 returning,
             )
         })
+    }
+
+    fn execute_merge(
+        &mut self,
+        target: &str,
+        source: &str,
+        on: crate::planner::TypedExpr,
+        clauses: Vec<crate::planner::MergeClausePlan>,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| dml::execute_merge(txn, &*catalog, target, source, on, clauses))
     }
 
     // ========================================================================
@@ -906,6 +927,15 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     returning,
                 )
             }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                dml::execute_merge(&mut sql_txn, &view, &target, &source, on, clauses)
+            }
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }
@@ -1031,6 +1061,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 ddl::sequence::create_generated(
                     txn,
                     sequence.clone(),
+                    format!("{}.{}", table.name, column.name),
                     column
                         .generated_sequence_options
                         .clone()

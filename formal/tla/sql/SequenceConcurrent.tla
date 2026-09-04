@@ -1,7 +1,7 @@
 ------------------------ MODULE SequenceConcurrent ------------------------
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Clients, MaxSequence
+CONSTANTS Clients, RemoteClients, MaxSequence
 
 VARIABLES nextValue, version, status, snapshot, staged, committed
 
@@ -21,10 +21,16 @@ Begin(client) == /\ status[client] = "idle"
                  /\ UNCHANGED <<nextValue, version, committed>>
 
 Allocate(client) == /\ status[client] = "active"
+                    /\ client \notin RemoteClients
                     /\ staged[client] = 0
                     /\ nextValue <= MaxSequence
                     /\ staged' = [staged EXCEPT ![client] = nextValue]
                     /\ UNCHANGED <<nextValue, version, status, snapshot, committed>>
+
+RejectRemote(client) == /\ status[client] = "active"
+                        /\ client \in RemoteClients
+                        /\ status' = [status EXCEPT ![client] = "remote-rejected"]
+                        /\ UNCHANGED <<nextValue, version, snapshot, staged, committed>>
 
 Commit(client) == /\ status[client] = "active"
                   /\ staged[client] > 0
@@ -43,25 +49,27 @@ Conflict(client) == /\ status[client] = "active"
                     /\ staged' = [staged EXCEPT ![client] = 0]
                     /\ UNCHANGED <<nextValue, version, snapshot, committed>>
 
-Rollback(client) == /\ status[client] \in {"active", "conflict"}
+Rollback(client) == /\ status[client] \in {"active", "conflict", "remote-rejected"}
                     /\ status' = [status EXCEPT ![client] = "idle"]
                     /\ staged' = [staged EXCEPT ![client] = 0]
                     /\ UNCHANGED <<nextValue, version, snapshot, committed>>
 
 Next == \E client \in Clients:
           Begin(client) \/ Allocate(client) \/ Commit(client)
-          \/ Conflict(client) \/ Rollback(client)
+          \/ RejectRemote(client) \/ Conflict(client) \/ Rollback(client)
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK == /\ nextValue \in 1..(MaxSequence + 1)
+          /\ RemoteClients \subseteq Clients
           /\ version \in Nat
-          /\ status \in [Clients -> {"idle", "active", "conflict"}]
+          /\ status \in [Clients -> {"idle", "active", "conflict", "remote-rejected"}]
           /\ snapshot \in [Clients -> Nat]
           /\ staged \in [Clients -> 0..MaxSequence]
           /\ committed \subseteq 1..MaxSequence
 
 CommittedValuesAreUnique == Cardinality(committed) = version
 CommittedPrefixIsGapFree == committed = 1..version
+RemoteNeverAllocates == \A client \in RemoteClients: staged[client] = 0
 
 =============================================================================

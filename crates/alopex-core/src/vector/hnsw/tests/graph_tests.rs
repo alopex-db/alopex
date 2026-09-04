@@ -90,6 +90,66 @@ fn hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn cosine_search_prepares_query_norm_once() {
+    let mut graph = HnswGraph::new(base_config().with_metric(Metric::Cosine)).unwrap();
+    for (key, vector) in [
+        (&b"a"[..], &[1.0, 0.0][..]),
+        (&b"b"[..], &[0.8, 0.6][..]),
+        (&b"c"[..], &[0.0, 1.0][..]),
+    ] {
+        graph.insert(key, vector, b"").unwrap();
+    }
+
+    let (_, stats) = graph.search(&[1.0, 0.0], 3, 8).unwrap();
+
+    assert_eq!(stats.query_norm_computations, 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn reverse_link_pruning_reuses_diverse_neighbor_selection() {
+    let mut graph = HnswGraph::new(base_config().with_metric(Metric::Cosine)).unwrap();
+    let root = graph.insert(b"root", &[1.0, 0.0], b"").unwrap();
+    let near = graph.insert(b"near", &[0.9, 0.435_889_9], b"").unwrap();
+    let redundant = graph.insert(b"redundant", &[0.8, 0.6], b"").unwrap();
+    let diverse = graph
+        .insert(b"diverse", &[0.7, -0.714_142_86], b"")
+        .unwrap();
+    graph.nodes[root as usize].as_mut().unwrap().neighbors[0] = vec![near, redundant, diverse];
+
+    graph.prune_neighbors(root, 0, 2);
+
+    assert_eq!(
+        graph.nodes[root as usize].as_ref().unwrap().neighbors[0],
+        vec![near, diverse]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn level_assignment_is_reproducible_for_fixed_keys() {
+    let mut first = make_graph();
+    let mut second = make_graph();
+    for index in 0_u32..64 {
+        let key = index.to_le_bytes();
+        let vector = [index as f32, 1.0];
+        first.insert(&key, &vector, b"").unwrap();
+        second.insert(&key, &vector, b"").unwrap();
+    }
+
+    let levels = |graph: &HnswGraph| {
+        graph
+            .nodes
+            .iter()
+            .flatten()
+            .map(|node| node.neighbors.len())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(levels(&first), levels(&second));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn ef_search_is_auto_corrected() {
     let mut graph = make_graph();
     for i in 0..5u8 {

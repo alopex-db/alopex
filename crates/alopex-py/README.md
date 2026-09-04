@@ -200,7 +200,7 @@ plan = (
 
 with plan.collect_batches(chunk_size=1) as batches:
     for batch in batches:
-        print(batch.to_dict())
+        print(batch.to_dict(as_series=False))
 ```
 
 ### asyncio
@@ -284,7 +284,7 @@ with db.begin(TxnMode.READ_WRITE) as txn:
     txn.commit()
 
 results, stats = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 1)
-print(stats.node_count)
+print(stats.nodes_visited, stats.distance_computations, stats.search_time_us)
 ```
 
 ### Catalog API（polars 必須）

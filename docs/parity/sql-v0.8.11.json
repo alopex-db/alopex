@@ -308,855 +308,2328 @@
   "public_api": [
     {
       "surface": "CLI",
-      "api": "CLI.sql"
+      "api": "CLI.sql",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "Python",
-      "api": "Python.Database.copy_from_csv"
+      "api": "Python.Database.copy_from_csv",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "Python",
-      "api": "Python.Database.copy_to_csv"
+      "api": "Python.Database.copy_to_csv",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "Python",
-      "api": "Python.Database.execute_sql"
+      "api": "Python.Database.execute_sql",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "Python",
-      "api": "Python.Database.list_sequences"
+      "api": "Python.Database.list_sequences",
+      "claim": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+      "issue": 173,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "Python",
-      "api": "Python.Database.prepare"
+      "api": "Python.Database.prepare",
+      "claim": "prepared statements",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:c3ref/bind_blob",
+      "evidence": "crates/alopex-embedded/tests/prepared_statement.rs#prepared_statement_supports_null_rebind_reset_and_finalize",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "Python",
-      "api": "Python.Transaction.execute_sql"
+      "api": "Python.Transaction.execute_sql",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "Rust",
-      "api": "Executor.copy_from_csv_reader"
+      "api": "Executor.copy_from_csv_reader",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "Rust",
-      "api": "Executor.copy_to_csv_writer"
+      "api": "Executor.copy_to_csv_writer",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "Rust",
-      "api": "Executor.execute"
+      "api": "Executor.execute",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "Rust",
-      "api": "Parser.parse_sql"
+      "api": "Parser.parse_sql",
+      "claim": "parser/lexer",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:test",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "embedded",
-      "api": "Database.copy_from_csv_reader"
+      "api": "Database.copy_from_csv_reader",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "embedded",
-      "api": "Database.copy_to_csv_writer"
+      "api": "Database.copy_to_csv_writer",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "embedded",
-      "api": "Database.execute_sql"
+      "api": "Database.execute_sql",
+      "claim": "ON CONFLICT",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:sql-insert",
+      "evidence": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#on-conflict",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "embedded",
-      "api": "Database.list_sequences"
+      "api": "Database.list_sequences",
+      "claim": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+      "issue": 173,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "embedded",
-      "api": "Database.prepare"
+      "api": "Database.prepare",
+      "claim": "prepared statements",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:c3ref/bind_blob",
+      "evidence": "crates/alopex-embedded/tests/prepared_statement.rs#prepared_statement_supports_null_rebind_reset_and_finalize",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "embedded",
-      "api": "SqlSession.execute"
+      "api": "SqlSession.execute",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "metadata",
-      "api": "information_schema.columns"
+      "api": "information_schema.columns",
+      "claim": "information_schema",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:infoschema",
+      "evidence": "crates/alopex-embedded/tests/metadata.rs#portable_metadata_surfaces_have_exact_schemas_and_values",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "metadata",
-      "api": "information_schema.indexes"
+      "api": "information_schema.indexes",
+      "claim": "information_schema",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:infoschema",
+      "evidence": "crates/alopex-embedded/tests/metadata.rs#portable_metadata_surfaces_have_exact_schemas_and_values",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "metadata",
-      "api": "information_schema.table_constraints"
+      "api": "information_schema.table_constraints",
+      "claim": "information_schema",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:infoschema",
+      "evidence": "crates/alopex-embedded/tests/metadata.rs#portable_metadata_surfaces_have_exact_schemas_and_values",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "metadata",
-      "api": "information_schema.tables"
+      "api": "information_schema.tables",
+      "claim": "information_schema",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:infoschema",
+      "evidence": "crates/alopex-embedded/tests/metadata.rs#portable_metadata_surfaces_have_exact_schemas_and_values",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.abs"
+      "api": "scalar.abs",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.acos"
+      "api": "scalar.acos",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.acosh"
+      "api": "scalar.acosh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.age"
+      "api": "scalar.age",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_append"
+      "api": "scalar.array_append",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_cat"
+      "api": "scalar.array_cat",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_length"
+      "api": "scalar.array_length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_position"
+      "api": "scalar.array_position",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_positions"
+      "api": "scalar.array_positions",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_prepend"
+      "api": "scalar.array_prepend",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_remove"
+      "api": "scalar.array_remove",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_replace"
+      "api": "scalar.array_replace",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_slice"
+      "api": "scalar.array_slice",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_subscript"
+      "api": "scalar.array_subscript",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_to_string"
+      "api": "scalar.array_to_string",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.array_value"
+      "api": "scalar.array_value",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ascii"
+      "api": "scalar.ascii",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.asin"
+      "api": "scalar.asin",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.asinh"
+      "api": "scalar.asinh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.atan"
+      "api": "scalar.atan",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.atan2"
+      "api": "scalar.atan2",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.atanh"
+      "api": "scalar.atanh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.bit_length"
+      "api": "scalar.bit_length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.cbrt"
+      "api": "scalar.cbrt",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ceil"
+      "api": "scalar.ceil",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ceiling"
+      "api": "scalar.ceiling",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.char_length"
+      "api": "scalar.char_length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.chr"
+      "api": "scalar.chr",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.clear_cache"
+      "api": "scalar.clear_cache",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.coalesce"
+      "api": "scalar.coalesce",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.concat"
+      "api": "scalar.concat",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.concat_ws"
+      "api": "scalar.concat_ws",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.cos"
+      "api": "scalar.cos",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.cosh"
+      "api": "scalar.cosh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.cot"
+      "api": "scalar.cot",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.current_date"
+      "api": "scalar.current_date",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.current_time"
+      "api": "scalar.current_time",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.current_timestamp"
+      "api": "scalar.current_timestamp",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.currval"
+      "api": "scalar.currval",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.date"
+      "api": "scalar.date",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.date_add"
+      "api": "scalar.date_add",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.date_part"
+      "api": "scalar.date_part",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.date_sub"
+      "api": "scalar.date_sub",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.date_trunc"
+      "api": "scalar.date_trunc",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.datetime"
+      "api": "scalar.datetime",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.decode"
+      "api": "scalar.decode",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.degrees"
+      "api": "scalar.degrees",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.encode"
+      "api": "scalar.encode",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ends_with"
+      "api": "scalar.ends_with",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.exp"
+      "api": "scalar.exp",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.extract"
+      "api": "scalar.extract",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.floor"
+      "api": "scalar.floor",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.gen_random_uuid"
+      "api": "scalar.gen_random_uuid",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.greatest"
+      "api": "scalar.greatest",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.hamming_distance"
+      "api": "scalar.hamming_distance",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.hex"
+      "api": "scalar.hex",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ifnull"
+      "api": "scalar.ifnull",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.iif"
+      "api": "scalar.iif",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.initcap"
+      "api": "scalar.initcap",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.instr"
+      "api": "scalar.instr",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.io_stats"
+      "api": "scalar.io_stats",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.isnan"
+      "api": "scalar.isnan",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json"
+      "api": "scalar.json",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_array"
+      "api": "scalar.json_array",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_array_length"
+      "api": "scalar.json_array_length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_extract"
+      "api": "scalar.json_extract",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_insert"
+      "api": "scalar.json_insert",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_object"
+      "api": "scalar.json_object",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_remove"
+      "api": "scalar.json_remove",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_replace"
+      "api": "scalar.json_replace",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_set"
+      "api": "scalar.json_set",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_type"
+      "api": "scalar.json_type",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.json_valid"
+      "api": "scalar.json_valid",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_build_array"
+      "api": "scalar.jsonb_build_array",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_build_object"
+      "api": "scalar.jsonb_build_object",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_extract"
+      "api": "scalar.jsonb_extract",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_extract_path"
+      "api": "scalar.jsonb_extract_path",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_extract_path_text"
+      "api": "scalar.jsonb_extract_path_text",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_extract_text"
+      "api": "scalar.jsonb_extract_text",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_insert"
+      "api": "scalar.jsonb_insert",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.jsonb_set"
+      "api": "scalar.jsonb_set",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.julianday"
+      "api": "scalar.julianday",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.least"
+      "api": "scalar.least",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.left"
+      "api": "scalar.left",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.length"
+      "api": "scalar.length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.levenshtein"
+      "api": "scalar.levenshtein",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.list_value"
+      "api": "scalar.list_value",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ln"
+      "api": "scalar.ln",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.log"
+      "api": "scalar.log",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.log10"
+      "api": "scalar.log10",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.log2"
+      "api": "scalar.log2",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.lower"
+      "api": "scalar.lower",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.lpad"
+      "api": "scalar.lpad",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ltrim"
+      "api": "scalar.ltrim",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.make_date"
+      "api": "scalar.make_date",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.make_interval"
+      "api": "scalar.make_interval",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.make_time"
+      "api": "scalar.make_time",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.make_timestamp"
+      "api": "scalar.make_timestamp",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.map"
+      "api": "scalar.map",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.md5"
+      "api": "scalar.md5",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.memory_stats"
+      "api": "scalar.memory_stats",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.mod"
+      "api": "scalar.mod",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.nextval"
+      "api": "scalar.nextval",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.now"
+      "api": "scalar.now",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.nullif"
+      "api": "scalar.nullif",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.octet_length"
+      "api": "scalar.octet_length",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.pg_typeof"
+      "api": "scalar.pg_typeof",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.pi"
+      "api": "scalar.pi",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.plainto_tsquery"
+      "api": "scalar.plainto_tsquery",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.pow"
+      "api": "scalar.pow",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.power"
+      "api": "scalar.power",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.quote"
+      "api": "scalar.quote",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.radians"
+      "api": "scalar.radians",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.random"
+      "api": "scalar.random",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.regexp_like"
+      "api": "scalar.regexp_like",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.regexp_match"
+      "api": "scalar.regexp_match",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.regexp_matches"
+      "api": "scalar.regexp_matches",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.regexp_replace"
+      "api": "scalar.regexp_replace",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.repeat"
+      "api": "scalar.repeat",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.replace"
+      "api": "scalar.replace",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.reverse"
+      "api": "scalar.reverse",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.right"
+      "api": "scalar.right",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.round"
+      "api": "scalar.round",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.rpad"
+      "api": "scalar.rpad",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.rtrim"
+      "api": "scalar.rtrim",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.sha256"
+      "api": "scalar.sha256",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.sign"
+      "api": "scalar.sign",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.simhash"
+      "api": "scalar.simhash",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.sin"
+      "api": "scalar.sin",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.sinh"
+      "api": "scalar.sinh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.split_part"
+      "api": "scalar.split_part",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.sqrt"
+      "api": "scalar.sqrt",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.starts_with"
+      "api": "scalar.starts_with",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.strftime"
+      "api": "scalar.strftime",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.string_to_array"
+      "api": "scalar.string_to_array",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.strpos"
+      "api": "scalar.strpos",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.struct_pack"
+      "api": "scalar.struct_pack",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.substr"
+      "api": "scalar.substr",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.tan"
+      "api": "scalar.tan",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.tanh"
+      "api": "scalar.tanh",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.time"
+      "api": "scalar.time",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.to_char"
+      "api": "scalar.to_char",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.to_date"
+      "api": "scalar.to_date",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.to_timestamp"
+      "api": "scalar.to_timestamp",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.to_tsquery"
+      "api": "scalar.to_tsquery",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.to_tsvector"
+      "api": "scalar.to_tsvector",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.translate"
+      "api": "scalar.translate",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.trim"
+      "api": "scalar.trim",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.trunc"
+      "api": "scalar.trunc",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ts_headline"
+      "api": "scalar.ts_headline",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.ts_rank"
+      "api": "scalar.ts_rank",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.typeof"
+      "api": "scalar.typeof",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.unhex"
+      "api": "scalar.unhex",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.unixepoch"
+      "api": "scalar.unixepoch",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.upper"
+      "api": "scalar.upper",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.uuidv7"
+      "api": "scalar.uuidv7",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.vector_dims"
+      "api": "scalar.vector_dims",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.vector_distance"
+      "api": "scalar.vector_distance",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.vector_norm"
+      "api": "scalar.vector_norm",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.vector_similarity"
+      "api": "scalar.vector_similarity",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "scalar",
-      "api": "scalar.websearch_to_tsquery"
+      "api": "scalar.websearch_to_tsquery",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "server",
-      "api": "HTTP.sql"
+      "api": "HTTP.sql",
+      "claim": "streaming query",
+      "status": "known-performance-divergence",
+      "reference": "datafusion:execute_stream",
+      "evidence": "crates/alopex-py/tests/test_sql.py#test_execute_sql_select_iteration_matches_guide_usage",
+      "issue": 307,
+      "performance_contract": "sql-datafusion-streaming-v1",
+      "performance_evidence": "sql-streaming"
     },
     {
       "surface": "server",
-      "api": "gRPC.sql"
+      "api": "gRPC.sql",
+      "claim": "streaming query",
+      "status": "known-performance-divergence",
+      "reference": "datafusion:execute_stream",
+      "evidence": "crates/alopex-py/tests/test_sql.py#test_execute_sql_select_iteration_matches_guide_usage",
+      "issue": 307,
+      "performance_contract": "sql-datafusion-streaming-v1",
+      "performance_evidence": "sql-streaming"
     },
     {
       "surface": "server",
-      "api": "server.COPY_local_only_rejection"
+      "api": "server.COPY_local_only_rejection",
+      "claim": "streaming query",
+      "status": "known-performance-divergence",
+      "reference": "datafusion:execute_stream",
+      "evidence": "crates/alopex-py/tests/test_sql.py#test_execute_sql_select_iteration_matches_guide_usage",
+      "issue": 307,
+      "performance_contract": "sql-datafusion-streaming-v1",
+      "performance_evidence": "sql-streaming"
     },
     {
       "surface": "statement",
-      "api": "statement.AlterSequence"
+      "api": "statement.AlterSequence",
+      "claim": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+      "issue": 173,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.AlterTable"
+      "api": "statement.AlterTable",
+      "claim": "VIEW/ALTER TABLE/TRUNCATE",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Begin"
+      "api": "statement.Begin",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Commit"
+      "api": "statement.Commit",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Copy"
+      "api": "statement.Copy",
+      "claim": "COPY",
+      "status": "known-divergence",
+      "reference": "postgresql:sql-copy",
+      "evidence": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+      "issue": 172
     },
     {
       "surface": "statement",
-      "api": "statement.CreateContinuousAggregate"
+      "api": "statement.CreateContinuousAggregate",
+      "claim": "parser/lexer",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:test",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.CreateIndex"
+      "api": "statement.CreateIndex",
+      "claim": "VECTOR/HNSW",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#create_insert_and_search_hnsw_index",
+      "issue": 307
     },
     {
       "surface": "statement",
-      "api": "statement.CreateSequence"
+      "api": "statement.CreateSequence",
+      "claim": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+      "issue": 173,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.CreateTable"
+      "api": "statement.CreateTable",
+      "claim": "CHECK/FK constraints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:foreignkeys",
+      "evidence": "crates/alopex-embedded/tests/constraints.rs#check_and_composite_foreign_keys_follow_sql_null_semantics",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.CreateView"
+      "api": "statement.CreateView",
+      "claim": "VIEW/ALTER TABLE/TRUNCATE",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Delete"
+      "api": "statement.Delete",
+      "claim": "MERGE/UPDATE FROM/DELETE USING",
+      "status": "known-performance-divergence",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+      "evidence": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#update-from;scripts/reference_tests/sql_v0811_advanced_dml.json#delete-using;scripts/reference_tests/sql_v0811_advanced_dml.json#merge",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.DropIndex"
+      "api": "statement.DropIndex",
+      "claim": "parser/lexer",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:test",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.DropSequence"
+      "api": "statement.DropSequence",
+      "claim": "SERIAL/IDENTITY/SEQUENCE",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:create-sequence",
+      "evidence": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+      "issue": 173,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.DropTable"
+      "api": "statement.DropTable",
+      "claim": "parser/lexer",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:test",
+      "evidence": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.DropView"
+      "api": "statement.DropView",
+      "claim": "VIEW/ALTER TABLE/TRUNCATE",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Explain"
+      "api": "statement.Explain",
+      "claim": "EXPLAIN JSON",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:sql-explain",
+      "evidence": "crates/alopex-embedded/tests/explain.rs#json_contract_is_versioned_complete_and_redacts_literals_and_binds",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Insert"
+      "api": "statement.Insert",
+      "claim": "RETURNING",
+      "status": "known-performance-divergence",
+      "reference": "postgresql:dml-returning",
+      "evidence": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#returning",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Merge"
+      "api": "statement.Merge",
+      "claim": "MERGE/UPDATE FROM/DELETE USING",
+      "status": "known-performance-divergence",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+      "evidence": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#update-from;scripts/reference_tests/sql_v0811_advanced_dml.json#delete-using;scripts/reference_tests/sql_v0811_advanced_dml.json#merge",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Pragma"
+      "api": "statement.Pragma",
+      "claim": "PRAGMA",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_database_execute_sql_pragma_uses_store_path",
+      "issue": 307
     },
     {
       "surface": "statement",
-      "api": "statement.ReleaseSavepoint"
+      "api": "statement.ReleaseSavepoint",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Rollback"
+      "api": "statement.Rollback",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.RollbackToSavepoint"
+      "api": "statement.RollbackToSavepoint",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Savepoint"
+      "api": "statement.Savepoint",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Select"
+      "api": "statement.Select",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.SetTransaction"
+      "api": "statement.SetTransaction",
+      "claim": "transactions/savepoints",
+      "status": "known-performance-divergence",
+      "reference": "sqlite:lang_transaction",
+      "evidence": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Truncate"
+      "api": "statement.Truncate",
+      "claim": "VIEW/ALTER TABLE/TRUNCATE",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Update"
+      "api": "statement.Update",
+      "claim": "MERGE/UPDATE FROM/DELETE USING",
+      "status": "known-performance-divergence",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+      "evidence": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#update-from;scripts/reference_tests/sql_v0811_advanced_dml.json#delete-using;scripts/reference_tests/sql_v0811_advanced_dml.json#merge",
+      "issue": 307,
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
-      "api": "statement.Values"
+      "api": "statement.Values",
+      "claim": "portable SELECT/null/order/coercion",
+      "status": "known-performance-divergence",
+      "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
+      "evidence": "scripts/reference_tests/sql_v0811_differential.py#main",
+      "issue": 307,
+      "performance_contract": "sql-sqlite-v1",
+      "performance_evidence": "sql-sqlite-curated"
     }
   ]
 }

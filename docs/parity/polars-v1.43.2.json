@@ -77,9 +77,9 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.to_dict",
-      "status": "known-divergence",
+      "status": "implemented-compatible",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "performance_contract": "polars-eager-v1",
       "performance_evidence": "polars-eager-api",
       "contracts": [
@@ -91,14 +91,15 @@
         "row-order",
         "value",
         "multi-chunk"
-      ]
+      ],
+      "issue": 305
     },
     {
       "surface": "LazyFrame",
       "api": "LazyFrame.collect",
-      "status": "known-divergence",
+      "status": "known-performance-divergence",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_csv_parquet_and_streaming_contracts",
       "performance_contract": "polars-lazy-streaming-v1",
       "performance_evidence": "polars-csv-streaming",
       "issue": 305,
@@ -116,9 +117,9 @@
     {
       "surface": "LazyFrame",
       "api": "LazyFrame.collect_batches",
-      "status": "known-divergence",
+      "status": "known-performance-divergence",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_csv_parquet_and_streaming_contracts",
       "performance_contract": "polars-lazy-streaming-v1",
       "performance_evidence": "polars-csv-streaming",
       "issue": 305,
@@ -147,6 +148,37 @@
       "status": "alopex-extension",
       "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
       "notes": "Polars exposes scan_parquet as a top-level function; behavior is compared but the Alopex static constructor is outside the signature intersection."
+    },
+    {
+      "surface": "Series",
+      "api": "Series.name",
+      "status": "implemented-compatible",
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "issue": 305,
+      "contracts": [
+        "return-type",
+        "value"
+      ]
+    },
+    {
+      "surface": "Series",
+      "api": "Series.to_list",
+      "status": "implemented-compatible",
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "issue": 305,
+      "contracts": [
+        "return-type",
+        "dtype",
+        "null",
+        "value",
+        "multi-chunk"
+      ]
     },
     {
       "surface": "Expr",
@@ -182,26 +214,50 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.__init__",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex accepts a column mapping and optional schema; Polars exposes its wider constructor option set."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
       "api": "DataFrame.explode",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex accepts one column and does not yet expose Polars multi-column/null options."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
       "api": "DataFrame.height",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex currently exposes a method while Polars exposes a property."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
@@ -225,74 +281,146 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.width",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex currently exposes a method while Polars exposes a property."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.add",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.and_",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts one Expr operand instead of Polars variadic operands."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.eq",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.ge",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.gt",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.le",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.lt",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.mul",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -314,42 +442,82 @@
     {
       "surface": "Expr",
       "api": "Expr.or_",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts one Expr operand instead of Polars variadic operands."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
       "api": "Expr.sub",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",
       "api": "concat",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex exposes strict vertical DataFrame concatenation without Polars option variants."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",
       "api": "concat_str",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex exposes its explicit null_behavior option instead of the Polars signature."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",
       "api": "lit",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex does not yet expose Polars dtype and allow_object options."
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "extension",
@@ -368,11 +536,18 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.__init__",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex accepts a column mapping and optional schema; Polars exposes its wider constructor option set.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
@@ -503,11 +678,18 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.explode",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex accepts one column and does not yet expose Polars multi-column/null options.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
@@ -624,11 +806,18 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.height",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex currently exposes a method while Polars exposes a property.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
@@ -1100,9 +1289,9 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.to_dict",
-      "status": "known-divergence",
+      "status": "implemented-compatible",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "performance_contract": "polars-eager-v1",
       "performance_evidence": "polars-eager-api",
       "contracts": [
@@ -1114,7 +1303,8 @@
         "row-order",
         "value",
         "multi-chunk"
-      ]
+      ],
+      "issue": 305
     },
     {
       "surface": "DataFrame",
@@ -1252,11 +1442,18 @@
     {
       "surface": "DataFrame",
       "api": "DataFrame.width",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
       "issue": 305,
-      "notes": "Alopex currently exposes a method while Polars exposes a property.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "DataFrame",
@@ -1387,11 +1584,18 @@
     {
       "surface": "Expr",
       "api": "Expr.add",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -1425,11 +1629,18 @@
     {
       "surface": "Expr",
       "api": "Expr.and_",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts one Expr operand instead of Polars variadic operands.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -1798,11 +2009,18 @@
     {
       "surface": "Expr",
       "api": "Expr.eq",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -1968,11 +2186,18 @@
     {
       "surface": "Expr",
       "api": "Expr.ge",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -1984,11 +2209,18 @@
     {
       "surface": "Expr",
       "api": "Expr.gt",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -2182,11 +2414,18 @@
     {
       "surface": "Expr",
       "api": "Expr.le",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -2240,11 +2479,18 @@
     {
       "surface": "Expr",
       "api": "Expr.lt",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -2326,11 +2572,18 @@
     {
       "surface": "Expr",
       "api": "Expr.mul",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -2408,11 +2661,18 @@
     {
       "surface": "Expr",
       "api": "Expr.or_",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts one Expr operand instead of Polars variadic operands.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -2851,11 +3111,18 @@
     {
       "surface": "Expr",
       "api": "Expr.sub",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex currently accepts Expr operands only.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "Expr",
@@ -3994,9 +4261,9 @@
     {
       "surface": "LazyFrame",
       "api": "LazyFrame.collect",
-      "status": "known-divergence",
+      "status": "known-performance-divergence",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_csv_parquet_and_streaming_contracts",
       "performance_contract": "polars-lazy-streaming-v1",
       "performance_evidence": "polars-csv-streaming",
       "issue": 305,
@@ -4021,9 +4288,9 @@
     {
       "surface": "LazyFrame",
       "api": "LazyFrame.collect_batches",
-      "status": "known-divergence",
+      "status": "known-performance-divergence",
       "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
-      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_csv_parquet_and_streaming_contracts",
       "performance_contract": "polars-lazy-streaming-v1",
       "performance_evidence": "polars-csv-streaming",
       "issue": 305,
@@ -5583,9 +5850,16 @@
     {
       "surface": "Series",
       "api": "Series.name",
-      "status": "not-yet-implemented",
-      "evidence": "docs/parity/README.md",
-      "issue": 305
+      "status": "implemented-compatible",
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "issue": 305,
+      "contracts": [
+        "return-type",
+        "value"
+      ]
     },
     {
       "surface": "Series",
@@ -6150,9 +6424,19 @@
     {
       "surface": "Series",
       "api": "Series.to_list",
-      "status": "not-yet-implemented",
-      "evidence": "docs/parity/README.md",
-      "issue": 305
+      "status": "implemented-compatible",
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_dataframe_properties_series_and_constructor_defaults",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "issue": 305,
+      "contracts": [
+        "return-type",
+        "dtype",
+        "null",
+        "value",
+        "multi-chunk"
+      ]
     },
     {
       "surface": "Series",
@@ -7265,29 +7549,50 @@
     {
       "surface": "function",
       "api": "concat",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex exposes strict vertical DataFrame concatenation without Polars option variants.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",
       "api": "concat_str",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex exposes its explicit null_behavior option instead of the Polars signature.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",
       "api": "lit",
-      "status": "known-divergence",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "status": "implemented-compatible",
+      "evidence": "crates/alopex-py/tests/test_polars_1432_reference.py#test_polars_1432_expr_scalar_variadic_and_module_default_values",
       "issue": 305,
-      "notes": "Alopex does not yet expose Polars dtype and allow_object options.",
-      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b"
+      "reference": "polars:1.43.2@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "performance_contract": "polars-eager-v1",
+      "performance_evidence": "polars-eager-api",
+      "contracts": [
+        "signature",
+        "return-type",
+        "value",
+        "error"
+      ]
     },
     {
       "surface": "function",

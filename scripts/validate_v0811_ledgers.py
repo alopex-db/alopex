@@ -95,6 +95,21 @@ SQL_UPSTREAM_FIELDS = {
 }
 
 
+def validate_test_evidence(path: Path, evidence: object, label: str) -> list[str]:
+    errors: list[str] = []
+    for item in str(evidence or "").split(";"):
+        if "#" not in item:
+            errors.append(f"{path}: source-only {label} evidence {item}")
+            continue
+        relative, selector = item.split("#", 1)
+        source = ROOT / relative
+        if not source.is_file():
+            errors.append(f"{path}: missing {label} evidence {relative}")
+        elif not selector or selector not in source.read_text(encoding="utf-8"):
+            errors.append(f"{path}: unknown {label} evidence selector {item}")
+    return errors
+
+
 def load_performance_contracts(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -228,10 +243,43 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
     if not entries:
         errors.append(f"{path}: empty ledger")
     if payload.get("schema") == "alopex.sql-conformance/v1":
+        try:
+            from scripts.reference_tests.sql_public_inventory import (
+                inventory as sql_inventory,
+                materialize as materialize_sql,
+            )
+        except ModuleNotFoundError:
+            from reference_tests.sql_public_inventory import (
+                inventory as sql_inventory,
+                materialize as materialize_sql,
+            )
+
         public_api = payload.get("public_api", [])
         names = [row.get("api") for row in public_api]
         if not public_api or len(names) != len(set(names)):
             errors.append(f"{path}: SQL public inventory is empty or duplicated")
+        expected = {(row["surface"], row["api"]) for row in sql_inventory()}
+        actual = {(row.get("surface"), row.get("api")) for row in public_api}
+        if actual != expected:
+            errors.append(f"{path}: SQL public inventory does not match source")
+        if public_api != materialize_sql(payload):
+            errors.append(f"{path}: SQL public inventory does not match materialized claims")
+        claims = {entry.get("api"): entry for entry in entries}
+        unused_claims = set(claims).difference(row.get("claim") for row in public_api)
+        if unused_claims:
+            errors.append(f"{path}: unused SQL claims {sorted(unused_claims)}")
+        for row in public_api:
+            api = row.get("api")
+            claim = claims.get(row.get("claim"))
+            if claim is None:
+                errors.append(f"{path}: unknown SQL claim for {api}")
+                continue
+            for field in ("status", "reference", "evidence", "issue"):
+                if not row.get(field):
+                    errors.append(f"{path}: incomplete SQL public row {api}: {field}")
+            if row.get("status") != claim.get("status"):
+                errors.append(f"{path}: SQL public status disagrees with claim for {api}")
+            errors.extend(validate_test_evidence(path, row.get("evidence"), "SQL"))
         required_surfaces = {"statement", "scalar", "metadata", "Rust", "embedded", "Python", "CLI", "server"}
         missing_surfaces = required_surfaces.difference(
             row.get("surface") for row in public_api
@@ -266,28 +314,53 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
                 if evidence and not (ROOT / evidence).exists():
                     errors.append(f"{path}: upstream evidence does not exist: {evidence}")
     if payload.get("schema") == "alopex.hnsw-conformance/v1":
+        try:
+            from scripts.reference_tests.hnsw_public_inventory import (
+                inventory as hnsw_inventory,
+                materialize as materialize_hnsw,
+            )
+        except ModuleNotFoundError:
+            from reference_tests.hnsw_public_inventory import (
+                inventory as hnsw_inventory,
+                materialize as materialize_hnsw,
+            )
+
         public_api = payload.get("public_api", [])
         names = [row.get("api") for row in public_api]
         if not public_api or len(names) != len(set(names)):
             errors.append(f"{path}: HNSW public inventory is empty or duplicated")
+        expected = {(row["surface"], row["api"]) for row in hnsw_inventory()}
+        actual = {(row.get("surface"), row.get("api")) for row in public_api}
+        if actual != expected:
+            errors.append(f"{path}: HNSW public inventory does not match source")
+        if public_api != materialize_hnsw(payload):
+            errors.append(f"{path}: HNSW public inventory does not match materialized claims")
+        claims = {entry.get("api"): entry for entry in entries}
+        unused_claims = set(claims).difference(row.get("claim") for row in public_api)
+        if unused_claims:
+            errors.append(f"{path}: unused HNSW claims {sorted(unused_claims)}")
         missing_surfaces = {"Rust", "embedded", "Python", "SQL", "docs"}.difference(
             row.get("surface") for row in public_api
         )
         if missing_surfaces:
             errors.append(f"{path}: HNSW public inventory missing {sorted(missing_surfaces)}")
         for row in public_api:
-            if not {"api", "surface", "reference", "status", "evidence", "issue"}.issubset(row):
+            if not {"api", "surface", "claim", "reference", "status", "evidence", "issue"}.issubset(row):
                 errors.append(f"{path}: incomplete HNSW public row {row.get('api')}")
                 continue
+            claim = claims.get(row["claim"])
+            if claim is None:
+                errors.append(f"{path}: unknown HNSW claim for {row['api']}")
+                continue
+            if row["status"] != claim.get("status"):
+                errors.append(f"{path}: HNSW public status disagrees with claim for {row['api']}")
             if row["status"] not in statuses:
                 errors.append(f"{path}: invalid HNSW public status for {row['api']}")
             if row["reference"] != "alopex" and not re.search(
                 r"@[0-9a-f]{40}(?::|$)", str(row["reference"])
             ):
                 errors.append(f"{path}: mutable HNSW public reference for {row['api']}")
-            for evidence in str(row["evidence"]).split(";"):
-                if evidence and not (ROOT / evidence).exists():
-                    errors.append(f"{path}: missing HNSW public evidence {evidence}")
+            errors.extend(validate_test_evidence(path, row["evidence"], "HNSW"))
             if row["status"] in PERFORMANCE_STATUSES and (
                 row.get("performance_contract") != "hnsw-pareto-v1"
                 or row.get("performance_evidence") != "hnsw-pareto"

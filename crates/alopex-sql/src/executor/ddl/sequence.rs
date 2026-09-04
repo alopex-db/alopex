@@ -193,8 +193,10 @@ pub fn create<'txn, S: KVStore + 'txn>(
 pub fn create_generated<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     name: String,
-    options: SequenceOptions,
+    owned_by: String,
+    mut options: SequenceOptions,
 ) -> Result<()> {
+    options.owned_by = Some(owned_by);
     let _ = create(
         txn,
         CreateSequence {

@@ -29,6 +29,9 @@ All notable changes to this project will be documented in this file.
 - Fixed HNSW neighbor selection, candidate management, update reconnection,
   cosine norm caching, per-search Python statistics, and invalid-vector
   boundaries (#300–#303).
+- `Database.search_hnsw()` now returns per-search `SearchStats` instead of
+  index-wide `HnswStats`; callers that need index counts continue to use
+  `Database.get_hnsw_stats()` (#303).
 
 ## [0.8.10] — 2026-08-28
 

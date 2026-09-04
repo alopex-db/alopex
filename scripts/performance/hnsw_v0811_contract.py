@@ -1237,6 +1237,39 @@ def run_benchmark(
     return runs, metadata, builds, recall_ceiling, diagnostics
 
 
+def render_markdown(payload: dict[str, object]) -> str:
+    summary = payload["summary"]
+    table = [
+        "| engine | ef_search | recall@10 | tie-aware recall@10 | QPS | us/query |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    table.extend(
+        "| {engine} | {ef_search} | {median_recall_at_10:.4f} | "
+        "{median_tie_aware_recall_at_10:.4f} | "
+        "{median_queries_per_second:.1f} | {median_latency_us:.1f} |".format(**row)
+        for row in summary
+    )
+    recall = payload["recall_investigation"]
+    hybrid = payload["hybrid"]
+    scale = payload["scale"]
+    return (
+        "# HNSW diagnostic\n\n"
+        f"Release: `{payload.get('release_version', 'local')}`. Dataset: `{DATASET_SIZE} x "
+        f"{DIMENSION}`; minimum queries/run: `{QUERY_COUNT}`; seed: `{SEED}`.\n\n"
+        + "\n".join(table)
+        + "\n\n## Recall ceiling conclusion\n\n"
+        + str(recall.get("conclusion", "not measured"))
+        + "\n\n## Hybrid\n\nAlopex advantageous selectivities: `"
+        + json.dumps(hybrid.get("alopex_advantageous_selectivities", []))
+        + "`. Filter-aware traversal: `false`.\n\n## Scale\n\n"
+        + "Brute-force crossovers: `"
+        + json.dumps(scale.get("brute_force_crossover", {}), sort_keys=True)
+        + "`. Limits: `"
+        + json.dumps(scale.get("limits", []), sort_keys=True)
+        + "`.\n"
+    )
+
+
 def write_artifacts(
     output: Path,
     runs: list[dict[str, object]],
@@ -1303,9 +1336,6 @@ def write_artifacts(
     (output / "hnsw-diagnostic.raw.json").write_text(
         json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (output / "hnsw-diagnostic.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
     fieldnames = sorted({key for run in runs for key in run})
     with (output / "hnsw-diagnostic.csv").open(
         "w", newline="", encoding="utf-8"
@@ -1325,32 +1355,11 @@ def write_artifacts(
             writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
-    table = [
-        "| engine | ef_search | recall@10 | tie-aware recall@10 | QPS | us/query |",
-        "|---|---:|---:|---:|---:|---:|",
-    ]
-    table.extend(
-        "| {engine} | {ef_search} | {median_recall_at_10:.4f} | "
-        "{median_tie_aware_recall_at_10:.4f} | "
-        "{median_queries_per_second:.1f} | {median_latency_us:.1f} |".format(**row)
-        for row in summary
-    )
-    (output / "hnsw-diagnostic.md").write_text(
-        "# HNSW diagnostic\n\n"
-        f"Release: `{release_version or 'local'}`. Dataset: `{DATASET_SIZE} x "
-        f"{DIMENSION}`; minimum queries/run: `{QUERY_COUNT}`; seed: `{SEED}`.\n\n"
-        + "\n".join(table)
-        + "\n\n## Recall ceiling conclusion\n\n"
-        + str(payload["recall_investigation"].get("conclusion", "not measured"))
-        + "\n\n## Hybrid\n\nAlopex advantageous selectivities: `"
-        + json.dumps(payload["hybrid"].get("alopex_advantageous_selectivities", []))
-        + "`. Filter-aware traversal: `false`.\n\n## Scale\n\n"
-        + "Brute-force crossovers: `"
-        + json.dumps(payload["scale"].get("brute_force_crossover", {}), sort_keys=True)
-        + "`. Limits: `"
-        + json.dumps(payload["scale"].get("limits", []), sort_keys=True)
-        + "`.\n",
-        encoding="utf-8",
+    markdown = render_markdown(payload)
+    (output / "hnsw-diagnostic.md").write_text(markdown, encoding="utf-8")
+    payload["markdown_sha256"] = hashlib.sha256(markdown.encode()).hexdigest()
+    (output / "hnsw-diagnostic.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
@@ -1363,7 +1372,7 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--release-version")
     parser.add_argument("--glove-dataset", type=Path)
-    parser.add_argument("--max-scale-n", type=int, default=50_000)
+    parser.add_argument("--max-scale-n", type=int, default=1_000_000)
     parser.add_argument("--baseline-only", action="store_true")
     args = parser.parse_args()
     if args.duration_seconds < WARMUP_SECONDS:

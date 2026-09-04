@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use alopex_sql::{
-    AlopexDialect, ExecutionResult, Parser, StatementKind, TransactionAccessMode,
-    TransactionIsolationLevel,
+    AlopexDialect, CommitMetadata, ExecutionResult, ExecutionStepError, ExecutionStepErrorKind,
+    ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult, Parser, SharedExecutionReport,
+    SharedExecutionRequest, StatementKind, TransactionAccessMode, TransactionIsolationLevel,
 };
 
 use crate::{Database, Error, OwnedEmbeddedTransaction, Result, SqlResult, TxnMode};
@@ -67,6 +68,84 @@ impl SqlSession {
     /// Return the effective explicit-transaction characteristics.
     pub fn transaction_characteristics(&self) -> SqlTransactionCharacteristics {
         self.characteristics
+    }
+
+    /// Execute ordered transaction, commit-barrier, and post-commit-read steps.
+    ///
+    /// The first transaction statement opens a transaction when the session is
+    /// idle. Execution stops at the first error. A failed commit suppresses all
+    /// later reads, while a post-commit read error preserves the successful
+    /// commit result already present in the report.
+    pub fn execute_shared(&mut self, request: SharedExecutionRequest) -> SharedExecutionReport {
+        let SharedExecutionRequest {
+            execution_id,
+            transaction_id,
+            steps,
+        } = request;
+        let mut committed = false;
+        let mut results = Vec::with_capacity(steps.len());
+
+        for (step_index, step) in steps.into_iter().enumerate() {
+            let outcome = match step.kind {
+                ExecutionStepKind::TransactionStatement { .. } if committed => Self::step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "transaction statement follows the commit barrier",
+                ),
+                ExecutionStepKind::TransactionStatement { sql } => {
+                    let result = if self.state == SqlSessionState::Idle {
+                        self.begin(None, None).and_then(|_| self.execute_sql(&sql))
+                    } else {
+                        self.execute_sql(&sql)
+                    };
+                    match result {
+                        Ok(result) => ExecutionStepOutcome::Execution(result),
+                        Err(error) => Self::step_error(ExecutionStepErrorKind::Transaction, error),
+                    }
+                }
+                ExecutionStepKind::CommitBarrier if committed => Self::step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "commit barrier follows a successful commit barrier",
+                ),
+                ExecutionStepKind::CommitBarrier => match self.commit() {
+                    Ok(_) => {
+                        committed = true;
+                        ExecutionStepOutcome::Commit(CommitMetadata {
+                            transaction_id: transaction_id.clone(),
+                        })
+                    }
+                    Err(error) => Self::step_error(ExecutionStepErrorKind::Commit, error),
+                },
+                ExecutionStepKind::PostCommitRead { .. } if !committed => Self::step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "post-commit read precedes a successful commit barrier",
+                ),
+                ExecutionStepKind::PostCommitRead { sql } => {
+                    match self.execute_post_commit_read(&sql) {
+                        Ok(result) => ExecutionStepOutcome::Execution(result),
+                        Err(error) => {
+                            Self::step_error(ExecutionStepErrorKind::PostCommitRead, error)
+                        }
+                    }
+                }
+            };
+            let failed = matches!(outcome, ExecutionStepOutcome::Error(_));
+            results.push(ExecutionStepResult {
+                execution_id: execution_id.clone(),
+                transaction_id: transaction_id.clone(),
+                step_id: step.step_id,
+                step_index,
+                outcome,
+            });
+            if failed {
+                break;
+            }
+        }
+
+        SharedExecutionReport {
+            execution_id,
+            transaction_id,
+            steps: results,
+        }
     }
 
     /// Execute exactly one SQL statement in this session.
@@ -250,6 +329,31 @@ impl SqlSession {
         }
     }
 
+    fn step_error(
+        kind: ExecutionStepErrorKind,
+        error: impl std::fmt::Display,
+    ) -> ExecutionStepOutcome {
+        ExecutionStepOutcome::Error(ExecutionStepError {
+            kind,
+            message: error.to_string(),
+        })
+    }
+
+    fn execute_post_commit_read(&self, sql: &str) -> Result<SqlResult> {
+        let statements =
+            Parser::parse_sql(&AlopexDialect, sql).map_err(alopex_sql::SqlError::from)?;
+        if statements.len() != 1 {
+            return Err(Error::SqlSessionRequiresSingleStatement);
+        }
+        if !statements[0].kind.is_query() {
+            return Err(Error::PostCommitReadRequiresQuery);
+        }
+        self.database
+            .execute_sql_multi(sql)?
+            .pop()
+            .ok_or(Error::SqlSessionRequiresSingleStatement)
+    }
+
     fn validate_isolation(level: Option<TransactionIsolationLevel>) -> Result<()> {
         if level.is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead) {
             return Err(Error::UnsupportedSqlTransactionIsolation(
@@ -268,6 +372,207 @@ impl SqlSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alopex_sql::{
+        ExecutionStep, ExecutionStepErrorKind, ExecutionStepKind, ExecutionStepOutcome,
+        SharedExecutionRequest,
+    };
+
+    #[test]
+    fn shared_execution_orders_and_correlates_mutation_commit_and_fresh_read() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut session = database.sql_session();
+
+        let report = session.execute_shared(SharedExecutionRequest::new(
+            "execution-1",
+            "transaction-1",
+            vec![
+                ExecutionStep::new(
+                    "mutation-1",
+                    ExecutionStepKind::TransactionStatement {
+                        sql: "INSERT INTO items (id) VALUES (1)".into(),
+                    },
+                ),
+                ExecutionStep::new("commit-1", ExecutionStepKind::CommitBarrier),
+                ExecutionStep::new(
+                    "read-1",
+                    ExecutionStepKind::PostCommitRead {
+                        sql: "SELECT id FROM items".into(),
+                    },
+                ),
+            ],
+        ));
+
+        assert_eq!(report.execution_id, "execution-1");
+        assert_eq!(report.transaction_id, "transaction-1");
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .map(|step| (step.step_index, step.step_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "mutation-1"), (1, "commit-1"), (2, "read-1")]
+        );
+        assert!(matches!(
+            report.steps[0].outcome,
+            ExecutionStepOutcome::Execution(ExecutionResult::RowsAffected(1))
+        ));
+        assert!(matches!(
+            report.steps[1].outcome,
+            ExecutionStepOutcome::Commit(ref metadata)
+                if metadata.transaction_id == "transaction-1"
+        ));
+        let ExecutionStepOutcome::Execution(ExecutionResult::Query(ref rows)) =
+            report.steps[2].outcome
+        else {
+            panic!("post-commit read must return a query result")
+        };
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(session.state(), SqlSessionState::Idle);
+    }
+
+    #[test]
+    fn shared_execution_stops_before_post_read_when_commit_fails() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut losing_session = database.sql_session();
+        let mut winning_session = database.sql_session();
+        losing_session.execute_sql("BEGIN").unwrap();
+        winning_session.execute_sql("BEGIN").unwrap();
+        losing_session
+            .execute_sql("INSERT INTO items (id) VALUES (1)")
+            .unwrap();
+        winning_session
+            .execute_sql("INSERT INTO items (id) VALUES (1)")
+            .unwrap();
+        winning_session.execute_sql("COMMIT").unwrap();
+
+        let report = losing_session.execute_shared(SharedExecutionRequest::new(
+            "execution-conflict",
+            "transaction-conflict",
+            vec![
+                ExecutionStep::new(
+                    "mutation-2",
+                    ExecutionStepKind::TransactionStatement {
+                        sql: "INSERT INTO items (id) VALUES (2)".into(),
+                    },
+                ),
+                ExecutionStep::new("commit-conflict", ExecutionStepKind::CommitBarrier),
+                ExecutionStep::new(
+                    "read-must-not-run",
+                    ExecutionStepKind::PostCommitRead {
+                        sql: "SELECT id FROM items".into(),
+                    },
+                ),
+            ],
+        ));
+
+        assert_eq!(report.steps.len(), 2);
+        assert!(matches!(
+            report.steps[1].outcome,
+            ExecutionStepOutcome::Error(ref error)
+                if error.kind == ExecutionStepErrorKind::Commit
+        ));
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| step.step_id != "read-must-not-run"));
+        assert_eq!(losing_session.state(), SqlSessionState::Failed);
+    }
+
+    #[test]
+    fn shared_execution_keeps_commit_success_when_post_read_fails() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut session = database.sql_session();
+
+        let report = session.execute_shared(SharedExecutionRequest::new(
+            "execution-read-error",
+            "transaction-read-error",
+            vec![
+                ExecutionStep::new(
+                    "mutation",
+                    ExecutionStepKind::TransactionStatement {
+                        sql: "INSERT INTO items (id) VALUES (1)".into(),
+                    },
+                ),
+                ExecutionStep::new("commit", ExecutionStepKind::CommitBarrier),
+                ExecutionStep::new(
+                    "read-error",
+                    ExecutionStepKind::PostCommitRead {
+                        sql: "SELECT id FROM missing".into(),
+                    },
+                ),
+            ],
+        ));
+
+        assert_eq!(report.steps.len(), 3);
+        assert!(matches!(
+            report.steps[1].outcome,
+            ExecutionStepOutcome::Commit(_)
+        ));
+        assert!(matches!(
+            report.steps[2].outcome,
+            ExecutionStepOutcome::Error(ref error)
+                if error.kind == ExecutionStepErrorKind::PostCommitRead
+        ));
+        let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(
+            rows.rows.len(),
+            1,
+            "the successful commit must stay visible"
+        );
+        assert_eq!(session.state(), SqlSessionState::Idle);
+    }
+
+    #[test]
+    fn shared_execution_rejects_mutation_in_post_commit_read_context() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let mut session = database.sql_session();
+
+        let report = session.execute_shared(SharedExecutionRequest::new(
+            "execution-read-only",
+            "transaction-read-only",
+            vec![
+                ExecutionStep::new(
+                    "mutation",
+                    ExecutionStepKind::TransactionStatement {
+                        sql: "INSERT INTO items (id) VALUES (1)".into(),
+                    },
+                ),
+                ExecutionStep::new("commit", ExecutionStepKind::CommitBarrier),
+                ExecutionStep::new(
+                    "not-a-read",
+                    ExecutionStepKind::PostCommitRead {
+                        sql: "INSERT INTO items (id) VALUES (2)".into(),
+                    },
+                ),
+            ],
+        ));
+
+        assert!(matches!(
+            report.steps[2].outcome,
+            ExecutionStepOutcome::Error(ref error)
+                if error.kind == ExecutionStepErrorKind::PostCommitRead
+        ));
+        let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap()
+        else {
+            panic!("SELECT must return rows")
+        };
+        assert_eq!(rows.rows.len(), 1, "post-commit reads must not mutate");
+    }
 
     #[test]
     fn explicit_transaction_controls_visibility_and_returns_to_idle() {

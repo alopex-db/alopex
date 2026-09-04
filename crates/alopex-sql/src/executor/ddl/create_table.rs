@@ -81,6 +81,7 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
             super::sequence::create_generated(
                 txn,
                 sequence.clone(),
+                format!("{}.{}", table.name, column.name),
                 column
                     .generated_sequence_options
                     .clone()

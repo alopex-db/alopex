@@ -10,6 +10,7 @@ from scripts.performance.hnsw_v0811_contract import (
     decompose_latency,
     load_amazon_products,
     recall_at_k,
+    render_markdown,
     summarize_by_engine,
     tie_aware_recall_at_k,
     write_artifacts,
@@ -193,6 +194,12 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(payload["release_version"], "0.8.11")
+            markdown = (Path(directory) / "hnsw-diagnostic.md").read_bytes()
+            self.assertEqual(markdown.decode(), render_markdown(payload))
+            self.assertEqual(
+                payload["markdown_sha256"],
+                __import__("hashlib").sha256(markdown).hexdigest(),
+            )
             self.assertIn("engine", payload["runs"][0])
             self.assertEqual(
                 payload["recall_investigation"]["conclusion"], "boundary tie"
@@ -218,11 +225,18 @@ class HnswDiagnosticContractTests(unittest.TestCase):
         self.assertIn(
             "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4", workflow
         )
-        self.assertIn("--max-scale-n 50000", workflow)
+        self.assertIn("--max-scale-n 1000000", workflow)
         self.assertNotIn("--baseline-only", workflow)
         self.assertIn('OMP_NUM_THREADS: "1"', workflow)
         self.assertIn('RAYON_NUM_THREADS: "1"', workflow)
         self.assertNotIn("  release:\n", workflow)
+        self.assertIn("report/vector-benchmark-v${VERSION}", workflow)
+        self.assertIn('report="reports/vector-benchmarks/v${VERSION}"', workflow)
+        self.assertIn('"${report}.json"', workflow)
+        self.assertIn('"${report}.md"', workflow)
+        self.assertIn("Create or update benchmark failure issue", workflow)
+        self.assertIn("steps.generate.outcome == 'success'", workflow)
+        self.assertIn("if: needs.diagnostic.outputs.publishable == 'true'", workflow)
         release_workflow = (
             Path(__file__).resolve().parents[2]
             / ".github/workflows/alopex-py-release.yml"

@@ -371,6 +371,205 @@ async fn grpc_multi_statement_returns_result_per_statement() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn grpc_shared_execution_preserves_order_commit_metadata_and_post_commit_rows() {
+    use grpc::proto::shared_execution_step::Kind;
+    use grpc::proto::shared_execution_step_result::Outcome;
+
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE shared_items (id INT PRIMARY KEY, value TEXT)".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("create table");
+
+    let report = client
+        .execute_shared(grpc::proto::SharedExecutionRequest {
+            execution_id: "exec-1".into(),
+            transaction_id: "txn-1".into(),
+            steps: vec![
+                grpc::proto::SharedExecutionStep {
+                    step_id: "insert".into(),
+                    kind: Some(Kind::TransactionStatement(
+                        "INSERT INTO shared_items VALUES (1, 'one')".into(),
+                    )),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "commit".into(),
+                    kind: Some(Kind::CommitBarrier(grpc::proto::CommitBarrier {})),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "read".into(),
+                    kind: Some(Kind::PostCommitRead(
+                        "SELECT id, value FROM shared_items ORDER BY id".into(),
+                    )),
+                },
+            ],
+        })
+        .await
+        .expect("shared execution")
+        .into_inner();
+
+    assert_eq!(report.execution_id, "exec-1");
+    assert_eq!(report.transaction_id, "txn-1");
+    assert_eq!(report.steps.len(), 3);
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| (step.step_id.as_str(), step.step_index))
+            .collect::<Vec<_>>(),
+        vec![("insert", 0), ("commit", 1), ("read", 2)]
+    );
+    let Some(Outcome::Execution(insert)) = &report.steps[0].outcome else {
+        panic!("expected insert result")
+    };
+    assert!(insert.has_affected_rows);
+    assert_eq!(insert.affected_rows, 1);
+    let Some(Outcome::Commit(commit)) = &report.steps[1].outcome else {
+        panic!("expected commit metadata")
+    };
+    assert_eq!(commit.transaction_id, "txn-1");
+    let Some(Outcome::Execution(read)) = &report.steps[2].outcome else {
+        panic!("expected post-commit rows")
+    };
+    assert_eq!(extract_int(&read.rows[0].values[0]), Some(1));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_shared_execution_returns_partial_transaction_error_and_rolls_back() {
+    use grpc::proto::shared_execution_step::Kind;
+    use grpc::proto::shared_execution_step_result::Outcome;
+
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE shared_errors (id INT PRIMARY KEY)".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("create table");
+
+    let report = client
+        .execute_shared(grpc::proto::SharedExecutionRequest {
+            execution_id: "exec-error".into(),
+            transaction_id: "txn-error".into(),
+            steps: vec![
+                grpc::proto::SharedExecutionStep {
+                    step_id: "insert".into(),
+                    kind: Some(Kind::TransactionStatement(
+                        "INSERT INTO shared_errors VALUES (1)".into(),
+                    )),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "duplicate".into(),
+                    kind: Some(Kind::TransactionStatement(
+                        "INSERT INTO shared_errors VALUES (1)".into(),
+                    )),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "commit-must-not-run".into(),
+                    kind: Some(Kind::CommitBarrier(grpc::proto::CommitBarrier {})),
+                },
+            ],
+        })
+        .await
+        .expect("partial report")
+        .into_inner();
+
+    assert_eq!(report.steps.len(), 2);
+    let Some(Outcome::Error(error)) = &report.steps[1].outcome else {
+        panic!("expected transaction error")
+    };
+    assert_eq!(
+        error.kind,
+        grpc::proto::SharedExecutionStepErrorKind::Transaction as i32
+    );
+    let mut rows = client
+        .execute_sql(grpc::proto::SqlRequest {
+            sql: "SELECT id FROM shared_errors".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("verification query")
+        .into_inner();
+    assert!(rows.message().await.unwrap().unwrap().rows.is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_shared_execution_preserves_commit_when_post_commit_read_fails() {
+    use grpc::proto::shared_execution_step::Kind;
+    use grpc::proto::shared_execution_step_result::Outcome;
+
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE shared_committed (id INT PRIMARY KEY)".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("create table");
+
+    let report = client
+        .execute_shared(grpc::proto::SharedExecutionRequest {
+            execution_id: "exec-post-error".into(),
+            transaction_id: "txn-post-error".into(),
+            steps: vec![
+                grpc::proto::SharedExecutionStep {
+                    step_id: "insert".into(),
+                    kind: Some(Kind::TransactionStatement(
+                        "INSERT INTO shared_committed VALUES (7)".into(),
+                    )),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "commit".into(),
+                    kind: Some(Kind::CommitBarrier(grpc::proto::CommitBarrier {})),
+                },
+                grpc::proto::SharedExecutionStep {
+                    step_id: "failed-read".into(),
+                    kind: Some(Kind::PostCommitRead(
+                        "SELECT * FROM table_that_does_not_exist".into(),
+                    )),
+                },
+            ],
+        })
+        .await
+        .expect("post-commit partial report")
+        .into_inner();
+
+    assert_eq!(report.steps.len(), 3);
+    assert!(matches!(report.steps[1].outcome, Some(Outcome::Commit(_))));
+    let Some(Outcome::Error(error)) = &report.steps[2].outcome else {
+        panic!("expected post-commit read error")
+    };
+    assert_eq!(
+        error.kind,
+        grpc::proto::SharedExecutionStepErrorKind::PostCommitRead as i32
+    );
+
+    let mut rows = client
+        .execute_sql(grpc::proto::SqlRequest {
+            sql: "SELECT id FROM shared_committed".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("verification query")
+        .into_inner();
+    let result = rows.message().await.unwrap().unwrap();
+    assert_eq!(extract_int(&result.rows[0].values[0]), Some(7));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn grpc_invalid_sql_returns_invalid_argument() {
     let (state, _temp) = build_state(AuthMode::None).await;
     let (channel, _handle) = spawn_grpc_server(state).await;

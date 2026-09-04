@@ -3,8 +3,6 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use rand::Rng;
-
 use super::types::{HnswConfig, HnswNode, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 use crate::vector::simd::{select_kernel, DistanceKernel};
 use crate::vector::{validate_dimensions, CompactionResult, Metric};
@@ -70,7 +68,7 @@ impl HnswGraph {
             });
         }
 
-        let level = self.random_level();
+        let level = self.level_for_key(key);
         let node_id = self.allocate_node_id();
         let neighbors = vec![Vec::new(); level + 1];
         let node = HnswNode {
@@ -119,17 +117,19 @@ impl HnswGraph {
         // Baseline after potential retarget.
         let baseline_max_level = self.max_level;
 
+        let query = PreparedQuery::new(self.config.metric, vector);
+
         // Greedy search on upper layers until just above the node level.
         if baseline_max_level > level {
             for l in (level + 1..=baseline_max_level).rev() {
-                enter_point = self.greedy_search(vector, enter_point, l);
+                enter_point = self.greedy_search(query, enter_point, l);
             }
         }
 
         // Connect across layers down to 0.
         for l in (0..=level.min(self.max_level)).rev() {
             let candidates =
-                self.search_layer(vector, enter_point, l, self.config.ef_construction, None);
+                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
             let max_conn = if l == 0 {
                 self.config.m * 2
             } else {
@@ -233,9 +233,10 @@ impl HnswGraph {
             .node(node_id)
             .map(|n| n.vector.clone())
             .unwrap_or_default();
+        let query = PreparedQuery::new(self.config.metric, &vector);
         for l in (0..=level.min(baseline)).rev() {
             let candidates =
-                self.search_layer(&vector, enter_point, l, self.config.ef_construction, None);
+                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
             let max_conn = if l == 0 {
                 self.config.m * 2
             } else {
@@ -271,6 +272,11 @@ impl HnswGraph {
         }
 
         let mut stats = SearchStats::default();
+        let query = PreparedQuery::new(self.config.metric, query);
+        #[cfg(test)]
+        {
+            stats.query_norm_computations = u64::from(self.config.metric == Metric::Cosine);
+        }
         let mut max_level = self.max_level;
         let mut enter_point = match self.entry_point {
             Some(ep) if self.node(ep).is_some_and(|n| !n.deleted) => ep,
@@ -420,23 +426,22 @@ impl HnswGraph {
         self.free_list.pop().unwrap_or(self.nodes.len() as u32)
     }
 
-    fn random_level(&self) -> usize {
+    fn level_for_key(&self, key: &[u8]) -> usize {
         if self.config.m <= 1 {
             return 0;
         }
-        let mut rng = rand::thread_rng();
-        let r: f64 = rng.gen();
+        let r = (f64::from(crc32fast::hash(key)) + 1.0) / (f64::from(u32::MAX) + 2.0);
         let ml = 1.0_f64 / (self.config.m as f64).ln();
         (-r.ln() * ml).floor() as usize
     }
 
-    fn greedy_search(&self, target: &[f32], start: u32, level: usize) -> u32 {
+    fn greedy_search(&self, target: PreparedQuery<'_>, start: u32, level: usize) -> u32 {
         self.greedy_search_with_stats(target, start, level, &mut SearchStats::default())
     }
 
     fn greedy_search_with_stats(
         &self,
-        target: &[f32],
+        target: PreparedQuery<'_>,
         start: u32,
         level: usize,
         stats: &mut SearchStats,
@@ -468,7 +473,7 @@ impl HnswGraph {
 
     fn search_layer(
         &self,
-        query: &[f32],
+        query: PreparedQuery<'_>,
         entry_point: u32,
         level: usize,
         ef: usize,
@@ -506,14 +511,18 @@ impl HnswGraph {
                             continue;
                         }
                         let s = self.distance(query, n, stats_ref);
-                        let entry = ScoredEntry {
-                            node_id: n,
-                            score: s,
-                        };
-                        candidates.push(entry.clone());
-                        best.push(Reverse(entry));
-                        if best.len() > ef {
-                            best.pop();
+                        let should_add =
+                            best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
+                        if should_add {
+                            let entry = ScoredEntry {
+                                node_id: n,
+                                score: s,
+                            };
+                            candidates.push(entry.clone());
+                            best.push(Reverse(entry));
+                            if best.len() > ef {
+                                best.pop();
+                            }
                         }
                     }
                 }
@@ -587,7 +596,7 @@ impl HnswGraph {
         }
     }
 
-    fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
+    pub(crate) fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
         let (neighbors_snapshot, query_vec) = {
             let Some(node) = self.node(node_id) else {
                 return;
@@ -598,7 +607,7 @@ impl HnswGraph {
             (node.neighbors[level].clone(), node.vector.clone())
         };
 
-        let mut selected: Vec<ScoredEntry> = neighbors_snapshot
+        let selected: Vec<ScoredEntry> = neighbors_snapshot
             .iter()
             .copied()
             .filter_map(|n| {
@@ -609,12 +618,7 @@ impl HnswGraph {
             })
             .collect();
 
-        selected.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
-        });
-        selected.truncate(max_degree);
+        let selected = self.select_neighbors_heuristic(&selected, max_degree);
 
         if let Some(node) = self
             .nodes
@@ -622,7 +626,7 @@ impl HnswGraph {
             .and_then(|n| n.as_mut())
         {
             if level < node.neighbors.len() {
-                node.neighbors[level] = selected.into_iter().map(|c| c.node_id).collect();
+                node.neighbors[level] = selected;
             }
         }
     }
@@ -707,23 +711,23 @@ impl HnswGraph {
         self.node(id).map(|n| n.key.clone()).unwrap_or_default()
     }
 
-    fn distance(&self, query: &[f32], node_id: u32, stats: &mut SearchStats) -> f32 {
+    fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f32 {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
         if let Some(node) = self.node(node_id) {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
             if self.config.metric == Metric::Cosine {
-                let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
-                if query_norm == 0.0 || node.norm == 0.0 {
+                if query.norm == 0.0 || node.norm == 0.0 {
                     return 0.0;
                 }
                 let dot = query
+                    .values
                     .iter()
                     .zip(&node.vector)
                     .map(|(left, right)| left * right)
                     .sum::<f32>();
-                return dot / (query_norm * node.norm);
+                return dot / (query.norm * node.norm);
             }
-            return self.distance_raw(query, &node.vector);
+            return self.distance_raw(query.values, &node.vector);
         }
         f32::NEG_INFINITY
     }
@@ -742,6 +746,23 @@ impl HnswGraph {
             Metric::Cosine => 1.0 - score,
             Metric::L2 | Metric::InnerProduct => -score,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedQuery<'a> {
+    values: &'a [f32],
+    norm: f32,
+}
+
+impl<'a> PreparedQuery<'a> {
+    fn new(metric: Metric, values: &'a [f32]) -> Self {
+        let norm = if metric == Metric::Cosine {
+            values.iter().map(|value| value * value).sum::<f32>().sqrt()
+        } else {
+            0.0
+        };
+        Self { values, norm }
     }
 }
 

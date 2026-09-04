@@ -126,7 +126,7 @@ class LedgerContractTests(unittest.TestCase):
             / ".github/workflows/parity-performance.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("[self-hosted, linux, x64, alopex-performance]", workflow)
-        self.assertIn("pull_request:", workflow)
+        self.assertIn("workflow_call:", workflow)
         self.assertIn("schedule:", workflow)
         self.assertIn("options: [curated, full]", workflow)
         self.assertIn('--suite "$SUITE"', workflow)
@@ -139,6 +139,16 @@ class LedgerContractTests(unittest.TestCase):
         self.assertIn("sql_public_inventory.py", workflow)
         self.assertIn("hnsw_public_inventory.py", workflow)
         self.assertNotIn("continue-on-error: true", workflow)
+        ci = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("parity: ${{ steps.classify.outputs.parity }}", ci)
+        self.assertIn("name: Required parity", ci)
+        self.assertIn("uses: ./.github/workflows/parity-performance.yml", ci)
+        self.assertIn(
+            "needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate, parity]",
+            ci,
+        )
 
     def test_sql_reference_engines_have_separate_runnable_contracts(self):
         contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)["contracts"]
@@ -186,6 +196,69 @@ class LedgerContractTests(unittest.TestCase):
             {"Rust", "embedded", "Python", "SQL", "docs"},
         )
         self.assertEqual(validate(hnsw), [])
+
+    def test_sql_public_inventory_rejects_missing_and_unknown_claims(self):
+        sql = next(path for path in LEDGERS if path.name.startswith("sql-"))
+        payload = json.loads(sql.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "sql.json"
+            missing = copy.deepcopy(payload)
+            missing["public_api"].pop()
+            ledger.write_text(json.dumps(missing), encoding="utf-8")
+            self.assertTrue(
+                any("SQL public inventory does not match source" in error for error in validate(ledger))
+            )
+
+            unknown = copy.deepcopy(payload)
+            unknown["public_api"][0]["claim"] = "missing-claim"
+            ledger.write_text(json.dumps(unknown), encoding="utf-8")
+            self.assertTrue(
+                any("unknown SQL claim" in error for error in validate(ledger))
+            )
+
+            wrong = copy.deepcopy(payload)
+            wrong["public_api"][0]["claim"] = wrong["entries"][1]["api"]
+            ledger.write_text(json.dumps(wrong), encoding="utf-8")
+            self.assertTrue(
+                any(
+                    "SQL public inventory does not match materialized claims" in error
+                    for error in validate(ledger)
+                )
+            )
+
+    def test_hnsw_public_inventory_rejects_duplicate_claim_and_source_evidence(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "hnsw.json"
+            duplicated = copy.deepcopy(payload)
+            duplicated["public_api"].append(copy.deepcopy(duplicated["public_api"][0]))
+            ledger.write_text(json.dumps(duplicated), encoding="utf-8")
+            self.assertTrue(
+                any("HNSW public inventory is empty or duplicated" in error for error in validate(ledger))
+            )
+
+            source_only = copy.deepcopy(payload)
+            source_only["public_api"][0]["evidence"] = "crates/alopex-core/src/vector/hnsw/mod.rs"
+            ledger.write_text(json.dumps(source_only), encoding="utf-8")
+            self.assertTrue(
+                any("source-only HNSW evidence" in error for error in validate(ledger))
+            )
+
+    def test_materialized_public_rows_require_test_selectors(self):
+        for ledger_path in LEDGERS:
+            if ledger_path.name.startswith("polars-"):
+                continue
+            payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+            for row in payload["public_api"]:
+                self.assertTrue(row["claim"])
+                self.assertTrue(row["status"])
+                self.assertTrue(row["reference"])
+                for evidence in row["evidence"].split(";"):
+                    self.assertIn("#", evidence)
+                    path, selector = evidence.split("#", 1)
+                    self.assertTrue((ledger_path.parents[2] / path).exists(), evidence)
+                    self.assertTrue(selector, evidence)
 
 
 if __name__ == "__main__":

@@ -560,6 +560,16 @@ where
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_delete(txn, &*guard, &table, filter)?
             }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                ensure_write(mode, op_name)?;
+                let guard = catalog.read().expect("catalog lock poisoned");
+                dml::execute_merge(txn, &*guard, &target, &source, on, clauses)?
+            }
             LogicalPlan::Copy { .. } => {
                 return Err(ExecutorError::UnsupportedOperation(
                     "COPY is not available through the async executor".into(),

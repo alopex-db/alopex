@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       production: ${{ steps.classify.outputs.production }}
+      parity: ${{ steps.classify.outputs.parity }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,9 +41,13 @@ jobs:
           fi
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
           production=false
+          parity=false
           changed=0
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
+            case "${path}" in
+              crates/alopex-core/src/vector/*|crates/alopex-dataframe/*|crates/alopex-py/*|crates/alopex-sql/*|docs/parity/*|scripts/performance/*|scripts/reference_tests/*|scripts/validate_v0811_ledgers.py|scripts/test_validate_v0811_ledgers.py|.github/workflows/ci.yml|.github/workflows/parity-performance.yml) parity=true ;;
+            esac
             case "${path}" in
               .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
               *) production=true ;;
@@ -52,6 +57,16 @@ jobs:
             production=true
           fi
           echo "production=${production}" >> "${GITHUB_OUTPUT}"
+          echo "parity=${parity}" >> "${GITHUB_OUTPUT}"
+
+  parity:
+    name: Required parity
+    needs: [scope]
+    if: needs.scope.outputs.parity == 'true'
+    uses: ./.github/workflows/parity-performance.yml
+    with:
+      suite: curated
+    secrets: inherit
 
   fmt:
     name: Rustfmt
@@ -207,6 +222,17 @@ jobs:
             --output "artifacts/build-metrics/compatibility-${RUNNER_OS}-${{ matrix.rust }}.json" \
             --target-dir "${GITHUB_WORKSPACE}/target" \
             -- cargo test --workspace --features lane_ci --timings
+
+      - name: Install nextest for isolated alopex-py tests
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@nextest
+
+      - name: Run alopex-py tests in isolated processes
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: cargo nextest run -p alopex-py --features lane_ci --no-fail-fast
 
       - name: Upload compatibility build metrics
         if: always()
@@ -544,7 +570,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate, parity]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -552,6 +578,16 @@ jobs:
         run: |
           if [[ "${{ needs.scope.result }}" != "success" ]]; then
             echo "change scope classification failed"
+            exit 1
+          fi
+          if [[ "${{ needs.scope.outputs.parity }}" == "true" && \
+                "${{ needs.parity.result }}" != "success" ]]; then
+            echo "required parity verification failed: ${{ needs.parity.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.scope.outputs.parity }}" == "false" && \
+                "${{ needs.parity.result }}" != "skipped" ]]; then
+            echo "unchanged parity scope unexpectedly ran: ${{ needs.parity.result }}"
             exit 1
           fi
           if [[ "${{ needs.scope.outputs.production }}" == "false" ]]; then

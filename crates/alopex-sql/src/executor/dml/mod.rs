@@ -6,6 +6,7 @@
 mod constraints;
 mod delete;
 mod insert;
+mod merge;
 mod update;
 
 #[allow(unused_imports)]
@@ -15,5 +16,6 @@ pub(crate) use insert::{evaluate_default, normalize_assignment_value};
 pub use insert::{
     execute_insert, execute_insert_rows, execute_insert_rows_with_plan, execute_insert_with_plan,
 };
+pub use merge::execute_merge;
 #[allow(unused_imports)]
 pub use update::{execute_update, execute_update_with_returning};

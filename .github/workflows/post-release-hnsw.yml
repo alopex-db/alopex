@@ -17,9 +17,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: post-release-hnsw-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   diagnostic:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      publishable: ${{ steps.status.outputs.publishable }}
     env:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
@@ -81,19 +89,156 @@ jobs:
             python -m pip show alopex numpy pandas scikit-learn faiss-cpu hnswlib h5py
           } > artifacts-environment.txt
       - name: Generate reproducible diagnostic artifacts
+        id: generate
         run: >-
           python scripts/performance/hnsw_v0811_contract.py
           --dataset "${DATASET_PATH}"
           --glove-dataset "${GLOVE_DATASET_PATH}"
-          --max-scale-n 50000
+          --max-scale-n 1000000
           --output artifacts/hnsw-diagnostic
           --release-version "${RELEASE_VERSION}"
       - name: Upload diagnostic artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-diagnostic-${{ github.sha }}
+          name: hnsw-diagnostic-${{ github.run_id }}
           path: |
             artifacts/hnsw-diagnostic
             artifacts-environment.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
+
+      - name: Record publication eligibility
+        id: status
+        if: always()
+        shell: bash
+        run: echo "publishable=${{ steps.release.outcome == 'success' && steps.generate.outcome == 'success' }}" >> "${GITHUB_OUTPUT}"
+
+  publish:
+    name: Publish successful benchmark candidate
+    needs: diagnostic
+    if: needs.diagnostic.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.diagnostic.outputs.version }}
+      REPORT_ROOT: benchmark-output/artifacts/hnsw-diagnostic
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download benchmark evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: hnsw-diagnostic-${{ github.run_id }}
+          path: benchmark-output
+
+      - name: Validate JSON and rendered Markdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${REPORT_ROOT}/hnsw-diagnostic.json" "${REPORT_ROOT}/hnsw-diagnostic.md" "${VERSION}" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          data_path, markdown_path, version = map(pathlib.Path, sys.argv[1:])
+          payload = json.loads(data_path.read_text(encoding="utf-8"))
+          expected_version = str(version)
+          actual_version = str(payload.get("release_version", ""))
+          if actual_version != expected_version:
+              raise SystemExit(f"release version mismatch: {actual_version} != {expected_version}")
+          if payload.get("schema") != "alopex.hnsw-diagnostic/v3":
+              raise SystemExit("unexpected diagnostic schema")
+          digest = hashlib.sha256(markdown_path.read_bytes()).hexdigest()
+          if digest != payload.get("markdown_sha256"):
+              raise SystemExit("Markdown does not match the canonical JSON hash")
+          PY
+
+      - name: Publish candidate branch for docs ingestion
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="report/vector-benchmark-v${VERSION}"
+          report="reports/vector-benchmarks/v${VERSION}"
+          public="https://raw.githubusercontent.com/alopex-db/docs/main/${report}"
+          if curl -fsSL "${public}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              -o "${RUNNER_TEMP}/published.json" && \
+             curl -fsSL "${public}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              -o "${RUNNER_TEMP}/published.md" && \
+             cmp -s "${REPORT_ROOT}/hnsw-diagnostic.json" "${RUNNER_TEMP}/published.json" && \
+             cmp -s "${REPORT_ROOT}/hnsw-diagnostic.md" "${RUNNER_TEMP}/published.md"; then
+            echo "The exact benchmark is already present on docs main."
+            echo "branch=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          mkdir -p reports/vector-benchmarks
+          cp "${REPORT_ROOT}/hnsw-diagnostic.json" "${report}.json"
+          cp "${REPORT_ROOT}/hnsw-diagnostic.md" "${report}.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}" || true
+          git switch -C "${branch}"
+          git add "${report}.json" "${report}.md"
+          git commit -m "docs(vector): publish v${VERSION} benchmark candidate"
+          git push --force-with-lease origin "${branch}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for identical bytes on docs main
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="reports/vector-benchmarks/v${VERSION}"
+          public="https://raw.githubusercontent.com/alopex-db/docs/main/${report}"
+          for attempt in $(seq 1 60); do
+            if curl -fsSL "${public}.json?cachebust=${GITHUB_RUN_ID}-${attempt}" \
+                -o "${RUNNER_TEMP}/published.json" && \
+               curl -fsSL "${public}.md?cachebust=${GITHUB_RUN_ID}-${attempt}" \
+                -o "${RUNNER_TEMP}/published.md" && \
+               cmp -s "${REPORT_ROOT}/hnsw-diagnostic.json" "${RUNNER_TEMP}/published.json" && \
+               cmp -s "${REPORT_ROOT}/hnsw-diagnostic.md" "${RUNNER_TEMP}/published.md"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "docs main did not publish the exact benchmark bytes" >&2
+          exit 1
+
+      - name: Cleanup publication branch
+        if: always() && steps.candidate.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+        shell: bash
+        run: git push origin --delete "${BRANCH}"
+
+  notify-failure:
+    name: Create or update benchmark failure issue
+    needs: diagnostic
+    if: always() && needs.diagnostic.outputs.publishable != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update benchmark failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.diagnostic.outputs.version || inputs.version }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${VERSION#alopex-py-v}"
+          version="${version#v}"
+          title="post-release HNSW benchmark failed: v${version}"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          body="v${version} の公開ベンチマークが失敗しました。部分成果物と環境情報: ${RUN_URL}"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "${title}" --body "${body}"
+          fi

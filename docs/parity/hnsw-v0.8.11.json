@@ -274,9 +274,10 @@
     {
       "surface": "Python",
       "api": "Python.HnswConfig",
+      "claim": "Python.HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "hnswlib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:python_bindings/bindings.cpp",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -284,35 +285,37 @@
     {
       "surface": "Python",
       "api": "Python.HnswStats",
+      "claim": "Python SearchResult/HnswStats/SearchStats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "Python",
       "api": "Python.SearchResult",
-      "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
-      "issue": 306,
-      "performance_contract": "hnsw-pareto-v1",
-      "performance_evidence": "hnsw-pareto"
+      "claim": "Python SearchResult/HnswStats/SearchStats",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
+      "issue": 306
     },
     {
       "surface": "Python",
       "api": "Python.SearchStats",
+      "claim": "Python SearchResult/HnswStats/SearchStats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-py/python/alopex/_alopex.pyi",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "Python",
       "api": "Python.method.create_hnsw_index",
+      "claim": "Python.create/drop/get_hnsw_stats",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -320,9 +323,10 @@
     {
       "surface": "Python",
       "api": "Python.method.delete_from_hnsw",
+      "claim": "Python transaction upsert_to_hnsw/delete_from_hnsw",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -330,9 +334,10 @@
     {
       "surface": "Python",
       "api": "Python.method.drop_hnsw_index",
+      "claim": "Python.create/drop/get_hnsw_stats",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -340,17 +345,21 @@
     {
       "surface": "Python",
       "api": "Python.method.get_hnsw_stats",
-      "status": "alopex-extension",
-      "reference": "alopex",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
-      "issue": 306
+      "claim": "Python.create/drop/get_hnsw_stats",
+      "status": "known-performance-divergence",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
+      "issue": 306,
+      "performance_contract": "hnsw-pareto-v1",
+      "performance_evidence": "hnsw-pareto"
     },
     {
       "surface": "Python",
       "api": "Python.method.search_hnsw",
+      "claim": "Python.search_hnsw",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -358,9 +367,10 @@
     {
       "surface": "Python",
       "api": "Python.method.upsert_to_hnsw",
+      "claim": "Python transaction upsert_to_hnsw/delete_from_hnsw",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-py/src/embedded;crates/alopex-py/python/alopex/_alopex.pyi",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -368,9 +378,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig",
+      "claim": "HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:ALGO_PARAMS.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -378,9 +389,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig.validate",
+      "claim": "HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:ALGO_PARAMS.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -388,9 +400,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig.with_dimension",
+      "claim": "HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:ALGO_PARAMS.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -398,9 +411,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig.with_ef_construction",
+      "claim": "HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:ALGO_PARAMS.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -408,9 +422,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig.with_m",
+      "claim": "HnswConfig",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:ALGO_PARAMS.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -418,9 +433,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswConfig.with_metric",
+      "claim": "Metric",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/vector.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -428,9 +444,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex",
+      "claim": "HnswIndex.create",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:README.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -438,9 +455,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.commit_staged",
+      "claim": "HnswIndex staged commit/rollback",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#transaction_commit_and_rollback_are_respected",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -448,17 +466,19 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.compact",
+      "claim": "HnswIndex.compact",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#delete_marks_node_and_compact_removes_it",
       "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.create",
+      "claim": "HnswIndex.create",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:README.md",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -466,9 +486,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.delete",
+      "claim": "HnswIndex.delete",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:python_bindings/bindings.cpp",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#deleted_nodes_are_skipped_in_results",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -476,9 +497,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.delete_staged",
+      "claim": "HnswIndex staged commit/rollback",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#transaction_commit_and_rollback_are_respected",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -486,9 +508,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.drop",
+      "claim": "HnswIndex.drop",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -496,9 +519,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.load",
+      "claim": "HnswIndex.load/save",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#save_and_load_roundtrip_preserves_graph",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -506,39 +530,37 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.name",
-      "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
-      "issue": 306,
-      "performance_contract": "hnsw-pareto-v1",
-      "performance_evidence": "hnsw-pareto"
+      "claim": "HnswIndex.stats",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
+      "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.on_insert",
-      "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
-      "issue": 306,
-      "performance_contract": "hnsw-pareto-v1",
-      "performance_evidence": "hnsw-pareto"
+      "claim": "HnswIndex callbacks",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#callbacks_fire_on_core_index",
+      "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.on_search",
-      "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
-      "issue": 306,
-      "performance_contract": "hnsw-pareto-v1",
-      "performance_evidence": "hnsw-pareto"
+      "claim": "HnswIndex callbacks",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#callbacks_fire_on_core_index",
+      "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.rollback",
+      "claim": "HnswIndex staged commit/rollback",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#transaction_commit_and_rollback_are_respected",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -546,9 +568,10 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.save",
+      "claim": "HnswIndex.load/save",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#save_and_load_roundtrip_preserves_graph",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -556,27 +579,30 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.search",
+      "claim": "cosine distance",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
-      "issue": 306,
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/vector.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
+      "issue": 302,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.stats",
+      "claim": "HnswIndex.stats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.upsert",
+      "claim": "HnswIndex.upsert",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_upsert_reconnects_existing_key_without_duplicate_results",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -584,19 +610,21 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswIndex.upsert_staged",
+      "claim": "upsert reconnect",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/mod.rs",
-      "issue": 306,
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:python_bindings/bindings.cpp",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_deleted_node_reactivation_reconnects_at_new_position",
+      "issue": 301,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
     },
     {
       "surface": "Rust",
       "api": "Rust.HnswSearchResult",
+      "claim": "HnswSearchResult",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/vector.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#tie_breaks_by_key_order",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -604,33 +632,37 @@
     {
       "surface": "Rust",
       "api": "Rust.HnswStats",
+      "claim": "HnswStats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.InsertStats",
+      "claim": "SearchStats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "Rust",
       "api": "Rust.SearchStats",
+      "claim": "SearchStats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-core/src/vector/hnsw/types.rs",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "SQL",
       "api": "SQL.CREATE_INDEX_USING_HNSW",
+      "claim": "SQL CREATE INDEX USING HNSW",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#create_insert_and_search_hnsw_index",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -638,9 +670,10 @@
     {
       "surface": "SQL",
       "api": "SQL.DROP_INDEX_USING_HNSW",
+      "claim": "SQL DROP INDEX USING HNSW",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#create_insert_and_search_hnsw_index",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -648,9 +681,10 @@
     {
       "surface": "SQL",
       "api": "SQL.HNSW_DELETE_SYNC",
+      "claim": "SQL HNSW DML/transaction synchronization",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#dml_changes_are_reflected_in_hnsw_index",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -658,9 +692,10 @@
     {
       "surface": "SQL",
       "api": "SQL.HNSW_INSERT_SYNC",
+      "claim": "SQL HNSW DML/transaction synchronization",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#dml_changes_are_reflected_in_hnsw_index",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -668,9 +703,10 @@
     {
       "surface": "SQL",
       "api": "SQL.HNSW_KNN_SEARCH",
+      "claim": "SQL KNN search",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/knn_optimization.rs#knn_optimization_without_index",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -678,9 +714,10 @@
     {
       "surface": "SQL",
       "api": "SQL.HNSW_UPDATE_SYNC",
+      "claim": "SQL HNSW NULL/type/option validation",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-sql/src/executor/hnsw_bridge.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:sql/hnsw.sql",
+      "evidence": "crates/alopex-sql/tests/hnsw_sql_tests.rs#dimension_mismatch_on_insert_returns_error_and_no_index_write",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -688,9 +725,10 @@
     {
       "surface": "docs",
       "api": "docs.HNSW_contract",
+      "claim": "HnswIndex.search",
       "status": "known-performance-divergence",
-      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
-      "evidence": "docs/parity/README.md",
+      "reference": "qdrant/qdrant@829abe0ad8c425d4c6c1fd5042db8ea92a01ff84:lib/segment/src/index/hnsw_index",
+      "evidence": "scripts/performance/hnsw_v0811_contract.py#run_benchmark",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -698,17 +736,19 @@
     {
       "surface": "embedded",
       "api": "embedded.Database.compact_hnsw_index",
+      "claim": "HnswIndex.compact",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#delete_marks_node_and_compact_removes_it",
       "issue": 306
     },
     {
       "surface": "embedded",
       "api": "embedded.Database.create_hnsw_index",
+      "claim": "Embedded create/search/drop",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -716,9 +756,10 @@
     {
       "surface": "embedded",
       "api": "embedded.Database.drop_hnsw_index",
+      "claim": "Embedded create/search/drop",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -726,17 +767,19 @@
     {
       "surface": "embedded",
       "api": "embedded.Database.get_hnsw_stats",
+      "claim": "HnswIndex.stats",
       "status": "alopex-extension",
       "reference": "alopex",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
       "issue": 306
     },
     {
       "surface": "embedded",
       "api": "embedded.Database.search_hnsw",
+      "claim": "Embedded create/search/drop",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -744,9 +787,10 @@
     {
       "surface": "embedded",
       "api": "embedded.OwnedEmbeddedTransaction.delete_from_hnsw",
+      "claim": "Embedded transaction upsert/delete/commit/rollback/reopen",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -754,9 +798,10 @@
     {
       "surface": "embedded",
       "api": "embedded.OwnedEmbeddedTransaction.upsert_to_hnsw",
+      "claim": "Embedded transaction upsert/delete/commit/rollback/reopen",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -764,9 +809,10 @@
     {
       "surface": "embedded",
       "api": "embedded.Transaction.delete_from_hnsw",
+      "claim": "Embedded transaction upsert/delete/commit/rollback/reopen",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
@@ -774,9 +820,10 @@
     {
       "surface": "embedded",
       "api": "embedded.Transaction.upsert_to_hnsw",
+      "claim": "Embedded transaction upsert/delete/commit/rollback/reopen",
       "status": "known-performance-divergence",
-      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2",
-      "evidence": "crates/alopex-embedded/src/lib.rs",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"

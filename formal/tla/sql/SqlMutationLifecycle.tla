@@ -104,15 +104,21 @@ Crash == /\ txn \in {"active", "failed"} \/ output = "temporary"
          /\ txn' = "idle"
          /\ stagedRows' = "none"
          /\ pendingSequence' = 0
-         /\ output' = IF output = "temporary" THEN "none" ELSE output
+         /\ output' = output
          /\ cascadeDepth' = 0
          /\ error' = "none"
          /\ UNCHANGED <<rows, sequence, lastValue>>
 
+RecoverCopyTemporary == /\ output = "temporary"
+                        /\ output' = "none"
+                        /\ UNCHANGED <<rows, txn, stagedRows, sequence,
+                                        pendingSequence, lastValue,
+                                        cascadeDepth, error>>
+
 Next == Begin \/ StageValidDml \/ StageConstraintViolation
         \/ RejectInvalidCommit \/ MergeMultipleMatch \/ NextVal
         \/ Cascade \/ RejectCascadeLimit \/ Commit \/ Rollback
-        \/ CopyStart \/ CopyPublish \/ Crash
+        \/ CopyStart \/ CopyPublish \/ Crash \/ RecoverCopyTemporary
 
 Spec == Init /\ [][Next]_vars
 

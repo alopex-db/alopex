@@ -11,7 +11,10 @@ use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
-use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
+use crate::types::{
+    DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PySharedExecutionReport,
+    PySharedExecutionStep, PyTxnMode,
+};
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult, PySearchStats};
 use crate::vector;
 use crate::vector::SliceOrOwned;
@@ -299,6 +302,27 @@ impl PyDatabase {
             .detach(move || db.execute_sql(&bound_sql))
             .map_err(error::embedded_err)?;
         crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
+    /// Execute mutation, commit-barrier, and post-commit-read steps through the shared session.
+    fn execute_shared(
+        &self,
+        py: Python<'_>,
+        execution_id: String,
+        transaction_id: String,
+        steps: Vec<PyRef<'_, PySharedExecutionStep>>,
+    ) -> PyResult<PySharedExecutionReport> {
+        let db = self.ensure_open()?;
+        let steps = steps
+            .iter()
+            .map(|step| step.to_native())
+            .collect::<PyResult<Vec<_>>>()?;
+        let request = alopex_sql::SharedExecutionRequest::new(execution_id, transaction_id, steps);
+        let report = py.detach(move || {
+            let mut session = db.sql_session();
+            session.execute_shared(request)
+        });
+        PySharedExecutionReport::from_native(py, report)
     }
 
     /// Prepare one SQL statement with one-based positional `?` parameters.

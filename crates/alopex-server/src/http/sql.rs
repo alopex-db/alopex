@@ -1272,6 +1272,7 @@ fn classify_statement_schema(
         | alopex_sql::ast::StatementKind::Insert(_)
         | alopex_sql::ast::StatementKind::Update(_)
         | alopex_sql::ast::StatementKind::Delete(_)
+        | alopex_sql::ast::StatementKind::Merge(_)
         | alopex_sql::ast::StatementKind::Pragma { .. } => StatementSchemaClass::NonSchema,
         _ => StatementSchemaClass::Unsupported,
     }

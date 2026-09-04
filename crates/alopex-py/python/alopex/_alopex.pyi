@@ -1,5 +1,5 @@
 from builtins import str as _str
-from typing import Any, BinaryIO, Dict, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -147,8 +147,15 @@ class ListNamespace:
 class DataFrame:
     def __init__(
         self,
-        columns: Dict[str, List[Any]],
+        data: Optional[Dict[str, List[Any]]] = None,
         schema: Optional[Dict[str, str]] = None,
+        *,
+        schema_overrides: Optional[Dict[str, str]] = None,
+        strict: bool = True,
+        orient: Optional[str] = None,
+        infer_schema_length: Optional[int] = 100,
+        nan_to_null: bool = False,
+        height: Optional[int] = None,
     ) -> None: ...
 
     @staticmethod
@@ -157,44 +164,125 @@ class DataFrame:
         schema: Optional[Dict[str, str]] = None,
     ) -> "DataFrame": ...
 
+    @property
     def height(self) -> int: ...
+    @property
     def width(self) -> int: ...
-    def to_dict(self) -> Dict[str, List[Any]]: ...
+    def to_dict(self, *, as_series: bool = True) -> Dict[str, Union["Series", List[Any]]]: ...
     def str(self, column: _str) -> StringNamespace: ...
     def dt(self, column: _str) -> DatetimeNamespace: ...
     def list(self, column: _str) -> ListNamespace: ...
-    def explode(self, column: _str) -> "DataFrame": ...
+    def explode(
+        self,
+        columns: Union[_str, Sequence[_str]],
+        *more_columns: _str,
+        empty_as_null: bool = ...,
+        keep_nulls: bool = True,
+    ) -> "DataFrame": ...
     def implode(self) -> "DataFrame": ...
     def lazy(self) -> "LazyFrame": ...
 
 
+class Series:
+    @property
+    def name(self) -> str: ...
+    def to_list(self) -> List[Any]: ...
+
+
 class Expr:
     def alias(self, name: str) -> "Expr": ...
-    def add(self, rhs: "Expr") -> "Expr": ...
-    def sub(self, rhs: "Expr") -> "Expr": ...
-    def mul(self, rhs: "Expr") -> "Expr": ...
-    def div(self, rhs: "Expr") -> "Expr": ...
-    def eq(self, rhs: "Expr") -> "Expr": ...
-    def neq(self, rhs: "Expr") -> "Expr": ...
-    def gt(self, rhs: "Expr") -> "Expr": ...
-    def lt(self, rhs: "Expr") -> "Expr": ...
-    def ge(self, rhs: "Expr") -> "Expr": ...
-    def le(self, rhs: "Expr") -> "Expr": ...
-    def and_(self, rhs: "Expr") -> "Expr": ...
-    def or_(self, rhs: "Expr") -> "Expr": ...
+    def add(self, other: Any) -> "Expr": ...
+    def sub(self, other: Any) -> "Expr": ...
+    def mul(self, other: Any) -> "Expr": ...
+    def div(self, other: Any) -> "Expr": ...
+    def eq(self, other: Any) -> "Expr": ...
+    def neq(self, other: Any) -> "Expr": ...
+    def gt(self, other: Any) -> "Expr": ...
+    def lt(self, other: Any) -> "Expr": ...
+    def ge(self, other: Any) -> "Expr": ...
+    def le(self, other: Any) -> "Expr": ...
+    def and_(self, *others: Any) -> "Expr": ...
+    def or_(self, *others: Any) -> "Expr": ...
     def not_(self) -> "Expr": ...
 
 
 def col(name: str) -> Expr: ...
-def lit(value: Union[None, bool, int, float, str]) -> Expr: ...
-def concat(inputs: List[DataFrame]) -> DataFrame: ...
-def concat_str(
-    inputs: List[Expr],
-    separator: str = "",
+def lit(value: Any, dtype: Optional[Any] = None, *, allow_object: bool = False) -> Expr: ...
+def concat(
+    items: Iterable[DataFrame],
     *,
-    null_behavior: Literal["propagate", "ignore", "replace"] = "propagate",
-    null_value: Optional[str] = None,
+    how: str = "vertical",
+    rechunk: bool = False,
+    parallel: bool = True,
+    strict: Optional[bool] = None,
+) -> DataFrame: ...
+def concat_str(
+    exprs: Any,
+    *more_exprs: Any,
+    separator: str = "",
+    ignore_nulls: bool = False,
 ) -> Expr: ...
+
+
+SharedExecutionStepKind = Literal[
+    "transaction_statement",
+    "commit_barrier",
+    "post_commit_read",
+]
+ExecutionStepErrorKind = Literal[
+    "transaction",
+    "commit",
+    "post_commit_read",
+    "invalid_order",
+]
+
+
+class SharedExecutionStep:
+    step_id: str
+    kind: SharedExecutionStepKind
+    sql: Optional[str]
+
+    def __init__(
+        self,
+        step_id: str,
+        kind: SharedExecutionStepKind,
+        sql: Optional[str] = None,
+    ) -> None: ...
+
+    @staticmethod
+    def transaction_statement(step_id: str, sql: str) -> "SharedExecutionStep": ...
+
+    @staticmethod
+    def commit_barrier(step_id: str) -> "SharedExecutionStep": ...
+
+    @staticmethod
+    def post_commit_read(step_id: str, sql: str) -> "SharedExecutionStep": ...
+
+
+class CommitMetadata:
+    transaction_id: str
+
+
+class ExecutionStepError:
+    kind: ExecutionStepErrorKind
+    message: str
+
+
+class SharedExecutionStepResult:
+    execution_id: str
+    transaction_id: str
+    step_id: str
+    step_index: int
+    outcome_kind: Literal["execution", "commit", "error"]
+    result: Optional[Any]
+    commit_metadata: Optional[CommitMetadata]
+    error: Optional[ExecutionStepError]
+
+
+class SharedExecutionReport:
+    execution_id: str
+    transaction_id: str
+    steps: List[SharedExecutionStepResult]
 
 
 class SearchResult:
@@ -393,12 +481,32 @@ class LazyFrame:
     def filter(self, *predicates: object, **constraints: object) -> "LazyFrame": ...
     def with_columns(self, *exprs: object, **named_exprs: object) -> "LazyFrame": ...
 
-    def collect(self) -> DataFrame: ...
+    def collect(
+        self,
+        *,
+        type_coercion: bool = True,
+        predicate_pushdown: bool = True,
+        projection_pushdown: bool = True,
+        simplify_expression: bool = True,
+        slice_pushdown: bool = True,
+        comm_subplan_elim: bool = True,
+        comm_subexpr_elim: bool = True,
+        cluster_with_columns: bool = True,
+        collapse_joins: bool = True,
+        no_optimization: bool = False,
+        engine: str = "auto",
+        background: bool = False,
+        optimizations: Any = ...,
+        **_kwargs: Any,
+    ) -> DataFrame: ...
     def collect_batches(
         self,
         *,
         chunk_size: Optional[int] = None,
-        resource_limit_bytes: Optional[int] = None,
+        maintain_order: bool = True,
+        lazy: bool = False,
+        engine: str = "auto",
+        optimizations: Any = ...,
     ) -> DataFrameStream: ...
 
 
@@ -469,6 +577,18 @@ class Database:
                 supported by the SQL parser yet).
             AlopexError: SQL parse/execution errors (``code`` carries the
                 stable ALOPEX-P/S/C/E### error code).
+        """
+        ...
+    def execute_shared(
+        self,
+        execution_id: str,
+        transaction_id: str,
+        steps: Sequence[SharedExecutionStep],
+    ) -> SharedExecutionReport:
+        """Execute ordered mutation, commit-barrier, and post-commit-read steps.
+
+        The returned report retains successful earlier outcomes when a later
+        step fails. This API does not expose freshness/version tokens.
         """
         ...
     def prepare(self, sql: str) -> PreparedStatement: ...

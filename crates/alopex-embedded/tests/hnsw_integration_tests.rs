@@ -133,6 +133,64 @@ fn hnsw_upsert_reconnects_existing_key_without_duplicate_results() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn hnsw_existing_upsert_rollback_restores_previous_position() {
+    let db = Database::new();
+    db.create_hnsw_index("vec_idx", config()).unwrap();
+    let mut seed = db.begin(TxnMode::ReadWrite).unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"anchor", &[0.0, 0.0], b"")
+        .unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"moving", &[100.0, 0.0], b"old")
+        .unwrap();
+    seed.commit().unwrap();
+
+    let mut update = db.begin(TxnMode::ReadWrite).unwrap();
+    update
+        .upsert_to_hnsw("vec_idx", b"moving", &[0.1, 0.0], b"new")
+        .unwrap();
+    update.rollback().unwrap();
+
+    let (results, _) = db
+        .search_hnsw("vec_idx", &[100.0, 0.0], 1, Some(8))
+        .unwrap();
+    assert_eq!(results[0].key, b"moving");
+    assert_eq!(results[0].metadata, b"old");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn hnsw_deleted_node_reactivation_reconnects_at_new_position() {
+    let db = Database::new();
+    db.create_hnsw_index("vec_idx", config()).unwrap();
+    let mut seed = db.begin(TxnMode::ReadWrite).unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"anchor", &[0.0, 0.0], b"")
+        .unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"moving", &[100.0, 0.0], b"old")
+        .unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"old-neighbor", &[100.0, 1.0], b"")
+        .unwrap();
+    seed.commit().unwrap();
+
+    let mut delete = db.begin(TxnMode::ReadWrite).unwrap();
+    delete.delete_from_hnsw("vec_idx", b"moving").unwrap();
+    delete.commit().unwrap();
+    let mut reactivate = db.begin(TxnMode::ReadWrite).unwrap();
+    reactivate
+        .upsert_to_hnsw("vec_idx", b"moving", &[0.1, 0.0], b"new")
+        .unwrap();
+    reactivate.commit().unwrap();
+
+    let (new_position, _) = db.search_hnsw("vec_idx", &[0.1, 0.0], 1, Some(8)).unwrap();
+    let (old_position, _) = db
+        .search_hnsw("vec_idx", &[100.0, 0.0], 1, Some(8))
+        .unwrap();
+    assert_eq!(new_position[0].key, b"moving");
+    assert_eq!(new_position[0].metadata, b"new");
+    assert_eq!(old_position[0].key, b"old-neighbor");
+    assert_eq!(db.get_hnsw_stats("vec_idx").unwrap().deleted_count, 0);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn callbacks_fire_on_core_index() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let searches = Arc::new(Mutex::new(Vec::new()));

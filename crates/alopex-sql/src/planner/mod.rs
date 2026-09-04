@@ -26,9 +26,9 @@ pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
-    JoinType, JoinedDmlSource, LogicalPlan, OffsetWindowFunction, OnConflictActionPlan,
-    OnConflictPlan, RecursiveCteLimits, SetOperator, TableFunctionKind, ValueWindowFunction,
-    WindowExpr, WindowFunction,
+    JoinType, JoinedDmlSource, LogicalPlan, MergeActionPlan, MergeClausePlan, OffsetWindowFunction,
+    OnConflictActionPlan, OnConflictPlan, RecursiveCteLimits, SetOperator, TableFunctionKind,
+    ValueWindowFunction, WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -43,8 +43,8 @@ use crate::ast::ddl::{
 };
 use crate::ast::dml::{
     CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
-    LITERAL_TABLE, OnConflictAction, OrderByExpr, QueryBody, Select, SelectItem,
-    SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
+    LITERAL_TABLE, Merge, MergeAction, OnConflictAction, OrderByExpr, QueryBody, Select,
+    SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -1026,6 +1026,44 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                push_table_reference(
+                    references,
+                    target,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                push_table_reference(
+                    references,
+                    source,
+                    TableReferenceAccess::Read,
+                    TableReferenceSource::LogicalPlanScan,
+                );
+                self.extract_typed_expr(on, diagnostics, references);
+                for clause in clauses {
+                    if let Some(condition) = &clause.condition {
+                        self.extract_typed_expr(condition, diagnostics, references);
+                    }
+                    match &clause.action {
+                        MergeActionPlan::Update { assignments } => {
+                            for assignment in assignments {
+                                self.extract_typed_expr(&assignment.value, diagnostics, references);
+                            }
+                        }
+                        MergeActionPlan::Insert { values, .. } => {
+                            for value in values {
+                                self.extract_typed_expr(value, diagnostics, references);
+                            }
+                        }
+                        MergeActionPlan::DoNothing => {}
+                    }
+                }
+            }
             LogicalPlan::Copy {
                 table,
                 direction,
@@ -1260,6 +1298,7 @@ enum GenericHostStatement<'a> {
     Insert(&'a Insert),
     Update(&'a Update),
     Delete(&'a Delete),
+    Merge(&'a Merge),
     Copy(&'a crate::ast::CopyStatement),
     CreateSequence(&'a CreateSequence),
     AlterSequence(&'a AlterSequence),
@@ -1285,6 +1324,7 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
+        StatementKind::Merge(statement) => GenericHostStatement::Merge(statement),
         StatementKind::Copy(statement) => GenericHostStatement::Copy(statement),
         StatementKind::CreateSequence(statement) => GenericHostStatement::CreateSequence(statement),
         StatementKind::AlterSequence(statement) => GenericHostStatement::AlterSequence(statement),
@@ -1318,7 +1358,8 @@ fn table_reference_access_for_classified(
         }
         GenericHostStatement::Insert(_)
         | GenericHostStatement::Update(_)
-        | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
+        | GenericHostStatement::Delete(_)
+        | GenericHostStatement::Merge(_) => Ok(TableReferenceAccess::Write),
         GenericHostStatement::Copy(statement) => Ok(match statement.direction {
             CopyDirection::From => TableReferenceAccess::Write,
             CopyDirection::To => TableReferenceAccess::Read,
@@ -1431,6 +1472,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
+            GenericHostStatement::Merge(statement) => self.plan_merge(statement),
             GenericHostStatement::Copy(statement) => self.plan_copy(statement),
             GenericHostStatement::CreateSequence(statement) => {
                 Ok(LogicalPlan::CreateSequence(statement.clone()))
@@ -6201,6 +6243,179 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             } else {
                 Some(self.build_projection(&stmt.returning, table)?)
             },
+        })
+    }
+
+    fn plan_merge(&self, stmt: &Merge) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.returning.is_empty() {
+            return Err(PlannerError::unsupported_feature(
+                "MERGE RETURNING",
+                "a later release",
+                stmt.span,
+            ));
+        }
+        let FromItem::Table {
+            name: target_name,
+            span: target_span,
+            ..
+        } = &stmt.target
+        else {
+            return Err(PlannerError::unsupported_feature(
+                "non-table MERGE target",
+                "a later release",
+                stmt.span,
+            ));
+        };
+        let FromItem::Table {
+            name: source_name,
+            span: source_span,
+            ..
+        } = &stmt.source
+        else {
+            return Err(PlannerError::unsupported_feature(
+                "non-table MERGE source",
+                "a later release",
+                stmt.span,
+            ));
+        };
+
+        let target = self
+            .name_resolver
+            .resolve_table(target_name, *target_span)?;
+        Self::ensure_writable_table(target, "MERGE", stmt.span)?;
+        let source = self
+            .name_resolver
+            .resolve_table(source_name, *source_span)?;
+        let scope = [
+            ScopedTable::new(target.clone(), 0),
+            ScopedTable::new(source.clone(), target.column_count()),
+        ];
+        let infer = |expr: &Expr| {
+            self.type_checker
+                .infer_type_with_scope(expr, &scope, &|statement, _| {
+                    let plan = Planner::new(self.catalog).plan(statement)?;
+                    Ok((plan, Vec::new()))
+                })
+        };
+
+        let on = infer(&stmt.on)?;
+        if on.resolved_type != ResolvedType::Boolean {
+            return Err(PlannerError::type_mismatch(
+                "Boolean",
+                on.resolved_type.to_string(),
+                stmt.on.span,
+            ));
+        }
+
+        let mut clauses = Vec::with_capacity(stmt.clauses.len());
+        for clause in &stmt.clauses {
+            let condition = clause.condition.as_ref().map(&infer).transpose()?;
+            if let (Some(expression), Some(typed)) = (&clause.condition, &condition)
+                && typed.resolved_type != ResolvedType::Boolean
+            {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean",
+                    typed.resolved_type.to_string(),
+                    expression.span,
+                ));
+            }
+
+            let action = match &clause.action {
+                MergeAction::Update { assignments } if clause.matched => {
+                    let assignments = assignments
+                        .iter()
+                        .map(|assignment| {
+                            let column = self.name_resolver.resolve_column(
+                                target,
+                                &assignment.column,
+                                assignment.span,
+                            )?;
+                            let value = infer(&assignment.value)?;
+                            self.validate_type_assignment(
+                                &value,
+                                &column.data_type,
+                                assignment.value.span,
+                            )?;
+                            Ok(TypedAssignment::new(
+                                assignment.column.clone(),
+                                target.get_column_index(&assignment.column).unwrap(),
+                                self.coerce_assignment_value(
+                                    value,
+                                    &column.data_type,
+                                    assignment.value.span,
+                                ),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    MergeActionPlan::Update { assignments }
+                }
+                MergeAction::Insert { columns, values } if !clause.matched => {
+                    let columns = if columns.is_empty() {
+                        target
+                            .column_names()
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    } else {
+                        columns.clone()
+                    };
+                    if columns.len() != values.len() {
+                        return Err(PlannerError::column_value_count_mismatch(
+                            columns.len(),
+                            values.len(),
+                            clause.span,
+                        ));
+                    }
+                    let values = columns
+                        .iter()
+                        .zip(values)
+                        .map(|(column_name, expression)| {
+                            let column = self.name_resolver.resolve_column(
+                                target,
+                                column_name,
+                                expression.span,
+                            )?;
+                            let value = infer(expression)?;
+                            self.validate_type_assignment(
+                                &value,
+                                &column.data_type,
+                                expression.span,
+                            )?;
+                            Ok(self.coerce_assignment_value(
+                                value,
+                                &column.data_type,
+                                expression.span,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    MergeActionPlan::Insert { columns, values }
+                }
+                MergeAction::DoNothing => MergeActionPlan::DoNothing,
+                MergeAction::Delete => {
+                    return Err(PlannerError::unsupported_feature(
+                        "MERGE DELETE",
+                        "a later release",
+                        clause.span,
+                    ));
+                }
+                MergeAction::Update { .. } | MergeAction::Insert { .. } => {
+                    return Err(PlannerError::invalid_expression(
+                        "MERGE UPDATE requires WHEN MATCHED and MERGE INSERT requires WHEN NOT MATCHED",
+                    ));
+                }
+            };
+            clauses.push(MergeClausePlan {
+                matched: clause.matched,
+                condition,
+                action,
+            });
+        }
+
+        Ok(LogicalPlan::Merge {
+            target: target.name.clone(),
+            source: source.name.clone(),
+            on,
+            clauses,
         })
     }
 

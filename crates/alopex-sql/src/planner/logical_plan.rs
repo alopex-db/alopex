@@ -476,6 +476,14 @@ pub enum LogicalPlan {
         returning: Option<Projection>,
     },
 
+    /// MERGE operation over one target and one source table.
+    Merge {
+        target: String,
+        source: String,
+        on: TypedExpr,
+        clauses: Vec<MergeClausePlan>,
+    },
+
     /// COPY table data to or from a local file.
     Copy {
         table: String,
@@ -578,6 +586,25 @@ pub enum OnConflictActionPlan {
 pub struct JoinedDmlSource {
     pub table: String,
     pub condition: Option<TypedExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeClausePlan {
+    pub matched: bool,
+    pub condition: Option<TypedExpr>,
+    pub action: MergeActionPlan,
+}
+
+#[derive(Debug, Clone)]
+pub enum MergeActionPlan {
+    Update {
+        assignments: Vec<TypedAssignment>,
+    },
+    Insert {
+        columns: Vec<String>,
+        values: Vec<TypedExpr>,
+    },
+    DoNothing,
 }
 
 impl LogicalPlan {
@@ -694,6 +721,7 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "INSERT",
             LogicalPlan::Update { .. } => "UPDATE",
             LogicalPlan::Delete { .. } => "DELETE",
+            LogicalPlan::Merge { .. } => "MERGE",
             LogicalPlan::Copy { .. } => "COPY",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
@@ -883,6 +911,7 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "InsertSelect",
             LogicalPlan::Update { .. } => "Update",
             LogicalPlan::Delete { .. } => "Delete",
+            LogicalPlan::Merge { .. } => "Merge",
             LogicalPlan::Copy { .. } => "Copy",
             LogicalPlan::CreateSequence(_) => "CreateSequence",
             LogicalPlan::AlterSequence(_) => "AlterSequence",
@@ -929,6 +958,7 @@ impl LogicalPlan {
                 | LogicalPlan::InsertSelect { .. }
                 | LogicalPlan::Update { .. }
                 | LogicalPlan::Delete { .. }
+                | LogicalPlan::Merge { .. }
                 | LogicalPlan::Copy { .. }
         )
     }
@@ -982,6 +1012,7 @@ impl LogicalPlan {
             | LogicalPlan::InsertSelect { table, .. }
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
+            LogicalPlan::Merge { target, .. } => Some(target),
             LogicalPlan::Copy { table, query, .. } => {
                 if table.is_empty() {
                     query.as_deref().and_then(Self::table_name)

@@ -11,6 +11,34 @@ from pathlib import Path
 VERSION = "1.43.2"
 COMMIT = "ae588a9f2c91171f45bace43a99fb7b80b90847b"
 PYI = Path(__file__).parents[2] / "crates/alopex-py/python/alopex/_alopex.pyi"
+EXPECTED_PUBLIC_ROWS = 995
+EXPECTED_MATERIALIZED_ROWS = 999
+PERFORMANCE_STATUSES = {"implemented-compatible", "known-performance-divergence"}
+REPAIRED_APIS = {
+    "DataFrame.__init__",
+    "DataFrame.explode",
+    "DataFrame.height",
+    "DataFrame.width",
+    "DataFrame.to_dict",
+    "Series.name",
+    "Series.to_list",
+    "Expr.add",
+    "Expr.and_",
+    "Expr.eq",
+    "Expr.ge",
+    "Expr.gt",
+    "Expr.le",
+    "Expr.lt",
+    "Expr.mul",
+    "Expr.or_",
+    "Expr.sub",
+    "concat",
+    "concat_str",
+    "lit",
+    "LazyFrame.collect",
+    "LazyFrame.collect_batches",
+}
+DIFFERENTIAL_TEST = "crates/alopex-py/tests/test_polars_1432_reference.py"
 
 
 def public_members(value: object) -> list[str]:
@@ -47,7 +75,47 @@ def inventory() -> list[dict[str, str]]:
     )
     for class_name in ("DataFrame", "Series", "LazyFrame", "Expr"):
         rows.append({"surface": class_name, "api": f"{class_name}.__init__"})
-    return sorted(rows, key=lambda row: (row["surface"], row["api"]))
+    rows = sorted(rows, key=lambda row: (row["surface"], row["api"]))
+    if len(rows) != EXPECTED_PUBLIC_ROWS:
+        raise RuntimeError(
+            f"Polars public inventory changed: expected {EXPECTED_PUBLIC_ROWS}, got {len(rows)}"
+        )
+    return rows
+
+
+def normalize_claims(claims: list[dict[str, object]]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for original in claims:
+        claim = dict(original)
+        api = str(claim["api"])
+        if api in REPAIRED_APIS:
+            lazy = api in {"LazyFrame.collect", "LazyFrame.collect_batches"}
+            if lazy:
+                selector = "test_polars_1432_csv_parquet_and_streaming_contracts"
+            elif api.startswith(("DataFrame.", "Series.")):
+                selector = (
+                    "test_polars_1432_dataframe_properties_series_and_constructor_defaults"
+                )
+            else:
+                selector = "test_polars_1432_expr_scalar_variadic_and_module_default_values"
+            claim.update(
+                status=(
+                    "known-performance-divergence" if lazy else "implemented-compatible"
+                ),
+                reference=f"polars:{VERSION}@{COMMIT}",
+                evidence=f"{DIFFERENTIAL_TEST}#{selector}",
+                performance_contract=(
+                    "polars-lazy-streaming-v1" if lazy else "polars-eager-v1"
+                ),
+                performance_evidence=(
+                    "polars-csv-streaming" if lazy else "polars-eager-api"
+                ),
+                issue=305,
+            )
+            claim.pop("notes", None)
+            claim.setdefault("contracts", ["signature", "return-type", "value", "error"])
+        normalized.append(claim)
+    return normalized
 
 
 def alopex_polars_overlaps(public_names: set[str]) -> set[str]:
@@ -79,6 +147,12 @@ def materialize(payload: dict[str, object]) -> list[dict[str, object]]:
         if api in by_api:
             raise RuntimeError(f"duplicate claim: {api}")
         by_api[api] = claim
+        status = str(claim.get("status", ""))
+        if status in PERFORMANCE_STATUSES:
+            if not claim.get("performance_contract"):
+                raise RuntimeError(f"missing performance contract: {api}")
+            if not claim.get("performance_evidence"):
+                raise RuntimeError(f"missing performance evidence: {api}")
     rows: list[dict[str, object]] = []
     public = inventory()
     public_names = {row["api"] for row in public}
@@ -111,6 +185,10 @@ def materialize(payload: dict[str, object]) -> list[dict[str, object]]:
         for claim in claims
         if claim.get("status") == "alopex-extension"
     )
+    if len(rows) != EXPECTED_MATERIALIZED_ROWS:
+        raise RuntimeError(
+            f"materialized Polars inventory changed: expected {EXPECTED_MATERIALIZED_ROWS}, got {len(rows)}"
+        )
     return rows
 
 
@@ -120,6 +198,9 @@ def main() -> int:
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     payload = json.loads(args.ledger.read_text(encoding="utf-8"))
+    claims = normalize_claims(list(payload.get("claims", [])))
+    claims_are_stale = payload.get("claims") != claims
+    payload["claims"] = claims
     expected = materialize(payload)
     if args.write:
         payload["entries"] = expected
@@ -129,6 +210,8 @@ def main() -> int:
         return 0
     if payload.get("polars_version") != VERSION or payload.get("polars_commit") != COMMIT:
         raise RuntimeError("ledger reference does not match the inventory generator")
+    if claims_are_stale:
+        raise RuntimeError("Polars claims are stale; run with --write")
     if payload.get("entries") != expected:
         raise RuntimeError("Polars public inventory is stale; run with --write")
     print(f"validated {len(expected)} Polars public API rows")

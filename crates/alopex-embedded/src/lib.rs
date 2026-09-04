@@ -103,6 +103,9 @@ pub enum Error {
     /// SQL session execution accepts one statement per call.
     #[error("SQL session execution requires exactly one statement")]
     SqlSessionRequiresSingleStatement,
+    /// A post-commit read step contained a mutation or transaction control statement.
+    #[error("post-commit read step requires a query statement")]
+    PostCommitReadRequiresQuery,
     /// Prepared statements accept exactly one SQL statement.
     #[error("prepared statement requires exactly one SQL statement")]
     PreparedStatementRequiresSingleStatement,

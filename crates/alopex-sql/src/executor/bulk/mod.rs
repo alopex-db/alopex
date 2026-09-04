@@ -317,11 +317,11 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         }
         file.flush()
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-        drop(file);
         fs::rename(&temporary_path, file_path)
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
         Ok(ExecutionResult::RowsAffected(rows))
     })();
+    drop(file);
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
     }
@@ -410,11 +410,11 @@ pub fn execute_copy_query_to(
         }
         file.flush()
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-        drop(file);
         fs::rename(&temporary_path, file_path)
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
         Ok(ExecutionResult::RowsAffected(result.rows.len() as u64))
     })();
+    drop(file);
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
     }
@@ -555,6 +555,7 @@ fn create_copy_temp_file(file_path: &str) -> Result<(PathBuf, File)> {
             path: file_path.into(),
             reason: "output path must contain a file name".into(),
         })?;
+    recover_stale_copy_temp_files(parent, name)?;
     let pid = std::process::id();
     for attempt in 0..16u32 {
         let temporary_path = parent.join(format!(".{name}.alopex-copy-{pid}-{attempt}.tmp"));
@@ -563,7 +564,14 @@ fn create_copy_temp_file(file_path: &str) -> Result<(PathBuf, File)> {
             .create_new(true)
             .open(&temporary_path)
         {
-            Ok(file) => return Ok((temporary_path, file)),
+            Ok(file) => {
+                if let Err(error) = file.try_lock() {
+                    drop(file);
+                    let _ = fs::remove_file(&temporary_path);
+                    return Err(ExecutorError::BulkLoad(error.to_string()));
+                }
+                return Ok((temporary_path, file));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(ExecutorError::BulkLoad(error.to_string())),
         }
@@ -571,6 +579,47 @@ fn create_copy_temp_file(file_path: &str) -> Result<(PathBuf, File)> {
     Err(ExecutorError::BulkLoad(
         "could not allocate a temporary COPY output".into(),
     ))
+}
+
+fn recover_stale_copy_temp_files(parent: &Path, output_name: &str) -> Result<()> {
+    for entry in fs::read_dir(parent).map_err(|error| ExecutorError::BulkLoad(error.to_string()))? {
+        let entry = entry.map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !is_copy_temp_file_name(file_name, output_name) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        if file.try_lock().is_err() {
+            continue;
+        }
+        drop(file);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ExecutorError::BulkLoad(error.to_string())),
+        }
+    }
+    Ok(())
+}
+
+fn is_copy_temp_file_name(file_name: &str, output_name: &str) -> bool {
+    let prefix = format!(".{output_name}.alopex-copy-");
+    let Some(suffix) = file_name
+        .strip_prefix(&prefix)
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((pid, attempt)) = suffix.rsplit_once('-') else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok() && attempt.parse::<u32>().is_ok_and(|attempt| attempt < 16)
 }
 
 fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
@@ -1692,6 +1741,39 @@ mod tests {
             let err = validate_file_path(link.to_str().unwrap(), &config).unwrap_err();
             assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
         }
+    }
+
+    #[test]
+    fn copy_temp_recovery_removes_only_stale_same_destination_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("export.csv");
+        let stale = directory
+            .path()
+            .join(".export.csv.alopex-copy-999999-0.tmp");
+        let other_destination = directory.path().join(".other.csv.alopex-copy-999999-0.tmp");
+        let malformed = directory
+            .path()
+            .join(".export.csv.alopex-copy-not-a-pid-0.tmp");
+        File::create(&stale).unwrap();
+        File::create(&other_destination).unwrap();
+        File::create(&malformed).unwrap();
+
+        let (active_path, active_file) = create_copy_temp_file(output.to_str().unwrap()).unwrap();
+        assert!(!stale.exists(), "stale COPY output must be recovered");
+        assert!(
+            other_destination.exists(),
+            "another destination is out of scope"
+        );
+        assert!(malformed.exists(), "non-COPY lookalikes are out of scope");
+
+        let (next_path, next_file) = create_copy_temp_file(output.to_str().unwrap()).unwrap();
+        assert!(
+            active_path.exists(),
+            "an active COPY writer must not be removed"
+        );
+        assert_ne!(active_path, next_path);
+
+        drop((active_file, next_file));
     }
 
     #[test]

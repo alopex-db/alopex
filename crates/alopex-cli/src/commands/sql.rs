@@ -2092,6 +2092,18 @@ fn execute_sql_with_formatter<W: Write>(
             .first()
             .is_some_and(|statement| statement.kind.is_query());
 
+    if stmts
+        .iter()
+        .any(|statement| matches!(statement.kind, alopex_sql::StatementKind::Commit))
+    {
+        if !matches!(output, SqlOutput::Format(OutputFormat::Json)) {
+            return Err(CliError::InvalidArgument(
+                "transaction scripts with a commit barrier require --output json".into(),
+            ));
+        }
+        return execute_shared_transaction_script(db, sql, &stmts, writer, options);
+    }
+
     if is_single_query {
         // A single query statement uses the streaming path (FR-7).
         let formatter = output.create_block_formatter();
@@ -2126,6 +2138,265 @@ fn execute_sql_with_formatter<W: Write>(
         // DDL/DML and multi-statement input: emit one result block per statement.
         execute_sql_statements(db, sql, writer, output, options)
     }
+}
+
+fn execute_shared_transaction_script<W: Write>(
+    db: &Database,
+    sql: &str,
+    statements: &[alopex_sql::Statement],
+    writer: &mut W,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    use alopex_sql::{
+        CommitMetadata, ExecutionStep, ExecutionStepError, ExecutionStepErrorKind,
+        ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult, SharedExecutionReport,
+        SharedExecutionRequest, StatementKind,
+    };
+
+    options.deadline.check()?;
+    let texts = statement_texts(sql, statements)?;
+    let mut after_commit = false;
+    let mut steps = Vec::new();
+    for (statement, text) in statements.iter().zip(texts) {
+        let kind = match &statement.kind {
+            StatementKind::Begin { .. } => continue,
+            StatementKind::Commit => {
+                after_commit = true;
+                ExecutionStepKind::CommitBarrier
+            }
+            _ if after_commit => ExecutionStepKind::PostCommitRead { sql: text },
+            _ => ExecutionStepKind::TransactionStatement { sql: text },
+        };
+        steps.push(ExecutionStep::new(format!("step-{}", steps.len()), kind));
+    }
+    let request = SharedExecutionRequest::new("cli-execution", "cli-transaction", steps);
+    let SharedExecutionRequest {
+        execution_id,
+        transaction_id,
+        steps,
+    } = request;
+    let mut transaction = None;
+    let mut committed = false;
+    let mut results = Vec::with_capacity(steps.len());
+
+    for (step_index, step) in steps.into_iter().enumerate() {
+        let outcome = match step.kind {
+            ExecutionStepKind::TransactionStatement { sql } => {
+                if transaction.is_none() {
+                    transaction = Some(db.begin(alopex_embedded::TxnMode::ReadWrite)?);
+                }
+                match transaction
+                    .as_mut()
+                    .expect("transaction opened")
+                    .execute_sql(&sql)
+                {
+                    Ok(result) => ExecutionStepOutcome::Execution(result),
+                    Err(error) => {
+                        if let Some(transaction) = transaction.take() {
+                            let _ = transaction.rollback();
+                        }
+                        ExecutionStepOutcome::Error(ExecutionStepError {
+                            kind: ExecutionStepErrorKind::Transaction,
+                            message: error.to_string(),
+                        })
+                    }
+                }
+            }
+            ExecutionStepKind::CommitBarrier => match transaction.take() {
+                Some(transaction) => match transaction.commit() {
+                    Ok(()) => {
+                        committed = true;
+                        ExecutionStepOutcome::Commit(CommitMetadata {
+                            transaction_id: transaction_id.clone(),
+                        })
+                    }
+                    Err(error) => ExecutionStepOutcome::Error(ExecutionStepError {
+                        kind: ExecutionStepErrorKind::Commit,
+                        message: error.to_string(),
+                    }),
+                },
+                None => ExecutionStepOutcome::Error(ExecutionStepError {
+                    kind: ExecutionStepErrorKind::InvalidOrder,
+                    message: "commit barrier has no mutation transaction".into(),
+                }),
+            },
+            ExecutionStepKind::PostCommitRead { sql } if committed => {
+                let is_single_read =
+                    alopex_sql::Parser::parse_sql(&alopex_sql::AlopexDialect, &sql).is_ok_and(
+                        |statements| statements.len() == 1 && statements[0].kind.is_query(),
+                    );
+                if !is_single_read {
+                    ExecutionStepOutcome::Error(ExecutionStepError {
+                        kind: ExecutionStepErrorKind::PostCommitRead,
+                        message: "post-commit read requires exactly one query statement".into(),
+                    })
+                } else {
+                    match db.execute_sql_multi(&sql) {
+                        Ok(mut values) if values.len() == 1 => {
+                            ExecutionStepOutcome::Execution(values.remove(0))
+                        }
+                        Ok(_) => ExecutionStepOutcome::Error(ExecutionStepError {
+                            kind: ExecutionStepErrorKind::PostCommitRead,
+                            message: "post-commit read requires exactly one statement".into(),
+                        }),
+                        Err(error) => ExecutionStepOutcome::Error(ExecutionStepError {
+                            kind: ExecutionStepErrorKind::PostCommitRead,
+                            message: error.to_string(),
+                        }),
+                    }
+                }
+            }
+            ExecutionStepKind::PostCommitRead { .. } => {
+                ExecutionStepOutcome::Error(ExecutionStepError {
+                    kind: ExecutionStepErrorKind::InvalidOrder,
+                    message: "post-commit read precedes a successful commit barrier".into(),
+                })
+            }
+        };
+        let failed = matches!(outcome, ExecutionStepOutcome::Error(_));
+        results.push(ExecutionStepResult {
+            execution_id: execution_id.clone(),
+            transaction_id: transaction_id.clone(),
+            step_id: step.step_id,
+            step_index,
+            outcome,
+        });
+        if failed {
+            break;
+        }
+    }
+
+    let report = SharedExecutionReport {
+        execution_id,
+        transaction_id,
+        steps: results,
+    };
+    let failed = report
+        .steps
+        .iter()
+        .any(|step| matches!(step.outcome, ExecutionStepOutcome::Error(_)));
+    write_shared_execution_report(writer, &report)?;
+    options.deadline.check()?;
+    if failed {
+        return Err(CliError::InvalidArgument(
+            "transaction script completed with a partial failure".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn statement_texts(sql: &str, statements: &[alopex_sql::Statement]) -> Result<Vec<String>> {
+    fn offset(sql: &str, location: alopex_sql::Location) -> Option<usize> {
+        if location.line == 0 || location.column == 0 {
+            return None;
+        }
+        let line_start = sql
+            .split_inclusive('\n')
+            .take(location.line.saturating_sub(1) as usize)
+            .map(str::len)
+            .sum::<usize>();
+        line_start.checked_add(location.column.saturating_sub(1) as usize)
+    }
+
+    let starts = statements
+        .iter()
+        .map(|statement| offset(sql, statement.span.start))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| CliError::Parse("SQL statement span is unavailable".into()))?;
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(sql.len());
+            sql.get(*start..end)
+                .map(|text| text.trim().trim_end_matches(';').trim().to_string())
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| CliError::Parse("invalid SQL statement span".into()))
+        })
+        .collect()
+}
+
+fn write_shared_execution_report<W: Write>(
+    writer: &mut W,
+    report: &alopex_sql::SharedExecutionReport,
+) -> Result<()> {
+    use alopex_sql::{ExecutionResult, ExecutionStepErrorKind, ExecutionStepOutcome};
+
+    fn result_json(result: &ExecutionResult) -> serde_json::Value {
+        match result {
+            ExecutionResult::Success => serde_json::json!({ "kind": "success" }),
+            ExecutionResult::RowsAffected(affected_rows) => serde_json::json!({
+                "kind": "rows_affected",
+                "affected_rows": affected_rows,
+            }),
+            ExecutionResult::Query(query) => serde_json::json!({
+                "kind": "query",
+                "columns": query.columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+                "rows": query.rows.iter().map(|row| {
+                    row.iter()
+                        .cloned()
+                        .map(sql_value_to_value)
+                        .map(|value| serde_json::to_value(value).expect("CLI values serialize"))
+                        .collect::<Vec<_>>()
+                }).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    fn error_kind(kind: ExecutionStepErrorKind) -> &'static str {
+        match kind {
+            ExecutionStepErrorKind::Transaction => "transaction",
+            ExecutionStepErrorKind::Commit => "commit",
+            ExecutionStepErrorKind::PostCommitRead => "post_commit_read",
+            ExecutionStepErrorKind::InvalidOrder => "invalid_order",
+        }
+    }
+
+    let steps = report
+        .steps
+        .iter()
+        .map(|step| match &step.outcome {
+            ExecutionStepOutcome::Execution(result) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "execution",
+                "result": result_json(result),
+            }),
+            ExecutionStepOutcome::Commit(metadata) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "commit",
+                "commit": { "transaction_id": metadata.transaction_id },
+            }),
+            ExecutionStepOutcome::Error(error) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "error",
+                "error": { "kind": error_kind(error.kind), "message": error.message },
+            }),
+        })
+        .collect::<Vec<_>>();
+    let success = !report
+        .steps
+        .iter()
+        .any(|step| matches!(step.outcome, ExecutionStepOutcome::Error(_)));
+    serde_json::to_writer(
+        &mut *writer,
+        &serde_json::json!({
+            "execution_id": report.execution_id,
+            "transaction_id": report.transaction_id,
+            "success": success,
+            "steps": steps,
+        }),
+    )?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 /// Execute SELECT query with streaming callback (FR-7).

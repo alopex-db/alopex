@@ -8,6 +8,97 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+EVIDENCE_BY_CLAIM = {
+    "portable SELECT/null/order/coercion": "scripts/reference_tests/sql_v0811_differential.py#main",
+    "parser/lexer": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
+    "transactions/savepoints": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
+    "prepared statements": "crates/alopex-embedded/tests/prepared_statement.rs#prepared_statement_supports_null_rebind_reset_and_finalize",
+    "EXPLAIN JSON": "crates/alopex-embedded/tests/explain.rs#json_contract_is_versioned_complete_and_redacts_literals_and_binds",
+    "RETURNING": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#returning",
+    "ON CONFLICT": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#on-conflict",
+    "CHECK/FK constraints": "crates/alopex-embedded/tests/constraints.rs#check_and_composite_foreign_keys_follow_sql_null_semantics",
+    "COPY": "crates/alopex-embedded/tests/copy_sql.rs#copy_reader_writer_streams_share_csv_quoting_and_atomicity",
+    "SERIAL/IDENTITY/SEQUENCE": "crates/alopex-embedded/tests/sequence.rs#sequence_ddl_is_transactional_and_persistent",
+    "VIEW/ALTER TABLE/TRUNCATE": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
+    "MERGE/UPDATE FROM/DELETE USING": "scripts/reference_tests/sql_v0811_advanced_dml.py#main;scripts/reference_tests/sql_v0811_advanced_dml.json#update-from;scripts/reference_tests/sql_v0811_advanced_dml.json#delete-using;scripts/reference_tests/sql_v0811_advanced_dml.json#merge",
+    "VECTOR/HNSW": "crates/alopex-sql/tests/hnsw_sql_tests.rs#create_insert_and_search_hnsw_index",
+    "PRAGMA": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_database_execute_sql_pragma_uses_store_path",
+    "information_schema": "crates/alopex-embedded/tests/metadata.rs#portable_metadata_surfaces_have_exact_schemas_and_values",
+    "streaming query": "crates/alopex-py/tests/test_sql.py#test_execute_sql_select_iteration_matches_guide_usage",
+}
+
+TRANSACTION_STATEMENTS = {
+    "Begin", "Commit", "ReleaseSavepoint", "Rollback", "RollbackToSavepoint",
+    "Savepoint", "SetTransaction",
+}
+
+
+def claim_for(row: dict[str, str]) -> str:
+    surface, api = row["surface"], row["api"]
+    name = api.rsplit(".", 1)[-1]
+    if surface == "scalar":
+        return "portable SELECT/null/order/coercion"
+    if surface == "metadata":
+        return "information_schema"
+    if surface == "statement":
+        if name in TRANSACTION_STATEMENTS:
+            return "transactions/savepoints"
+        if name == "Explain":
+            return "EXPLAIN JSON"
+        if name == "Copy":
+            return "COPY"
+        if name in {"CreateSequence", "AlterSequence", "DropSequence"}:
+            return "SERIAL/IDENTITY/SEQUENCE"
+        if name in {"AlterTable", "CreateView", "DropView", "Truncate"}:
+            return "VIEW/ALTER TABLE/TRUNCATE"
+        if name in {"Merge", "Update", "Delete"}:
+            return "MERGE/UPDATE FROM/DELETE USING"
+        if name == "Insert":
+            return "RETURNING"
+        if name == "CreateTable":
+            return "CHECK/FK constraints"
+        if name == "CreateIndex":
+            return "VECTOR/HNSW"
+        if name == "Pragma":
+            return "PRAGMA"
+        if name in {"Select", "Values"}:
+            return "portable SELECT/null/order/coercion"
+        return "parser/lexer"
+    if "copy_" in api:
+        return "COPY"
+    if "list_sequences" in api:
+        return "SERIAL/IDENTITY/SEQUENCE"
+    if api.endswith(".prepare"):
+        return "prepared statements"
+    if surface == "embedded" and api == "Database.execute_sql":
+        return "ON CONFLICT"
+    if surface == "server":
+        return "streaming query"
+    if api == "Parser.parse_sql":
+        return "parser/lexer"
+    return "portable SELECT/null/order/coercion"
+
+
+def materialize(payload: dict[str, object]) -> list[dict[str, object]]:
+    claims = {str(entry["api"]): entry for entry in payload.get("entries", [])}
+    rows = []
+    for source in inventory():
+        claim = claim_for(source)
+        entry = claims.get(claim)
+        if entry is None:
+            raise RuntimeError(f"unknown SQL claim: {claim}")
+        rows.append({
+            **source,
+            "claim": claim,
+            "status": entry["status"],
+            "reference": entry.get("reference", "alopex"),
+            "evidence": EVIDENCE_BY_CLAIM[claim],
+            "issue": entry.get("issue", 307),
+            **({"performance_contract": entry["performance_contract"]} if "performance_contract" in entry else {}),
+            **({"performance_evidence": entry["performance_evidence"]} if "performance_evidence" in entry else {}),
+        })
+    return rows
+
 
 def inventory() -> list[dict[str, str]]:
     ast = (ROOT / "crates/alopex-sql/src/ast/mod.rs").read_text(encoding="utf-8")
@@ -69,7 +160,7 @@ def main() -> int:
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     payload = json.loads(args.ledger.read_text(encoding="utf-8"))
-    expected = inventory()
+    expected = materialize(payload)
     if args.write:
         payload["public_api"] = expected
         args.ledger.write_text(

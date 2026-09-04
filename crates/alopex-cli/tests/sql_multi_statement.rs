@@ -341,6 +341,58 @@ fn batch_multi_statement_error_exits_nonzero() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn batch_json_maps_commit_barrier_steps_losslessly() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--output",
+        "json",
+        "sql",
+        "BEGIN; CREATE TABLE items (id INTEGER PRIMARY KEY); \
+         INSERT INTO items (id) VALUES (1); COMMIT; SELECT id FROM items",
+    ]);
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(value["execution_id"], "cli-execution");
+    assert_eq!(value["transaction_id"], "cli-transaction");
+    assert_eq!(value["success"], true);
+    let steps = value["steps"].as_array().expect("ordered steps");
+    assert_eq!(steps.len(), 4);
+    assert_eq!(steps[0]["step_id"], "step-0");
+    assert_eq!(steps[1]["result"]["kind"], "rows_affected");
+    assert_eq!(steps[1]["result"]["affected_rows"], 1);
+    assert_eq!(steps[2]["kind"], "commit");
+    assert_eq!(steps[2]["commit"]["transaction_id"], "cli-transaction");
+    assert_eq!(steps[3]["result"]["kind"], "query");
+    assert_eq!(steps[3]["result"]["rows"], serde_json::json!([[1]]));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_json_preserves_commit_when_post_read_fails_and_exits_nonzero() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--output",
+        "json",
+        "sql",
+        "BEGIN; CREATE TABLE items (id INTEGER PRIMARY KEY); \
+         INSERT INTO items (id) VALUES (1); COMMIT; SELECT id FROM missing",
+    ]);
+
+    assert!(!output.status.success(), "partial failure must be non-zero");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("stdout must remain machine-readable: {error}"));
+    assert_eq!(value["success"], false);
+    let steps = value["steps"].as_array().expect("ordered partial steps");
+    assert_eq!(steps.len(), 4);
+    assert_eq!(steps[2]["kind"], "commit");
+    assert_eq!(steps[3]["kind"], "error");
+    assert_eq!(steps[3]["error"]["kind"], "post_commit_read");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn recursive_cte_resource_limit_reports_stable_error_code() {
     let output = run_alopex(&[
         "--in-memory",
