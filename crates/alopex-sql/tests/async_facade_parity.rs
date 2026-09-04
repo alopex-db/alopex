@@ -58,6 +58,8 @@ fn insert_user(table: &str, id: i64, name: &str) -> LogicalPlan {
                 Span::default(),
             ),
         ]],
+        conflict: None,
+        returning: None,
     }
 }
 

@@ -27,6 +27,23 @@ rtk bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
 Also run the repository's candidate verifier, then the focused test suites for any changed contract. Before and after Cargo/maturin work, perform the hygiene commands above.
 
+## Reference compatibility gate
+
+Apply `docs/reference-compatibility-development-policy.md` before approving or
+implementing any compatibility-sensitive API.
+
+- [ ] The inventory names the canonical reference project for each observable contract.
+- [ ] The inventory pins the exact version and full commit, not only `main`, `current`, `stable`, or `latest`.
+- [ ] The design records the upstream implementation path and upstream test file/case inspected by the implementer.
+- [ ] Each item is classified as `ported`, `extended`, `diverged`, `not-yet-implemented`, `unsupported`, or `alopex-native`.
+- [ ] Every compatibility fixture has machine-readable project/version/commit/source/test provenance and a reproducible generation command.
+- [ ] Every fixture derived from a reference and extended by Alopex names its base case, exact change, reason, and expected difference.
+- [ ] Handwritten expectations are marked `handwritten-regression` and are excluded from conformance evidence.
+- [ ] The curated reference/differential cases for the changed contract run in required CI without skip.
+- [ ] Licensing and attribution permit any copied or adapted test material.
+
+Block approval, implementation completion, and release when any applicable item is unchecked.
+
 ## spec-workflow approval sequence
 
 Call the guide first, then complete one spec in this order:
@@ -58,7 +75,7 @@ roadmap, but preserve exact per-surface enumeration, one owning phase per row,
 explicit support/rejection classification, target-version gate coverage, and the
 full requirements → design → task → test/evidence crosswalk.
 
-Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
+Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, reference project/version/commit, upstream implementation and test locations, relationship classification, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
 
 ## Release safety and tags
 

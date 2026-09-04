@@ -44,6 +44,7 @@
 //! };
 //! ```
 
+use crate::ast::AlterTableAction;
 use crate::ast::expr::WindowFrame;
 use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
@@ -205,6 +206,15 @@ impl TableFunctionKind {
 /// 3. **DDL Plans**: Schema modification (CreateTable, DropTable, CreateIndex, DropIndex)
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
+    /// Introspection wrapper around the plan that the executor actually uses.
+    Explain {
+        /// Execute the wrapped plan and include runtime metrics.
+        analyze: bool,
+        /// Requested output encoding.
+        format: crate::ast::ExplainFormat,
+        /// Planned statement being described.
+        input: Box<LogicalPlan>,
+    },
     /// Runtime configuration or statistics operation.
     Pragma {
         /// PRAGMA name.
@@ -424,6 +434,8 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Values to insert (one Vec per row, each value corresponds to a column).
         values: Vec<Vec<TypedExpr>>,
+        conflict: Option<OnConflictPlan>,
+        returning: Option<Projection>,
     },
 
     /// INSERT rows produced by a SELECT query.
@@ -434,6 +446,8 @@ pub enum LogicalPlan {
         columns: Vec<String>,
         /// Query that produces one row per inserted row.
         source: Box<LogicalPlan>,
+        conflict: Option<OnConflictPlan>,
+        returning: Option<Projection>,
     },
 
     /// UPDATE operation.
@@ -446,6 +460,8 @@ pub enum LogicalPlan {
         assignments: Vec<TypedAssignment>,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        join_source: Option<JoinedDmlSource>,
+        returning: Option<Projection>,
     },
 
     /// DELETE operation.
@@ -456,7 +472,33 @@ pub enum LogicalPlan {
         table: String,
         /// Optional filter predicate (WHERE clause).
         filter: Option<TypedExpr>,
+        join_source: Option<JoinedDmlSource>,
+        returning: Option<Projection>,
     },
+
+    /// MERGE operation over one target and one source table.
+    Merge {
+        target: String,
+        source: String,
+        on: TypedExpr,
+        clauses: Vec<MergeClausePlan>,
+    },
+
+    /// COPY table data to or from a local file.
+    Copy {
+        table: String,
+        path: String,
+        direction: crate::ast::CopyDirection,
+        options: Vec<crate::ast::CopyOption>,
+        query: Option<Box<LogicalPlan>>,
+    },
+
+    /// CREATE SEQUENCE metadata operation.
+    CreateSequence(crate::ast::CreateSequence),
+    /// ALTER SEQUENCE metadata operation.
+    AlterSequence(crate::ast::AlterSequence),
+    /// DROP SEQUENCE metadata operation.
+    DropSequence(crate::ast::DropSequence),
 
     // === DDL Plans ===
     /// CREATE TABLE operation.
@@ -481,6 +523,26 @@ pub enum LogicalPlan {
         if_exists: bool,
     },
 
+    CreateView {
+        table: TableMetadata,
+        if_not_exists: bool,
+    },
+
+    DropView {
+        name: String,
+        if_exists: bool,
+    },
+
+    AlterTable {
+        name: String,
+        if_exists: bool,
+        action: AlterTableAction,
+    },
+
+    Truncate {
+        name: String,
+    },
+
     /// CREATE INDEX operation.
     ///
     /// Creates a new index on a table column.
@@ -502,9 +564,143 @@ pub enum LogicalPlan {
     },
 }
 
+/// Type-checked INSERT conflict behavior.
+#[derive(Debug, Clone)]
+pub struct OnConflictPlan {
+    pub columns: Vec<String>,
+    pub constraint: Option<String>,
+    pub action: OnConflictActionPlan,
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum OnConflictActionPlan {
+    DoNothing,
+    DoUpdate {
+        assignments: Vec<TypedAssignment>,
+        selection: Option<TypedExpr>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinedDmlSource {
+    pub table: String,
+    pub condition: Option<TypedExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeClausePlan {
+    pub matched: bool,
+    pub condition: Option<TypedExpr>,
+    pub action: MergeActionPlan,
+}
+
+#[derive(Debug, Clone)]
+pub enum MergeActionPlan {
+    Update {
+        assignments: Vec<TypedAssignment>,
+    },
+    Insert {
+        columns: Vec<String>,
+        values: Vec<TypedExpr>,
+    },
+    DoNothing,
+}
+
 impl LogicalPlan {
+    /// Render the stable, secret-free machine-readable explain contract.
+    pub fn explain_json(
+        &self,
+        analyze: bool,
+        elapsed_ns: Option<u64>,
+        rows: Option<u64>,
+    ) -> String {
+        let knn_pattern_applied = super::knn_optimizer::detect_knn_pattern(self).is_some();
+        serde_json::json!({
+            "schema": "alopex.explain",
+            "version": 1,
+            "analyze": analyze,
+            "logical_plan": self.explain_node(),
+            "physical_plan": {
+                "engine": "logical-direct",
+                "root": self.explain_node(),
+            },
+            "distributed_plan": {
+                "mode": "single-node",
+                "fragments": [{"id": 0, "placement": "local", "root": self.name()}],
+            },
+            "optimizer_rules": [{
+                "name": "knn_pattern_detection",
+                "status": "integrated",
+                "applied": knn_pattern_applied,
+            }],
+            "metrics": {
+                "elapsed_ns": elapsed_ns,
+                "rows": rows,
+            },
+        })
+        .to_string()
+    }
+
+    /// Render the human-readable explain tree. This format is not stable across releases.
+    pub fn explain_text(&self, elapsed_ns: Option<u64>, rows: Option<u64>) -> String {
+        fn write_tree(plan: &LogicalPlan, depth: usize, output: &mut String) {
+            output.push_str(&"  ".repeat(depth));
+            output.push_str(plan.name());
+            if let Some(table) = plan.table_name() {
+                output.push_str(" table=");
+                output.push_str(table);
+            }
+            output.push('\n');
+            for child in plan.explain_children() {
+                write_tree(child, depth + 1, output);
+            }
+        }
+
+        let mut output = String::new();
+        write_tree(self, 0, &mut output);
+        if let Some(value) = elapsed_ns {
+            output.push_str(&format!("elapsed_ns={value}\n"));
+        }
+        if let Some(value) = rows {
+            output.push_str(&format!("rows={value}\n"));
+        }
+        output
+    }
+
+    fn explain_node(&self) -> serde_json::Value {
+        serde_json::json!({
+            "node": self.name(),
+            "table": self.table_name(),
+            "children": self.explain_children().into_iter().map(Self::explain_node).collect::<Vec<_>>(),
+        })
+    }
+
+    fn explain_children(&self) -> Vec<&LogicalPlan> {
+        match self {
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::InsertSelect { source: input, .. } => vec![input],
+            LogicalPlan::Join { left, right, .. }
+            | LogicalPlan::LateralJoin { left, right, .. }
+            | LogicalPlan::SetOperation { left, right, .. } => vec![left, right],
+            LogicalPlan::RecursiveCte {
+                anchor,
+                recursive_term,
+                ..
+            } => vec![anchor, recursive_term],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn operation_name(&self) -> &'static str {
         match self {
+            LogicalPlan::Explain { .. } => "EXPLAIN",
             LogicalPlan::Pragma { .. } => "PRAGMA",
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }
@@ -525,10 +721,19 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "INSERT",
             LogicalPlan::Update { .. } => "UPDATE",
             LogicalPlan::Delete { .. } => "DELETE",
+            LogicalPlan::Merge { .. } => "MERGE",
+            LogicalPlan::Copy { .. } => "COPY",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
+            LogicalPlan::CreateView { .. } => "CREATE VIEW",
+            LogicalPlan::DropView { .. } => "DROP VIEW",
+            LogicalPlan::AlterTable { .. } => "ALTER TABLE",
+            LogicalPlan::Truncate { .. } => "TRUNCATE",
             LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
             LogicalPlan::DropIndex { .. } => "DROP INDEX",
+            LogicalPlan::CreateSequence(_) => "CREATE SEQUENCE",
+            LogicalPlan::AlterSequence(_) => "ALTER SEQUENCE",
+            LogicalPlan::DropSequence(_) => "DROP SEQUENCE",
         }
     }
 
@@ -621,6 +826,8 @@ impl LogicalPlan {
             table,
             columns,
             values,
+            conflict: None,
+            returning: None,
         }
     }
 
@@ -634,12 +841,19 @@ impl LogicalPlan {
             table,
             assignments,
             filter,
+            join_source: None,
+            returning: None,
         }
     }
 
     /// Creates a new Delete plan.
     pub fn delete(table: String, filter: Option<TypedExpr>) -> Self {
-        LogicalPlan::Delete { table, filter }
+        LogicalPlan::Delete {
+            table,
+            filter,
+            join_source: None,
+            returning: None,
+        }
     }
 
     /// Creates a new CreateTable plan.
@@ -676,6 +890,7 @@ impl LogicalPlan {
     /// Returns the name of this plan variant.
     pub fn name(&self) -> &'static str {
         match self {
+            LogicalPlan::Explain { .. } => "Explain",
             LogicalPlan::Pragma { .. } => "Pragma",
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Values { .. } => "Values",
@@ -696,8 +911,17 @@ impl LogicalPlan {
             LogicalPlan::InsertSelect { .. } => "InsertSelect",
             LogicalPlan::Update { .. } => "Update",
             LogicalPlan::Delete { .. } => "Delete",
+            LogicalPlan::Merge { .. } => "Merge",
+            LogicalPlan::Copy { .. } => "Copy",
+            LogicalPlan::CreateSequence(_) => "CreateSequence",
+            LogicalPlan::AlterSequence(_) => "AlterSequence",
+            LogicalPlan::DropSequence(_) => "DropSequence",
             LogicalPlan::CreateTable { .. } => "CreateTable",
             LogicalPlan::DropTable { .. } => "DropTable",
+            LogicalPlan::CreateView { .. } => "CreateView",
+            LogicalPlan::DropView { .. } => "DropView",
+            LogicalPlan::AlterTable { .. } => "AlterTable",
+            LogicalPlan::Truncate { .. } => "Truncate",
             LogicalPlan::CreateIndex { .. } => "CreateIndex",
             LogicalPlan::DropIndex { .. } => "DropIndex",
         }
@@ -707,7 +931,8 @@ impl LogicalPlan {
     pub fn is_query(&self) -> bool {
         matches!(
             self,
-            LogicalPlan::Scan { .. }
+            LogicalPlan::Explain { .. }
+                | LogicalPlan::Scan { .. }
                 | LogicalPlan::Values { .. }
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
@@ -733,6 +958,8 @@ impl LogicalPlan {
                 | LogicalPlan::InsertSelect { .. }
                 | LogicalPlan::Update { .. }
                 | LogicalPlan::Delete { .. }
+                | LogicalPlan::Merge { .. }
+                | LogicalPlan::Copy { .. }
         )
     }
 
@@ -742,16 +969,24 @@ impl LogicalPlan {
             self,
             LogicalPlan::CreateTable { .. }
                 | LogicalPlan::DropTable { .. }
+                | LogicalPlan::CreateView { .. }
+                | LogicalPlan::DropView { .. }
+                | LogicalPlan::AlterTable { .. }
+                | LogicalPlan::Truncate { .. }
                 | LogicalPlan::CreateIndex { .. }
                 | LogicalPlan::DropIndex { .. }
                 | LogicalPlan::Pragma { .. }
+                | LogicalPlan::CreateSequence(_)
+                | LogicalPlan::AlterSequence(_)
+                | LogicalPlan::DropSequence(_)
         )
     }
 
     /// Returns the input plan if this is a transformation (Filter, Aggregate, Sort, Limit).
     pub fn input(&self) -> Option<&LogicalPlan> {
         match self {
-            LogicalPlan::Filter { input, .. }
+            LogicalPlan::Explain { input, .. }
+            | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
@@ -771,13 +1006,29 @@ impl LogicalPlan {
     /// Returns the table name if this plan operates on a single table.
     pub fn table_name(&self) -> Option<&str> {
         match self {
+            LogicalPlan::Explain { input, .. } => input.table_name(),
             LogicalPlan::Scan { table, .. }
             | LogicalPlan::Insert { table, .. }
             | LogicalPlan::InsertSelect { table, .. }
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
+            LogicalPlan::Merge { target, .. } => Some(target),
+            LogicalPlan::Copy { table, query, .. } => {
+                if table.is_empty() {
+                    query.as_deref().and_then(Self::table_name)
+                } else {
+                    Some(table)
+                }
+            }
+            LogicalPlan::CreateSequence(_)
+            | LogicalPlan::AlterSequence(_)
+            | LogicalPlan::DropSequence(_) => None,
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),
             LogicalPlan::DropTable { name, .. } => Some(name),
+            LogicalPlan::CreateView { table, .. } => Some(&table.name),
+            LogicalPlan::DropView { name, .. }
+            | LogicalPlan::AlterTable { name, .. }
+            | LogicalPlan::Truncate { name } => Some(name),
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Pragma { .. } => None,
@@ -807,6 +1058,7 @@ impl LogicalPlan {
     /// opened rather than trying to infer it from a table name.
     pub fn contains_join(&self) -> bool {
         match self {
+            LogicalPlan::Explain { input, .. } => input.contains_join(),
             LogicalPlan::Join { .. } | LogicalPlan::LateralJoin { .. } => true,
             LogicalPlan::SetOperation { left, right, .. } => {
                 left.contains_join() || right.contains_join()
@@ -830,6 +1082,7 @@ impl LogicalPlan {
     /// Returns whether this plan tree contains a set-operation boundary.
     pub fn contains_set_operation(&self) -> bool {
         match self {
+            LogicalPlan::Explain { input, .. } => input.contains_set_operation(),
             LogicalPlan::SetOperation { .. } | LogicalPlan::RecursiveCte { .. } => true,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
@@ -1010,6 +1263,7 @@ mod tests {
             table,
             columns,
             values,
+            ..
         } = &plan
         {
             assert_eq!(table, "users");

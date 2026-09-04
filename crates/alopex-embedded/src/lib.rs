@@ -11,7 +11,9 @@ mod dataframe_api;
 pub mod options;
 pub mod owned_session;
 pub mod owned_sql;
+mod prepared;
 mod sql_api;
+mod sql_session;
 mod txn_manager;
 
 pub use crate::catalog::{CachedTableInfo, Catalog};
@@ -30,7 +32,9 @@ pub use crate::columnar_api::{
 pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
+pub use crate::prepared::{bind_sql_parameters, PreparedSessionStatement, PreparedStatement};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
+pub use crate::sql_session::{SqlSession, SqlSessionState, SqlTransactionCharacteristics};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
@@ -85,6 +89,52 @@ pub enum Error {
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
+    /// A statement failed and the transaction must be rolled back.
+    #[error("transaction is failed and must be rolled back")]
+    TxnFailed,
+    /// A SQL transaction control statement is invalid in the current session state.
+    #[error("invalid SQL transaction transition: {statement} while {state:?}")]
+    InvalidSqlTransactionTransition {
+        /// The rejected statement kind.
+        statement: &'static str,
+        /// The state in which the statement was rejected.
+        state: SqlSessionState,
+    },
+    /// SQL session execution accepts one statement per call.
+    #[error("SQL session execution requires exactly one statement")]
+    SqlSessionRequiresSingleStatement,
+    /// A post-commit read step contained a mutation or transaction control statement.
+    #[error("post-commit read step requires a query statement")]
+    PostCommitReadRequiresQuery,
+    /// Prepared statements accept exactly one SQL statement.
+    #[error("prepared statement requires exactly one SQL statement")]
+    PreparedStatementRequiresSingleStatement,
+    /// The prepared statement was finalized and cannot be reused.
+    #[error("prepared statement is finalized")]
+    PreparedStatementFinalized,
+    /// A one-based bind index was outside the prepared parameter range.
+    #[error("prepared parameter index {index} is outside 1..={count}")]
+    PreparedParameterOutOfRange {
+        /// Rejected one-based parameter index.
+        index: usize,
+        /// Number of positional parameters in the statement.
+        count: usize,
+    },
+    /// A positional parameter had no bound value at execution time.
+    #[error("prepared parameter ?{0} is unbound")]
+    PreparedParameterUnbound(usize),
+    /// The supplied SQL value has no safe SQL literal representation.
+    #[error("unsupported prepared parameter value type")]
+    UnsupportedPreparedParameterType,
+    /// The requested SQL isolation name is not provided by the engine.
+    #[error("unsupported SQL transaction isolation level: {0:?}")]
+    UnsupportedSqlTransactionIsolation(alopex_sql::TransactionIsolationLevel),
+    /// Transaction characteristics may only be set before transactional work.
+    #[error("SQL transaction characteristics are already locked")]
+    SqlTransactionCharacteristicsLocked,
+    /// A named savepoint does not exist in the active transaction.
+    #[error("savepoint not found: {0}")]
+    SavepointNotFound(String),
     /// Catalog が見つかりません。
     #[error("カタログが見つかりません: {0}")]
     CatalogNotFound(String),

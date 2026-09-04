@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 
 use alopex_embedded::Database;
 
@@ -124,7 +125,7 @@ impl<W: Write> Write for CountingWriter<W> {
 /// * `quiet` - Whether to suppress warnings and status result sets.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_with_formatter<'a, W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -174,28 +175,25 @@ pub fn execute_with_formatter_factory<'a, W: Write>(
 ) -> Result<()> {
     let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
     let cancel = CancelSignal::new();
+    let sql = cmd.resolve_query(batch_mode)?;
     let mut output = SqlOutput::Custom(make_formatter);
-
-    execute_with_output_control(
-        db,
-        cmd,
-        batch_mode,
-        ui_mode,
-        writer,
-        &mut output,
-        SqlExecutionOptions {
-            limit,
-            quiet,
-            cancel: &cancel,
-            deadline: &deadline,
-            admin_launcher,
-        },
-    )
+    let mut options = SqlExecutionOptions {
+        limit: merge_limit(limit, cmd.max_rows),
+        quiet,
+        cancel: &cancel,
+        deadline: &deadline,
+        admin_launcher,
+    };
+    if ui_mode == UiMode::Tui {
+        let admin_launcher = options.admin_launcher.take();
+        return execute_tui_local(db, &sql, &options, admin_launcher);
+    }
+    execute_sql_statements(db, &sql, writer, &mut output, &options)
 }
 
 #[doc(hidden)]
 pub fn execute_with_formatter_control<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -208,7 +206,7 @@ pub fn execute_with_formatter_control<W: Write>(
 }
 
 fn execute_with_output_control<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -698,7 +696,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
 }
 
 fn execute_tui_local_or_fallback<'a, W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     sql: &str,
     writer: &mut W,
     output: &mut SqlOutput<'_>,
@@ -1938,7 +1936,7 @@ pub fn execute<W: Write>(
 impl SqlCommand {
     /// Resolve the SQL query source (argument, file, or stdin).
     pub fn resolve_query(&self, batch_mode: &BatchMode) -> Result<String> {
-        match (&self.query, &self.file) {
+        let sql = match (&self.query, &self.file) {
             (Some(query), None) => Ok(query.clone()),
             (None, Some(file)) => fs::read_to_string(file).map_err(|e| {
                 CliError::InvalidArgument(format!("Failed to read SQL file '{}': {}", file, e))
@@ -1952,7 +1950,60 @@ impl SqlCommand {
             (Some(_), Some(_)) => Err(CliError::InvalidArgument(
                 "Cannot specify both query and file".to_string(),
             )),
+        }?;
+        let values = self
+            .params
+            .iter()
+            .map(|value| parse_cli_parameter(value))
+            .collect::<Result<Vec<_>>>()?;
+        alopex_embedded::bind_sql_parameters(&sql, &values)
+            .map_err(|error| CliError::InvalidArgument(error.to_string()))
+    }
+}
+
+fn parse_cli_parameter(input: &str) -> Result<alopex_sql::SqlValue> {
+    use alopex_sql::SqlValue;
+
+    let value: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        CliError::InvalidArgument(format!("invalid --param JSON value: {error}"))
+    })?;
+    match value {
+        serde_json::Value::Null => Ok(SqlValue::Null),
+        serde_json::Value::Bool(value) => Ok(SqlValue::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(SqlValue::BigInt(value))
+            } else {
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(SqlValue::Double)
+                    .ok_or_else(|| CliError::InvalidArgument("invalid numeric --param".into()))
+            }
         }
+        serde_json::Value::String(value) => Ok(SqlValue::Text(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| {
+                let value = value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        CliError::InvalidArgument(
+                            "array --param must contain only finite numbers".into(),
+                        )
+                    })? as f32;
+                value.is_finite().then_some(value).ok_or_else(|| {
+                    CliError::InvalidArgument(
+                        "array --param must contain only finite f32 numbers".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(SqlValue::Vector),
+        serde_json::Value::Object(_) => Err(CliError::InvalidArgument(
+            "object --param values are not supported".into(),
+        )),
     }
 }
 
@@ -2021,7 +2072,7 @@ fn execute_sql<W: Write>(db: &Database, sql: &str, writer: &mut StreamingWriter<
 /// - Leading comments
 /// - Complex query structures
 fn execute_sql_with_formatter<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     sql: &str,
     writer: &mut W,
     output: &mut SqlOutput<'_>,
@@ -2038,6 +2089,26 @@ fn execute_sql_with_formatter<W: Write>(
         && stmts
             .first()
             .is_some_and(|statement| statement.kind.is_query());
+
+    if stmts.iter().any(|statement| {
+        matches!(
+            statement.kind,
+            alopex_sql::StatementKind::Begin { .. }
+                | alopex_sql::StatementKind::SetTransaction { .. }
+                | alopex_sql::StatementKind::Commit
+                | alopex_sql::StatementKind::Rollback
+                | alopex_sql::StatementKind::Savepoint { .. }
+                | alopex_sql::StatementKind::RollbackToSavepoint { .. }
+                | alopex_sql::StatementKind::ReleaseSavepoint { .. }
+        )
+    }) {
+        if !matches!(output, SqlOutput::Format(OutputFormat::Json)) {
+            return Err(CliError::InvalidArgument(
+                "transaction scripts with a commit barrier require --output json".into(),
+            ));
+        }
+        return execute_shared_transaction_script(db, sql, &stmts, writer, options);
+    }
 
     if is_single_query {
         // A single query statement uses the streaming path (FR-7).
@@ -2075,6 +2146,403 @@ fn execute_sql_with_formatter<W: Write>(
     }
 }
 
+fn execute_shared_transaction_script<W: Write>(
+    db: &Arc<Database>,
+    sql: &str,
+    statements: &[alopex_sql::Statement],
+    writer: &mut W,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    use alopex_sql::{
+        CommitMetadata, ExecutionResult, ExecutionStepError, ExecutionStepErrorKind,
+        ExecutionStepOutcome, ExecutionStepResult, SharedExecutionReport, StatementKind,
+        TransactionAccessMode, TransactionIsolationLevel,
+    };
+
+    options.deadline.check()?;
+    let texts = statement_texts(sql, statements)?;
+    let execution_id = "cli-execution".to_owned();
+    let transaction_id = "cli-transaction".to_owned();
+    let mut transaction = None;
+    let mut committed = false;
+    let mut rolled_back = false;
+    let mut failed_transaction = false;
+    let mut read_only = false;
+    let mut characteristics_locked = false;
+    let mut explicit_begin_pending = statements
+        .iter()
+        .any(|statement| matches!(statement.kind, StatementKind::Begin { .. }));
+    let mut results = Vec::with_capacity(statements.len());
+
+    let step_error =
+        |kind, message: String| ExecutionStepOutcome::Error(ExecutionStepError { kind, message });
+
+    for (statement, text) in statements.iter().zip(texts) {
+        options.deadline.check()?;
+        let outcome = match &statement.kind {
+            StatementKind::Begin {
+                isolation_level,
+                access_mode,
+            } => {
+                if transaction.is_some() || committed {
+                    step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "BEGIN requires an idle SQL session".into(),
+                    )
+                } else if isolation_level
+                    .is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead)
+                {
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "only REPEATABLE READ isolation is supported".into(),
+                    )
+                } else {
+                    explicit_begin_pending = false;
+                    rolled_back = false;
+                    read_only = *access_mode == Some(TransactionAccessMode::ReadOnly);
+                    let mode = if read_only {
+                        alopex_embedded::TxnMode::ReadOnly
+                    } else {
+                        alopex_embedded::TxnMode::ReadWrite
+                    };
+                    transaction = Some(Arc::clone(db).begin_owned_embedded_transaction(mode)?);
+                    characteristics_locked = isolation_level.is_some() || access_mode.is_some();
+                    continue;
+                }
+            }
+            StatementKind::SetTransaction {
+                isolation_level,
+                access_mode,
+            } => {
+                if transaction.is_none() || failed_transaction {
+                    step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "SET TRANSACTION requires an active transaction".into(),
+                    )
+                } else if characteristics_locked {
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "transaction characteristics are already locked".into(),
+                    )
+                } else if isolation_level
+                    .is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead)
+                {
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "only REPEATABLE READ isolation is supported".into(),
+                    )
+                } else {
+                    if let Some(access_mode) = access_mode {
+                        read_only = *access_mode == TransactionAccessMode::ReadOnly;
+                    }
+                    characteristics_locked = true;
+                    ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                }
+            }
+            StatementKind::Savepoint { name } if !failed_transaction => {
+                match transaction.as_mut() {
+                    Some(transaction) => match transaction.create_savepoint(name) {
+                        Ok(()) => ExecutionStepOutcome::Execution(ExecutionResult::Success),
+                        Err(error) => {
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    },
+                    None => step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "SAVEPOINT requires an active transaction".into(),
+                    ),
+                }
+            }
+            StatementKind::RollbackToSavepoint { name } => match transaction.as_mut() {
+                Some(transaction) => match transaction.rollback_to_savepoint(name) {
+                    Ok(()) => {
+                        failed_transaction = false;
+                        ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                    }
+                    Err(error) => {
+                        step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                    }
+                },
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "ROLLBACK TO SAVEPOINT requires an active transaction".into(),
+                ),
+            },
+            StatementKind::ReleaseSavepoint { name } if !failed_transaction => {
+                match transaction.as_mut() {
+                    Some(transaction) => match transaction.release_savepoint(name) {
+                        Ok(()) => ExecutionStepOutcome::Execution(ExecutionResult::Success),
+                        Err(error) => {
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    },
+                    None => step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "RELEASE SAVEPOINT requires an active transaction".into(),
+                    ),
+                }
+            }
+            StatementKind::Rollback => match transaction.take() {
+                Some(mut transaction) => match transaction.rollback() {
+                    Ok(()) => {
+                        rolled_back = true;
+                        failed_transaction = false;
+                        ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                    }
+                    Err(error) => {
+                        step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                    }
+                },
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "ROLLBACK requires an active transaction".into(),
+                ),
+            },
+            StatementKind::Commit if failed_transaction => step_error(
+                ExecutionStepErrorKind::Commit,
+                "failed transaction must be rolled back".into(),
+            ),
+            StatementKind::Commit => match transaction.take() {
+                Some(mut transaction) => match transaction.commit() {
+                    Ok(()) => {
+                        committed = true;
+                        ExecutionStepOutcome::Commit(CommitMetadata {
+                            transaction_id: transaction_id.clone(),
+                        })
+                    }
+                    Err(error) => ExecutionStepOutcome::Error(ExecutionStepError {
+                        kind: ExecutionStepErrorKind::Commit,
+                        message: error.to_string(),
+                    }),
+                },
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "COMMIT requires an active transaction".into(),
+                ),
+            },
+            _ if committed => {
+                let is_single_read =
+                    alopex_sql::Parser::parse_sql(&alopex_sql::AlopexDialect, &text).is_ok_and(
+                        |statements| statements.len() == 1 && !statements[0].kind.requires_write(),
+                    );
+                if !is_single_read {
+                    ExecutionStepOutcome::Error(ExecutionStepError {
+                        kind: ExecutionStepErrorKind::PostCommitRead,
+                        message: "post-commit read requires exactly one query statement".into(),
+                    })
+                } else {
+                    match db.execute_sql_multi(&text) {
+                        Ok(mut values) if values.len() == 1 => {
+                            ExecutionStepOutcome::Execution(values.remove(0))
+                        }
+                        Ok(_) => ExecutionStepOutcome::Error(ExecutionStepError {
+                            kind: ExecutionStepErrorKind::PostCommitRead,
+                            message: "post-commit read requires exactly one statement".into(),
+                        }),
+                        Err(error) => ExecutionStepOutcome::Error(ExecutionStepError {
+                            kind: ExecutionStepErrorKind::PostCommitRead,
+                            message: error.to_string(),
+                        }),
+                    }
+                }
+            }
+            _ if rolled_back => match db.execute_sql(&text) {
+                Ok(result) => ExecutionStepOutcome::Execution(result),
+                Err(error) => step_error(ExecutionStepErrorKind::Transaction, error.to_string()),
+            },
+            _ if failed_transaction => step_error(
+                ExecutionStepErrorKind::Transaction,
+                "failed transaction accepts only ROLLBACK or ROLLBACK TO SAVEPOINT".into(),
+            ),
+            kind if read_only && kind.requires_write() => step_error(
+                ExecutionStepErrorKind::Transaction,
+                "write attempted in read-only transaction".into(),
+            ),
+            _ => {
+                if transaction.is_none() && explicit_begin_pending {
+                    match db.execute_sql(&text) {
+                        Ok(result) => {
+                            results.push(ExecutionStepResult {
+                                execution_id: execution_id.clone(),
+                                transaction_id: transaction_id.clone(),
+                                step_id: format!("step-{}", results.len()),
+                                step_index: results.len(),
+                                outcome: ExecutionStepOutcome::Execution(result),
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            failed_transaction = true;
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    }
+                } else {
+                    if transaction.is_none() {
+                        transaction = Some(Arc::clone(db).begin_owned_embedded_transaction(
+                            alopex_embedded::TxnMode::ReadWrite,
+                        )?);
+                    }
+                    characteristics_locked = true;
+                    match transaction
+                        .as_mut()
+                        .expect("transaction opened")
+                        .execute_sql(&text)
+                    {
+                        Ok(result) => ExecutionStepOutcome::Execution(result),
+                        Err(error) => {
+                            failed_transaction = true;
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    }
+                }
+            }
+        };
+        let failed = matches!(outcome, ExecutionStepOutcome::Error(_));
+        results.push(ExecutionStepResult {
+            execution_id: execution_id.clone(),
+            transaction_id: transaction_id.clone(),
+            step_id: format!("step-{}", results.len()),
+            step_index: results.len(),
+            outcome,
+        });
+        if failed {
+            break;
+        }
+    }
+
+    let report = SharedExecutionReport {
+        execution_id,
+        transaction_id,
+        steps: results,
+    };
+    let failed = report
+        .steps
+        .iter()
+        .any(|step| matches!(step.outcome, ExecutionStepOutcome::Error(_)));
+    write_shared_execution_report(writer, &report)?;
+    options.deadline.check()?;
+    if failed {
+        return Err(CliError::InvalidArgument(
+            "transaction script completed with a partial failure".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn statement_texts(sql: &str, statements: &[alopex_sql::Statement]) -> Result<Vec<String>> {
+    fn offset(sql: &str, location: alopex_sql::Location) -> Option<usize> {
+        if location.line == 0 || location.column == 0 {
+            return None;
+        }
+        let line_start = sql
+            .split_inclusive('\n')
+            .take(location.line.saturating_sub(1) as usize)
+            .map(str::len)
+            .sum::<usize>();
+        line_start.checked_add(location.column.saturating_sub(1) as usize)
+    }
+
+    let starts = statements
+        .iter()
+        .map(|statement| offset(sql, statement.span.start))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| CliError::Parse("SQL statement span is unavailable".into()))?;
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(sql.len());
+            sql.get(*start..end)
+                .map(|text| text.trim().trim_end_matches(';').trim().to_string())
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| CliError::Parse("invalid SQL statement span".into()))
+        })
+        .collect()
+}
+
+fn write_shared_execution_report<W: Write>(
+    writer: &mut W,
+    report: &alopex_sql::SharedExecutionReport,
+) -> Result<()> {
+    use alopex_sql::{ExecutionResult, ExecutionStepErrorKind, ExecutionStepOutcome};
+
+    fn result_json(result: &ExecutionResult) -> serde_json::Value {
+        match result {
+            ExecutionResult::Success => serde_json::json!({ "kind": "success" }),
+            ExecutionResult::RowsAffected(affected_rows) => serde_json::json!({
+                "kind": "rows_affected",
+                "affected_rows": affected_rows,
+            }),
+            ExecutionResult::Query(query) => serde_json::json!({
+                "kind": "query",
+                "columns": query.columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+                "rows": query.rows.iter().map(|row| {
+                    row.iter()
+                        .cloned()
+                        .map(sql_value_to_value)
+                        .map(|value| serde_json::to_value(value).expect("CLI values serialize"))
+                        .collect::<Vec<_>>()
+                }).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    fn error_kind(kind: ExecutionStepErrorKind) -> &'static str {
+        match kind {
+            ExecutionStepErrorKind::Transaction => "transaction",
+            ExecutionStepErrorKind::Commit => "commit",
+            ExecutionStepErrorKind::PostCommitRead => "post_commit_read",
+            ExecutionStepErrorKind::InvalidOrder => "invalid_order",
+        }
+    }
+
+    let steps = report
+        .steps
+        .iter()
+        .map(|step| match &step.outcome {
+            ExecutionStepOutcome::Execution(result) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "execution",
+                "result": result_json(result),
+            }),
+            ExecutionStepOutcome::Commit(metadata) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "commit",
+                "commit": { "transaction_id": metadata.transaction_id },
+            }),
+            ExecutionStepOutcome::Error(error) => serde_json::json!({
+                "execution_id": step.execution_id,
+                "transaction_id": step.transaction_id,
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "kind": "error",
+                "error": { "kind": error_kind(error.kind), "message": error.message },
+            }),
+        })
+        .collect::<Vec<_>>();
+    let success = !report
+        .steps
+        .iter()
+        .any(|step| matches!(step.outcome, ExecutionStepOutcome::Error(_)));
+    serde_json::to_writer(
+        &mut *writer,
+        &serde_json::json!({
+            "execution_id": report.execution_id,
+            "transaction_id": report.transaction_id,
+            "success": success,
+            "steps": steps,
+        }),
+    )?;
+    writeln!(writer)?;
+    Ok(())
+}
+
 /// Execute SELECT query with streaming callback (FR-7).
 ///
 /// This function uses `execute_sql_with_rows` for true streaming output.
@@ -2103,6 +2571,11 @@ fn execute_sql_select_streaming<W: Write>(
             code: "ALOPEX-C001",
         })
     }
+
+    if options.cancel.is_cancelled() {
+        return Err(CliError::Cancelled);
+    }
+    options.deadline.check()?;
 
     let cancelled = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
@@ -2531,8 +3004,8 @@ mod tests {
     use crate::batch::BatchModeSource;
     use crate::output::jsonl::JsonlFormatter;
 
-    fn create_test_db() -> Database {
-        Database::open_in_memory().unwrap()
+    fn create_test_db() -> Arc<Database> {
+        Arc::new(Database::open_in_memory().unwrap())
     }
 
     fn create_status_writer(output: &mut Vec<u8>) -> StreamingWriter<&mut Vec<u8>> {
@@ -2621,6 +3094,26 @@ mod tests {
     }
 
     #[test]
+    fn explain_json_is_available_through_cli_query_output() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, secret TEXT)")
+            .unwrap();
+        let mut output = Vec::new();
+        let columns = vec![Column::new("query_plan", DataType::Text)];
+        let mut writer = create_query_writer(&mut output, columns);
+        execute_sql(
+            &db,
+            "EXPLAIN (FORMAT JSON) SELECT id FROM items WHERE secret = 'never-show-this'",
+            &mut writer,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("alopex.explain"));
+        assert!(rendered.contains("logical_plan"));
+        assert!(!rendered.contains("never-show-this"));
+    }
+
+    #[test]
     fn test_syntax_error() {
         let db = create_test_db();
 
@@ -2696,6 +3189,42 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_explain_analyze_does_not_start_or_commit_writes() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let deadline = Deadline::new(parse_deadline(None).unwrap());
+        let cancel = CancelSignal::new();
+        cancel.cancel();
+        let options = SqlExecutionOptions {
+            limit: None,
+            quiet: false,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher: None,
+        };
+        let mut output = Vec::new();
+        let formatter = Box::new(JsonlFormatter::new());
+        let error = execute_sql_select_streaming(
+            &db,
+            "EXPLAIN ANALYZE INSERT INTO items VALUES (1)",
+            &mut output,
+            formatter,
+            &options,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Cancelled));
+
+        let alopex_sql::ExecutionResult::Query(rows) =
+            db.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+        else {
+            panic!("COUNT must return rows");
+        };
+        assert_eq!(rows.rows[0][0], alopex_sql::SqlValue::BigInt(0));
+    }
+
+    #[test]
     fn test_sql_value_conversion() {
         use alopex_sql::SqlValue;
 
@@ -2725,6 +3254,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2745,6 +3275,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2762,6 +3293,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2779,6 +3311,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            params: Vec::new(),
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2789,5 +3322,23 @@ mod tests {
             err,
             CliError::InvalidArgument(msg) if msg == "Cannot specify both query and file"
         ));
+    }
+
+    #[test]
+    fn resolve_query_binds_json_parameters_without_changing_sql_structure() {
+        let cmd = SqlCommand {
+            query: Some("SELECT ? AS id, ? AS note".to_string()),
+            file: None,
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
+            params: vec!["1".into(), r#""x'); DROP TABLE items; --""#.into()],
+            read_mode: None,
+            routing_report: None,
+            tui: false,
+        };
+
+        let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
+        assert_eq!(sql, "SELECT 1 AS id, 'x''); DROP TABLE items; --' AS note");
     }
 }

@@ -4,9 +4,11 @@
 //! `SqlValue` へ変換する。Columnar ストレージも Row ストレージと同じ経路で
 //! 取り込み、将来の columnar エンジン実装で差し替え可能な構造にしている。
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use ::parquet::arrow::ArrowWriter;
 use alopex_core::columnar::encoding::{Column, LogicalType};
 use alopex_core::columnar::encoding_v2::Bitmap;
 use alopex_core::columnar::kvs_bridge::key_layout;
@@ -16,6 +18,12 @@ use alopex_core::columnar::segment_v2::{
 use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::storage::compression::CompressionV2;
 use alopex_core::storage::format::bincode_config;
+use arrow_array::builder::{
+    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder,
+    StringBuilder,
+};
+use arrow_array::{ArrayRef, RecordBatch as ArrowRecordBatch};
+use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use bincode::config::Options;
 
 use crate::ast::ddl::IndexMethod;
@@ -27,7 +35,7 @@ use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::types::ResolvedType;
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 mod csv;
 mod parquet;
@@ -94,8 +102,8 @@ pub trait BulkReader {
 }
 
 /// COPY 文を実行する。
-pub fn execute_copy<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table_name: &str,
     file_path: &str,
@@ -108,17 +116,34 @@ pub fn execute_copy<S: KVStore, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
 
-    validate_file_path(file_path, config)?;
+    if file_path != "-" {
+        validate_file_path(file_path, config)?;
+    }
 
-    if !Path::new(file_path).exists() {
+    if file_path != "-" && !Path::new(file_path).exists() {
         return Err(ExecutorError::FileNotFound(file_path.to_string()));
     }
 
     let reader: Box<dyn BulkReader> = match format {
         FileFormat::Parquet => {
+            if file_path == "-" {
+                return Err(ExecutorError::UnsupportedFormat(
+                    "COPY FROM STDIN currently supports CSV only".into(),
+                ));
+            }
             Box::new(ParquetReader::open(file_path, &table_meta, options.header)?)
         }
-        FileFormat::Csv => Box::new(CsvReader::open(file_path, &table_meta, options.header)?),
+        FileFormat::Csv => {
+            if file_path == "-" {
+                Box::new(CsvReader::from_reader(
+                    std::io::stdin(),
+                    &table_meta,
+                    options.header,
+                )?)
+            } else {
+                Box::new(CsvReader::open(file_path, &table_meta, options.header)?)
+            }
+        }
     };
 
     validate_schema(reader.schema(), &table_meta)?;
@@ -131,6 +156,526 @@ pub fn execute_copy<S: KVStore, C: Catalog + ?Sized>(
     };
 
     Ok(ExecutionResult::RowsAffected(rows_loaded))
+}
+
+/// Stream CSV from an application-owned reader into a table.
+pub fn execute_copy_from_csv_reader<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    reader: impl Read + 'static,
+    options: CopyOptions,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let reader: Box<dyn BulkReader> =
+        Box::new(CsvReader::from_reader(reader, &table, options.header)?);
+    validate_schema(reader.schema(), &table)?;
+    let rows = match table.storage_options.storage_type {
+        crate::catalog::StorageType::Columnar => bulk_load_columnar(txn, catalog, &table, reader)?,
+        crate::catalog::StorageType::Row => bulk_load_row(txn, catalog, &table, reader)?,
+    };
+    Ok(ExecutionResult::RowsAffected(rows))
+}
+
+/// Stream table rows as CSV to an application-owned writer.
+pub fn execute_copy_to_csv_writer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    writer: &mut impl Write,
+    options: CopyOptions,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+    let entries = txn.inner_mut().scan_prefix(&prefix)?;
+    if options.header {
+        writeln!(
+            writer,
+            "{}",
+            table
+                .columns
+                .iter()
+                .map(|column| csv_escape(&column.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    }
+    let mut rows = 0u64;
+    for (key, encoded) in entries {
+        let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+        if table_id == table.table_id {
+            let values = crate::storage::RowCodec::decode(&encoded)?;
+            writeln!(
+                writer,
+                "{}",
+                values.iter().map(csv_value).collect::<Vec<_>>().join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            rows = rows.saturating_add(1);
+        }
+    }
+    writer
+        .flush()
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+    Ok(ExecutionResult::RowsAffected(rows))
+}
+
+/// COPY table rows to a local CSV file.
+pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table_name: &str,
+    file_path: &str,
+    format: FileFormat,
+    options: CopyOptions,
+    config: &CopySecurityConfig,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    if file_path == "-" {
+        if format != FileFormat::Csv {
+            return Err(ExecutorError::UnsupportedFormat(
+                "COPY TO STDOUT currently supports CSV only".into(),
+            ));
+        }
+        return execute_copy_to_csv_writer(
+            txn,
+            catalog,
+            table_name,
+            &mut std::io::stdout().lock(),
+            options,
+        );
+    }
+    validate_output_path(file_path, config)?;
+    if format == FileFormat::Parquet {
+        let (temporary_path, file) = create_copy_temp_file(file_path)?;
+        let result = (|| {
+            let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+            let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
+            let mut rows = Vec::new();
+            for (key, encoded) in entries {
+                let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+                if table_id == table.table_id {
+                    rows.push(crate::storage::RowCodec::decode(&encoded)?);
+                }
+            }
+            let batch = parquet_batch(&table, &rows)?;
+            let schema = batch.schema();
+            let mut writer = ArrowWriter::try_new(file, schema, None)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            writer
+                .write(&batch)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            writer
+                .close()
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            fs::rename(&temporary_path, file_path)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            Ok(ExecutionResult::RowsAffected(rows.len() as u64))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        return result;
+    }
+    let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
+    let result = (|| {
+        if options.header {
+            writeln!(
+                file,
+                "{}",
+                table
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        }
+        let mut rows = 0u64;
+        let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+        let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
+        for (key, encoded) in entries {
+            let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+            if table_id != table.table_id {
+                continue;
+            }
+            let values = crate::storage::RowCodec::decode(&encoded)?;
+            let line = values.iter().map(csv_value).collect::<Vec<_>>().join(",");
+            writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            rows = rows.saturating_add(1);
+        }
+        file.flush()
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        fs::rename(&temporary_path, file_path)
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        Ok(ExecutionResult::RowsAffected(rows))
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+/// Write a materialized query result to a local CSV file using the same atomic
+/// replacement semantics as table COPY TO.
+pub fn execute_copy_query_to(
+    result: &crate::executor::QueryResult,
+    file_path: &str,
+    format: FileFormat,
+    options: CopyOptions,
+    config: &CopySecurityConfig,
+) -> Result<ExecutionResult> {
+    if file_path == "-" {
+        if format == FileFormat::Parquet {
+            return Err(ExecutorError::UnsupportedFormat(
+                "COPY TO STDOUT currently supports CSV only".into(),
+            ));
+        }
+        if options.header {
+            println!(
+                "{}",
+                result
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        for row in &result.rows {
+            println!(
+                "{}",
+                row.iter().map(csv_value).collect::<Vec<_>>().join(",")
+            );
+        }
+        return Ok(ExecutionResult::RowsAffected(result.rows.len() as u64));
+    }
+    validate_output_path(file_path, config)?;
+    if format == FileFormat::Parquet {
+        let (temporary_path, file) = create_copy_temp_file(file_path)?;
+        let copy_result = (|| {
+            let columns = result
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), &column.data_type))
+                .collect::<Vec<_>>();
+            let batch = parquet_batch_from_columns(&columns, &result.rows)?;
+            let mut writer = ArrowWriter::try_new(file, batch.schema(), None)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            writer
+                .write(&batch)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            writer
+                .close()
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            fs::rename(&temporary_path, file_path)
+                .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+            Ok(ExecutionResult::RowsAffected(result.rows.len() as u64))
+        })();
+        if copy_result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        return copy_result;
+    }
+    let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
+    let result = (|| {
+        if options.header {
+            writeln!(
+                file,
+                "{}",
+                result
+                    .columns
+                    .iter()
+                    .map(|column| csv_escape(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        }
+        for row in &result.rows {
+            let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
+            writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        }
+        file.flush()
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        fs::rename(&temporary_path, file_path)
+            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        Ok(ExecutionResult::RowsAffected(result.rows.len() as u64))
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn parquet_batch(table: &TableMetadata, rows: &[Vec<SqlValue>]) -> Result<ArrowRecordBatch> {
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), &column.data_type))
+        .collect::<Vec<_>>();
+    parquet_batch_from_columns(&columns, rows)
+}
+
+fn parquet_batch_from_columns(
+    columns: &[(&str, &ResolvedType)],
+    rows: &[Vec<SqlValue>],
+) -> Result<ArrowRecordBatch> {
+    let fields = columns
+        .iter()
+        .map(|(name, data_type)| {
+            Ok(ArrowField::new(
+                *name,
+                match data_type {
+                    ResolvedType::Integer => ArrowDataType::Int32,
+                    ResolvedType::BigInt => ArrowDataType::Int64,
+                    ResolvedType::Float => ArrowDataType::Float32,
+                    ResolvedType::Double => ArrowDataType::Float64,
+                    ResolvedType::Boolean => ArrowDataType::Boolean,
+                    ResolvedType::Text => ArrowDataType::Utf8,
+                    ResolvedType::Blob => ArrowDataType::Binary,
+                    _ => {
+                        return Err(ExecutorError::UnsupportedFormat(format!(
+                            "COPY TO Parquet does not support {name} columns"
+                        )));
+                    }
+                },
+                true,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let schema = std::sync::Arc::new(ArrowSchema::new(fields));
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+    for (index, (_, data_type)) in columns.iter().enumerate() {
+        match data_type {
+            ResolvedType::Integer => {
+                let mut builder = Int32Builder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Integer(value)) => builder.append_value(*value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("integer value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::BigInt => {
+                let mut builder = Int64Builder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::BigInt(value)) => builder.append_value(*value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("bigint value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::Float => {
+                let mut builder = Float32Builder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Float(value)) => builder.append_value(*value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("float value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::Double => {
+                let mut builder = Float64Builder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Double(value)) => builder.append_value(*value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("double value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::Boolean => {
+                let mut builder = BooleanBuilder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Boolean(value)) => builder.append_value(*value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("boolean value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::Text => {
+                let mut builder = StringBuilder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Text(value)) => builder.append_value(value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("text value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            ResolvedType::Blob => {
+                let mut builder = BinaryBuilder::new();
+                for row in rows {
+                    match row.get(index) {
+                        Some(SqlValue::Blob(value)) => builder.append_value(value),
+                        Some(SqlValue::Null) | None => builder.append_null(),
+                        _ => return Err(ExecutorError::BulkLoad("blob value mismatch".into())),
+                    }
+                }
+                arrays.push(std::sync::Arc::new(builder.finish()));
+            }
+            _ => unreachable!("unsupported types were rejected while building schema"),
+        }
+    }
+    ArrowRecordBatch::try_new(schema, arrays)
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))
+}
+
+fn create_copy_temp_file(file_path: &str) -> Result<(PathBuf, File)> {
+    let output = Path::new(file_path);
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "output path must contain a file name".into(),
+        })?;
+    recover_stale_copy_temp_files(parent, name)?;
+    let pid = std::process::id();
+    for attempt in 0..16u32 {
+        let temporary_path = parent.join(format!(".{name}.alopex-copy-{pid}-{attempt}.tmp"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => {
+                if let Err(error) = file.try_lock() {
+                    drop(file);
+                    let _ = fs::remove_file(&temporary_path);
+                    return Err(ExecutorError::BulkLoad(error.to_string()));
+                }
+                return Ok((temporary_path, file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(ExecutorError::BulkLoad(error.to_string())),
+        }
+    }
+    Err(ExecutorError::BulkLoad(
+        "could not allocate a temporary COPY output".into(),
+    ))
+}
+
+fn recover_stale_copy_temp_files(parent: &Path, output_name: &str) -> Result<()> {
+    for entry in fs::read_dir(parent).map_err(|error| ExecutorError::BulkLoad(error.to_string()))? {
+        let entry = entry.map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !is_copy_temp_file_name(file_name, output_name) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        if file.try_lock().is_err() {
+            continue;
+        }
+        drop(file);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ExecutorError::BulkLoad(error.to_string())),
+        }
+    }
+    Ok(())
+}
+
+fn is_copy_temp_file_name(file_name: &str, output_name: &str) -> bool {
+    let prefix = format!(".{output_name}.alopex-copy-");
+    let Some(suffix) = file_name
+        .strip_prefix(&prefix)
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((pid, attempt)) = suffix.rsplit_once('-') else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok() && attempt.parse::<u32>().is_ok_and(|attempt| attempt < 16)
+}
+
+fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
+    let path = Path::new(file_path);
+    if path.exists() && !config.allow_symlinks && path.is_symlink() {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "symbolic links not allowed".into(),
+        });
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent =
+        parent
+            .canonicalize()
+            .map_err(|error| ExecutorError::PathValidationFailed {
+                path: file_path.into(),
+                reason: error.to_string(),
+            })?;
+    if let Some(base_dirs) = &config.allowed_base_dirs
+        && !base_dirs
+            .iter()
+            .any(|base| canonical_parent.starts_with(base))
+    {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "path not in allowed directories".into(),
+        });
+    }
+    Ok(())
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn csv_value(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Null => String::new(),
+        SqlValue::Integer(value) => value.to_string(),
+        SqlValue::BigInt(value) => value.to_string(),
+        SqlValue::Float(value) => value.to_string(),
+        SqlValue::Double(value) => value.to_string(),
+        SqlValue::Text(value) => csv_escape(value),
+        SqlValue::Boolean(value) => value.to_string(),
+        SqlValue::Decimal(value) => value.to_string(),
+        SqlValue::Json(value) => csv_escape(value.as_str()),
+        SqlValue::Blob(value) => csv_escape(&String::from_utf8_lossy(value)),
+        SqlValue::Array(_) | SqlValue::Map(_) | SqlValue::Struct(_) => {
+            csv_escape(&value.nested_json_text().unwrap_or_default())
+        }
+        other => csv_escape(&format!("{other:?}")),
+    }
 }
 
 /// パスセキュリティ検証。
@@ -238,8 +783,8 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
 }
 
 /// Row ストレージへの書き込み。
-fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table: &TableMetadata,
     mut reader: Box<dyn BulkReader>,
@@ -286,8 +831,8 @@ fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
     Ok(staged.len() as u64)
 }
 
-fn populate_fts_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_fts_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -300,8 +845,8 @@ fn populate_fts_indexes<S: KVStore>(
 }
 
 /// Columnar ストレージへの書き込み（現状は Row と同経路で処理）。
-fn bulk_load_columnar<S: KVStore, C: Catalog + ?Sized>(
-    txn: &mut SqlTransaction<'_, S>,
+fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     table: &TableMetadata,
     mut reader: Box<dyn BulkReader>,
@@ -839,8 +1384,8 @@ fn build_column(
     }
 }
 
-fn persist_segment<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn persist_segment<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     mut segment: ColumnSegmentV2,
     row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
@@ -1084,8 +1629,8 @@ fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
     }
 }
 
-fn populate_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -1104,8 +1649,8 @@ fn populate_indexes<S: KVStore>(
     Ok(())
 }
 
-fn populate_hnsw_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
@@ -1196,6 +1741,39 @@ mod tests {
             let err = validate_file_path(link.to_str().unwrap(), &config).unwrap_err();
             assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
         }
+    }
+
+    #[test]
+    fn copy_temp_recovery_removes_only_stale_same_destination_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("export.csv");
+        let stale = directory
+            .path()
+            .join(".export.csv.alopex-copy-999999-0.tmp");
+        let other_destination = directory.path().join(".other.csv.alopex-copy-999999-0.tmp");
+        let malformed = directory
+            .path()
+            .join(".export.csv.alopex-copy-not-a-pid-0.tmp");
+        File::create(&stale).unwrap();
+        File::create(&other_destination).unwrap();
+        File::create(&malformed).unwrap();
+
+        let (active_path, active_file) = create_copy_temp_file(output.to_str().unwrap()).unwrap();
+        assert!(!stale.exists(), "stale COPY output must be recovered");
+        assert!(
+            other_destination.exists(),
+            "another destination is out of scope"
+        );
+        assert!(malformed.exists(), "non-COPY lookalikes are out of scope");
+
+        let (next_path, next_file) = create_copy_temp_file(output.to_str().unwrap()).unwrap();
+        assert!(
+            active_path.exists(),
+            "an active COPY writer must not be removed"
+        );
+        assert_ne!(active_path, next_path);
+
+        drop((active_file, next_file));
     }
 
     #[test]

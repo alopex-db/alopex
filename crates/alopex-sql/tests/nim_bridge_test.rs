@@ -1,9 +1,10 @@
 #![cfg(target_os = "linux")]
 
 use alopex_sql::{
-    AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
-    InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span, Statement,
-    StatementKind, VectorMetric, WindowFrameBound, WindowFrameUnits, parser_contract_version,
+    AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExplainFormat, ExprKind,
+    FromItem, InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span,
+    Statement, StatementKind, TransactionAccessMode, TransactionIsolationLevel, VectorMetric,
+    WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
@@ -357,7 +358,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.19.0");
+    assert_eq!(parser_contract_version(), "0.25.0");
 }
 
 #[test]
@@ -499,7 +500,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.19.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.25.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -507,7 +508,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.19.0");
+    assert_eq!(parser_contract_version(), "0.25.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -743,6 +744,65 @@ fn parse_join_subquery_and_vector_variants_from_nim() {
         Some(ExprKind::Literal {
             literal: Literal::Number(value)
         }) if value == "10"
+    ));
+}
+
+#[test]
+fn parses_transaction_control_statements_from_nim() {
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "BEGIN; START TRANSACTION; COMMIT; ROLLBACK")
+            .expect("transaction controls should parse");
+
+    assert!(matches!(statements[0].kind, StatementKind::Begin { .. }));
+    assert!(matches!(statements[1].kind, StatementKind::Begin { .. }));
+    assert!(matches!(statements[2].kind, StatementKind::Commit));
+    assert!(matches!(statements[3].kind, StatementKind::Rollback));
+}
+
+#[test]
+fn parses_savepoint_control_statements_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SAVEPOINT retry; ROLLBACK TO SAVEPOINT retry; RELEASE SAVEPOINT retry",
+    )
+    .expect("savepoint controls should parse");
+
+    assert!(matches!(
+        &statements[0].kind,
+        StatementKind::Savepoint { name } if name == "retry"
+    ));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::RollbackToSavepoint { name } if name == "retry"
+    ));
+    assert!(matches!(
+        &statements[2].kind,
+        StatementKind::ReleaseSavepoint { name } if name == "retry"
+    ));
+}
+
+#[test]
+fn parses_transaction_characteristics_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; \
+         SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+    )
+    .expect("transaction characteristics should parse");
+
+    assert!(matches!(
+        &statements[0].kind,
+        StatementKind::Begin {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            access_mode: Some(TransactionAccessMode::ReadOnly),
+        }
+    ));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::SetTransaction {
+            isolation_level: Some(TransactionIsolationLevel::Serializable),
+            access_mode: Some(TransactionAccessMode::ReadWrite),
+        }
     ));
 }
 
@@ -1034,4 +1094,284 @@ fn clause_free_function_calls_still_decode_without_the_new_keys() {
     assert!(filter.is_none());
     assert!(order_by.is_empty());
     assert!(within_group.is_empty());
+}
+
+#[test]
+fn positional_bind_parameters_cross_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT ? AS value FROM docs WHERE id = ? LIMIT ?",
+    )
+    .expect("positional parameters should parse");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    assert!(matches!(expr.kind, ExprKind::Parameter { index: 1 }));
+    assert!(matches!(
+        select.selection.as_ref().map(|expr| &expr.kind),
+        Some(ExprKind::BinaryOp { right, .. })
+            if matches!(right.kind, ExprKind::Parameter { index: 2 })
+    ));
+    assert!(matches!(
+        select.limit.as_ref().map(|expr| &expr.kind),
+        Some(ExprKind::Parameter { index: 3 })
+    ));
+
+    let statements = Parser::parse_sql(&AlopexDialect, "SELECT ?; SELECT ?")
+        .expect("parameter indices should reset for each statement");
+    for statement in statements {
+        let StatementKind::Select(select) = statement.kind else {
+            panic!("expected SELECT");
+        };
+        let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+            panic!("expected expression projection");
+        };
+        assert!(matches!(expr.kind, ExprKind::Parameter { index: 1 }));
+    }
+}
+
+#[test]
+fn parses_explain_and_explain_analyze_formats() {
+    for (sql, expected_analyze, expected_format) in [
+        ("EXPLAIN SELECT 1", false, ExplainFormat::Text),
+        ("EXPLAIN ANALYZE SELECT 1", true, ExplainFormat::Text),
+        ("EXPLAIN (FORMAT JSON) SELECT 1", false, ExplainFormat::Json),
+        (
+            "EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1",
+            true,
+            ExplainFormat::Json,
+        ),
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        assert_eq!(statements.len(), 1, "{sql}");
+        let StatementKind::Explain {
+            analyze,
+            format,
+            statement,
+        } = &statements[0].kind
+        else {
+            panic!("expected EXPLAIN for {sql}");
+        };
+        assert_eq!(*analyze, expected_analyze, "{sql}");
+        assert_eq!(*format, expected_format, "{sql}");
+        assert!(matches!(statement.kind, StatementKind::Select(_)), "{sql}");
+    }
+}
+
+#[test]
+fn parses_portable_metadata_statements_without_new_wire_variants() {
+    for (sql, expected_name, expected_value) in [
+        ("SHOW TABLES", "show_tables", None),
+        ("SHOW INDEXES", "show_indexes", None),
+        (
+            "SHOW INDEXES FROM \"Order Items\"",
+            "show_indexes",
+            Some("Order Items"),
+        ),
+        ("DESCRIBE \"Order Items\"", "describe", Some("Order Items")),
+        ("DESC \"Order Items\"", "describe", Some("Order Items")),
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let StatementKind::Pragma { name, value } = &statements[0].kind else {
+            panic!("{sql} must normalize to the existing metadata statement envelope");
+        };
+        assert_eq!(name, expected_name, "{sql}");
+        assert_eq!(
+            value,
+            &expected_value.map(|value| alopex_sql::PragmaValue::Text(value.to_string())),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn parses_temporary_table_lifetime_marker() {
+    for sql in [
+        "CREATE TEMP TABLE scratch (id BIGINT)",
+        "CREATE TEMPORARY TABLE scratch (id BIGINT)",
+    ] {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let StatementKind::CreateTable(table) = &statements[0].kind else {
+            panic!("expected CREATE TABLE for {sql}");
+        };
+        assert!(table.temporary, "{sql}");
+    }
+    let statements = Parser::parse_sql(&AlopexDialect, "CREATE TABLE durable (id BIGINT)").unwrap();
+    let StatementKind::CreateTable(table) = &statements[0].kind else {
+        panic!("expected CREATE TABLE");
+    };
+    assert!(!table.temporary);
+}
+
+#[test]
+fn parses_view_and_truncate_schema_evolution_contract() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE VIEW IF NOT EXISTS labels (name) AS SELECT label FROM items; \
+         DROP VIEW IF EXISTS labels; TRUNCATE TABLE items",
+    )
+    .unwrap();
+    let StatementKind::CreateView(view) = &statements[0].kind else {
+        panic!("expected CREATE VIEW");
+    };
+    assert!(view.if_not_exists);
+    assert_eq!(view.name, "labels");
+    assert_eq!(view.columns, ["name"]);
+    assert!(matches!(view.query.kind, StatementKind::Select(_)));
+    assert!(matches!(
+        &statements[1].kind,
+        StatementKind::DropView(view) if view.if_exists && view.name == "labels"
+    ));
+    assert!(matches!(
+        &statements[2].kind,
+        StatementKind::Truncate(table) if table.name == "items"
+    ));
+}
+
+#[test]
+fn parses_each_alter_table_action_across_the_nim_boundary() {
+    use alopex_sql::{AlterColumnAction, AlterTableAction};
+
+    let cases = [
+        "ALTER TABLE items ADD COLUMN IF NOT EXISTS score BIGINT DEFAULT 0",
+        "ALTER TABLE items DROP COLUMN IF EXISTS score",
+        "ALTER TABLE items RENAME COLUMN label TO name",
+        "ALTER TABLE items RENAME TO products",
+        "ALTER TABLE items ALTER COLUMN score SET DATA TYPE TEXT",
+        "ALTER TABLE items ALTER COLUMN score SET DEFAULT '0'",
+        "ALTER TABLE items ALTER COLUMN score DROP DEFAULT",
+        "ALTER TABLE items ALTER COLUMN score SET NOT NULL",
+        "ALTER TABLE items ALTER COLUMN score DROP NOT NULL",
+    ];
+    for (index, sql) in cases.into_iter().enumerate() {
+        let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+        let StatementKind::AlterTable(table) = statement.kind else {
+            panic!("expected ALTER TABLE for {sql}");
+        };
+        let matches_expected = matches!(
+            (index, table.action),
+            (
+                0,
+                AlterTableAction::AddColumn {
+                    if_not_exists: true,
+                    ..
+                },
+            ) | (
+                1,
+                AlterTableAction::DropColumn {
+                    if_exists: true,
+                    ..
+                },
+            ) | (2, AlterTableAction::RenameColumn { .. })
+                | (3, AlterTableAction::RenameTable { .. })
+                | (
+                    4,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetDataType { .. },
+                        ..
+                    },
+                )
+                | (
+                    5,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetDefault { .. },
+                        ..
+                    },
+                )
+                | (
+                    6,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::DropDefault,
+                        ..
+                    },
+                )
+                | (
+                    7,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::SetNotNull,
+                        ..
+                    },
+                )
+                | (
+                    8,
+                    AlterTableAction::AlterColumn {
+                        action: AlterColumnAction::DropNotNull,
+                        ..
+                    },
+                )
+        );
+        assert!(matches_expected, "wrong action for {sql}");
+    }
+}
+
+#[test]
+fn parses_v0811_relational_sql_across_the_nim_boundary() {
+    use alopex_sql::{
+        ColumnConstraint, CopyDirection, CopySource, CopyTarget, DataType, MergeAction,
+        OnConflictAction,
+    };
+
+    let insert = Parser::parse_sql(
+        &AlopexDialect,
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) \
+         DO UPDATE SET name = 'b' RETURNING id",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Insert(insert) = insert.kind else {
+        panic!("expected INSERT")
+    };
+    assert!(matches!(
+        insert.on_conflict.unwrap().action,
+        OnConflictAction::DoUpdate { .. }
+    ));
+    assert_eq!(insert.returning.len(), 1);
+
+    let merge = Parser::parse_sql(
+        &AlopexDialect,
+        "MERGE INTO target USING source ON target.id = source.id \
+         WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id) VALUES (source.id)",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Merge(merge) = merge.kind else {
+        panic!("expected MERGE")
+    };
+    assert!(matches!(merge.clauses[0].action, MergeAction::Delete));
+    assert!(matches!(
+        merge.clauses[1].action,
+        MergeAction::Insert { .. }
+    ));
+
+    let copy = Parser::parse_sql(
+        &AlopexDialect,
+        "COPY users (id) FROM 'users.csv' WITH (FORMAT CSV, HEADER TRUE)",
+    )
+    .unwrap()
+    .remove(0);
+    let StatementKind::Copy(copy) = copy.kind else {
+        panic!("expected COPY")
+    };
+    assert_eq!(copy.direction, CopyDirection::From);
+    assert!(matches!(copy.source, CopySource::Table { .. }));
+    assert!(matches!(copy.target, CopyTarget::File { .. }));
+
+    let sequence = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE SEQUENCE seq START WITH 10 INCREMENT BY 2 CYCLE; \
+         CREATE TABLE t (id SERIAL, stable BIGINT GENERATED ALWAYS AS IDENTITY)",
+    )
+    .unwrap();
+    assert!(matches!(sequence[0].kind, StatementKind::CreateSequence(_)));
+    let StatementKind::CreateTable(table) = &sequence[1].kind else {
+        panic!("expected table")
+    };
+    assert!(matches!(table.columns[0].data_type, DataType::Serial));
+    assert!(matches!(
+        table.columns[1].constraints[0],
+        ColumnConstraint::Identity { .. }
+    ));
 }

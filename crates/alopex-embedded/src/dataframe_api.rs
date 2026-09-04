@@ -154,7 +154,7 @@ impl ColumnBuilder {
             ResolvedType::Vector { .. } => {
                 return Err(DataFrameError::invalid_operation(
                     "vector columns are not supported for DataFrame conversion",
-                ))
+                ));
             }
         };
 

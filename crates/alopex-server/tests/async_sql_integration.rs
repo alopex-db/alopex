@@ -58,6 +58,8 @@ fn insert_row(table: &str, id: i64, name: &str) -> LogicalPlan {
                 Span::default(),
             ),
         ]],
+        conflict: None,
+        returning: None,
     }
 }
 

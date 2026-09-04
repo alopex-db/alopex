@@ -8,6 +8,8 @@
 - ``Transaction.execute_sql`` も同一形状
 """
 
+import json
+
 import pytest
 
 from alopex import AlopexError, Database, TxnMode
@@ -32,11 +34,96 @@ def test_execute_sql_ddl_returns_none(db):
     assert result is None
 
 
+def test_execute_sql_portable_metadata_exact_rows(db):
+    db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
+
+    assert db.execute_sql("SHOW TABLES") == [{"table_name": "Order Items"}]
+    assert db.execute_sql('DESC "Order Items"') == [
+        {
+            "column_name": "id",
+            "column_type": "BIGINT",
+            "null": "YES",
+            "key": "",
+            "default": None,
+            "extra": "",
+        },
+        {
+            "column_name": "label",
+            "column_type": "TEXT",
+            "null": "YES",
+            "key": "",
+            "default": None,
+            "extra": "",
+        },
+    ]
+    assert db.execute_sql(
+        "SELECT table_name, column_name, ordinal_position "
+        "FROM information_schema.columns ORDER BY ordinal_position"
+    ) == [
+        {"table_name": "Order Items", "column_name": "id", "ordinal_position": 1},
+        {"table_name": "Order Items", "column_name": "label", "ordinal_position": 2},
+    ]
+
+
+def test_execute_sql_explain_json_is_machine_readable_and_redacts_params(db):
+    db.execute_sql("CREATE TABLE explain_items (id INTEGER PRIMARY KEY, secret TEXT)")
+    rows = db.execute_sql(
+        "EXPLAIN (FORMAT JSON) SELECT id FROM explain_items WHERE secret = ?",
+        ["never-show-this"],
+    )
+    payload = rows[0]["query_plan"]
+    assert "never-show-this" not in payload
+    document = json.loads(payload)
+    assert document["schema"] == "alopex.explain"
+    assert document["version"] == 1
+    assert document["physical_plan"]["engine"] == "logical-direct"
+
+
 def test_execute_sql_insert_returns_rows_affected(users_db):
     result = users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')"
     )
     assert result == 1
+
+
+def test_execute_sql_merge_updates_matches_and_inserts_non_matches(db):
+    db.execute_sql("CREATE TABLE target (id BIGINT PRIMARY KEY, value TEXT)")
+    db.execute_sql("CREATE TABLE source (id BIGINT, value TEXT)")
+    db.execute_sql("INSERT INTO target VALUES (1, 'old')")
+    db.execute_sql("INSERT INTO source VALUES (1, 'updated'), (2, 'inserted')")
+
+    assert (
+        db.execute_sql(
+            "MERGE INTO target USING source ON target.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET value = source.value "
+            "WHEN NOT MATCHED THEN INSERT (id, value) "
+            "VALUES (source.id, source.value)"
+        )
+        == 2
+    )
+    assert db.execute_sql("SELECT id, value FROM target ORDER BY id") == [
+        {"id": 1, "value": "updated"},
+        {"id": 2, "value": "inserted"},
+    ]
+
+
+def test_execute_sql_merge_matched_only_matches_reference_corpus(db):
+    db.execute_sql("CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)")
+    db.execute_sql("CREATE TABLE dml_source (id INTEGER, value TEXT)")
+    db.execute_sql("INSERT INTO dml_target VALUES (1, 'old')")
+    db.execute_sql("INSERT INTO dml_source VALUES (1, 'updated')")
+
+    assert (
+        db.execute_sql(
+            "MERGE INTO dml_target USING dml_source "
+            "ON dml_target.id = dml_source.id "
+            "WHEN MATCHED THEN UPDATE SET value = dml_source.value"
+        )
+        == 1
+    )
+    assert db.execute_sql("SELECT id, value FROM dml_target ORDER BY id") == [
+        {"id": 1, "value": "updated"}
+    ]
 
 
 def test_execute_sql_select_returns_list_of_name_accessible_rows(users_db):

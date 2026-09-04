@@ -165,6 +165,15 @@ pub async fn handle(
             &ctx,
         );
     }
+    if uses_remote_copy(&request.sql) {
+        return error_response(
+            ServerError::BadRequest(
+                "COPY is local-only and unavailable over remote SQL; use an explicit upload/download API"
+                    .into(),
+            ),
+            &ctx,
+        );
+    }
 
     if request.streaming {
         return stream_response(state, request, &ctx);
@@ -385,6 +394,12 @@ pub(crate) async fn execute_non_streaming(
 ) -> Result<SqlResponse> {
     let start = Instant::now();
     let sql = request.sql.as_str();
+    if uses_remote_copy(sql) {
+        return Err(ServerError::BadRequest(
+            "COPY is local-only and unavailable over remote SQL; use an explicit upload/download API"
+                .into(),
+        ));
+    }
     let is_ddl = is_ddl(sql);
     if is_write_sql(sql) {
         state.lifecycle_state.check_write_allowed()?;
@@ -1242,6 +1257,12 @@ fn classify_statement_schema(
     // authorization merely because the generic classifier predates it.
     #[allow(unreachable_patterns)]
     match statement_kind {
+        alopex_sql::ast::StatementKind::Explain {
+            analyze: true,
+            statement,
+            ..
+        } => classify_statement_schema(&statement.kind),
+        alopex_sql::ast::StatementKind::Explain { .. } => StatementSchemaClass::NonSchema,
         alopex_sql::ast::StatementKind::CreateTable(_)
         | alopex_sql::ast::StatementKind::DropTable(_)
         | alopex_sql::ast::StatementKind::CreateIndex(_)
@@ -1251,6 +1272,7 @@ fn classify_statement_schema(
         | alopex_sql::ast::StatementKind::Insert(_)
         | alopex_sql::ast::StatementKind::Update(_)
         | alopex_sql::ast::StatementKind::Delete(_)
+        | alopex_sql::ast::StatementKind::Merge(_)
         | alopex_sql::ast::StatementKind::Pragma { .. } => StatementSchemaClass::NonSchema,
         _ => StatementSchemaClass::Unsupported,
     }
@@ -1269,7 +1291,16 @@ fn is_write_sql(sql: &str) -> bool {
     let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
         return false;
     };
-    statements.iter().any(|stmt| !stmt.kind.is_query())
+    statements.iter().any(|stmt| stmt.kind.requires_write())
+}
+
+fn uses_remote_copy(sql: &str) -> bool {
+    let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|statement| matches!(&statement.kind, alopex_sql::StatementKind::Copy(_)))
 }
 
 #[cfg(test)]
@@ -1328,5 +1359,23 @@ mod tests {
         assert!(!is_ddl("VALUES (1);"));
         assert!(!is_write_sql("VALUES (1);"));
         assert!(!is_ddl("INSERT INTO items (id) VALUES (1);"));
+    }
+
+    #[test]
+    fn explain_only_inherits_nested_write_classification_when_analyzing() {
+        assert!(!is_write_sql("EXPLAIN INSERT INTO items VALUES (1)"));
+        assert!(is_write_sql("EXPLAIN ANALYZE INSERT INTO items VALUES (1)"));
+        assert!(!is_ddl("EXPLAIN CREATE TABLE items (id INT)"));
+        assert!(is_ddl("EXPLAIN ANALYZE CREATE TABLE items (id INT)"));
+    }
+
+    #[test]
+    fn remote_sql_rejects_local_copy_targets() {
+        assert!(uses_remote_copy("COPY items FROM STDIN WITH (FORMAT CSV)"));
+        assert!(uses_remote_copy("COPY items TO STDOUT WITH (FORMAT CSV)"));
+        assert!(uses_remote_copy(
+            "COPY items TO '/server/export.csv' WITH (FORMAT CSV)"
+        ));
+        assert!(!uses_remote_copy("SELECT 1"));
     }
 }

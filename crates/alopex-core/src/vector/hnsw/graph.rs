@@ -3,8 +3,6 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use rand::Rng;
-
 use super::types::{HnswConfig, HnswNode, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 use crate::vector::simd::{select_kernel, DistanceKernel};
 use crate::vector::{validate_dimensions, CompactionResult, Metric};
@@ -61,6 +59,7 @@ impl HnswGraph {
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
         validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)?;
 
         if self.key_to_node.contains_key(key) {
             return Err(Error::InvalidParameter {
@@ -69,12 +68,13 @@ impl HnswGraph {
             });
         }
 
-        let level = self.random_level();
+        let level = self.level_for_key(key);
         let node_id = self.allocate_node_id();
         let neighbors = vec![Vec::new(); level + 1];
         let node = HnswNode {
             key: key.to_vec(),
             vector: vector.to_vec(),
+            norm: vector.iter().map(|value| value * value).sum::<f32>().sqrt(),
             metadata: metadata.to_vec(),
             neighbors,
             deleted: false,
@@ -117,17 +117,19 @@ impl HnswGraph {
         // Baseline after potential retarget.
         let baseline_max_level = self.max_level;
 
+        let query = PreparedQuery::new(self.config.metric, vector);
+
         // Greedy search on upper layers until just above the node level.
         if baseline_max_level > level {
             for l in (level + 1..=baseline_max_level).rev() {
-                enter_point = self.greedy_search(vector, enter_point, l);
+                enter_point = self.greedy_search(query, enter_point, l);
             }
         }
 
         // Connect across layers down to 0.
         for l in (0..=level.min(self.max_level)).rev() {
             let candidates =
-                self.search_layer(vector, enter_point, l, self.config.ef_construction, None);
+                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
             let max_conn = if l == 0 {
                 self.config.m * 2
             } else {
@@ -176,7 +178,14 @@ impl HnswGraph {
     /// 既存ノードが deleted の場合は再有効化する。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
         validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)?;
         if let Some(node_id) = self.find_node_id(key) {
+            let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
+            for other in self.nodes.iter_mut().flatten() {
+                for neighbors in &mut other.neighbors {
+                    neighbors.retain(|&neighbor| neighbor != node_id);
+                }
+            }
             let Some(node) = self
                 .nodes
                 .get_mut(node_id as usize)
@@ -187,6 +196,7 @@ impl HnswGraph {
             };
             node.vector.clear();
             node.vector.extend_from_slice(vector);
+            node.norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
             node.metadata.clear();
             node.metadata.extend_from_slice(metadata);
             if node.deleted {
@@ -194,10 +204,58 @@ impl HnswGraph {
                 self.deleted_count = self.deleted_count.saturating_sub(1);
                 self.active_count = self.active_count.saturating_add(1);
             }
+            if !was_deleted || self.entry_point.is_some() {
+                self.reconnect_existing(node_id)?;
+            }
             Ok(node_id)
         } else {
             self.insert(key, vector, metadata)
         }
+    }
+
+    fn reconnect_existing(&mut self, node_id: u32) -> Result<()> {
+        let Some(node) = self.node(node_id) else {
+            return Ok(());
+        };
+        let level = node.neighbors.len().saturating_sub(1);
+        let Some(mut enter_point) = self.entry_point.filter(|&id| id != node_id) else {
+            self.entry_point = Some(node_id);
+            self.max_level = level;
+            return Ok(());
+        };
+        if self.node(enter_point).is_none_or(|n| n.deleted) {
+            if let Some(new_entry) = self.select_new_entry_point() {
+                enter_point = new_entry;
+            }
+        }
+        let baseline = self.max_level;
+        let vector = self
+            .node(node_id)
+            .map(|n| n.vector.clone())
+            .unwrap_or_default();
+        let query = PreparedQuery::new(self.config.metric, &vector);
+        for l in (0..=level.min(baseline)).rev() {
+            let candidates =
+                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
+            let max_conn = if l == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
+            let selected: Vec<ScoredEntry> = candidates
+                .into_iter()
+                .filter(|entry| entry.node_id != node_id)
+                .collect();
+            let selected = self.select_neighbors_heuristic(&selected, max_conn);
+            self.connect_new_node(node_id, &selected, l);
+            for &neighbor in &selected {
+                self.prune_neighbors(neighbor, l, max_conn);
+            }
+            if let Some(&first) = selected.first() {
+                enter_point = first;
+            }
+        }
+        Ok(())
     }
 
     /// Executes a top-k search. Returns results and search statistics.
@@ -208,11 +266,17 @@ impl HnswGraph {
         ef_search: usize,
     ) -> Result<(Vec<HnswSearchResult>, SearchStats)> {
         validate_dimensions(self.config.dimension, query.len())?;
+        validate_hnsw_vector(self.config.metric, query)?;
         if k == 0 || self.entry_point.is_none() || self.active_count == 0 {
             return Ok((Vec::new(), SearchStats::default()));
         }
 
         let mut stats = SearchStats::default();
+        let query = PreparedQuery::new(self.config.metric, query);
+        #[cfg(test)]
+        {
+            stats.query_norm_computations = u64::from(self.config.metric == Metric::Cosine);
+        }
         let mut max_level = self.max_level;
         let mut enter_point = match self.entry_point {
             Some(ep) if self.node(ep).is_some_and(|n| !n.deleted) => ep,
@@ -362,23 +426,22 @@ impl HnswGraph {
         self.free_list.pop().unwrap_or(self.nodes.len() as u32)
     }
 
-    fn random_level(&self) -> usize {
+    fn level_for_key(&self, key: &[u8]) -> usize {
         if self.config.m <= 1 {
             return 0;
         }
-        let mut rng = rand::thread_rng();
-        let r: f64 = rng.gen();
+        let r = (f64::from(crc32fast::hash(key)) + 1.0) / (f64::from(u32::MAX) + 2.0);
         let ml = 1.0_f64 / (self.config.m as f64).ln();
         (-r.ln() * ml).floor() as usize
     }
 
-    fn greedy_search(&self, target: &[f32], start: u32, level: usize) -> u32 {
+    fn greedy_search(&self, target: PreparedQuery<'_>, start: u32, level: usize) -> u32 {
         self.greedy_search_with_stats(target, start, level, &mut SearchStats::default())
     }
 
     fn greedy_search_with_stats(
         &self,
-        target: &[f32],
+        target: PreparedQuery<'_>,
         start: u32,
         level: usize,
         stats: &mut SearchStats,
@@ -410,7 +473,7 @@ impl HnswGraph {
 
     fn search_layer(
         &self,
-        query: &[f32],
+        query: PreparedQuery<'_>,
         entry_point: u32,
         level: usize,
         ef: usize,
@@ -448,14 +511,18 @@ impl HnswGraph {
                             continue;
                         }
                         let s = self.distance(query, n, stats_ref);
-                        let entry = ScoredEntry {
-                            node_id: n,
-                            score: s,
-                        };
-                        candidates.push(entry.clone());
-                        best.push(Reverse(entry));
-                        if best.len() > ef {
-                            best.pop();
+                        let should_add =
+                            best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
+                        if should_add {
+                            let entry = ScoredEntry {
+                                node_id: n,
+                                score: s,
+                            };
+                            candidates.push(entry.clone());
+                            best.push(Reverse(entry));
+                            if best.len() > ef {
+                                best.pop();
+                            }
                         }
                     }
                 }
@@ -478,7 +545,28 @@ impl HnswGraph {
                 .total_cmp(&a.score)
                 .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
         });
-        sorted.into_iter().take(max).map(|c| c.node_id).collect()
+        let mut selected = Vec::with_capacity(max);
+        for candidate in sorted {
+            if selected.len() >= max {
+                break;
+            }
+            let diverse = selected.iter().all(|&chosen| {
+                let similarity = self
+                    .node(chosen)
+                    .map(|node| {
+                        self.distance_raw(
+                            self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
+                            &node.vector,
+                        )
+                    })
+                    .unwrap_or(f32::NEG_INFINITY);
+                similarity < candidate.score
+            });
+            if diverse || selected.is_empty() {
+                selected.push(candidate.node_id);
+            }
+        }
+        selected
     }
 
     fn connect_new_node(&mut self, node_id: u32, neighbors: &[u32], level: usize) {
@@ -508,7 +596,7 @@ impl HnswGraph {
         }
     }
 
-    fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
+    pub(crate) fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
         let (neighbors_snapshot, query_vec) = {
             let Some(node) = self.node(node_id) else {
                 return;
@@ -519,7 +607,7 @@ impl HnswGraph {
             (node.neighbors[level].clone(), node.vector.clone())
         };
 
-        let mut selected: Vec<ScoredEntry> = neighbors_snapshot
+        let selected: Vec<ScoredEntry> = neighbors_snapshot
             .iter()
             .copied()
             .filter_map(|n| {
@@ -530,12 +618,7 @@ impl HnswGraph {
             })
             .collect();
 
-        selected.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
-        });
-        selected.truncate(max_degree);
+        let selected = self.select_neighbors_heuristic(&selected, max_degree);
 
         if let Some(node) = self
             .nodes
@@ -543,7 +626,7 @@ impl HnswGraph {
             .and_then(|n| n.as_mut())
         {
             if level < node.neighbors.len() {
-                node.neighbors[level] = selected.into_iter().map(|c| c.node_id).collect();
+                node.neighbors[level] = selected;
             }
         }
     }
@@ -628,11 +711,23 @@ impl HnswGraph {
         self.node(id).map(|n| n.key.clone()).unwrap_or_default()
     }
 
-    fn distance(&self, query: &[f32], node_id: u32, stats: &mut SearchStats) -> f32 {
+    fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f32 {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
         if let Some(node) = self.node(node_id) {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
-            return self.distance_raw(query, &node.vector);
+            if self.config.metric == Metric::Cosine {
+                if query.norm == 0.0 || node.norm == 0.0 {
+                    return 0.0;
+                }
+                let dot = query
+                    .values
+                    .iter()
+                    .zip(&node.vector)
+                    .map(|(left, right)| left * right)
+                    .sum::<f32>();
+                return dot / (query.norm * node.norm);
+            }
+            return self.distance_raw(query.values, &node.vector);
         }
         f32::NEG_INFINITY
     }
@@ -652,6 +747,39 @@ impl HnswGraph {
             Metric::L2 | Metric::InnerProduct => -score,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedQuery<'a> {
+    values: &'a [f32],
+    norm: f32,
+}
+
+impl<'a> PreparedQuery<'a> {
+    fn new(metric: Metric, values: &'a [f32]) -> Self {
+        let norm = if metric == Metric::Cosine {
+            values.iter().map(|value| value * value).sum::<f32>().sqrt()
+        } else {
+            0.0
+        };
+        Self { values, norm }
+    }
+}
+
+fn validate_hnsw_vector(metric: Metric, vector: &[f32]) -> Result<()> {
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(Error::InvalidParameter {
+            param: "vector".to_string(),
+            reason: "HNSW vectors must contain only finite values".to_string(),
+        });
+    }
+    if metric == Metric::Cosine && vector.iter().all(|value| *value == 0.0) {
+        return Err(Error::InvalidParameter {
+            param: "vector".to_string(),
+            reason: "cosine HNSW vectors must have a non-zero norm".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]

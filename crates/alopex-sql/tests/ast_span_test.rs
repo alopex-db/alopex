@@ -15,6 +15,7 @@ fn span(line: u64, col: u64) -> Span {
 fn ddl_nodes_carry_spans() {
     let tbl = CreateTable {
         if_not_exists: true,
+        temporary: false,
         name: "t".into(),
         columns: vec![],
         constraints: vec![],
@@ -77,6 +78,8 @@ fn dml_nodes_carry_spans() {
         table: "t".into(),
         columns: None,
         source: alopex_sql::ast::InsertSource::Values { values: vec![] },
+        on_conflict: None,
+        returning: vec![],
         span: span(2, 1),
     };
     assert_eq!(insert.span().start.line, 2);
@@ -94,6 +97,8 @@ fn dml_nodes_carry_spans() {
             span: span(3, 5),
         }],
         selection: None,
+        from: vec![],
+        returning: vec![],
         span: span(3, 1),
     };
     assert_eq!(update.span().start.line, 3);
@@ -101,6 +106,8 @@ fn dml_nodes_carry_spans() {
     let delete = Delete {
         table: "t".into(),
         selection: None,
+        using: vec![],
+        returning: vec![],
         span: span(4, 1),
     };
     assert_eq!(delete.span().start.line, 4);

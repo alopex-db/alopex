@@ -1,6 +1,40 @@
 import pytest
+from alopex import AlopexError, DataFrame, LazyFrame
 
-from alopex import AlopexError, DataFrame
+
+@pytest.mark.parametrize("row_count", [1023, 1024, 1025, 34_250])
+def test_scan_csv_collect_to_dict_preserves_all_arrow_batches(tmp_path, row_count):
+    path = tmp_path / f"rows-{row_count}.csv"
+    path.write_text(
+        "id,label\n"
+        + "".join(f"{index},row-{index}\n" for index in range(row_count)),
+        encoding="utf-8",
+    )
+
+    frame = LazyFrame.scan_csv(str(path)).collect()
+    values = frame.to_dict(as_series=False)
+
+    assert frame.height == row_count
+    assert values["id"] == list(range(row_count))
+    assert values["label"] == [f"row-{index}" for index in range(row_count)]
+
+
+def test_scan_csv_stream_is_publicly_iterable_across_batches(tmp_path):
+    path = tmp_path / "stream.csv"
+    path.write_text(
+        "id\n" + "".join(f"{index}\n" for index in range(1025)),
+        encoding="utf-8",
+    )
+
+    with LazyFrame.scan_csv(str(path)).collect_batches(chunk_size=1024) as batches:
+        values = [
+            value for batch in batches for value in batch.to_dict(as_series=False)["id"]
+        ]
+
+    assert values == list(range(1025))
+
+    with pytest.raises(NotImplementedError):
+        LazyFrame.scan_csv(str(path)).collect(streaming=True)
 
 
 def test_python_string_namespace_operations():
@@ -15,7 +49,7 @@ def test_python_string_namespace_operations():
         .contains(r"\d+$", "has_digits")
         .str("name")
         .len_chars("chars")
-        .to_dict()
+        .to_dict(as_series=False)
     )
 
     assert out["lower"] == [" alopex ", None, "straße42"]
@@ -39,7 +73,7 @@ def test_python_datetime_namespace_operations():
         .to_string("text")
         .dt("ts")
         .convert_time_zone("Z", "+09:00", "tokyo")
-        .to_dict()
+        .to_dict(as_series=False)
     )
 
     assert out["year"] == [1970, 2024, None]
@@ -63,7 +97,7 @@ def test_python_list_namespace_and_explode_implode_parity():
         .len("len")
         .list("parts")
         .contains("db", "has_db")
-        .to_dict()
+        .to_dict(as_series=False)
     )
 
     assert out["parts"] == [["db", "rust"], None, ["db", ""]]
@@ -72,7 +106,7 @@ def test_python_list_namespace_and_explode_implode_parity():
     assert out["has_db"] == [True, None, True]
 
     words = DataFrame({"word": ["a", None, "c"]})
-    assert words.implode().explode("word").to_dict()["word"] == ["a", None, "c"]
+    assert words.implode().explode("word").to_dict(as_series=False)["word"] == ["a", None, "c"]
 
     lists = DataFrame(
         {
@@ -81,7 +115,7 @@ def test_python_list_namespace_and_explode_implode_parity():
         },
         schema={"items": "list_utf8"},
     )
-    exploded = lists.explode("items").to_dict()
+    exploded = lists.explode("items").to_dict(as_series=False)
     assert exploded["id"] == ["x", "x", "y", "z"]
     assert exploded["items"] == ["a", "b", None, None]
 

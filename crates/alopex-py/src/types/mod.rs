@@ -15,9 +15,12 @@ pub use config::{
 pub(crate) use dataframe::{streaming_dataframe_err, DataFrameStreamRegistry};
 pub use dataframe::{
     PyDataFrame, PyDataFrameStream, PyDatetimeNamespace, PyExpr, PyLazyFrame, PyListNamespace,
-    PyStringNamespace,
+    PySeries, PyStringNamespace,
 };
-pub use results::{PyHnswStats, PyMemoryStats, PySearchResult};
+pub use results::{
+    PyCommitMetadata, PyExecutionStepError, PyHnswStats, PyMemoryStats, PySearchResult,
+    PySearchStats, PySharedExecutionReport, PySharedExecutionStep, PySharedExecutionStepResult,
+};
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTxnMode>()?;
@@ -27,6 +30,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEmbeddedConfig>()?;
     m.add_class::<PyDatabaseOptions>()?;
     m.add_class::<PyDataFrame>()?;
+    m.add_class::<PySeries>()?;
     m.add_class::<PyExpr>()?;
     m.add_class::<PyLazyFrame>()?;
     m.add_class::<PyDataFrameStream>()?;
@@ -35,7 +39,13 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyListNamespace>()?;
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyHnswStats>()?;
+    m.add_class::<PySearchStats>()?;
     m.add_class::<PyMemoryStats>()?;
+    m.add_class::<PySharedExecutionStep>()?;
+    m.add_class::<PyCommitMetadata>()?;
+    m.add_class::<PyExecutionStepError>()?;
+    m.add_class::<PySharedExecutionStepResult>()?;
+    m.add_class::<PySharedExecutionReport>()?;
     m.add_class::<PyCatalogInfo>()?;
     m.add_class::<PyNamespaceInfo>()?;
     m.add_class::<PyTableInfo>()?;

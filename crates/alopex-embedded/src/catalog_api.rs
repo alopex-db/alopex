@@ -1493,6 +1493,8 @@ fn resolve_storage_location(
                 .ok_or(Error::StorageRootRequired)?;
             Ok(Some(storage_root))
         }
+        TableType::Temporary => Ok(None),
+        TableType::View => Ok(None),
     }
 }
 
@@ -1763,14 +1765,25 @@ pub struct CatalogManifestColumn {
     pub not_null: bool,
     pub primary_key: bool,
     pub unique: bool,
+    #[serde(default)]
+    pub generated_sequence: Option<String>,
+    #[serde(default)]
+    pub generated_sequence_options: Option<alopex_sql::ast::ddl::SequenceOptions>,
 }
 
 impl CatalogManifestColumn {
     fn to_metadata(&self) -> ColumnMetadata {
-        ColumnMetadata::new(self.name.clone(), self.data_type.clone().into())
+        let mut metadata = ColumnMetadata::new(self.name.clone(), self.data_type.clone().into())
             .with_not_null(self.not_null)
             .with_primary_key(self.primary_key)
-            .with_unique(self.unique)
+            .with_unique(self.unique);
+        if let Some(sequence) = &self.generated_sequence {
+            metadata = metadata.with_generated_sequence(sequence.clone());
+        }
+        if let Some(options) = &self.generated_sequence_options {
+            metadata = metadata.with_generated_sequence_options(options.clone());
+        }
+        metadata
     }
 }
 
@@ -1782,6 +1795,8 @@ impl From<&ColumnMetadata> for CatalogManifestColumn {
             not_null: column.not_null,
             primary_key: column.primary_key,
             unique: column.unique,
+            generated_sequence: column.generated_sequence.clone(),
+            generated_sequence_options: column.generated_sequence_options.clone(),
         }
     }
 }
@@ -1792,6 +1807,8 @@ impl From<&ColumnMetadata> for CatalogManifestColumn {
 pub enum CatalogManifestTableType {
     Managed,
     External,
+    Temporary,
+    View,
 }
 
 impl From<TableType> for CatalogManifestTableType {
@@ -1799,6 +1816,8 @@ impl From<TableType> for CatalogManifestTableType {
         match value {
             TableType::Managed => Self::Managed,
             TableType::External => Self::External,
+            TableType::Temporary => Self::Temporary,
+            TableType::View => Self::View,
         }
     }
 }
@@ -1808,6 +1827,8 @@ impl From<CatalogManifestTableType> for TableType {
         match value {
             CatalogManifestTableType::Managed => Self::Managed,
             CatalogManifestTableType::External => Self::External,
+            CatalogManifestTableType::Temporary => Self::Temporary,
+            CatalogManifestTableType::View => Self::View,
         }
     }
 }

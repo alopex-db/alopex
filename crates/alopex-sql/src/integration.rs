@@ -94,6 +94,8 @@ pub mod disk {
                     table: "users".into(),
                     columns: vec!["id".into(), "name".into()],
                     values,
+                    conflict: None,
+                    returning: None,
                 })
                 .unwrap();
             assert!(matches!(res, ExecutionResult::RowsAffected(2)));
@@ -144,6 +146,8 @@ pub mod disk {
                 table: "users".into(),
                 assignments: vec![assign],
                 filter: None,
+                join_source: None,
+                returning: None,
             })
             .unwrap();
         assert!(matches!(res, ExecutionResult::RowsAffected(2)));
@@ -153,6 +157,8 @@ pub mod disk {
             .execute(LogicalPlan::Delete {
                 table: "users".into(),
                 filter: None,
+                join_source: None,
+                returning: None,
             })
             .unwrap();
         assert!(matches!(res, ExecutionResult::RowsAffected(2)));

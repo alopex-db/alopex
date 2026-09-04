@@ -345,6 +345,8 @@ fn hnsw_flush_on_success() {
             table: "items".to_string(),
             columns: vec!["id".to_string(), "embedding".to_string()],
             values: vec![vec![id, embedding]],
+            conflict: None,
+            returning: None,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
         executor.execute_in_txn(plan, &mut borrowed).unwrap();

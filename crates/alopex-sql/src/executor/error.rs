@@ -60,8 +60,8 @@ pub enum ExecutorError {
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 
-    /// Column value required (DEFAULT not supported in v0.1.2).
-    #[error("column required: {column} (DEFAULT not supported in v0.1.2)")]
+    /// A NOT NULL column without a default was omitted.
+    #[error("column required: {column}")]
     ColumnRequired { column: String },
 
     /// Invalid index name (reserved prefix).
@@ -160,6 +160,12 @@ pub enum ConstraintViolation {
         columns: Vec<String>,
         value: Option<String>,
     },
+
+    #[error("CHECK constraint violated: {constraint}")]
+    Check { constraint: String },
+
+    #[error("FOREIGN KEY constraint violated: {constraint}")]
+    ForeignKey { constraint: String },
 }
 
 /// Expression evaluation errors.

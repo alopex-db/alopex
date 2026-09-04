@@ -1,8 +1,9 @@
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -10,8 +11,11 @@ use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
-use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
-use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
+use crate::types::{
+    DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PySharedExecutionReport,
+    PySharedExecutionStep, PyTxnMode,
+};
+use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult, PySearchStats};
 use crate::vector;
 use crate::vector::SliceOrOwned;
 
@@ -28,6 +32,132 @@ pub struct PyDatabase {
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
     #[cfg(test)]
     rollback_fail_count: AtomicUsize,
+}
+
+#[pyclass(name = "PreparedStatement")]
+pub struct PyPreparedStatement {
+    database: Arc<alopex_embedded::Database>,
+    sql: String,
+    bindings: Vec<Option<String>>,
+    finalized: bool,
+}
+
+struct PythonReader(Py<PyAny>);
+
+impl Read for PythonReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        Python::attach(|py| {
+            let chunk = self
+                .0
+                .bind(py)
+                .call_method1("read", (buffer.len(),))
+                .and_then(|value| value.extract::<Vec<u8>>())
+                .map_err(std::io::Error::other)?;
+            if chunk.len() > buffer.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "binary reader returned more bytes than requested",
+                ));
+            }
+            buffer[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        })
+    }
+}
+
+struct PythonWriter(Py<PyAny>);
+
+impl Write for PythonWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        Python::attach(|py| {
+            let written = self
+                .0
+                .bind(py)
+                .call_method1("write", (PyBytes::new(py, buffer),))
+                .and_then(|value| value.extract::<usize>())
+                .map_err(std::io::Error::other)?;
+            if written != buffer.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "binary writer accepted only part of a CSV chunk",
+                ));
+            }
+            Ok(written)
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Python::attach(|py| {
+            self.0
+                .bind(py)
+                .call_method0("flush")
+                .map(|_| ())
+                .map_err(std::io::Error::other)
+        })
+    }
+}
+
+#[pymethods]
+impl PyPreparedStatement {
+    fn parameter_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    fn bind(&mut self, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
+        self.ensure_open()?;
+        let count = self.bindings.len();
+        let slot = index
+            .checked_sub(1)
+            .and_then(|index| self.bindings.get_mut(index))
+            .ok_or_else(|| {
+                error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
+            })?;
+        *slot = Some(crate::embedded::sql::render_param(&value, index - 1)?);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> PyResult<()> {
+        self.ensure_open()?;
+        self.bindings.fill(None);
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> PyResult<()> {
+        self.ensure_open()?;
+        self.bindings.clear();
+        self.finalized = true;
+        Ok(())
+    }
+
+    fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let rendered = self
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .clone()
+                    .ok_or_else(|| error::to_py_err(format!("parameter ?{} is unbound", index + 1)))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let sql = crate::embedded::sql::bind_rendered_params(&self.sql, &rendered)?;
+        let database = Arc::clone(&self.database);
+        let result = py
+            .detach(move || database.execute_sql(&sql))
+            .map_err(error::embedded_err)?;
+        crate::embedded::sql::execution_result_to_py(py, result)
+    }
+}
+
+impl PyPreparedStatement {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.finalized {
+            Err(error::to_py_err("prepared statement is finalized"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl PyDatabase {
@@ -172,6 +302,42 @@ impl PyDatabase {
             .detach(move || db.execute_sql(&bound_sql))
             .map_err(error::embedded_err)?;
         crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
+    /// Execute mutation, commit-barrier, and post-commit-read steps through the shared session.
+    fn execute_shared(
+        &self,
+        py: Python<'_>,
+        execution_id: String,
+        transaction_id: String,
+        steps: Vec<PyRef<'_, PySharedExecutionStep>>,
+    ) -> PyResult<PySharedExecutionReport> {
+        let db = self.ensure_open()?;
+        let steps = steps
+            .iter()
+            .map(|step| step.to_native())
+            .collect::<PyResult<Vec<_>>>()?;
+        let request = alopex_sql::SharedExecutionRequest::new(execution_id, transaction_id, steps);
+        let report = py.detach(move || {
+            let mut session = db.sql_session();
+            session.execute_shared(request)
+        });
+        PySharedExecutionReport::from_native(py, report)
+    }
+
+    /// Prepare one SQL statement with one-based positional `?` parameters.
+    fn prepare(&self, sql: &str) -> PyResult<PyPreparedStatement> {
+        let database = self.ensure_open()?;
+        let parameter_count = database
+            .prepare(sql)
+            .map_err(error::embedded_err)?
+            .parameter_count();
+        Ok(PyPreparedStatement {
+            database,
+            sql: sql.to_owned(),
+            bindings: vec![None; parameter_count],
+            finalized: false,
+        })
     }
 
     /// Open a local-only, incrementally consumed SQL result stream.
@@ -437,14 +603,14 @@ impl PyDatabase {
         query: Py<PyAny>,
         k: usize,
         ef_search: Option<usize>,
-    ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
+    ) -> PyResult<(Vec<PySearchResult>, PySearchStats)> {
         let db = self.ensure_open()?;
         vector::require_numpy(py)?;
         let name = name.to_string();
         vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
             let db_clone = Arc::clone(&db);
             let name_clone = name.clone();
-            let (results, _stats) = match slice_or_owned {
+            let (results, stats) = match slice_or_owned {
                 SliceOrOwned::Borrowed { ptr, len, _guard } => {
                     let _guard = _guard;
                     let ptr = ptr as usize;
@@ -459,9 +625,8 @@ impl PyDatabase {
                 }
             }
             .map_err(error::embedded_err)?;
-            let stats = db.get_hnsw_stats(&name).map_err(error::embedded_err)?;
             let results = results.into_iter().map(PySearchResult::from).collect();
-            Ok((results, PyHnswStats::from(stats)))
+            Ok((results, PySearchStats::from(stats)))
         })
     }
 
@@ -476,11 +641,76 @@ impl PyDatabase {
             .map(PyHnswStats::from)
             .map_err(error::embedded_err)
     }
+
+    /// Stream CSV bytes from a Python binary reader into a table.
+    #[pyo3(signature = (table, source, header = false))]
+    fn copy_from_csv(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        source: Py<PyAny>,
+        header: bool,
+    ) -> PyResult<u64> {
+        let db = Arc::clone(&self.ensure_open()?);
+        let table = table.to_string();
+        match py
+            .detach(move || db.copy_from_csv_reader(&table, PythonReader(source), header))
+            .map_err(error::embedded_err)?
+        {
+            alopex_sql::ExecutionResult::RowsAffected(rows) => Ok(rows),
+            _ => Err(error::to_py_err("COPY FROM did not report affected rows")),
+        }
+    }
+
+    /// Stream table rows as CSV bytes into a Python binary writer.
+    #[pyo3(signature = (table, destination, header = false))]
+    fn copy_to_csv(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        destination: Py<PyAny>,
+        header: bool,
+    ) -> PyResult<u64> {
+        let db = Arc::clone(&self.ensure_open()?);
+        let table = table.to_string();
+        let mut writer = PythonWriter(destination);
+        match py
+            .detach(move || db.copy_to_csv_writer(&table, &mut writer, header))
+            .map_err(error::embedded_err)?
+        {
+            alopex_sql::ExecutionResult::RowsAffected(rows) => Ok(rows),
+            _ => Err(error::to_py_err("COPY TO did not report affected rows")),
+        }
+    }
+
+    /// Return sequence definitions and current allocation state.
+    fn list_sequences(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        self.ensure_open()?
+            .list_sequences()
+            .map_err(error::embedded_err)?
+            .into_iter()
+            .map(|sequence| {
+                let result = PyDict::new(py);
+                result.set_item("name", sequence.name)?;
+                result.set_item("start_value", sequence.start_value)?;
+                result.set_item("next_value", sequence.next_value)?;
+                result.set_item("last_value", sequence.last_value)?;
+                result.set_item("increment", sequence.increment)?;
+                result.set_item("min_value", sequence.min_value)?;
+                result.set_item("max_value", sequence.max_value)?;
+                result.set_item("cache", sequence.cache)?;
+                result.set_item("cycle", sequence.cycle)?;
+                result.set_item("owned_by", sequence.owned_by)?;
+                Ok(result.unbind())
+            })
+            .collect()
+    }
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyThreadMode>()?;
     m.add_class::<PyDatabase>()?;
+    m.add_class::<PyPreparedStatement>()?;
     m.add_class::<PySqlResultStream>()?;
     m.add_class::<PyLocalScan>()?;
     Ok(())
@@ -559,6 +789,26 @@ mod tests {
                 .expect("select");
             let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
             assert_eq!(rows.len(), 0);
+        });
+    }
+
+    #[test]
+    fn prepared_statement_python_surface_rebinds_and_finalizes() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            db.execute_sql(py, "CREATE TABLE prepared (id INTEGER PRIMARY KEY)", None)
+                .unwrap();
+            let mut statement = db.prepare("INSERT INTO prepared (id) VALUES (?)").unwrap();
+            assert_eq!(statement.parameter_count(), 1);
+            let one = 1i64.into_py_any(py).unwrap();
+            statement.bind(1, one.bind(py).clone()).unwrap();
+            statement.execute(py).unwrap();
+            statement.reset().unwrap();
+            let two = 2i64.into_py_any(py).unwrap();
+            statement.bind(1, two.bind(py).clone()).unwrap();
+            statement.execute(py).unwrap();
+            statement.finalize().unwrap();
+            assert!(statement.execute(py).is_err());
         });
     }
 

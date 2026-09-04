@@ -67,6 +67,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_numpy: numpy が必要なテスト")
     config.addinivalue_line("markers", "requires_polars: polars が必要なテスト")
     config.addinivalue_line(
+        "markers", "polars_reference: Polars 1.43.2とのrequired differential"
+    )
+    config.addinivalue_line(
         "markers", "requires_server: 実 alopex-server バイナリが必要な e2e テスト"
     )
 

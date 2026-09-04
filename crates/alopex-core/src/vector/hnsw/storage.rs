@@ -248,9 +248,16 @@ impl HnswStorage {
                 all_node_checksums = hash(&node_bytes).wrapping_add(all_node_checksums);
 
                 key_to_node.insert(node_data.key.clone(), node_id as u32);
+                let norm = node_data
+                    .vector
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt();
                 nodes.push(Some(HnswNode {
                     key: node_data.key,
                     vector: node_data.vector,
+                    norm,
                     metadata: node_data.metadata,
                     neighbors: node_data.neighbors,
                     deleted: node_data.deleted,

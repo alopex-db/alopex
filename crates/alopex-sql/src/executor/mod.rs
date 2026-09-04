@@ -52,10 +52,15 @@ mod system;
 
 #[cfg(feature = "tokio")]
 pub use async_executor::AsyncExecutor;
+pub use ddl::sequence::SequenceInfo;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
 pub use memory::{MemoryPolicy, SpillPolicy};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
-pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
+pub use result::{
+    ColumnInfo, CommitMetadata, ExecutionResult, ExecutionStep, ExecutionStepError,
+    ExecutionStepErrorKind, ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult,
+    QueryResult, QueryRowIterator, Row, SharedExecutionReport, SharedExecutionRequest,
+};
 
 /// Returns whether a plan requires direct access to the backing KV store.
 pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
@@ -71,7 +76,36 @@ use crate::catalog::Catalog;
 use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
-use crate::storage::{BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, TxnBridge};
+use crate::storage::{
+    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, TxnBridge,
+};
+use crate::{ExplainFormat, ResolvedType};
+use std::time::Instant;
+
+fn explain_result(
+    plan: &LogicalPlan,
+    analyze: bool,
+    format: ExplainFormat,
+    elapsed_ns: Option<u64>,
+    rows: Option<u64>,
+) -> ExecutionResult {
+    let (column, value) = match format {
+        ExplainFormat::Text => ("QUERY PLAN", plan.explain_text(elapsed_ns, rows)),
+        ExplainFormat::Json => ("query_plan", plan.explain_json(analyze, elapsed_ns, rows)),
+    };
+    ExecutionResult::Query(QueryResult::new(
+        vec![ColumnInfo::new(column, ResolvedType::Text)],
+        vec![vec![SqlValue::Text(value)]],
+    ))
+}
+
+fn result_rows(result: &ExecutionResult) -> u64 {
+    match result {
+        ExecutionResult::Success => 0,
+        ExecutionResult::RowsAffected(rows) => *rows,
+        ExecutionResult::Query(result) => result.rows.len() as u64,
+    }
+}
 
 /// SQL statement executor.
 ///
@@ -121,6 +155,50 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         }
     }
 
+    /// Stream CSV from an application-owned reader into `table` atomically.
+    pub fn copy_from_csv_reader(
+        &self,
+        table: &str,
+        reader: impl std::io::Read + 'static,
+        header: bool,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            bulk::execute_copy_from_csv_reader(
+                txn,
+                &*catalog,
+                table,
+                reader,
+                bulk::CopyOptions { header },
+            )
+        })
+    }
+
+    /// Stream `table` as CSV to an application-owned writer.
+    pub fn copy_to_csv_writer(
+        &self,
+        table: &str,
+        writer: &mut impl std::io::Write,
+        header: bool,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            bulk::execute_copy_to_csv_writer(
+                txn,
+                &*catalog,
+                table,
+                writer,
+                bulk::CopyOptions { header },
+            )
+        })
+    }
+
+    /// List persisted sequences in deterministic name order.
+    pub fn list_sequences(&self) -> Result<Vec<SequenceInfo>> {
+        let mut transaction = self.bridge.begin_read().map_err(ExecutorError::from)?;
+        ddl::sequence::list(&mut transaction)
+    }
+
     /// Execute a logical plan and return the result.
     ///
     /// # Arguments
@@ -149,7 +227,30 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
         let _statement_timestamp = evaluator::begin_statement();
+        let plan = match plan {
+            LogicalPlan::Explain {
+                analyze,
+                format,
+                input,
+            } => {
+                if !analyze {
+                    return Ok(explain_result(&input, false, format, None, None));
+                }
+                let started = Instant::now();
+                let result = self.execute((*input).clone())?;
+                let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                return Ok(explain_result(
+                    &input,
+                    true,
+                    format,
+                    Some(elapsed_ns),
+                    Some(result_rows(&result)),
+                ));
+            }
+            plan => plan,
+        };
         match plan {
+            LogicalPlan::Explain { .. } => unreachable!("EXPLAIN handled before dispatch"),
             LogicalPlan::Pragma { name, value } => {
                 system::execute_pragma(&self.bridge, &name, value.as_ref())
             }
@@ -160,29 +261,152 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
+            LogicalPlan::CreateView {
+                table,
+                if_not_exists,
+            } => self.execute_create_table(table, Vec::new(), if_not_exists),
+            LogicalPlan::DropView { name, if_exists } => self.execute_drop_view(&name, if_exists),
+            LogicalPlan::AlterTable {
+                name,
+                if_exists,
+                action,
+            } => self.execute_alter_table(&name, if_exists, action),
+            LogicalPlan::Truncate { name } => self.execute_truncate(&name),
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,
             } => self.execute_create_index(index, if_not_exists),
             LogicalPlan::DropIndex { name, if_exists } => self.execute_drop_index(&name, if_exists),
+            LogicalPlan::Copy {
+                query: Some(_),
+                direction: crate::ast::CopyDirection::From,
+                ..
+            } => Err(ExecutorError::InvalidOperation {
+                operation: "COPY FROM".into(),
+                reason: "COPY FROM requires a table source and file input".into(),
+            }),
+            LogicalPlan::Copy {
+                query: Some(query),
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                ..
+            } => {
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                let ExecutionResult::Query(result) = self.execute_query(*query)? else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "COPY TO".into(),
+                        reason: "query source did not return rows".into(),
+                    });
+                };
+                bulk::execute_copy_query_to(
+                    &result,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                query: None,
+            } => {
+                let catalog = self.catalog.read().expect("catalog lock poisoned");
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                self.run_in_write_txn(|txn| {
+                    bulk::execute_copy_to(
+                        txn,
+                        &*catalog,
+                        &table,
+                        &path,
+                        format,
+                        bulk::CopyOptions { header },
+                        &bulk::CopySecurityConfig::default(),
+                    )
+                })
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::From,
+                query: None,
+                ..
+            } => {
+                let catalog = self.catalog.read().expect("catalog lock poisoned");
+                self.run_in_write_txn(|txn| {
+                    let format = copy_format(&path, &options)?;
+                    let header = options.iter().any(|option| {
+                        option.name.eq_ignore_ascii_case("header")
+                            && option.value.eq_ignore_ascii_case("true")
+                    });
+                    bulk::execute_copy(
+                        txn,
+                        &*catalog,
+                        &table,
+                        &path,
+                        format,
+                        bulk::CopyOptions { header },
+                        &bulk::CopySecurityConfig::default(),
+                    )
+                })
+            }
+
+            LogicalPlan::CreateSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::create(txn, statement))
+            }
+            LogicalPlan::AlterSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::alter(txn, statement))
+            }
+            LogicalPlan::DropSequence(statement) => {
+                self.run_in_write_txn(|txn| ddl::sequence::drop(txn, statement))
+            }
 
             // DML Operations
             LogicalPlan::Insert {
                 table,
                 columns,
                 values,
-            } => self.execute_insert(&table, columns, values),
+                conflict,
+                returning,
+            } => self.execute_insert(&table, columns, values, conflict, returning),
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
-            } => self.execute_insert_select(&table, columns, *source),
+                conflict,
+                returning,
+            } => self.execute_insert_select(&table, columns, *source, conflict, returning),
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
-            } => self.execute_update(&table, assignments, filter),
-            LogicalPlan::Delete { table, filter } => self.execute_delete(&table, filter),
+                join_source,
+                returning,
+            } => self.execute_update(&table, assignments, filter, join_source, returning),
+            LogicalPlan::Delete {
+                table,
+                filter,
+                join_source,
+                returning,
+            } => self.execute_delete(&table, filter, join_source, returning),
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => self.execute_merge(&target, &source, on, clauses),
 
             // Query Operations
             LogicalPlan::Scan { .. }
@@ -232,6 +456,45 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         })
     }
 
+    fn execute_drop_view(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            let Some(view) =
+                ddl::schema_evolution::prepare_drop_view(txn, &*catalog, name, if_exists)?
+            else {
+                return Ok(ExecutionResult::Success);
+            };
+            catalog.drop_table(&view.name)?;
+            Ok(ExecutionResult::Success)
+        })
+    }
+
+    fn execute_alter_table(
+        &mut self,
+        name: &str,
+        if_exists: bool,
+        action: crate::ast::AlterTableAction,
+    ) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        if !catalog.table_exists(name) && if_exists {
+            return Ok(ExecutionResult::Success);
+        }
+        self.run_in_write_txn(|txn| {
+            let outcome = ddl::schema_evolution::prepare_alter(txn, &*catalog, name, action)?;
+            catalog.drop_table(&outcome.old_table.name)?;
+            catalog.create_table(outcome.new_table)?;
+            for (_, index) in outcome.updated_indexes {
+                catalog.create_index(index)?;
+            }
+            Ok(ExecutionResult::Success)
+        })
+    }
+
+    fn execute_truncate(&mut self, name: &str) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| ddl::schema_evolution::execute_truncate(txn, &*catalog, name))
+    }
+
     fn execute_create_index(
         &mut self,
         index: crate::catalog::IndexMetadata,
@@ -259,9 +522,15 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         columns: Vec<String>,
         values: Vec<Vec<crate::planner::TypedExpr>>,
+        conflict: Option<crate::planner::OnConflictPlan>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_insert(txn, &*catalog, table, columns, values))
+        self.run_in_write_txn(|txn| {
+            dml::execute_insert_with_plan(
+                txn, &*catalog, table, columns, values, conflict, returning,
+            )
+        })
     }
 
     fn execute_insert_select(
@@ -269,6 +538,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         columns: Vec<String>,
         source: LogicalPlan,
+        conflict: Option<crate::planner::OnConflictPlan>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| {
@@ -279,7 +550,15 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     reason: "SELECT source did not return query rows".into(),
                 });
             };
-            dml::execute_insert_rows(txn, &*catalog, table, columns, result.rows)
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*catalog,
+                table,
+                columns,
+                result.rows,
+                conflict,
+                returning,
+            )
         })
     }
 
@@ -288,18 +567,52 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         table: &str,
         assignments: Vec<crate::planner::TypedAssignment>,
         filter: Option<crate::planner::TypedExpr>,
+        join_source: Option<crate::planner::JoinedDmlSource>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_update(txn, &*catalog, table, assignments, filter))
+        self.run_in_write_txn(|txn| {
+            dml::execute_update_with_returning(
+                txn,
+                &*catalog,
+                table,
+                assignments,
+                filter,
+                join_source,
+                returning,
+            )
+        })
     }
 
     fn execute_delete(
         &mut self,
         table: &str,
         filter: Option<crate::planner::TypedExpr>,
+        join_source: Option<crate::planner::JoinedDmlSource>,
+        returning: Option<crate::planner::typed_expr::Projection>,
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| dml::execute_delete(txn, &*catalog, table, filter))
+        self.run_in_write_txn(|txn| {
+            dml::execute_delete_with_returning(
+                txn,
+                &*catalog,
+                table,
+                filter,
+                join_source,
+                returning,
+            )
+        })
+    }
+
+    fn execute_merge(
+        &mut self,
+        target: &str,
+        source: &str,
+        on: crate::planner::TypedExpr,
+        clauses: Vec<crate::planner::MergeClausePlan>,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| dml::execute_merge(txn, &*catalog, target, source, on, clauses))
     }
 
     // ========================================================================
@@ -321,6 +634,28 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
+        let plan = match plan {
+            LogicalPlan::Explain {
+                analyze,
+                format,
+                input,
+            } => {
+                if !analyze {
+                    return Ok(explain_result(&input, false, format, None, None));
+                }
+                let started = Instant::now();
+                let result = self.execute_in_txn((*input).clone(), txn)?;
+                let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                return Ok(explain_result(
+                    &input,
+                    true,
+                    format,
+                    Some(elapsed_ns),
+                    Some(result_rows(&result)),
+                ));
+            }
+            plan => plan,
+        };
         if txn.mode() == TxnMode::ReadOnly
             && !matches!(
                 plan,
@@ -351,6 +686,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         let (mut sql_txn, overlay) = txn.split_parts();
 
         let result = match plan {
+            LogicalPlan::Explain { .. } => unreachable!("EXPLAIN handled before dispatch"),
             LogicalPlan::CreateTable {
                 table,
                 if_not_exists,
@@ -370,6 +706,40 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 &name,
                 if_exists,
             ),
+            LogicalPlan::CreateView {
+                table,
+                if_not_exists,
+            } => self.execute_create_table_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                table,
+                Vec::new(),
+                if_not_exists,
+            ),
+            LogicalPlan::DropView { name, if_exists } => self.execute_drop_view_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                &name,
+                if_exists,
+            ),
+            LogicalPlan::AlterTable {
+                name,
+                if_exists,
+                action,
+            } => self.execute_alter_table_in_txn(
+                &mut *catalog,
+                &mut sql_txn,
+                overlay,
+                &name,
+                if_exists,
+                action,
+            ),
+            LogicalPlan::Truncate { name } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                ddl::schema_evolution::execute_truncate(&mut sql_txn, &view, &name)
+            }
             LogicalPlan::CreateIndex {
                 index,
                 if_not_exists,
@@ -394,14 +764,115 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 table,
                 columns,
                 values,
+                conflict,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_insert(&mut sql_txn, &view, &table, columns, values)
+                dml::execute_insert_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    columns,
+                    values,
+                    conflict,
+                    returning,
+                )
             }
+            LogicalPlan::Copy {
+                query: Some(_),
+                direction: crate::ast::CopyDirection::From,
+                ..
+            } => Err(ExecutorError::InvalidOperation {
+                operation: "COPY FROM".into(),
+                reason: "COPY FROM requires a table source and file input".into(),
+            }),
+            LogicalPlan::Copy {
+                query: Some(query),
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                ..
+            } => {
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let ExecutionResult::Query(result) =
+                    query::execute_query(&mut sql_txn, &view, *query)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "COPY TO".into(),
+                        reason: "query source did not return rows".into(),
+                    });
+                };
+                let format = copy_format(&path, &options)?;
+                bulk::execute_copy_query_to(
+                    &result,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                query: None,
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                bulk::execute_copy_to(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::From,
+                query: None,
+                ..
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let format = copy_format(&path, &options)?;
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                bulk::execute_copy(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    &bulk::CopySecurityConfig::default(),
+                )
+            }
+            LogicalPlan::CreateSequence(statement) => {
+                ddl::sequence::create(&mut sql_txn, statement)
+            }
+            LogicalPlan::AlterSequence(statement) => ddl::sequence::alter(&mut sql_txn, statement),
+            LogicalPlan::DropSequence(statement) => ddl::sequence::drop(&mut sql_txn, statement),
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
+                conflict,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 let ExecutionResult::Query(result) =
@@ -412,19 +883,58 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                         reason: "SELECT source did not return query rows".into(),
                     });
                 };
-                dml::execute_insert_rows(&mut sql_txn, &view, &table, columns, result.rows)
+                dml::execute_insert_rows_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    columns,
+                    result.rows,
+                    conflict,
+                    returning,
+                )
             }
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
+                join_source,
+                returning,
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_update(&mut sql_txn, &view, &table, assignments, filter)
+                dml::execute_update_with_returning(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    assignments,
+                    filter,
+                    join_source,
+                    returning,
+                )
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete {
+                table,
+                filter,
+                join_source,
+                returning,
+            } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                dml::execute_delete(&mut sql_txn, &view, &table, filter)
+                dml::execute_delete_with_returning(
+                    &mut sql_txn,
+                    &view,
+                    &table,
+                    filter,
+                    join_source,
+                    returning,
+                )
+            }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                dml::execute_merge(&mut sql_txn, &view, &target, &source, on, clauses)
             }
             LogicalPlan::Scan { .. }
             | LogicalPlan::Values { .. }
@@ -442,7 +952,22 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                query::execute_query(&mut sql_txn, &view, plan)
+                if let Some((function, name, alias)) = system::direct_sequence_call(&plan) {
+                    let value = if function.eq_ignore_ascii_case("nextval") {
+                        ddl::sequence::next_value(&mut sql_txn, name)?
+                    } else {
+                        ddl::sequence::current_value(&mut sql_txn, name)?
+                    };
+                    Ok(ExecutionResult::Query(QueryResult::new(
+                        vec![ColumnInfo::new(
+                            alias.unwrap_or(function),
+                            ResolvedType::BigInt,
+                        )],
+                        vec![vec![SqlValue::BigInt(value)]],
+                    )))
+                } else {
+                    query::execute_query(&mut sql_txn, &view, plan)
+                }
             }
         };
 
@@ -531,6 +1056,19 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         catalog
             .persist_create_table(txn.inner_mut(), &table)
             .map_err(Self::map_catalog_error)?;
+        for column in &table.columns {
+            if let Some(sequence) = &column.generated_sequence {
+                ddl::sequence::create_generated(
+                    txn,
+                    sequence.clone(),
+                    format!("{}.{}", table.name, column.name),
+                    column
+                        .generated_sequence_options
+                        .clone()
+                        .unwrap_or_default(),
+                )?;
+            }
+        }
         if let Some(index) = &pk_index {
             catalog
                 .persist_create_index(txn.inner_mut(), index)
@@ -575,6 +1113,17 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             };
         }
 
+        if table_meta.table_type == crate::TableType::View {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "DROP TABLE".into(),
+                reason: format!("'{}' is a view; use DROP VIEW", table_meta.name),
+            });
+        }
+        ddl::schema_evolution::ensure_no_dependent_views(
+            &TxnCatalogView::new(catalog, overlay),
+            table_name,
+        )?;
+
         let indexes = TxnCatalogView::new(catalog, overlay)
             .get_indexes_for_table(table_name)
             .into_iter()
@@ -591,6 +1140,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         txn.delete_prefix(&KeyEncoder::table_prefix(table_meta.table_id))?;
         txn.delete_prefix(&KeyEncoder::sequence_key(table_meta.table_id))?;
+        ddl::sequence::drop_owned_by(txn, table_name)?;
 
         catalog
             .persist_drop_table(txn.inner_mut(), &TableFqn::from(&table_meta))
@@ -598,6 +1148,53 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         overlay.drop_table(&TableFqn::from(&table_meta));
 
+        Ok(ExecutionResult::Success)
+    }
+
+    fn execute_drop_view_in_txn<'txn>(
+        &self,
+        catalog: &mut PersistentCatalog<S>,
+        txn: &mut impl crate::storage::SqlTxn<'txn, S>,
+        overlay: &mut CatalogOverlay,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<ExecutionResult>
+    where
+        S: 'txn,
+    {
+        let view = TxnCatalogView::new(catalog, overlay);
+        let Some(metadata) = ddl::schema_evolution::prepare_drop_view(txn, &view, name, if_exists)?
+        else {
+            return Ok(ExecutionResult::Success);
+        };
+        overlay.drop_table(&TableFqn::from(&metadata));
+        Ok(ExecutionResult::Success)
+    }
+
+    fn execute_alter_table_in_txn<'txn>(
+        &self,
+        catalog: &mut PersistentCatalog<S>,
+        txn: &mut impl crate::storage::SqlTxn<'txn, S>,
+        overlay: &mut CatalogOverlay,
+        name: &str,
+        if_exists: bool,
+        action: crate::ast::AlterTableAction,
+    ) -> Result<ExecutionResult>
+    where
+        S: 'txn,
+    {
+        if catalog.get_table_in_txn(name, overlay).is_none() && if_exists {
+            return Ok(ExecutionResult::Success);
+        }
+        let view = TxnCatalogView::new(catalog, overlay);
+        let outcome = ddl::schema_evolution::prepare_alter(txn, &view, name, action)?;
+        if outcome.old_table.name != outcome.new_table.name {
+            overlay.drop_table(&TableFqn::from(&outcome.old_table));
+        }
+        overlay.add_table(TableFqn::from(&outcome.new_table), outcome.new_table);
+        for (_, index) in outcome.updated_indexes {
+            overlay.add_index(IndexFqn::from(&index), index);
+        }
         Ok(ExecutionResult::Success)
     }
 
@@ -724,6 +1321,29 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
     }
 }
 
+fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> Result<bulk::FileFormat> {
+    let Some(format) = options
+        .iter()
+        .find(|option| option.name.eq_ignore_ascii_case("format"))
+        .map(|option| option.value.as_str())
+    else {
+        return Ok(if path.to_ascii_lowercase().ends_with(".parquet") {
+            bulk::FileFormat::Parquet
+        } else {
+            bulk::FileFormat::Csv
+        });
+    };
+    if format.eq_ignore_ascii_case("csv") {
+        Ok(bulk::FileFormat::Csv)
+    } else if format.eq_ignore_ascii_case("parquet") {
+        Ok(bulk::FileFormat::Parquet)
+    } else {
+        Err(ExecutorError::UnsupportedFormat(format!(
+            "COPY FORMAT {format}; supported formats are CSV and PARQUET"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +1413,8 @@ mod tests {
                 resolved_type: ResolvedType::Integer,
                 span: Span::default(),
             }]],
+            conflict: None,
+            returning: None,
         });
         assert!(matches!(result, Ok(ExecutionResult::RowsAffected(1))));
     }

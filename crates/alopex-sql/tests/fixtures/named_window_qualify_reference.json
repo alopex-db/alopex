@@ -1,5 +1,6 @@
 {
-  "verified_with": {
+  "test_provenance": {"relationship":"handwritten-regression","generation":{"command":null,"result_format":"documented expected rows; not external execution"}},
+  "documented_against": {
     "duckdb": "1.5.5",
     "datafusion": "54.0.0"
   },

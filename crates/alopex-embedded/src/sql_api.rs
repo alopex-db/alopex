@@ -124,23 +124,58 @@ fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn stmt_requires_write(stmt: &Statement) -> bool {
-    !stmt.kind.is_query()
+    stmt.kind.requires_write()
 }
 
 fn stmt_changes_catalog(stmt: &Statement) -> bool {
+    if let StatementKind::Explain {
+        analyze: true,
+        statement,
+        ..
+    } = &stmt.kind
+    {
+        return stmt_changes_catalog(statement);
+    }
     matches!(
         stmt.kind,
         StatementKind::CreateTable(_)
             | StatementKind::DropTable(_)
+            | StatementKind::CreateView(_)
+            | StatementKind::DropView(_)
+            | StatementKind::AlterTable(_)
             | StatementKind::CreateIndex(_)
             | StatementKind::DropIndex(_)
+            | StatementKind::CreateSequence(_)
+            | StatementKind::AlterSequence(_)
+            | StatementKind::DropSequence(_)
     )
 }
 
 fn stmt_changes_user_data(stmt: &Statement) -> bool {
+    if let StatementKind::Explain {
+        analyze: true,
+        statement,
+        ..
+    } = &stmt.kind
+    {
+        return stmt_changes_user_data(statement);
+    }
     matches!(
         stmt.kind,
-        StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_)
+        StatementKind::Insert(_)
+            | StatementKind::Update(_)
+            | StatementKind::Delete(_)
+            | StatementKind::Merge(_)
+            | StatementKind::Copy(_)
+            | StatementKind::AlterTable(_)
+            | StatementKind::Truncate(_)
+    )
+}
+
+fn stmt_can_stream(stmt: &Statement) -> bool {
+    matches!(
+        stmt.kind,
+        StatementKind::Select(_) | StatementKind::Values(_)
     )
 }
 
@@ -176,7 +211,13 @@ pub(crate) fn execute_sql_owned(
     transaction: &mut OwnedEmbeddedTransaction,
     sql: &str,
 ) -> Result<SqlResult> {
-    let statements = parse_sql(sql)?;
+    let statements = match parse_sql(sql) {
+        Ok(statements) => statements,
+        Err(error) => {
+            transaction.failed = true;
+            return Err(error);
+        }
+    };
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
@@ -202,7 +243,7 @@ pub(crate) fn execute_sql_owned(
     let catalog_modified = &mut transaction.catalog_modified;
     let mut outcome = Ok(alopex_sql::ExecutionResult::Success);
 
-    session
+    let session_result = session
         .with_transaction(|owned| {
             outcome = (|| {
                 let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
@@ -239,7 +280,14 @@ pub(crate) fn execute_sql_owned(
             })();
             Ok(())
         })
-        .map_err(Error::Core)?;
+        .map_err(Error::Core);
+    if let Err(error) = session_result {
+        transaction.failed = true;
+        return Err(error);
+    }
+    if outcome.is_err() {
+        transaction.failed = true;
+    }
     outcome
 }
 
@@ -326,6 +374,40 @@ impl Database {
             .execute_sql_multi(sql)?
             .pop()
             .unwrap_or(alopex_sql::ExecutionResult::Success))
+    }
+
+    /// Atomically import CSV from an application-owned reader.
+    pub fn copy_from_csv_reader(
+        &self,
+        table: &str,
+        reader: impl std::io::Read + 'static,
+        header: bool,
+    ) -> Result<SqlResult> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .copy_from_csv_reader(table, reader, header)
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+    }
+
+    /// Export CSV to an application-owned writer.
+    pub fn copy_to_csv_writer(
+        &self,
+        table: &str,
+        writer: &mut impl std::io::Write,
+        header: bool,
+    ) -> Result<SqlResult> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .copy_to_csv_writer(table, writer, header)
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+    }
+
+    /// Return persisted sequence definitions and current allocation state.
+    pub fn list_sequences(&self) -> Result<Vec<alopex_sql::executor::SequenceInfo>> {
+        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
+        executor
+            .list_sequences()
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
     }
 
     /// SQL を実行し、文ごとの実行結果を返す（auto-commit）。
@@ -499,7 +581,7 @@ impl Database {
         }
 
         // For streaming SELECT, use the new pipeline
-        if stmts.len() == 1 && stmts[0].kind.is_query() {
+        if stmts.len() == 1 && stmt_can_stream(&stmts[0]) {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 
@@ -646,7 +728,7 @@ impl Database {
         }
 
         // For streaming, only support single SELECT statement
-        if stmts.len() == 1 && stmts[0].kind.is_query() {
+        if stmts.len() == 1 && stmt_can_stream(&stmts[0]) {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 

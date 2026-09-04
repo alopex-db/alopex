@@ -112,8 +112,10 @@ impl ResolvedType {
     /// ```
     pub fn from_ast(dt: &DataType) -> Self {
         match dt {
-            DataType::Integer | DataType::Int => Self::Integer,
-            DataType::BigInt => Self::BigInt,
+            DataType::Integer | DataType::Int | DataType::SmallSerial | DataType::Serial => {
+                Self::Integer
+            }
+            DataType::BigInt | DataType::BigSerial => Self::BigInt,
             DataType::Float => Self::Float,
             DataType::Double => Self::Double,
             DataType::Text => Self::Text,

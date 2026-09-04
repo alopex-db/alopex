@@ -17,6 +17,7 @@ type
 
   SqlNodeKind* = enum
     nkSelect
+    nkExplain
     nkValues
     nkWithClause
     nkCommonTableExpr
@@ -24,12 +25,41 @@ type
     nkInsert
     nkUpdate
     nkDelete
+    nkMerge
+    nkMergeWhen
+    nkReturningClause
+    nkOnConflict
+    nkCopy
     nkCreateTable
     nkDropTable
+    nkCreateView
+    nkDropView
+    nkAlterTable
+    nkAlterAddColumn
+    nkAlterDropColumn
+    nkAlterRenameColumn
+    nkAlterRenameTable
+    nkAlterColumn
+    nkAlterSetDataType
+    nkAlterSetDefault
+    nkAlterDropDefault
+    nkAlterSetNotNull
+    nkAlterDropNotNull
+    nkTruncate
     nkCreateIndex
     nkCreateContinuousAggregate
     nkDropIndex
+    nkCreateSequence
+    nkAlterSequence
+    nkDropSequence
     nkPragma
+    nkBegin
+    nkSetTransaction
+    nkCommit
+    nkRollback
+    nkSavepoint
+    nkRollbackToSavepoint
+    nkReleaseSavepoint
     nkStatementList
     nkIdentifier
     nkStringLit
@@ -38,6 +68,7 @@ type
     nkFloatLit
     nkBoolLit
     nkNull
+    nkParameter
     nkStar
     nkQualifiedStar
     nkColumnRef
@@ -135,11 +166,33 @@ type
     lateral*: bool          ## nkFromDerived/nkFromFunction: LATERAL (issue #151)
     withOrdinality*: bool   ## nkFromFunction: WITH ORDINALITY (issue #162)
     recursive*: bool
+    parameterIndex*: int
+    explainAnalyze*: bool
+    explainFormat*: string
     limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
+    constraintKind*: string
+    constraintName*: string
+    constraintColumns*: seq[string]
+    referencedTable*: string
+    referencedColumns*: seq[string]
+    onDeleteAction*: string
+    onUpdateAction*: string
+    constraintDeferrable*: bool
+    initiallyDeferred*: bool
+    constraintExpression*: SqlNode
+    statementAction*: string
+    copyDirection*: string
+    copyTarget*: string
+    copyFormat*: string
+    copyOptions*: seq[string]
+    sequenceOptions*: seq[string]
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind
     case kind*: SqlNodeKind
+    of nkBegin, nkSetTransaction:
+      isolationLevel*: string
+      accessMode*: string
     of nkIdentifier, nkStringLit, nkIntervalLit:
       strVal*: string
     of nkIntLit:
@@ -247,6 +300,8 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
   if node.span.isEmpty:
     node.span = fallback
   case node.kind
+  of nkBegin, nkSetTransaction:
+    discard
   of nkIdentifier, nkStringLit, nkIntervalLit, nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkStar:
     discard
   of nkBinaryOp:
@@ -288,6 +343,8 @@ proc `$`*(node: SqlNode): string =
   if node == nil:
     return "nil"
   case node.kind
+  of nkBegin, nkSetTransaction:
+    result = $node.kind & "(" & node.isolationLevel & ", " & node.accessMode & ")"
   of nkIdentifier:
     result = "Ident(" & node.strVal & ")"
   of nkStringLit:

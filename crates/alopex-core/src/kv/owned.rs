@@ -54,6 +54,32 @@ pub trait OwnedKVTransaction: Send {
     /// Stage one deletion for commit.
     fn delete(&mut self, key: Key) -> Result<()>;
 
+    /// Snapshot staged writes and return a transaction-local savepoint identifier.
+    fn create_savepoint(&mut self) -> Result<u64> {
+        Err(Error::InvalidParameter {
+            param: "savepoint".into(),
+            reason: "backend does not support savepoints".into(),
+        })
+    }
+
+    /// Restore staged writes at `id` and discard every later savepoint.
+    fn rollback_to_savepoint(&mut self, id: u64) -> Result<()> {
+        let _ = id;
+        Err(Error::InvalidParameter {
+            param: "savepoint".into(),
+            reason: "backend does not support savepoints".into(),
+        })
+    }
+
+    /// Discard `id` and every savepoint nested after it without changing writes.
+    fn release_savepoint(&mut self, id: u64) -> Result<()> {
+        let _ = id;
+        Err(Error::InvalidParameter {
+            param: "savepoint".into(),
+            reason: "backend does not support savepoints".into(),
+        })
+    }
+
     /// Open an owned prefix cursor at the transaction's snapshot.
     fn scan_prefix(&mut self, prefix: &[u8]) -> Result<Box<dyn OwnedKVScan>>;
 
@@ -490,6 +516,21 @@ impl OwnedTransactionSession {
     /// Roll back this owned transaction once.
     pub fn rollback(&self) -> Result<OwnedTransactionSessionStatus> {
         self.finish_transaction(false)
+    }
+
+    /// Snapshot the transaction's staged writes.
+    pub fn create_savepoint(&self) -> Result<u64> {
+        self.with_transaction(|transaction| transaction.create_savepoint())
+    }
+
+    /// Restore one savepoint and discard its descendants.
+    pub fn rollback_to_savepoint(&self, id: u64) -> Result<()> {
+        self.with_transaction(|transaction| transaction.rollback_to_savepoint(id))
+    }
+
+    /// Release one savepoint and its descendants.
+    pub fn release_savepoint(&self, id: u64) -> Result<()> {
+        self.with_transaction(|transaction| transaction.release_savepoint(id))
     }
 
     fn finish_transaction(&self, commit: bool) -> Result<OwnedTransactionSessionStatus> {

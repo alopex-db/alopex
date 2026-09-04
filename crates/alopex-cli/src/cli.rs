@@ -359,6 +359,10 @@ pub struct SqlCommand {
     #[arg(long)]
     pub deadline: Option<String>,
 
+    /// JSON value bound to the next positional `?` parameter (repeatable)
+    #[arg(long = "param", value_name = "JSON")]
+    pub params: Vec<String>,
+
     /// Read routing mode. Non-local modes require an explicit cluster profile.
     #[arg(long, value_enum)]
     pub read_mode: Option<SqlReadMode>,
@@ -899,6 +903,26 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Sql(SqlCommand { query: Some(q), file: None, .. })) if q == "SELECT * FROM users"
+        ));
+    }
+
+    #[test]
+    fn test_parse_sql_parameters() {
+        let cli = Cli::try_parse_from([
+            "alopex",
+            "--in-memory",
+            "sql",
+            "SELECT ?, ?",
+            "--param",
+            "1",
+            "--param",
+            "null",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Sql(SqlCommand { params, .. })) if params == ["1", "null"]
         ));
     }
 

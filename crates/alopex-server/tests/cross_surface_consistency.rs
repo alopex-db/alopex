@@ -4,7 +4,7 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
@@ -223,7 +223,7 @@ fn normalize_sql_rows(rows: &Value) -> Value {
     Value::Array(normalized)
 }
 
-fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
+fn run_cli_sql_rows(db: &Arc<Database>, query: &str) -> Vec<Value> {
     let cmd = SqlCommand {
         query: Some(query.to_string()),
         file: None,
@@ -232,6 +232,7 @@ fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
         deadline: None,
         read_mode: None,
         routing_report: None,
+        params: Vec::new(),
         tui: false,
     };
     let mut output = Vec::new();
@@ -781,7 +782,7 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
 
     drop(guard);
 
-    let db = Database::open(temp.path()).expect("open db");
+    let db = Arc::new(Database::open(temp.path()).expect("open db"));
     let cli_sql_rows = run_cli_sql_rows(&db, "SELECT id, name FROM surface_items ORDER BY id;");
     let cli_vector_row = run_cli_sql_rows(
         &db,

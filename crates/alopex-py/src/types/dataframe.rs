@@ -8,11 +8,11 @@ use alopex_dataframe::{
     ConcatStrNullBehavior, DataFrame, DataFrameStream, Expr, LazyFrame, Series, StreamOptions,
 };
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, ListBuilder, StringArray,
-    StringBuilder, TimestampMicrosecondArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, LargeStringArray, ListArray,
+    ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyTuple};
 
@@ -50,11 +50,59 @@ impl PyDataFrame {
     }
 }
 
+/// Polars-compatible wrapper returned by ``DataFrame.to_dict(as_series=True)``.
+#[pyclass(name = "Series", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PySeries {
+    inner: Series,
+    control: Arc<DatabaseControl>,
+}
+
+#[pymethods]
+impl PySeries {
+    #[getter]
+    fn name(&self) -> PyResult<&str> {
+        self.control.ensure_open()?;
+        Ok(self.inner.name())
+    }
+
+    fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.control.ensure_open()?;
+        series_to_py_list(py, &self.inner)
+    }
+}
+
 #[pymethods]
 impl PyDataFrame {
     #[new]
-    #[pyo3(signature = (columns, schema = None))]
-    fn py_new(columns: &Bound<'_, PyDict>, schema: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+    #[pyo3(signature = (data = None, schema = None, *, schema_overrides = None, strict = true, orient = None, infer_schema_length = 100, nan_to_null = false, height = None))]
+    #[allow(clippy::too_many_arguments)] // Mirrors the Polars 1.43.2 constructor.
+    fn py_new(
+        data: Option<&Bound<'_, PyAny>>,
+        schema: Option<&Bound<'_, PyDict>>,
+        schema_overrides: Option<&Bound<'_, PyAny>>,
+        strict: bool,
+        orient: Option<&Bound<'_, PyAny>>,
+        infer_schema_length: Option<usize>,
+        nan_to_null: bool,
+        height: Option<usize>,
+    ) -> PyResult<Self> {
+        reject_non_default(schema_overrides.is_some(), "schema_overrides")?;
+        reject_non_default(!strict, "strict=False")?;
+        reject_non_default(orient.is_some(), "orient")?;
+        reject_non_default(infer_schema_length != Some(100), "infer_schema_length")?;
+        reject_non_default(nan_to_null, "nan_to_null=True")?;
+        reject_non_default(height.is_some(), "height")?;
+        let Some(data) = data else {
+            return DataFrame::new(Vec::new())
+                .map(Self::new)
+                .map_err(dataframe_err);
+        };
+        let columns = data.cast::<PyDict>().map_err(|_| {
+            PyNotImplementedError::new_err(
+                "DataFrame data currently supports mappings of column names to values",
+            )
+        })?;
         dataframe_from_py(columns, schema).map(Self::new)
     }
 
@@ -67,19 +115,26 @@ impl PyDataFrame {
         dataframe_from_py(columns, schema).map(Self::new)
     }
 
+    #[getter]
     fn height(&self) -> PyResult<usize> {
         self.ensure_access()?;
         Ok(self.inner.height())
     }
 
+    #[getter]
     fn width(&self) -> PyResult<usize> {
         self.ensure_access()?;
         Ok(self.inner.width())
     }
 
-    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+    #[pyo3(signature = (*, as_series = true))]
+    fn to_dict(&self, py: Python<'_>, as_series: bool) -> PyResult<Py<PyDict>> {
         self.ensure_access()?;
-        dataframe_to_py_dict(py, &self.inner)
+        if as_series {
+            dataframe_to_py_series_dict(py, &self.inner, self.control.clone())
+        } else {
+            dataframe_to_py_dict(py, &self.inner)
+        }
     }
 
     fn str(&self, column: &str) -> PyResult<PyStringNamespace> {
@@ -109,10 +164,23 @@ impl PyDataFrame {
         })
     }
 
-    fn explode(&self, column: &str) -> PyResult<Self> {
+    #[pyo3(signature = (columns, *more_columns, empty_as_null = None, keep_nulls = true))]
+    fn explode(
+        &self,
+        columns: &Bound<'_, PyAny>,
+        more_columns: &Bound<'_, PyTuple>,
+        empty_as_null: Option<bool>,
+        keep_nulls: bool,
+    ) -> PyResult<Self> {
         self.ensure_access()?;
+        reject_non_default(!more_columns.is_empty(), "multiple explode columns")?;
+        reject_non_default(empty_as_null.is_some(), "empty_as_null")?;
+        reject_non_default(!keep_nulls, "keep_nulls=False")?;
+        let column = columns.extract::<String>().map_err(|_| {
+            PyNotImplementedError::new_err("explode currently supports one column name")
+        })?;
         self.inner
-            .explode(column)
+            .explode(&column)
             .map(|frame| Self::with_control(frame, self.control.clone()))
             .map_err(dataframe_err)
     }
@@ -156,9 +224,28 @@ impl PyExpr {
         Ok(self.inner.clone())
     }
 
-    fn binary(&self, rhs: &PyExpr, build: impl FnOnce(Expr, Expr) -> Expr) -> PyResult<Self> {
+    fn binary(
+        &self,
+        other: &Bound<'_, PyAny>,
+        build: impl FnOnce(Expr, Expr) -> Expr,
+    ) -> PyResult<Self> {
         Ok(Self {
-            inner: build(self.clone_inner()?, rhs.clone_inner()?),
+            inner: build(self.clone_inner()?, expression_from_operand(other)?),
+            control: self.control.clone(),
+        })
+    }
+
+    fn variadic_binary(
+        &self,
+        others: &Bound<'_, PyTuple>,
+        build: impl Fn(Expr, Expr) -> Expr,
+    ) -> PyResult<Self> {
+        let mut expression = self.clone_inner()?;
+        for other in others.iter() {
+            expression = build(expression, expression_from_operand(&other)?);
+        }
+        Ok(Self {
+            inner: expression,
             control: self.control.clone(),
         })
     }
@@ -173,52 +260,54 @@ impl PyExpr {
         })
     }
 
-    fn add(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::add)
+    fn add(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::add)
     }
 
-    fn sub(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::sub)
+    fn sub(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::sub)
     }
 
-    fn mul(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::mul)
+    fn mul(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::mul)
     }
 
-    fn div(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::div)
+    fn div(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::div)
     }
 
-    fn eq(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::eq)
+    fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::eq)
     }
 
-    fn neq(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::neq)
+    fn neq(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::neq)
     }
 
-    fn gt(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::gt)
+    fn gt(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::gt)
     }
 
-    fn lt(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::lt)
+    fn lt(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::lt)
     }
 
-    fn ge(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::ge)
+    fn ge(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::ge)
     }
 
-    fn le(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::le)
+    fn le(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.binary(other, Expr::le)
     }
 
-    fn and_(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::and_)
+    #[pyo3(signature = (*others))]
+    fn and_(&self, others: &Bound<'_, PyTuple>) -> PyResult<Self> {
+        self.variadic_binary(others, Expr::and_)
     }
 
-    fn or_(&self, rhs: &PyExpr) -> PyResult<Self> {
-        self.binary(rhs, Expr::or_)
+    #[pyo3(signature = (*others))]
+    fn or_(&self, others: &Bound<'_, PyTuple>) -> PyResult<Self> {
+        self.variadic_binary(others, Expr::or_)
     }
 
     fn not_(&self) -> PyResult<Self> {
@@ -321,59 +410,120 @@ impl PyLazyFrame {
             .map_err(dataframe_err)
     }
 
-    fn select(&self, exprs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Self> {
+    #[pyo3(signature = (*exprs, **named_exprs))]
+    fn select(
+        &self,
+        exprs: &Bound<'_, PyTuple>,
+        named_exprs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
-        let exprs = expressions_from_py(exprs)?;
+        let exprs = expressions_from_args(exprs, named_exprs)?;
         Ok(Self::with_control(
             self.inner.clone().select(exprs),
             self.control.clone(),
         ))
     }
 
-    fn filter(&self, predicate: PyRef<'_, PyExpr>) -> PyResult<Self> {
+    #[pyo3(signature = (*predicates, **constraints))]
+    fn filter(
+        &self,
+        predicates: &Bound<'_, PyTuple>,
+        constraints: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
+        let mut predicates = expressions_from_args(predicates, None)?;
+        if let Some(constraints) = constraints {
+            for (name, value) in constraints.iter() {
+                predicates.push(col(&name.extract::<String>()?).eq(lit(py_scalar(&value)?)));
+            }
+        }
+        let predicate = predicates
+            .into_iter()
+            .reduce(Expr::and_)
+            .ok_or_else(|| PyTypeError::new_err("filter requires at least one predicate"))?;
         Ok(Self::with_control(
-            self.inner.clone().filter(predicate.clone_inner()?),
+            self.inner.clone().filter(predicate),
             self.control.clone(),
         ))
     }
 
-    fn with_columns(&self, exprs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Self> {
+    #[pyo3(signature = (*exprs, **named_exprs))]
+    fn with_columns(
+        &self,
+        exprs: &Bound<'_, PyTuple>,
+        named_exprs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         self.control.ensure_open()?;
-        let exprs = expressions_from_py(exprs)?;
+        let exprs = expressions_from_args(exprs, named_exprs)?;
         Ok(Self::with_control(
             self.inner.clone().with_columns(exprs),
             self.control.clone(),
         ))
     }
 
-    #[pyo3(signature = (*, streaming = false, resource_limit_bytes = None, batch_rows = None))]
+    #[pyo3(signature = (*, type_coercion = true, predicate_pushdown = true, projection_pushdown = true, simplify_expression = true, slice_pushdown = true, comm_subplan_elim = true, comm_subexpr_elim = true, cluster_with_columns = true, collapse_joins = true, no_optimization = false, engine = "auto", background = false, optimizations = None, **_kwargs))]
+    #[allow(clippy::too_many_arguments)] // Mirrors the Polars 1.43.2 collect signature.
     fn collect(
         &self,
-        py: Python<'_>,
-        streaming: bool,
-        resource_limit_bytes: Option<u64>,
-        batch_rows: Option<usize>,
-    ) -> PyResult<Py<PyAny>> {
+        type_coercion: bool,
+        predicate_pushdown: bool,
+        projection_pushdown: bool,
+        simplify_expression: bool,
+        slice_pushdown: bool,
+        comm_subplan_elim: bool,
+        comm_subexpr_elim: bool,
+        cluster_with_columns: bool,
+        collapse_joins: bool,
+        no_optimization: bool,
+        engine: &str,
+        background: bool,
+        optimizations: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
         self.control.ensure_open()?;
-        if streaming {
-            let stream = self
-                .inner
-                .clone()
-                .collect_streaming(Self::options(resource_limit_bytes, batch_rows)?)
-                .map_err(dataframe_err)?;
-            return Py::new(
-                py,
-                PyDataFrameStream::with_control(stream, self.control.clone()),
-            )
-            .map(|stream| stream.into_any());
-        }
+        reject_non_default(!type_coercion, "type_coercion=False")?;
+        reject_non_default(!predicate_pushdown, "predicate_pushdown=False")?;
+        reject_non_default(!projection_pushdown, "projection_pushdown=False")?;
+        reject_non_default(!simplify_expression, "simplify_expression=False")?;
+        reject_non_default(!slice_pushdown, "slice_pushdown=False")?;
+        reject_non_default(!comm_subplan_elim, "comm_subplan_elim=False")?;
+        reject_non_default(!comm_subexpr_elim, "comm_subexpr_elim=False")?;
+        reject_non_default(!cluster_with_columns, "cluster_with_columns=False")?;
+        reject_non_default(!collapse_joins, "collapse_joins=False")?;
+        reject_non_default(no_optimization, "no_optimization=True")?;
+        reject_non_default(engine != "auto", "non-default collect engine")?;
+        reject_non_default(background, "background=True")?;
+        reject_non_default(optimizations.is_some(), "optimizations")?;
+        reject_non_default(
+            _kwargs.is_some_and(|kwargs| !kwargs.is_empty()),
+            "collect keyword",
+        )?;
         self.inner
             .clone()
             .collect()
             .map(|frame| PyDataFrame::with_control(frame, self.control.clone()))
             .map_err(dataframe_err)
-            .and_then(|frame| Py::new(py, frame).map(|frame| frame.into_any()))
+    }
+
+    #[pyo3(signature = (*, chunk_size = None, maintain_order = true, lazy = false, engine = "auto", optimizations = None))]
+    fn collect_batches(
+        &self,
+        chunk_size: Option<usize>,
+        maintain_order: bool,
+        lazy: bool,
+        engine: &str,
+        optimizations: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrameStream> {
+        self.control.ensure_open()?;
+        reject_non_default(!maintain_order, "maintain_order=False")?;
+        reject_non_default(lazy, "lazy=True")?;
+        reject_non_default(engine != "auto", "non-default collect_batches engine")?;
+        reject_non_default(optimizations.is_some(), "optimizations")?;
+        self.inner
+            .clone()
+            .collect_streaming(Self::options(None, chunk_size)?)
+            .map(|stream| PyDataFrameStream::with_control(stream, self.control.clone()))
+            .map_err(dataframe_err)
     }
 }
 
@@ -385,23 +535,45 @@ pub(crate) fn py_col(name: String) -> PyExpr {
 
 /// Construct a supported scalar literal expression for lazy DataFrame plans.
 #[pyfunction(name = "lit")]
-pub(crate) fn py_lit(value: Bound<'_, PyAny>) -> PyResult<PyExpr> {
+#[pyo3(signature = (value, dtype = None, *, allow_object = false))]
+pub(crate) fn py_lit(
+    value: Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    allow_object: bool,
+) -> PyResult<PyExpr> {
+    reject_non_default(dtype.is_some(), "lit dtype")?;
+    reject_non_default(allow_object, "allow_object=True")?;
     Ok(PyExpr::new(lit(py_scalar(&value)?)))
 }
 
 /// Strict vertical eager concatenation using Phase 3's schema/null/row-order semantics.
 #[pyfunction(name = "concat")]
-pub(crate) fn py_concat(inputs: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataFrame> {
-    if inputs.len() < 2 {
+#[pyo3(signature = (items, *, how = "vertical", rechunk = false, parallel = true, strict = None))]
+pub(crate) fn py_concat(
+    items: Vec<PyRef<'_, PyDataFrame>>,
+    how: &str,
+    rechunk: bool,
+    parallel: bool,
+    strict: Option<bool>,
+) -> PyResult<PyDataFrame> {
+    reject_non_default(how != "vertical", "non-vertical concat")?;
+    reject_non_default(rechunk, "rechunk=True")?;
+    reject_non_default(!parallel, "parallel=False")?;
+    reject_non_default(strict.is_some(), "strict")?;
+    if items.is_empty() {
         return Err(dataframe_err(
             alopex_dataframe::DataFrameError::invalid_operation(
-                "concat requires at least two DataFrame inputs",
+                "concat requires at least one DataFrame input",
             ),
         ));
     }
-    let control = inputs[0].control.clone();
+    let control = items[0].control.clone();
     control.ensure_open()?;
-    let frames = inputs
+    if items.len() == 1 {
+        items[0].ensure_access()?;
+        return Ok(PyDataFrame::with_control(items[0].inner.clone(), control));
+    }
+    let frames = items
         .iter()
         .map(|input| {
             input.ensure_access()?;
@@ -415,45 +587,93 @@ pub(crate) fn py_concat(inputs: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataF
 
 /// Construct a Phase 3 row-wise string concatenation expression.
 #[pyfunction(name = "concat_str")]
-#[pyo3(signature = (inputs, separator = "", *, null_behavior = "propagate", null_value = None))]
+#[pyo3(signature = (exprs, *more_exprs, separator = "", ignore_nulls = false))]
 pub(crate) fn py_concat_str(
-    inputs: Vec<PyRef<'_, PyExpr>>,
+    exprs: &Bound<'_, PyAny>,
+    more_exprs: &Bound<'_, PyTuple>,
     separator: &str,
-    null_behavior: &str,
-    null_value: Option<String>,
+    ignore_nulls: bool,
 ) -> PyResult<PyExpr> {
-    if inputs.len() < 2 {
+    let mut expressions = Vec::new();
+    append_expression_args(exprs, &mut expressions)?;
+    for expression in more_exprs.iter() {
+        append_expression_args(&expression, &mut expressions)?;
+    }
+    if expressions.len() < 2 {
         return Err(dataframe_err(
             alopex_dataframe::DataFrameError::invalid_operation(
                 "concat_str requires at least two Expr inputs",
             ),
         ));
     }
-    let control = inputs[0].control.clone();
-    control.ensure_open()?;
-    let expressions = expressions_from_py(inputs)?;
-    let null_behavior = match null_behavior {
-        "propagate" => ConcatStrNullBehavior::Propagate,
-        "ignore" => ConcatStrNullBehavior::Ignore,
-        "replace" => ConcatStrNullBehavior::Replace(null_value.ok_or_else(|| {
-            PyValueError::new_err("null_value is required when null_behavior='replace'")
-        })?),
-        _ => {
-            return Err(PyValueError::new_err(
-                "null_behavior must be 'propagate', 'ignore', or 'replace'",
-            ));
-        }
+    let control = Arc::new(DatabaseControl::new(ThreadMode::Multi));
+    let null_behavior = if ignore_nulls {
+        ConcatStrNullBehavior::Ignore
+    } else {
+        ConcatStrNullBehavior::Propagate
     };
     dataframe_concat_str(expressions, separator, null_behavior)
         .map(|inner| PyExpr { inner, control })
         .map_err(dataframe_err)
 }
 
-fn expressions_from_py(inputs: Vec<PyRef<'_, PyExpr>>) -> PyResult<Vec<Expr>> {
-    inputs
-        .into_iter()
-        .map(|input| input.clone_inner())
-        .collect()
+fn expression_from_any(value: &Bound<'_, PyAny>) -> PyResult<Expr> {
+    if let Ok(expression) = value.extract::<PyRef<'_, PyExpr>>() {
+        return expression.clone_inner();
+    }
+    if let Ok(name) = value.extract::<String>() {
+        return Ok(col(&name));
+    }
+    py_scalar(value).map(lit)
+}
+
+fn expression_from_operand(value: &Bound<'_, PyAny>) -> PyResult<Expr> {
+    if let Ok(expression) = value.extract::<PyRef<'_, PyExpr>>() {
+        expression.clone_inner()
+    } else {
+        py_scalar(value).map(lit)
+    }
+}
+
+fn reject_non_default(condition: bool, option: &str) -> PyResult<()> {
+    if condition {
+        Err(PyNotImplementedError::new_err(format!(
+            "Alopex does not yet implement Polars option {option}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn append_expression_args(value: &Bound<'_, PyAny>, output: &mut Vec<Expr>) -> PyResult<()> {
+    if let Ok(items) = value.cast::<PyList>() {
+        for item in items.iter() {
+            append_expression_args(&item, output)?;
+        }
+    } else if let Ok(items) = value.cast::<PyTuple>() {
+        for item in items.iter() {
+            append_expression_args(&item, output)?;
+        }
+    } else {
+        output.push(expression_from_any(value)?);
+    }
+    Ok(())
+}
+
+fn expressions_from_args(
+    args: &Bound<'_, PyTuple>,
+    named: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Expr>> {
+    let mut expressions = Vec::new();
+    for value in args.iter() {
+        append_expression_args(&value, &mut expressions)?;
+    }
+    if let Some(named) = named {
+        for (name, value) in named.iter() {
+            expressions.push(expression_from_any(&value)?.alias(name.extract::<String>()?));
+        }
+    }
+    Ok(expressions)
 }
 
 fn py_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
@@ -1256,19 +1476,49 @@ fn list_utf8_from_py(values: &Bound<'_, PyAny>) -> PyResult<ArrayRef> {
 fn dataframe_to_py_dict(py: Python<'_>, df: &DataFrame) -> PyResult<Py<PyDict>> {
     let out = PyDict::new(py);
     for series in df.columns() {
-        let chunks = series.to_arrow();
-        let Some(array) = chunks.first() else {
-            out.set_item(series.name(), PyList::empty(py))?;
-            continue;
-        };
-        out.set_item(series.name(), array_to_py_list(py, array)?)?;
+        let values = PyList::empty(py);
+        for array in series.to_arrow() {
+            values.call_method1("extend", (array_to_py_list(py, &array)?,))?;
+        }
+        out.set_item(series.name(), values)?;
     }
     Ok(out.unbind())
+}
+
+fn dataframe_to_py_series_dict(
+    py: Python<'_>,
+    df: &DataFrame,
+    control: Arc<DatabaseControl>,
+) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    for series in df.columns() {
+        let name = series.name().to_string();
+        out.set_item(
+            name,
+            Py::new(
+                py,
+                PySeries {
+                    inner: series,
+                    control: control.clone(),
+                },
+            )?,
+        )?;
+    }
+    Ok(out.unbind())
+}
+
+fn series_to_py_list(py: Python<'_>, series: &Series) -> PyResult<Py<PyList>> {
+    let values = PyList::empty(py);
+    for array in series.to_arrow() {
+        values.call_method1("extend", (array_to_py_list(py, &array)?,))?;
+    }
+    Ok(values.unbind())
 }
 
 fn array_to_py_list(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
     match array.data_type() {
         DataType::Utf8 => utf8_array_to_py(py, array),
+        DataType::LargeUtf8 => large_utf8_array_to_py(py, array),
         DataType::Boolean => bool_array_to_py(py, array),
         DataType::Int32 => int32_array_to_py(py, array),
         DataType::Int64 => int64_array_to_py(py, array),
@@ -1281,6 +1531,19 @@ fn array_to_py_list(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
             "unsupported DataFrame column type for Python conversion: {other}"
         ))),
     }
+}
+
+fn large_utf8_array_to_py(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
+    let array = downcast_array::<LargeStringArray>(array, "LargeStringArray")?;
+    let values = PyList::empty(py);
+    for idx in 0..array.len() {
+        if array.is_null(idx) {
+            values.append(py.None())?;
+        } else {
+            values.append(array.value(idx))?;
+        }
+    }
+    Ok(values.unbind())
 }
 
 fn utf8_array_to_py(py: Python<'_>, array: &ArrayRef) -> PyResult<Py<PyList>> {
@@ -1394,13 +1657,27 @@ mod tests {
     use std::sync::Arc;
 
     use alopex_dataframe::{DataFrame, LazyFrame, Series, StreamOptions};
-    use arrow::array::{ArrayRef, Int64Array, StringArray};
-    use pyo3::types::{PyAnyMethods, PyDictMethods, PyList, PyModule};
+    use arrow::array::{ArrayRef, Int64Array, LargeStringArray, StringArray};
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule};
     use pyo3::{Py, Python};
 
     use super::{
-        DataFrameStreamRegistry, DatabaseControl, PyDataFrame, PyDataFrameStream, ThreadMode,
+        array_to_py_list, DataFrameStreamRegistry, DatabaseControl, PyDataFrame, PyDataFrameStream,
+        ThreadMode,
     };
+
+    #[test]
+    fn large_utf8_arrow_values_convert_to_python_lists() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let array: ArrayRef = Arc::new(LargeStringArray::from(vec![Some("a"), None]));
+            let values = array_to_py_list(py, &array).unwrap();
+            assert_eq!(
+                values.bind(py).extract::<Vec<Option<String>>>().unwrap(),
+                vec![Some("a".into()), None]
+            );
+        });
+    }
 
     fn expression_dataframe(values: Vec<i64>, labels: Vec<&str>) -> DataFrame {
         DataFrame::new(vec![
@@ -1600,10 +1877,15 @@ mod tests {
                 .unwrap();
             let left = col.call1(("left",)).unwrap();
             let right = col.call1(("right",)).unwrap();
+            let concat_str_kwargs = PyDict::new(py);
+            concat_str_kwargs.set_item("separator", "-").unwrap();
             let label = module
                 .getattr("concat_str")
                 .unwrap()
-                .call1((PyList::new(py, [&left, &right]).unwrap(), "-"))
+                .call(
+                    (PyList::new(py, [&left, &right]).unwrap(),),
+                    Some(&concat_str_kwargs),
+                )
                 .unwrap()
                 .call_method1("alias", ("label",))
                 .unwrap();
@@ -1616,8 +1898,10 @@ mod tests {
                 .unwrap()
                 .call_method0("collect")
                 .unwrap();
+            let to_dict_kwargs = PyDict::new(py);
+            to_dict_kwargs.set_item("as_series", false).unwrap();
             let rows = result
-                .call_method0("to_dict")
+                .call_method("to_dict", (), Some(&to_dict_kwargs))
                 .unwrap()
                 .cast_into::<pyo3::types::PyDict>()
                 .unwrap();
@@ -1650,7 +1934,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 combined
-                    .call_method0("height")
+                    .getattr("height")
                     .unwrap()
                     .extract::<usize>()
                     .unwrap(),

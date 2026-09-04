@@ -9,10 +9,11 @@ type
     # Literals
     tkIdent, tkString, tkInteger, tkFloat
     # Keywords
-    tkSelect, tkFrom, tkWhere, tkAnd, tkOr, tkNot
+    tkSelect, tkExplain, tkFrom, tkWhere, tkAnd, tkOr, tkNot
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
-    tkPragma
+    tkPragma, tkBegin, tkStart, tkTransaction, tkCommit, tkRollback
+    tkSavepoint, tkRelease
     tkJoin, tkInner, tkLeft, tkRight, tkFull, tkOuter, tkCross, tkOn
     tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
@@ -58,12 +59,15 @@ type
     lastCol: int
 
 const Keywords = {
-  "select": tkSelect, "from": tkFrom, "where": tkWhere,
+  "select": tkSelect, "explain": tkExplain, "from": tkFrom, "where": tkWhere,
   "and": tkAnd, "or": tkOr, "not": tkNot,
   "insert": tkInsert, "into": tkInto, "values": tkValues,
   "update": tkUpdate, "set": tkSet, "delete": tkDelete,
   "create": tkCreate, "drop": tkDrop, "table": tkTable,
   "pragma": tkPragma,
+  "begin": tkBegin, "start": tkStart, "transaction": tkTransaction,
+  "commit": tkCommit, "rollback": tkRollback,
+  "savepoint": tkSavepoint, "release": tkRelease,
   "alter": tkAlter, "index": tkIndex,
   "join": tkJoin, "inner": tkInner, "left": tkLeft,
   "right": tkRight, "full": tkFull, "outer": tkOuter,
@@ -165,6 +169,11 @@ proc readString(lex: var Lexer): Token =
       value &= $c
   lex.makeToken(tkString, value, startLine, startCol)
 
+proc readQuotedIdent(lex: var Lexer): Token =
+  let token = lex.readString()
+  Token(kind: tkIdent, value: token.value, line: token.line, col: token.col,
+        endLine: token.endLine, endCol: token.endCol)
+
 proc readNumber(lex: var Lexer): Token =
   let startLine = lex.line
   let startCol = lex.col
@@ -205,8 +214,10 @@ proc nextToken*(lex: var Lexer): Token =
   let c = lex.peek()
 
   case c
-  of '\'', '"':
+  of '\'':
     return lex.readString()
+  of '"':
+    return lex.readQuotedIdent()
   of '0'..'9':
     return lex.readNumber()
   of 'a'..'z', 'A'..'Z', '_':

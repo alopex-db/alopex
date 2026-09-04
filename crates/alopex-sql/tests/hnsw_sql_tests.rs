@@ -59,6 +59,37 @@ fn create_insert_and_search_hnsw_index() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn truncate_recreates_an_empty_hnsw_index_for_future_inserts() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    run_sql(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;
+         INSERT INTO items VALUES (1, [0.0, 0.0]);
+         TRUNCATE items;",
+    );
+    {
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+        assert!(index.search(&[0.0, 0.0], 1, None).unwrap().0.is_empty());
+        txn.commit_self().unwrap();
+    }
+    run_sql(
+        &mut executor,
+        &catalog,
+        "INSERT INTO items VALUES (2, [1.0, 0.0]);",
+    );
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+    assert_eq!(index.search(&[1.0, 0.0], 1, None).unwrap().0.len(), 1);
+    txn.commit_self().unwrap();
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn invalid_with_option_returns_error() {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));

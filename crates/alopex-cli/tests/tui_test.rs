@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
 use alopex_cli::cli::{OutputFormat, SqlCommand};
@@ -104,7 +104,7 @@ fn tui_falls_back_in_non_tty() {
         return;
     }
 
-    let db = Database::open_in_memory().expect("db");
+    let db = Arc::new(Database::open_in_memory().expect("db"));
     db.execute_sql("CREATE TABLE t (id INTEGER);").unwrap();
     db.execute_sql("INSERT INTO t (id) VALUES (1);").unwrap();
 
@@ -114,6 +114,7 @@ fn tui_falls_back_in_non_tty() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        params: Vec::new(),
         read_mode: None,
         routing_report: None,
         tui: true,

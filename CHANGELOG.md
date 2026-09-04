@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.11] — 2026-09-04
+
+### Added
+
+- Add portable `SHOW`/`DESCRIBE` and `information_schema` metadata queries,
+  transaction-aware catalog visibility, quoted identifiers, and handle-scoped
+  temporary tables.
+- SQL adds one-based positional `?` parameters and reusable prepared statement
+  lifecycles across Rust, embedded, Python, and CLI surfaces (issue #166).
+- The Nim parser wire contract is `0.25.0`.
+- SQL adds dynamic persistent views, transactional schema evolution through
+  `ALTER TABLE`, and transactional `TRUNCATE` (issue #169).
+- Added `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (FORMAT JSON)` with
+  versioned, secret-free logical/physical/distributed plan output (#167).
+- Added relational constraints and advanced DML (`RETURNING`, `ON CONFLICT`,
+  joined DML, and MERGE validation) with transactional enforcement (#170,
+  #171).
+- Added transactional table/query/file/stdin/stdout CSV COPY, sequence DDL,
+  SQL `nextval`/`currval`, persisted SERIAL/IDENTITY allocation, Parquet
+  round-trip, and application-owned CSV readers/writers (#172, #173).
+- Fixed Python `DataFrame.to_dict()` to preserve every Arrow chunk instead of
+  truncating eager CSV results at the first 1,024-row batch (#304).
+- Added source-generated Polars 1.43.2, HNSW, and SQL conformance inventories,
+  live reference comparisons, and dedicated performance contracts (#305–#307).
+- Fixed HNSW neighbor selection, candidate management, update reconnection,
+  cosine norm caching, per-search Python statistics, and invalid-vector
+  boundaries (#300–#303).
+- `Database.search_hnsw()` now returns per-search `SearchStats` instead of
+  index-wide `HnswStats`; callers that need index counts continue to use
+  `Database.get_hnsw_stats()` (#303).
+
 ## [0.8.10] — 2026-08-28
 
 ### Added
@@ -15,7 +46,7 @@ All notable changes to this project will be documented in this file.
 - The v0.8 type capability gate now records every v0.8.10 family as complete.
   The distributed execution catalog keeps non-portable JSON, temporal,
   nested, and full-text functions local-only.
-- The Nim parser wire contract is `0.19.0`.
+- The Nim parser wire contract is `0.20.0`.
 
 ### Fixed
 

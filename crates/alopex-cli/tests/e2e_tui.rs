@@ -145,17 +145,11 @@ fn ensure_focus_status(harness: &mut TuiTestHarness) -> Result<()> {
     if wait_for_contains(harness, "Focus: Status", Duration::from_secs(1)).is_ok() {
         return Ok(());
     }
-    for _ in 0..3 {
-        harness.send_key(KeyCode::Char('l'))?;
-        if wait_for_contains(harness, "Focus: Status", Duration::from_secs(2)).is_ok() {
-            return Ok(());
-        }
-    }
-    let snapshot = harness.screen_contents();
-    Err(std::io::Error::other(format!(
-        "Failed to find Focus: Status. Screen snapshot:\n{snapshot}"
-    ))
-    .into())
+    ensure_focus_table(harness)?;
+    harness.send_key(KeyCode::Right)?;
+    wait_for_contains(harness, "Focus: Detail", Duration::from_secs(5))?;
+    harness.send_key(KeyCode::Right)?;
+    wait_for_contains(harness, "Focus: Status", Duration::from_secs(5))
 }
 
 fn open_selection_overlay_for(

@@ -24,3 +24,5 @@ jobs:
             scripts.parity.runner.test_report \
             scripts.parity.runner.test_surfaces \
             scripts.parity.test_compat_fixture_contract
+      - name: Verify v0.8.11 compatibility ledgers
+        run: python scripts/validate_v0811_ledgers.py
