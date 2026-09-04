@@ -2,6 +2,45 @@
 
 Use these as patterns, substituting the target version and approved worktree. Keep `rtk` on every shell segment.
 
+Create one milestone-scoped release tracker issue before running release commands. Copy
+the checkpoints below into it and attach evidence as each item completes. Required-CI
+failure returns ownership to an implementation issue; it is not a release-phase repair.
+
+## Checkpoint 0 — tracker and candidate
+
+- [ ] Create the release tracker in the target milestone before release work.
+- [ ] Record target version, milestone, worktree, branch, base SHA, and head SHA.
+- [ ] Record every open target issue and every explicitly deferred post-release issue.
+
+## Checkpoint 1 — implementation and review
+
+- [ ] Every target issue has implementation, regression tests, and an issue comment.
+- [ ] Push the exact candidate SHA to a pull request.
+- [ ] Require all required CI, coverage, and target-version implementation-surface checks on that SHA.
+- [ ] On failure, keep the tracker open, create or reopen the owning implementation issue, fix it, and rerun focused, full, and remote checks.
+- [ ] Confirm that no target-version implementation issue remains open.
+
+## Checkpoint 2 — main and pre-tag verification
+
+- [ ] Merge the approved pull request and record the exact main SHA.
+- [ ] Require all required CI checks on that exact main SHA.
+- [ ] Run candidate verification, formatting, clippy, release checks, and `safe-tag.sh`.
+- [ ] Confirm that the target tags and registry versions do not already exist.
+- [ ] Confirm explicit user authorization before creating or publishing a tag.
+
+## Checkpoint 3 — publication
+
+- [ ] Create and push annotated Rust and Python tags at the recorded main SHA.
+- [ ] Record both workflow URLs and require every publish job to succeed.
+- [ ] Verify GitHub Release assets, all crates.io packages, and PyPI wheels/sdist independently.
+
+## Checkpoint 4 — public verification and close
+
+- [ ] Record tag SHAs, workflow conclusions, registry evidence, and public verifier evidence.
+- [ ] Verify worktree/branch state, generated-artifact cleanup, and the 50 GiB limit.
+- [ ] Record remaining post-release work in separate issues.
+- [ ] Close the release tracker only after every preceding item has evidence.
+
 ## State and hygiene
 
 ```bash
