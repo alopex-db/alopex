@@ -174,7 +174,8 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
-    pub(crate) fn create_savepoint(&mut self, name: &str) -> Result<()> {
+    /// Create a named SQL savepoint.
+    pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -186,7 +187,8 @@ impl OwnedEmbeddedTransaction {
         Ok(())
     }
 
-    pub(crate) fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+    /// Roll back to the most recent matching named SQL savepoint.
+    pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
         let position = self.savepoint_position(name)?;
         let savepoint = &self.savepoints[position];
         self.session
@@ -200,7 +202,8 @@ impl OwnedEmbeddedTransaction {
         Ok(())
     }
 
-    pub(crate) fn release_savepoint(&mut self, name: &str) -> Result<()> {
+    /// Release the most recent matching named SQL savepoint and nested savepoints.
+    pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
         let position = self.savepoint_position(name)?;
         self.session
             .release_savepoint(self.savepoints[position].core_id)

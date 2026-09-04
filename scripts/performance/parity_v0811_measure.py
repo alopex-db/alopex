@@ -26,6 +26,33 @@ SQL_FIXTURE_PATH = Path(__file__).parent / "fixtures/sql-v0.8.11-curated.json"
 SQL_FIXTURE = json.loads(SQL_FIXTURE_PATH.read_text(encoding="utf-8"))
 SQL_AGGREGATE_QUERY = SQL_FIXTURE["queries"]["aggregate"]
 SQL_STREAM_QUERY = SQL_FIXTURE["queries"]["stream"]
+POLARS_EAGER_CLAIMS = [
+    "DataFrame.__init__", "DataFrame.explode", "DataFrame.height", "DataFrame.lazy",
+    "DataFrame.to_dict", "DataFrame.width", "Expr.add", "Expr.alias", "Expr.and_",
+    "Expr.eq", "Expr.ge", "Expr.gt", "Expr.le", "Expr.lt", "Expr.mul", "Expr.not_",
+    "Expr.or_", "Expr.sub", "LazyFrame.filter", "LazyFrame.select",
+    "LazyFrame.with_columns", "Series.name", "Series.to_list", "col", "concat",
+    "concat_str", "lit",
+]
+POLARS_STREAMING_CLAIMS = ["LazyFrame.collect", "LazyFrame.collect_batches"]
+SQL_SQLITE_CLAIMS = [
+    "portable SELECT/null/order/coercion", "parser/lexer", "transactions/savepoints",
+    "prepared statements", "CHECK/FK constraints",
+]
+SQL_POSTGRESQL_CLAIMS = [
+    "EXPLAIN JSON", "RETURNING", "ON CONFLICT", "SERIAL/IDENTITY/SEQUENCE",
+    "VIEW/ALTER TABLE/TRUNCATE", "MERGE/UPDATE FROM/DELETE USING",
+    "information_schema",
+]
+SQL_STREAMING_CLAIMS = ["streaming query"]
+WORKLOAD_COVERAGE = {
+    "polars-eager-api": POLARS_EAGER_CLAIMS,
+    "polars-csv-streaming": POLARS_STREAMING_CLAIMS,
+    "polars-parquet-streaming": POLARS_STREAMING_CLAIMS,
+    "sql-sqlite-curated": SQL_SQLITE_CLAIMS,
+    "sql-postgresql-curated": SQL_POSTGRESQL_CLAIMS,
+    "sql-streaming": SQL_STREAMING_CLAIMS,
+}
 
 
 def summarize_latencies(samples: list[float], rows: int) -> dict[str, float]:
@@ -154,17 +181,41 @@ def _eager(engine: str, rows: int, warmups: int, runs: int) -> dict[str, float]:
         "label": [None if index % 10 == 0 else f"row-{index}" for index in range(rows)],
     }
     if engine == "alopex":
-        from alopex import DataFrame, col, lit
+        from alopex import DataFrame, col, concat, concat_str, lit
 
         def operation():
-            frame = DataFrame(columns)
-            return (
+            frame = DataFrame(
+                {**columns, "items": [[str(index), str(index + 1)] for index in range(rows)]}
+            )
+            series = frame.to_dict()
+            result = (
                 frame.lazy()
                 .filter(col("id").ge(lit(0)))
-                .with_columns([col("id").add(lit(1)).alias("next_id")])
-                .select([col("id"), col("next_id"), col("label")])
+                .with_columns(col("id").add(lit(1)).alias("next_id"))
+                .select(
+                    col("id").add(1).alias("add"),
+                    col("id").sub(1).alias("sub"),
+                    col("id").mul(2).alias("mul"),
+                    col("id").eq(0).alias("eq"),
+                    col("id").ge(0).alias("ge"),
+                    col("id").gt(-1).alias("gt"),
+                    col("id").le(rows).alias("le"),
+                    col("id").lt(rows + 1).alias("lt"),
+                    col("id").ge(0).and_(col("id").lt(rows)).alias("and"),
+                    col("id").lt(0).or_(col("id").ge(0)).alias("or"),
+                    col("id").lt(0).not_().alias("not"),
+                    concat_str("label", lit("!"), separator="").alias("joined"),
+                )
                 .collect()
-                .to_dict()
+            )
+            return (
+                frame.height,
+                frame.width,
+                frame.explode("items").height,
+                next(iter(series.values())).name,
+                next(iter(series.values())).to_list(),
+                concat([frame]).height,
+                result.to_dict(as_series=False),
             )
 
     else:
@@ -174,14 +225,38 @@ def _eager(engine: str, rows: int, warmups: int, runs: int) -> dict[str, float]:
             raise RuntimeError(f"expected Polars 1.43.2, got {pl.__version__}")
 
         def operation():
-            frame = pl.DataFrame(columns)
-            return (
+            frame = pl.DataFrame(
+                {**columns, "items": [[str(index), str(index + 1)] for index in range(rows)]}
+            )
+            series = frame.to_dict()
+            result = (
                 frame.lazy()
                 .filter(pl.col("id") >= 0)
                 .with_columns((pl.col("id") + 1).alias("next_id"))
-                .select("id", "next_id", "label")
+                .select(
+                    pl.col("id").add(1).alias("add"),
+                    pl.col("id").sub(1).alias("sub"),
+                    pl.col("id").mul(2).alias("mul"),
+                    pl.col("id").eq(0).alias("eq"),
+                    pl.col("id").ge(0).alias("ge"),
+                    pl.col("id").gt(-1).alias("gt"),
+                    pl.col("id").le(rows).alias("le"),
+                    pl.col("id").lt(rows + 1).alias("lt"),
+                    pl.col("id").ge(0).and_(pl.col("id").lt(rows)).alias("and"),
+                    pl.col("id").lt(0).or_(pl.col("id").ge(0)).alias("or"),
+                    pl.col("id").lt(0).not_().alias("not"),
+                    pl.concat_str("label", pl.lit("!"), separator="").alias("joined"),
+                )
                 .collect()
-                .to_dict(as_series=False)
+            )
+            return (
+                frame.height,
+                frame.width,
+                frame.explode("items").height,
+                next(iter(series.values())).name,
+                next(iter(series.values())).to_list(),
+                pl.concat([frame]).height,
+                result.to_dict(as_series=False),
             )
 
     metrics = summarize_latencies(_samples(operation, warmups, runs), rows)
@@ -198,18 +273,15 @@ def _streaming(
 
         scan = LazyFrame.scan_parquet if parquet else LazyFrame.scan_csv
         build = lambda: scan(str(fixture))
+        materialize = lambda: build().collect().height
 
         def consume():
             started = time.perf_counter()
-            with build().collect(
-                streaming=True,
-                batch_rows=1024,
-                resource_limit_bytes=1024 * 1024 * 1024,
-            ) as stream:
+            with build().collect_batches(chunk_size=1024) as stream:
                 first = next(stream)
                 first_elapsed = time.perf_counter() - started
-                count = first.height() + sum(batch.height() for batch in stream)
-                return first_elapsed, time.perf_counter() - started, count, first.height()
+                count = first.height + sum(batch.height for batch in stream)
+                return first_elapsed, time.perf_counter() - started, count, first.height
 
     else:
         import polars as pl
@@ -219,6 +291,7 @@ def _streaming(
 
         scan = pl.scan_parquet if parquet else pl.scan_csv
         build = lambda: scan(fixture)
+        materialize = lambda: build().collect().height
 
         def consume():
             started = time.perf_counter()
@@ -229,6 +302,7 @@ def _streaming(
             return first_elapsed, time.perf_counter() - started, count, first.height
 
     plan = _samples(build, warmups, runs)
+    collect_samples = _samples(materialize, warmups, runs)
     for _ in range(warmups):
         consume()
     first_samples = []
@@ -244,6 +318,7 @@ def _streaming(
     median_total = statistics.median(total_samples)
     return {
         "plan_build_p50_ms": statistics.median(plan) * 1000,
+        "collect_p50_ms": statistics.median(collect_samples) * 1000,
         "time_to_first_batch_p50_ms": statistics.median(first_samples) * 1000,
         "total_p50_ms": median_total * 1000,
         "steady_state_rows_per_second": statistics.median(steady_samples),
@@ -277,12 +352,140 @@ def _populate_sql(connection, engine: str, rows: int) -> None:
         connection.commit()
 
 
-def _sql(engine: str, rows: int, warmups: int, runs: int) -> dict[str, float]:
+def _sql_script(connection, engine: str, sql: str) -> None:
+    if engine == "alopex":
+        connection.execute_sql(sql)
+    elif engine == "sqlite":
+        connection.executescript(sql)
+    else:
+        connection.execute(sql)
+
+
+def _sql_transaction(connection, engine: str, statements: list[str]) -> None:
+    if engine == "alopex":
+        from alopex import TxnMode
+
+        transaction = connection.begin(TxnMode.READ_WRITE)
+        try:
+            for statement in statements:
+                transaction.execute_sql(statement)
+        finally:
+            transaction.rollback()
+        return
+    _sql_script(connection, engine, f"BEGIN; {'; '.join(statements)}; ROLLBACK")
+
+
+def _prepare_sql_workload(connection, engine: str, workload: str) -> None:
+    if workload == "sql-sqlite-curated":
+        statements = (
+            "CREATE TABLE perf_parent (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE perf_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES perf_parent(id), quantity INTEGER CHECK (quantity > 0))",
+            "INSERT INTO perf_parent VALUES (1)",
+        )
+    else:
+        statements = (
+            "DROP TABLE IF EXISTS perf_source",
+            "DROP TABLE IF EXISTS perf_items",
+            "DROP SEQUENCE IF EXISTS perf_sequence",
+            "CREATE TABLE perf_items (id INTEGER PRIMARY KEY, value TEXT)",
+            "CREATE TABLE perf_source (id INTEGER, value TEXT)",
+            "INSERT INTO perf_items VALUES (1, 'old')",
+            "INSERT INTO perf_source VALUES (1, 'new'), (2, 'second')",
+            "CREATE SEQUENCE perf_sequence START WITH 1",
+        )
+    for statement in statements:
+        if engine == "alopex":
+            connection.execute_sql(statement)
+        else:
+            connection.execute(statement)
+    if engine != "alopex":
+        connection.commit()
+
+
+def _sql_workload(connection, engine: str, workload: str, rows: int) -> None:
+    execute = connection.execute_sql if engine == "alopex" else connection.execute
+    if workload == "sql-sqlite-curated":
+        query = SQL_AGGREGATE_QUERY.replace("true", "1") if engine == "sqlite" else SQL_AGGREGATE_QUERY
+        execute(query)
+        execute("SELECT id, COALESCE(value, 0) FROM bench WHERE id >= 0 ORDER BY id LIMIT 16")
+        if engine == "alopex":
+            _sql_transaction(
+                connection,
+                engine,
+                [
+                    f"INSERT INTO bench VALUES ({rows + 1}, 1.0, true)",
+                    "UPDATE bench SET value = 2.0 WHERE id = 0",
+                ],
+            )
+        else:
+            _sql_script(
+                connection,
+                engine,
+                f"BEGIN; INSERT INTO bench VALUES ({rows + 1}, 1.0, true); "
+                "SAVEPOINT perf_savepoint; UPDATE bench SET value = 2.0 WHERE id = 0; "
+                "ROLLBACK TO perf_savepoint; RELEASE perf_savepoint; ROLLBACK",
+            )
+        if engine == "alopex":
+            statement = connection.prepare("SELECT id FROM bench WHERE id = ?")
+            statement.bind(1, 0)
+            statement.execute()
+            statement.finalize()
+        else:
+            connection.execute("SELECT id FROM bench WHERE id = ?", (0,)).fetchall()
+        _sql_transaction(
+            connection, engine, ["INSERT INTO perf_child VALUES (1, 1, 1)"]
+        )
+        return
+
+    execute(f"EXPLAIN (FORMAT JSON) {SQL_AGGREGATE_QUERY}")
+    _sql_transaction(
+        connection,
+        engine,
+        ["INSERT INTO perf_items VALUES (3, 'returning') RETURNING id"],
+    )
+    _sql_transaction(
+        connection,
+        engine,
+        [
+            "INSERT INTO perf_items VALUES (1, 'conflict') "
+            "ON CONFLICT (id) DO UPDATE SET value = 'updated' RETURNING value"
+        ],
+    )
+    execute("SELECT nextval('perf_sequence')")
+    _sql_transaction(
+        connection,
+        engine,
+        [
+            "CREATE TABLE perf_schema (id INTEGER)",
+            "ALTER TABLE perf_schema ADD COLUMN value TEXT",
+            "TRUNCATE TABLE perf_schema",
+            "CREATE VIEW perf_view AS SELECT id, value FROM perf_schema",
+        ],
+    )
+    _sql_transaction(
+        connection,
+        engine,
+        [
+            "MERGE INTO perf_items USING perf_source "
+            "ON perf_items.id = perf_source.id "
+            "WHEN MATCHED THEN UPDATE SET value = perf_source.value "
+            "WHEN NOT MATCHED THEN INSERT (id, value) VALUES (perf_source.id, perf_source.value)",
+            "UPDATE perf_items SET value = perf_source.value FROM perf_source "
+            "WHERE perf_items.id = perf_source.id",
+            "DELETE FROM perf_items USING perf_source "
+            "WHERE perf_items.id = perf_source.id AND perf_source.id = 2",
+        ],
+    )
+    execute("SELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 16")
+
+
+def _sql(
+    engine: str, workload: str, rows: int, warmups: int, runs: int
+) -> dict[str, float]:
     if engine == "alopex":
         from alopex import Database
 
         connection = Database.new()
-        execute = connection.execute_sql
         plan = lambda: connection.execute_sql(
             f"EXPLAIN (FORMAT JSON) {SQL_AGGREGATE_QUERY}"
         )
@@ -291,29 +494,29 @@ def _sql(engine: str, rows: int, warmups: int, runs: int) -> dict[str, float]:
 
         if sqlite3.sqlite_version != "3.46.1":
             raise RuntimeError(f"expected SQLite 3.46.1, got {sqlite3.sqlite_version}")
-        connection = sqlite3.connect(":memory:")
-        execute = lambda sql: connection.execute(sql).fetchall()
+        connection = sqlite3.connect(":memory:", isolation_level=None)
         plan = lambda: connection.execute(
             f"EXPLAIN QUERY PLAN {SQL_AGGREGATE_QUERY.replace('true', '1')}"
         ).fetchall()
     else:
         import psycopg
 
-        connection = psycopg.connect(os.environ["ALOPEX_PERF_POSTGRES_DSN"])
+        connection = psycopg.connect(
+            os.environ["ALOPEX_PERF_POSTGRES_DSN"], autocommit=True
+        )
         version = connection.execute("SHOW server_version").fetchone()[0]
         if not version.startswith("16.14"):
             raise RuntimeError(f"expected PostgreSQL 16.14, got {version}")
-        execute = lambda sql: connection.execute(sql).fetchall()
         plan = lambda: connection.execute(
             f"EXPLAIN (FORMAT JSON) {SQL_AGGREGATE_QUERY}"
         ).fetchall()
     _populate_sql(connection, engine, rows)
-    query = SQL_AGGREGATE_QUERY
-    if engine == "sqlite":
-        query = SQL_AGGREGATE_QUERY.replace("true", "1")
+    _prepare_sql_workload(connection, engine, workload)
     before_io = _io_bytes()
     plan_samples = _samples(plan, warmups, runs)
-    execution_samples = _samples(lambda: execute(query), warmups, runs)
+    execution_samples = _samples(
+        lambda: _sql_workload(connection, engine, workload, rows), warmups, runs
+    )
     metrics = summarize_latencies(execution_samples, rows)
     metrics.update(
         {
@@ -425,7 +628,7 @@ def _worker(args) -> int:
     elif args.worker == "sql-streaming":
         result = _sql_streaming(args.engine, args.rows, args.warmups, args.runs)
     else:
-        result = _sql(args.engine, args.rows, args.warmups, args.runs)
+        result = _sql(args.engine, args.worker, args.rows, args.warmups, args.runs)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -564,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "contract": contract,
                     "evidence_id": evidence,
+                    "covered_claims": WORKLOAD_COVERAGE[evidence],
                     "reference_revision": revision,
                     "dataset_sha256": checksum,
                     "subject": subject,

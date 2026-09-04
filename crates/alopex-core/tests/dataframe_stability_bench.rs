@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alopex_core::columnar::encoding::{Column, LogicalType};
 use alopex_core::columnar::segment_v2::{ColumnSchema, RecordBatch, Schema};
@@ -10,7 +10,8 @@ use alopex_core::dataframe::cast::{cast_value, DataType, DataValue};
 use alopex_core::dataframe::partition_scan::{PartitionScanner, VecBatchSource};
 use alopex_core::{Error, Result};
 use common::{
-    compare_v05_to_current, format_comparison_line, run_with_warmup_and_median, V06Comparison,
+    compare_v05_to_current, format_comparison_line, median_excluding_warmup, V06Comparison,
+    V06_TOTAL_RUNS, V06_WARMUP_RUNS,
 };
 
 const STABILITY_GATE_RATIO: f64 = 0.30;
@@ -133,12 +134,33 @@ fn run_dataframe_workload() -> Result<()> {
     run_partition_scan_workload()
 }
 
+fn paired_medians() -> Result<(Duration, Duration)> {
+    let measure = || -> Result<Duration> {
+        let started = Instant::now();
+        run_dataframe_workload()?;
+        Ok(started.elapsed())
+    };
+    let mut baseline = Vec::with_capacity(V06_TOTAL_RUNS);
+    let mut current = Vec::with_capacity(V06_TOTAL_RUNS);
+    for pair in 0..V06_TOTAL_RUNS {
+        if pair % 2 == 0 {
+            baseline.push(measure()?);
+            current.push(measure()?);
+        } else {
+            current.push(measure()?);
+            baseline.push(measure()?);
+        }
+    }
+    Ok((
+        median_excluding_warmup(&baseline, V06_WARMUP_RUNS),
+        median_excluding_warmup(&current, V06_WARMUP_RUNS),
+    ))
+}
+
 #[test]
 fn dataframe_cast_and_partition_scan_stability_within_30_percent() {
-    let baseline_median = run_with_warmup_and_median(run_dataframe_workload)
-        .expect("baseline workload should succeed");
-    let current_median = run_with_warmup_and_median(run_dataframe_workload)
-        .expect("current workload should succeed");
+    let (baseline_median, current_median) =
+        paired_medians().expect("paired workloads should succeed");
 
     let comparison = compare_v05_to_current(baseline_median, current_median);
     let line = format_comparison_line(&comparison);

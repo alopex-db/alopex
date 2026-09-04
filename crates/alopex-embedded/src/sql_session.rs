@@ -304,7 +304,7 @@ impl SqlSession {
             SqlSessionState::Active => {
                 self.characteristics_locked = true;
                 if self.characteristics.access_mode == TransactionAccessMode::ReadOnly
-                    && !kind.is_query()
+                    && kind.requires_write()
                 {
                     return Err(Error::TxnReadOnly);
                 }
@@ -345,7 +345,7 @@ impl SqlSession {
         if statements.len() != 1 {
             return Err(Error::SqlSessionRequiresSingleStatement);
         }
-        if !statements[0].kind.is_query() {
+        if statements[0].kind.requires_write() {
             return Err(Error::PostCommitReadRequiresQuery);
         }
         self.database
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_execution_rejects_mutation_in_post_commit_read_context() {
+    fn shared_execution_rejects_explain_analyze_mutation_in_post_commit_read_context() {
         let database = Arc::new(Database::new());
         database
             .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
@@ -556,7 +556,7 @@ mod tests {
                 ExecutionStep::new(
                     "not-a-read",
                     ExecutionStepKind::PostCommitRead {
-                        sql: "INSERT INTO items (id) VALUES (2)".into(),
+                        sql: "EXPLAIN ANALYZE INSERT INTO items (id) VALUES (2)".into(),
                     },
                 ),
             ],
@@ -887,6 +887,10 @@ mod tests {
         assert_eq!(after.rows.len(), 1);
         assert!(matches!(
             session.execute_sql("INSERT INTO items (id) VALUES (3)"),
+            Err(Error::TxnReadOnly)
+        ));
+        assert!(matches!(
+            session.execute_sql("EXPLAIN ANALYZE INSERT INTO items (id) VALUES (3)"),
             Err(Error::TxnReadOnly)
         ));
         assert_eq!(session.state(), SqlSessionState::Active);

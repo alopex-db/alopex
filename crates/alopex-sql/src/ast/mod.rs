@@ -141,4 +141,34 @@ impl StatementKind {
             _ => false,
         }
     }
+
+    /// Returns whether executing this statement can mutate database state.
+    pub fn requires_write(&self) -> bool {
+        match self {
+            Self::Explain {
+                analyze, statement, ..
+            } => *analyze && statement.kind.requires_write(),
+            kind => !kind.is_query(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AlopexDialect, Parser};
+
+    fn kind(sql: &str) -> StatementKind {
+        Parser::parse_sql(&AlopexDialect, sql)
+            .unwrap()
+            .remove(0)
+            .kind
+    }
+
+    #[test]
+    fn write_requirement_distinguishes_explain_from_explain_analyze() {
+        assert!(!kind("EXPLAIN INSERT INTO items VALUES (1)").requires_write());
+        assert!(kind("EXPLAIN ANALYZE INSERT INTO items VALUES (1)").requires_write());
+        assert!(!kind("EXPLAIN ANALYZE SELECT * FROM items").requires_write());
+    }
 }

@@ -2,14 +2,14 @@
 
 ## Date
 
-2026-09-01 (Asia/Tokyo)
+2026-09-04 (Asia/Tokyo)
 
 ## Working Tree
 
 - Repository: `alopex`
 - Branch: `feature/v0.8.11-completion`
-- Base commit: `39ebeea`
-- Model and fixture changes were uncommitted during verification.
+- Base commit: `53a1503`
+- The reviewed model and implementation changes were uncommitted during verification.
 
 ## Command
 
@@ -19,7 +19,9 @@ tlc formal/tla/sql/SqlTransactionLifecycle.tla
 
 ## Result
 
-TLC completed with exit code 0. TLC generated 308 states, found 82 distinct states, exhausted the queue, reached depth 11, and reported no error.
+TLC completed with exit code 0. TLC generated 906 states, found 218 distinct states, exhausted the queue, reached depth 13, and reported no error.
+
+The run used checksum-pinned TLA+ Tools v1.7.4 (revision `5a47802`), matching CI.
 
 The reusable implementation fixture also completed successfully:
 
@@ -37,11 +39,14 @@ sql transaction failure conformance passed
 - `DiscardedWritesNeverBecomeDurable`
 - `IdleHasNoStagedWrites`
 - `DeadProcessHasNoActiveTransaction`
+- `PostCommitReadRequiresBarrier`
+- `CommitFailureDoesNotPublish`
+- `CommitBarrierPublishesDurably`
 
 ## Counterexample
 
-TLC found no counterexample in the complete bounded state graph. An initial draft reused one symbolic write identifier after a prior commit; TLC correctly rejected that abstraction because the identifier could then be both historical durable data and a later rolled-back write. The final model assigns each bounded write identifier once.
+TLC found no counterexample in the complete bounded state graph. The model now explores commit failure, rollback failure, and post-commit read success/failure in addition to the original lifecycle.
 
 ## Follow-up
 
-No model or implementation follow-up is required for the v0.8.11 scope. A future design that defines client retry behavior for termination during the internal `COMMIT` interval must extend this model with a non-atomic commit protocol.
+PR CI now runs the model, and the v0.8 implementation gate runs the reusable failure fixture. A future design that defines client retry behavior for termination during the internal `COMMIT` interval must extend this model with a non-atomic commit protocol.

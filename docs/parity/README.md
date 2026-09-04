@@ -30,3 +30,12 @@ the row links a pinned oracle. Alopex-specific statistics, metadata, and
 compaction remain extensions. The SQL ledger similarly records SQLite as the
 base dialect and selects PostgreSQL, DuckDB, or DataFusion per feature; it does
 not claim wholesale compatibility with any one database.
+
+## Performance evidence coverage
+
+`performance-v0.8.11.json` maps every tabular and SQL evidence ID to the exact
+ledger claims executed by that workload. Measurement JSON repeats the executed claims as
+`covered_claims`; the gate rejects missing, extra, or reordered claims. The
+ledger validator also rejects a claim that points to an evidence ID whose
+workload does not cover it. Functional evidence remains separate: one aggregate
+query cannot stand in for transaction, prepared-statement, or DDL performance.

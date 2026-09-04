@@ -26,3 +26,15 @@ CLI JSON objects are unsupported. JSON arrays must contain only finite numbers a
 ## Concurrency and lifetime
 
 An auto-commit prepared statement owns an `Arc<Database>` and can move to another thread. A session prepared statement mutably borrows its `SqlSession`, preventing concurrent use of that session while the statement exists. Finalized statements reject bind, reset, execute, and repeated finalize operations.
+
+## Distributed and release boundary
+
+Prepared-statement state is local to the embedded database handle in v0.8.11.
+HTTP and gRPC expose direct SQL execution, not a remote prepare/bind lifecycle;
+they never substitute a local prepared statement for a remote request. The
+local ownership and failure state machine is checked by `FM-SQL-PREP-001`.
+
+The release verifier runs the `EMB-11-prepared-statements` public Rust scenario
+from `demo-v08-embedded` and the owning Rust/Python suites. The CLI deliberately
+uses one-shot positional `--param` values because a process invocation has no
+statement lifetime in which reset or finalize could be meaningful.

@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 
 use alopex_embedded::Database;
 
@@ -124,7 +125,7 @@ impl<W: Write> Write for CountingWriter<W> {
 /// * `quiet` - Whether to suppress warnings and status result sets.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_with_formatter<'a, W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -174,28 +175,25 @@ pub fn execute_with_formatter_factory<'a, W: Write>(
 ) -> Result<()> {
     let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
     let cancel = CancelSignal::new();
+    let sql = cmd.resolve_query(batch_mode)?;
     let mut output = SqlOutput::Custom(make_formatter);
-
-    execute_with_output_control(
-        db,
-        cmd,
-        batch_mode,
-        ui_mode,
-        writer,
-        &mut output,
-        SqlExecutionOptions {
-            limit,
-            quiet,
-            cancel: &cancel,
-            deadline: &deadline,
-            admin_launcher,
-        },
-    )
+    let mut options = SqlExecutionOptions {
+        limit: merge_limit(limit, cmd.max_rows),
+        quiet,
+        cancel: &cancel,
+        deadline: &deadline,
+        admin_launcher,
+    };
+    if ui_mode == UiMode::Tui {
+        let admin_launcher = options.admin_launcher.take();
+        return execute_tui_local(db, &sql, &options, admin_launcher);
+    }
+    execute_sql_statements(db, &sql, writer, &mut output, &options)
 }
 
 #[doc(hidden)]
 pub fn execute_with_formatter_control<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -208,7 +206,7 @@ pub fn execute_with_formatter_control<W: Write>(
 }
 
 fn execute_with_output_control<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
@@ -698,7 +696,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
 }
 
 fn execute_tui_local_or_fallback<'a, W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     sql: &str,
     writer: &mut W,
     output: &mut SqlOutput<'_>,
@@ -2074,7 +2072,7 @@ fn execute_sql<W: Write>(db: &Database, sql: &str, writer: &mut StreamingWriter<
 /// - Leading comments
 /// - Complex query structures
 fn execute_sql_with_formatter<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     sql: &str,
     writer: &mut W,
     output: &mut SqlOutput<'_>,
@@ -2092,10 +2090,18 @@ fn execute_sql_with_formatter<W: Write>(
             .first()
             .is_some_and(|statement| statement.kind.is_query());
 
-    if stmts
-        .iter()
-        .any(|statement| matches!(statement.kind, alopex_sql::StatementKind::Commit))
-    {
+    if stmts.iter().any(|statement| {
+        matches!(
+            statement.kind,
+            alopex_sql::StatementKind::Begin { .. }
+                | alopex_sql::StatementKind::SetTransaction { .. }
+                | alopex_sql::StatementKind::Commit
+                | alopex_sql::StatementKind::Rollback
+                | alopex_sql::StatementKind::Savepoint { .. }
+                | alopex_sql::StatementKind::RollbackToSavepoint { .. }
+                | alopex_sql::StatementKind::ReleaseSavepoint { .. }
+        )
+    }) {
         if !matches!(output, SqlOutput::Format(OutputFormat::Json)) {
             return Err(CliError::InvalidArgument(
                 "transaction scripts with a commit barrier require --output json".into(),
@@ -2141,69 +2147,163 @@ fn execute_sql_with_formatter<W: Write>(
 }
 
 fn execute_shared_transaction_script<W: Write>(
-    db: &Database,
+    db: &Arc<Database>,
     sql: &str,
     statements: &[alopex_sql::Statement],
     writer: &mut W,
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_sql::{
-        CommitMetadata, ExecutionStep, ExecutionStepError, ExecutionStepErrorKind,
-        ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult, SharedExecutionReport,
-        SharedExecutionRequest, StatementKind,
+        CommitMetadata, ExecutionResult, ExecutionStepError, ExecutionStepErrorKind,
+        ExecutionStepOutcome, ExecutionStepResult, SharedExecutionReport, StatementKind,
+        TransactionAccessMode, TransactionIsolationLevel,
     };
 
     options.deadline.check()?;
     let texts = statement_texts(sql, statements)?;
-    let mut after_commit = false;
-    let mut steps = Vec::new();
-    for (statement, text) in statements.iter().zip(texts) {
-        let kind = match &statement.kind {
-            StatementKind::Begin { .. } => continue,
-            StatementKind::Commit => {
-                after_commit = true;
-                ExecutionStepKind::CommitBarrier
-            }
-            _ if after_commit => ExecutionStepKind::PostCommitRead { sql: text },
-            _ => ExecutionStepKind::TransactionStatement { sql: text },
-        };
-        steps.push(ExecutionStep::new(format!("step-{}", steps.len()), kind));
-    }
-    let request = SharedExecutionRequest::new("cli-execution", "cli-transaction", steps);
-    let SharedExecutionRequest {
-        execution_id,
-        transaction_id,
-        steps,
-    } = request;
+    let execution_id = "cli-execution".to_owned();
+    let transaction_id = "cli-transaction".to_owned();
     let mut transaction = None;
     let mut committed = false;
-    let mut results = Vec::with_capacity(steps.len());
+    let mut rolled_back = false;
+    let mut failed_transaction = false;
+    let mut read_only = false;
+    let mut characteristics_locked = false;
+    let mut explicit_begin_pending = statements
+        .iter()
+        .any(|statement| matches!(statement.kind, StatementKind::Begin { .. }));
+    let mut results = Vec::with_capacity(statements.len());
 
-    for (step_index, step) in steps.into_iter().enumerate() {
-        let outcome = match step.kind {
-            ExecutionStepKind::TransactionStatement { sql } => {
-                if transaction.is_none() {
-                    transaction = Some(db.begin(alopex_embedded::TxnMode::ReadWrite)?);
-                }
-                match transaction
-                    .as_mut()
-                    .expect("transaction opened")
-                    .execute_sql(&sql)
+    let step_error =
+        |kind, message: String| ExecutionStepOutcome::Error(ExecutionStepError { kind, message });
+
+    for (statement, text) in statements.iter().zip(texts) {
+        options.deadline.check()?;
+        let outcome = match &statement.kind {
+            StatementKind::Begin {
+                isolation_level,
+                access_mode,
+            } => {
+                if transaction.is_some() || committed {
+                    step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "BEGIN requires an idle SQL session".into(),
+                    )
+                } else if isolation_level
+                    .is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead)
                 {
-                    Ok(result) => ExecutionStepOutcome::Execution(result),
-                    Err(error) => {
-                        if let Some(transaction) = transaction.take() {
-                            let _ = transaction.rollback();
-                        }
-                        ExecutionStepOutcome::Error(ExecutionStepError {
-                            kind: ExecutionStepErrorKind::Transaction,
-                            message: error.to_string(),
-                        })
-                    }
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "only REPEATABLE READ isolation is supported".into(),
+                    )
+                } else {
+                    explicit_begin_pending = false;
+                    rolled_back = false;
+                    read_only = *access_mode == Some(TransactionAccessMode::ReadOnly);
+                    let mode = if read_only {
+                        alopex_embedded::TxnMode::ReadOnly
+                    } else {
+                        alopex_embedded::TxnMode::ReadWrite
+                    };
+                    transaction = Some(Arc::clone(db).begin_owned_embedded_transaction(mode)?);
+                    characteristics_locked = isolation_level.is_some() || access_mode.is_some();
+                    continue;
                 }
             }
-            ExecutionStepKind::CommitBarrier => match transaction.take() {
-                Some(transaction) => match transaction.commit() {
+            StatementKind::SetTransaction {
+                isolation_level,
+                access_mode,
+            } => {
+                if transaction.is_none() || failed_transaction {
+                    step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "SET TRANSACTION requires an active transaction".into(),
+                    )
+                } else if characteristics_locked {
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "transaction characteristics are already locked".into(),
+                    )
+                } else if isolation_level
+                    .is_some_and(|level| level != TransactionIsolationLevel::RepeatableRead)
+                {
+                    step_error(
+                        ExecutionStepErrorKind::Transaction,
+                        "only REPEATABLE READ isolation is supported".into(),
+                    )
+                } else {
+                    if let Some(access_mode) = access_mode {
+                        read_only = *access_mode == TransactionAccessMode::ReadOnly;
+                    }
+                    characteristics_locked = true;
+                    ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                }
+            }
+            StatementKind::Savepoint { name } if !failed_transaction => {
+                match transaction.as_mut() {
+                    Some(transaction) => match transaction.create_savepoint(name) {
+                        Ok(()) => ExecutionStepOutcome::Execution(ExecutionResult::Success),
+                        Err(error) => {
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    },
+                    None => step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "SAVEPOINT requires an active transaction".into(),
+                    ),
+                }
+            }
+            StatementKind::RollbackToSavepoint { name } => match transaction.as_mut() {
+                Some(transaction) => match transaction.rollback_to_savepoint(name) {
+                    Ok(()) => {
+                        failed_transaction = false;
+                        ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                    }
+                    Err(error) => {
+                        step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                    }
+                },
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "ROLLBACK TO SAVEPOINT requires an active transaction".into(),
+                ),
+            },
+            StatementKind::ReleaseSavepoint { name } if !failed_transaction => {
+                match transaction.as_mut() {
+                    Some(transaction) => match transaction.release_savepoint(name) {
+                        Ok(()) => ExecutionStepOutcome::Execution(ExecutionResult::Success),
+                        Err(error) => {
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    },
+                    None => step_error(
+                        ExecutionStepErrorKind::InvalidOrder,
+                        "RELEASE SAVEPOINT requires an active transaction".into(),
+                    ),
+                }
+            }
+            StatementKind::Rollback => match transaction.take() {
+                Some(mut transaction) => match transaction.rollback() {
+                    Ok(()) => {
+                        rolled_back = true;
+                        failed_transaction = false;
+                        ExecutionStepOutcome::Execution(ExecutionResult::Success)
+                    }
+                    Err(error) => {
+                        step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                    }
+                },
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "ROLLBACK requires an active transaction".into(),
+                ),
+            },
+            StatementKind::Commit if failed_transaction => step_error(
+                ExecutionStepErrorKind::Commit,
+                "failed transaction must be rolled back".into(),
+            ),
+            StatementKind::Commit => match transaction.take() {
+                Some(mut transaction) => match transaction.commit() {
                     Ok(()) => {
                         committed = true;
                         ExecutionStepOutcome::Commit(CommitMetadata {
@@ -2215,15 +2315,15 @@ fn execute_shared_transaction_script<W: Write>(
                         message: error.to_string(),
                     }),
                 },
-                None => ExecutionStepOutcome::Error(ExecutionStepError {
-                    kind: ExecutionStepErrorKind::InvalidOrder,
-                    message: "commit barrier has no mutation transaction".into(),
-                }),
+                None => step_error(
+                    ExecutionStepErrorKind::InvalidOrder,
+                    "COMMIT requires an active transaction".into(),
+                ),
             },
-            ExecutionStepKind::PostCommitRead { sql } if committed => {
+            _ if committed => {
                 let is_single_read =
-                    alopex_sql::Parser::parse_sql(&alopex_sql::AlopexDialect, &sql).is_ok_and(
-                        |statements| statements.len() == 1 && statements[0].kind.is_query(),
+                    alopex_sql::Parser::parse_sql(&alopex_sql::AlopexDialect, &text).is_ok_and(
+                        |statements| statements.len() == 1 && !statements[0].kind.requires_write(),
                     );
                 if !is_single_read {
                     ExecutionStepOutcome::Error(ExecutionStepError {
@@ -2231,7 +2331,7 @@ fn execute_shared_transaction_script<W: Write>(
                         message: "post-commit read requires exactly one query statement".into(),
                     })
                 } else {
-                    match db.execute_sql_multi(&sql) {
+                    match db.execute_sql_multi(&text) {
                         Ok(mut values) if values.len() == 1 => {
                             ExecutionStepOutcome::Execution(values.remove(0))
                         }
@@ -2246,19 +2346,63 @@ fn execute_shared_transaction_script<W: Write>(
                     }
                 }
             }
-            ExecutionStepKind::PostCommitRead { .. } => {
-                ExecutionStepOutcome::Error(ExecutionStepError {
-                    kind: ExecutionStepErrorKind::InvalidOrder,
-                    message: "post-commit read precedes a successful commit barrier".into(),
-                })
+            _ if rolled_back => match db.execute_sql(&text) {
+                Ok(result) => ExecutionStepOutcome::Execution(result),
+                Err(error) => step_error(ExecutionStepErrorKind::Transaction, error.to_string()),
+            },
+            _ if failed_transaction => step_error(
+                ExecutionStepErrorKind::Transaction,
+                "failed transaction accepts only ROLLBACK or ROLLBACK TO SAVEPOINT".into(),
+            ),
+            kind if read_only && kind.requires_write() => step_error(
+                ExecutionStepErrorKind::Transaction,
+                "write attempted in read-only transaction".into(),
+            ),
+            _ => {
+                if transaction.is_none() && explicit_begin_pending {
+                    match db.execute_sql(&text) {
+                        Ok(result) => {
+                            results.push(ExecutionStepResult {
+                                execution_id: execution_id.clone(),
+                                transaction_id: transaction_id.clone(),
+                                step_id: format!("step-{}", results.len()),
+                                step_index: results.len(),
+                                outcome: ExecutionStepOutcome::Execution(result),
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            failed_transaction = true;
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    }
+                } else {
+                    if transaction.is_none() {
+                        transaction = Some(Arc::clone(db).begin_owned_embedded_transaction(
+                            alopex_embedded::TxnMode::ReadWrite,
+                        )?);
+                    }
+                    characteristics_locked = true;
+                    match transaction
+                        .as_mut()
+                        .expect("transaction opened")
+                        .execute_sql(&text)
+                    {
+                        Ok(result) => ExecutionStepOutcome::Execution(result),
+                        Err(error) => {
+                            failed_transaction = true;
+                            step_error(ExecutionStepErrorKind::Transaction, error.to_string())
+                        }
+                    }
+                }
             }
         };
         let failed = matches!(outcome, ExecutionStepOutcome::Error(_));
         results.push(ExecutionStepResult {
             execution_id: execution_id.clone(),
             transaction_id: transaction_id.clone(),
-            step_id: step.step_id,
-            step_index,
+            step_id: format!("step-{}", results.len()),
+            step_index: results.len(),
             outcome,
         });
         if failed {
@@ -2860,8 +3004,8 @@ mod tests {
     use crate::batch::BatchModeSource;
     use crate::output::jsonl::JsonlFormatter;
 
-    fn create_test_db() -> Database {
-        Database::open_in_memory().unwrap()
+    fn create_test_db() -> Arc<Database> {
+        Arc::new(Database::open_in_memory().unwrap())
     }
 
     fn create_status_writer(output: &mut Vec<u8>) -> StreamingWriter<&mut Vec<u8>> {

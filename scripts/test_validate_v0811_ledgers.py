@@ -88,6 +88,29 @@ class LedgerContractTests(unittest.TestCase):
             any(name in error and "max_peak_memory_ratio" in error for error in errors)
         )
 
+    def test_hnsw_contract_requires_reference_recall_band(self):
+        contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)
+        broken = copy.deepcopy(contracts)
+        broken["contracts"]["hnsw-pareto-v1"]["thresholds"].pop(
+            "max_recall_delta"
+        )
+
+        errors = validate_performance_contracts(Path("contracts.json"), broken)
+
+        self.assertTrue(any("max_recall_delta" in error for error in errors))
+
+    def test_performance_evidence_must_cover_the_ledger_claim(self):
+        contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)
+        broken = copy.deepcopy(contracts)
+        broken["contracts"]["polars-eager-v1"]["evidence_coverage"][
+            "polars-eager-api"
+        ].remove("DataFrame.explode")
+        polars = next(path for path in LEDGERS if path.name.startswith("polars-"))
+
+        errors = validate(polars, broken)
+
+        self.assertTrue(any("does not cover DataFrame.explode" in error for error in errors))
+
     def test_contract_rejects_mutable_reference_and_incomplete_fixture(self):
         contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)
         broken = copy.deepcopy(contracts)
@@ -146,7 +169,7 @@ class LedgerContractTests(unittest.TestCase):
         self.assertIn("name: Required parity", ci)
         self.assertIn("uses: ./.github/workflows/parity-performance.yml", ci)
         self.assertIn(
-            "needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate, parity]",
+            "needs: [scope, fmt, formal, clippy, test, coverage, security-audit, build, v08-release-gate, parity]",
             ci,
         )
 

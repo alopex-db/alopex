@@ -124,12 +124,7 @@ fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn stmt_requires_write(stmt: &Statement) -> bool {
-    match &stmt.kind {
-        StatementKind::Explain {
-            analyze, statement, ..
-        } => *analyze && stmt_requires_write(statement),
-        kind => !kind.is_query(),
-    }
+    stmt.kind.requires_write()
 }
 
 fn stmt_changes_catalog(stmt: &Statement) -> bool {

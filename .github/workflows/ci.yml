@@ -80,6 +80,27 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  formal:
+    name: SQL transaction model
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Run pinned TLC model checker
+        shell: bash
+        run: |
+          curl -fsSL \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
+            -o "${RUNNER_TEMP}/tla2tools.jar"
+          echo "bee4a54f3ee3d4afc347c3240ec2d9e93b075104  ${RUNNER_TEMP}/tla2tools.jar" | sha1sum -c -
+          java -XX:+UseParallelGC -cp "${RUNNER_TEMP}/tla2tools.jar" \
+            tlc2.TLC formal/tla/sql/SqlTransactionLifecycle.tla
+
   clippy:
     name: Clippy
     needs: [scope]
@@ -557,6 +578,11 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
           ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
+      - name: Run SQL transaction failure conformance
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: cargo run --manifest-path crates/alopex-tools/Cargo.toml --bin verify-sql-transaction-failures
       - name: Upload current implementation build metrics
         if: always()
         uses: actions/upload-artifact@v4
@@ -570,7 +596,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate, parity]
+    needs: [scope, fmt, formal, clippy, test, coverage, security-audit, build, v08-release-gate, parity]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -592,6 +618,7 @@ jobs:
           fi
           if [[ "${{ needs.scope.outputs.production }}" == "false" ]]; then
             if [[ "${{ needs.fmt.result }}" != "skipped" ]] || \
+               [[ "${{ needs.formal.result }}" != "skipped" ]] || \
                [[ "${{ needs.clippy.result }}" != "skipped" ]] || \
                [[ "${{ needs.test.result }}" != "skipped" ]] || \
                [[ "${{ needs.coverage.result }}" != "skipped" ]] || \
@@ -605,6 +632,7 @@ jobs:
             exit 0
           fi
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
+             [[ "${{ needs.formal.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
@@ -613,6 +641,7 @@ jobs:
              [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "fmt: ${{ needs.fmt.result }}"
+            echo "formal: ${{ needs.formal.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"

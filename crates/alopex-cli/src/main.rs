@@ -537,7 +537,9 @@ fn is_write_sql(sql_cmd: &cli::SqlCommand) -> bool {
         || trimmed.starts_with("TRUNCATE")
 }
 
-fn open_database_with_check(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
+fn open_database_with_check(
+    config: &ResolvedConfig,
+) -> Result<std::sync::Arc<alopex_embedded::Database>> {
     let db = open_database(config)?;
     let checker = version::compatibility::VersionChecker::new();
     let file_version = version::Version::from(db.file_format_version());
@@ -558,7 +560,7 @@ fn open_database_with_check(config: &ResolvedConfig) -> Result<alopex_embedded::
         }
     }
 
-    Ok(db)
+    Ok(std::sync::Arc::new(db))
 }
 
 /// Open the database based on CLI options.
@@ -1161,7 +1163,7 @@ fn execute_local_command(
 /// Execute the command and write output.
 #[allow(clippy::too_many_arguments)]
 fn execute_command(
-    db: &alopex_embedded::Database,
+    db: &std::sync::Arc<alopex_embedded::Database>,
     command: Command,
     data_dir: Option<&Path>,
     batch_mode: &BatchMode,

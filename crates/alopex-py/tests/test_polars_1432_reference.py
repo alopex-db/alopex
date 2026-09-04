@@ -7,11 +7,29 @@ pytestmark = [pytest.mark.requires_polars, pytest.mark.polars_reference]
 
 
 def _signature_shape(callable):
+    def default_value(parameter):
+        value = parameter.default
+        if value is inspect.Parameter.empty or isinstance(
+            value, (type(None), bool, int, float, str, bytes, tuple)
+        ):
+            return value
+        return None
+
     return [
-        (parameter.name, parameter.kind, parameter.default is inspect.Parameter.empty)
+        (parameter.name, parameter.kind, default_value(parameter))
         for parameter in list(inspect.signature(callable).parameters.values())
         if parameter.name != "self"
     ]
+
+
+def test_signature_shape_compares_default_values():
+    def alopex_api(*, enabled=True):
+        pass
+
+    def reference_api(*, enabled=False):
+        pass
+
+    assert _signature_shape(alopex_api) != _signature_shape(reference_api)
 
 
 def test_polars_1432_supported_public_signatures():

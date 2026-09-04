@@ -132,6 +132,27 @@ class PerformanceParityGateTests(unittest.TestCase):
         self.assertTrue(any("latency_p50_ms ratio" in error for error in errors))
         self.assertTrue(any("queries_per_second ratio" in error for error in errors))
 
+    def test_gate_rejects_measurement_with_different_claim_coverage(self):
+        contract = {
+            "reference_revision": "project@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "evidence_coverage": {"example": ["DataFrame.explode"]},
+            "metrics": [],
+            "thresholds": {},
+        }
+        measurement = {
+            "evidence_id": "example",
+            "covered_claims": ["DataFrame.to_dict"],
+            "reference_revision": "project@v1.0.0",
+            "dataset_sha256": "a" * 64,
+            "subject": {},
+            "reference": {},
+        }
+
+        errors = evaluate("example", contract, measurement)
+
+        self.assertTrue(any("covered_claims" in error for error in errors))
+
     def test_gate_rejects_measurements_from_another_runner(self):
         contracts = {
             "runner_profile": {
@@ -187,6 +208,25 @@ class PerformanceParityGateTests(unittest.TestCase):
         }
 
         self.assertEqual(evaluate("example", contract, measurement), [])
+
+    def test_hnsw_gate_rejects_recall_outside_the_reference_band(self):
+        contract = {
+            "reference_revision": "project@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "metrics": ["recall_at_10"],
+            "thresholds": {"min_recall": 0.99, "max_recall_delta": 0.01},
+        }
+        measurement = {
+            "reference_revision": "project@v1.0.0",
+            "dataset_sha256": "a" * 64,
+            "subject": {"recall_at_10": 0.99},
+            "reference": {"recall_at_10": 0.10},
+        }
+
+        errors = evaluate("hnsw", contract, measurement)
+
+        self.assertTrue(any("reference recall_at_10" in error for error in errors))
+        self.assertTrue(any("recall_at_10 delta" in error for error in errors))
 
 
 if __name__ == "__main__":

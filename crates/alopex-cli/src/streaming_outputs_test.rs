@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::batch::{BatchMode, BatchModeSource};
 use crate::cli::{ColumnarCommand, OutputFormat, SqlCommand, VectorCommand};
 use crate::commands::{columnar, sql, vector};
@@ -62,7 +64,7 @@ fn setup_sql_data(db: &Database) {
         .unwrap();
 }
 
-fn run_sql_with_formatter(db: &Database, output_format: OutputFormat) -> String {
+fn run_sql_with_formatter(db: &Arc<Database>, output_format: OutputFormat) -> String {
     let cmd = SqlCommand {
         query: Some("SELECT * FROM stream_test;".to_string()),
         file: None,
@@ -92,7 +94,7 @@ fn run_sql_with_formatter(db: &Database, output_format: OutputFormat) -> String 
 
 #[test]
 fn sql_streaming_outputs() {
-    let db = Database::open_in_memory().unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
     setup_sql_data(&db);
 
     let output = run_sql_with_formatter(&db, OutputFormat::Jsonl);

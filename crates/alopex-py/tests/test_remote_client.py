@@ -723,6 +723,11 @@ def test_routing_diagnostics_from_the_last_response_are_kept(stub):
 UNSUPPORTED_DATABASE_CALLS = [
     ("execute_sql_stream", ("SELECT 1",)),
     ("query_stream", (None,)),
+    ("execute_shared", (None,)),
+    ("prepare", ("SELECT 1",)),
+    ("copy_from_csv", ("items", None)),
+    ("copy_to_csv", ("items", None)),
+    ("list_sequences", ()),
     ("flush", ()),
     ("memory_usage", ()),
     ("routing_diagnostics", ()),

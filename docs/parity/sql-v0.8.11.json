@@ -127,10 +127,10 @@
     {
       "api": "VIEW/ALTER TABLE/TRUNCATE",
       "status": "known-performance-divergence",
-      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "crates/alopex-embedded/tests/schema_evolution.rs",
-      "performance_contract": "sql-sqlite-v1",
-      "performance_evidence": "sql-sqlite-curated",
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated",
       "issue": 307
     },
     {
@@ -2345,11 +2345,11 @@
       "api": "statement.AlterTable",
       "claim": "VIEW/ALTER TABLE/TRUNCATE",
       "status": "known-performance-divergence",
-      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
       "issue": 307,
-      "performance_contract": "sql-sqlite-v1",
-      "performance_evidence": "sql-sqlite-curated"
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
@@ -2429,11 +2429,11 @@
       "api": "statement.CreateView",
       "claim": "VIEW/ALTER TABLE/TRUNCATE",
       "status": "known-performance-divergence",
-      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
       "issue": 307,
-      "performance_contract": "sql-sqlite-v1",
-      "performance_evidence": "sql-sqlite-curated"
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
@@ -2484,11 +2484,11 @@
       "api": "statement.DropView",
       "claim": "VIEW/ALTER TABLE/TRUNCATE",
       "status": "known-performance-divergence",
-      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
       "issue": 307,
-      "performance_contract": "sql-sqlite-v1",
-      "performance_evidence": "sql-sqlite-curated"
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",
@@ -2603,11 +2603,11 @@
       "api": "statement.Truncate",
       "claim": "VIEW/ALTER TABLE/TRUNCATE",
       "status": "known-performance-divergence",
-      "reference": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "reference": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "crates/alopex-embedded/tests/schema_evolution.rs#alter_and_truncate_rollback_atomically",
       "issue": 307,
-      "performance_contract": "sql-sqlite-v1",
-      "performance_evidence": "sql-sqlite-curated"
+      "performance_contract": "sql-postgresql-v1",
+      "performance_evidence": "sql-postgresql-curated"
     },
     {
       "surface": "statement",

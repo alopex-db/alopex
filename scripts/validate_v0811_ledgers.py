@@ -175,6 +175,12 @@ def validate_performance_contracts(path: Path, payload: dict[str, object]) -> li
             errors.append(f"{path}: {name} thresholds missing min_recall")
         if kind == "hnsw" and "min_recall" not in compatibility_thresholds:
             errors.append(f"{path}: {name} compatibility_thresholds missing min_recall")
+        if kind == "hnsw" and "max_recall_delta" not in thresholds:
+            errors.append(f"{path}: {name} thresholds missing max_recall_delta")
+        if kind == "hnsw" and "max_recall_delta" not in compatibility_thresholds:
+            errors.append(
+                f"{path}: {name} compatibility_thresholds missing max_recall_delta"
+            )
         if kind == "sql" and "max_temporary_io_ratio" not in thresholds:
             errors.append(f"{path}: {name} thresholds missing max_temporary_io_ratio")
         if kind == "sql" and "max_temporary_io_ratio" not in compatibility_thresholds:
@@ -186,6 +192,16 @@ def validate_performance_contracts(path: Path, payload: dict[str, object]) -> li
             errors.append(f"{path}: {name} has no runnable evidence")
         if not contract.get("evidence_ids"):
             errors.append(f"{path}: {name} has no evidence_ids")
+        coverage = contract.get("evidence_coverage")
+        if kind != "hnsw" and set(coverage or {}) != set(
+            contract.get("evidence_ids", [])
+        ):
+            errors.append(f"{path}: {name} evidence_coverage must match evidence_ids")
+        for evidence_id, claims in (coverage or {}).items():
+            if not claims or len(claims) != len(set(claims)):
+                errors.append(
+                    f"{path}: {name}/{evidence_id} has empty or duplicate evidence_coverage"
+                )
         comparison = contract.get("comparison", {})
         if comparison.get("method") != "paired-median-ratio":
             errors.append(f"{path}: {name} must use paired-median-ratio")
@@ -232,6 +248,12 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
                     errors.append(f"{path}: missing performance_evidence for {api}")
                 elif evidence_id not in contract.get("evidence_ids", []):
                     errors.append(f"{path}: invalid performance_evidence for {api}")
+                elif "evidence_coverage" in contract and api not in contract[
+                    "evidence_coverage"
+                ].get(evidence_id, []):
+                    errors.append(
+                        f"{path}: performance_evidence {evidence_id} does not cover {api}"
+                    )
                 if (
                     entry.get("status") in COMPATIBLE_STATUSES
                     and contract.get("thresholds")

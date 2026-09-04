@@ -16,6 +16,9 @@
       "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["polars-eager-api"],
+      "evidence_coverage": {
+        "polars-eager-api": ["DataFrame.__init__", "DataFrame.explode", "DataFrame.height", "DataFrame.lazy", "DataFrame.to_dict", "DataFrame.width", "Expr.add", "Expr.alias", "Expr.and_", "Expr.eq", "Expr.ge", "Expr.gt", "Expr.le", "Expr.lt", "Expr.mul", "Expr.not_", "Expr.or_", "Expr.sub", "LazyFrame.filter", "LazyFrame.select", "LazyFrame.with_columns", "Series.name", "Series.to_list", "col", "concat", "concat_str", "lit"]
+      },
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
@@ -40,6 +43,10 @@
       "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["polars-csv-streaming", "polars-parquet-streaming"],
+      "evidence_coverage": {
+        "polars-csv-streaming": ["LazyFrame.collect", "LazyFrame.collect_batches"],
+        "polars-parquet-streaming": ["LazyFrame.collect", "LazyFrame.collect_batches"]
+      },
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
@@ -55,9 +62,9 @@
         "measurement_runs": 21,
         "resource_limit_bytes": 1073741824
       },
-      "metrics": ["plan_build_p50_ms", "time_to_first_batch_p50_ms", "total_p50_ms", "steady_state_rows_per_second", "peak_rss_bytes"],
+      "metrics": ["plan_build_p50_ms", "collect_p50_ms", "time_to_first_batch_p50_ms", "total_p50_ms", "steady_state_rows_per_second", "peak_rss_bytes"],
       "compatibility_thresholds": {"max_latency_ratio": 2.0, "min_throughput_ratio": 0.5, "max_peak_memory_ratio": 2.0},
-      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.001, "max_peak_memory_ratio": 2.0, "max_ratio_by_metric": {"total_p50_ms": 125.0}},
+      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.001, "max_peak_memory_ratio": 2.0, "max_ratio_by_metric": {"collect_p50_ms": 20.0, "total_p50_ms": 125.0}},
       "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
     },
     "hnsw-pareto-v1": {
@@ -90,8 +97,8 @@
         "ef_search": [16, 32, 64, 128, 256]
       },
       "metrics": ["recall_at_10", "build_latency_ms", "query_latency_p50_ms", "query_latency_p95_ms", "query_latency_p99_ms", "queries_per_second", "index_size_bytes", "peak_rss_bytes", "update_latency_ms", "delete_latency_ms", "reopen_latency_ms"],
-      "compatibility_thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 2.0, "min_recall": 0.99},
-      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 3.0, "min_recall": 0.99, "max_ratio_by_metric": {"update_latency_ms": 500.0, "delete_latency_ms": 25000.0}},
+      "compatibility_thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 2.0, "min_recall": 0.99, "max_recall_delta": 0.01},
+      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 3.0, "min_recall": 0.99, "max_recall_delta": 0.01, "max_ratio_by_metric": {"update_latency_ms": 500.0, "delete_latency_ms": 25000.0}},
       "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95, "match_on": ["recall_at_10"]}
     },
     "sql-sqlite-v1": {
@@ -99,6 +106,9 @@
       "reference_revision": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-sqlite-curated"],
+      "evidence_coverage": {
+        "sql-sqlite-curated": ["portable SELECT/null/order/coercion", "parser/lexer", "transactions/savepoints", "prepared statements", "CHECK/FK constraints"]
+      },
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
@@ -127,6 +137,9 @@
       "reference_revision": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-postgresql-curated"],
+      "evidence_coverage": {
+        "sql-postgresql-curated": ["EXPLAIN JSON", "RETURNING", "ON CONFLICT", "SERIAL/IDENTITY/SEQUENCE", "VIEW/ALTER TABLE/TRUNCATE", "MERGE/UPDATE FROM/DELETE USING", "information_schema"]
+      },
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
@@ -155,6 +168,9 @@
       "reference_revision": "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de",
       "evidence": "scripts/performance/parity_v0811_measure.py",
       "evidence_ids": ["sql-streaming"],
+      "evidence_coverage": {
+        "sql-streaming": ["streaming query"]
+      },
       "fixture": {
         "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",

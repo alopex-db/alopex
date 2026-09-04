@@ -75,7 +75,7 @@ impl PySeries {
 #[pymethods]
 impl PyDataFrame {
     #[new]
-    #[pyo3(signature = (data = None, schema = None, *, schema_overrides = None, strict = true, orient = None, infer_schema_length = Some(100), nan_to_null = false, height = None))]
+    #[pyo3(signature = (data = None, schema = None, *, schema_overrides = None, strict = true, orient = None, infer_schema_length = 100, nan_to_null = false, height = None))]
     #[allow(clippy::too_many_arguments)] // Mirrors the Polars 1.43.2 constructor.
     fn py_new(
         data: Option<&Bound<'_, PyAny>>,

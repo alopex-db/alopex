@@ -38,6 +38,12 @@ def evaluate(name: str, contract: dict[str, object], measurement: dict[str, obje
         errors.append(f"{name}: reference_revision does not match the contract")
     if measurement.get("dataset_sha256") != contract.get("fixture", {}).get("dataset_sha256"):
         errors.append(f"{name}: dataset_sha256 does not match the contract")
+    if "evidence_coverage" in contract:
+        expected_coverage = contract["evidence_coverage"].get(
+            measurement.get("evidence_id"), []
+        )
+        if measurement.get("covered_claims") != expected_coverage:
+            errors.append(f"{name}: covered_claims do not match the contract")
     subject = measurement.get("subject", {})
     reference = measurement.get("reference", {})
     thresholds = contract.get("thresholds", {})
@@ -47,8 +53,21 @@ def evaluate(name: str, contract: dict[str, object], measurement: dict[str, obje
             continue
         if metric == "recall_at_10":
             value = subject[metric]
-            if not isinstance(value, (int, float)) or value < thresholds["min_recall"]:
+            reference_value = reference[metric]
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                errors.append(f"{name}: subject recall_at_10 must be finite")
+                continue
+            if not isinstance(reference_value, (int, float)) or not math.isfinite(reference_value):
+                errors.append(f"{name}: reference recall_at_10 must be finite")
+                continue
+            if value < thresholds["min_recall"]:
                 errors.append(f"{name}: recall_at_10 is below min_recall")
+            if reference_value < thresholds["min_recall"]:
+                errors.append(f"{name}: reference recall_at_10 is below min_recall")
+            delta = abs(float(value) - float(reference_value))
+            limit = thresholds["max_recall_delta"]
+            if delta > limit:
+                errors.append(f"{name}: recall_at_10 delta {delta:.4f} exceeds {limit}")
             continue
         ratio = _ratio(subject[metric], reference[metric], f"{name}: {metric}", errors)
         if ratio is None:

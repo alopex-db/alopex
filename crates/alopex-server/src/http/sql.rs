@@ -1291,15 +1291,7 @@ fn is_write_sql(sql: &str) -> bool {
     let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
         return false;
     };
-    fn is_write(kind: &alopex_sql::StatementKind) -> bool {
-        match kind {
-            alopex_sql::StatementKind::Explain {
-                analyze, statement, ..
-            } => *analyze && is_write(&statement.kind),
-            kind => !kind.is_query(),
-        }
-    }
-    statements.iter().any(|stmt| is_write(&stmt.kind))
+    statements.iter().any(|stmt| stmt.kind.requires_write())
 }
 
 fn uses_remote_copy(sql: &str) -> bool {

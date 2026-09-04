@@ -8,13 +8,31 @@
 //! - table/csv/tsv/jsonl emit one result block per statement, in order.
 //! - Any failing statement makes the whole invocation exit non-zero.
 
-use std::process::{Command, Output};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 fn run_alopex(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_alopex"))
         .args(args)
         .output()
         .expect("spawn alopex")
+}
+
+fn run_alopex_with_stdin(args: &[&str], input: &[u8]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn alopex");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input)
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for alopex")
 }
 
 fn parse_json_stdout(output: &Output) -> serde_json::Value {
@@ -369,6 +387,73 @@ fn batch_json_maps_commit_barrier_steps_losslessly() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn batch_json_enforces_read_only_transaction_characteristics() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--output",
+        "json",
+        "sql",
+        "CREATE TABLE items (id INTEGER PRIMARY KEY); \
+         BEGIN READ ONLY; INSERT INTO items VALUES (1); COMMIT",
+    ]);
+
+    assert!(!output.status.success(), "read-only mutation must fail");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let steps = value["steps"].as_array().expect("ordered steps");
+    assert_eq!(steps.last().unwrap()["kind"], "error");
+    assert!(steps.last().unwrap()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("read-only"));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_json_executes_savepoint_rollback_and_release() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--output",
+        "json",
+        "sql",
+        "BEGIN; CREATE TABLE items (id INTEGER PRIMARY KEY); \
+         INSERT INTO items VALUES (1); SAVEPOINT keep_one; \
+         INSERT INTO items VALUES (2); ROLLBACK TO SAVEPOINT keep_one; \
+         RELEASE SAVEPOINT keep_one; COMMIT; SELECT id FROM items ORDER BY id",
+    ]);
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(value["success"], true);
+    let steps = value["steps"].as_array().expect("ordered steps");
+    assert_eq!(
+        steps.last().unwrap()["result"]["rows"],
+        serde_json::json!([[1]])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_json_rejects_explain_analyze_mutation_after_commit() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--output",
+        "json",
+        "sql",
+        "BEGIN; CREATE TABLE items (id INTEGER PRIMARY KEY); \
+         INSERT INTO items VALUES (1); COMMIT; \
+         EXPLAIN ANALYZE INSERT INTO items VALUES (2)",
+    ]);
+
+    assert!(!output.status.success(), "post-commit mutation must fail");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let steps = value["steps"].as_array().expect("ordered steps");
+    assert_eq!(steps.last().unwrap()["error"]["kind"], "post_commit_read");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn batch_json_preserves_commit_when_post_read_fails_and_exits_nonzero() {
     let output = run_alopex(&[
         "--in-memory",
@@ -389,6 +474,91 @@ fn batch_json_preserves_commit_when_post_read_fails_and_exits_nonzero() {
     assert_eq!(steps[2]["kind"], "commit");
     assert_eq!(steps[3]["kind"], "error");
     assert_eq!(steps[3]["error"]["kind"], "post_commit_read");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_json_executes_advanced_dml_through_the_public_cli() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--quiet",
+        "--output",
+        "json",
+        "sql",
+        "CREATE TABLE items (id BIGINT PRIMARY KEY, value TEXT); \
+         CREATE TABLE incoming (id BIGINT, value TEXT); \
+         INSERT INTO items VALUES (1, 'old'), (2, 'delete') RETURNING id; \
+         INSERT INTO incoming VALUES (1, 'joined'), (2, 'unused'); \
+         INSERT INTO items VALUES (1, 'conflict') ON CONFLICT (id) \
+             DO UPDATE SET value = 'updated' RETURNING value; \
+         UPDATE items SET value = incoming.value FROM incoming \
+             WHERE items.id = incoming.id; \
+         DELETE FROM items USING incoming \
+             WHERE items.id = incoming.id AND incoming.id = 2 RETURNING items.id; \
+         CREATE TABLE merge_target (id BIGINT PRIMARY KEY, value TEXT); \
+         CREATE TABLE merge_source (id BIGINT, value TEXT); \
+         INSERT INTO merge_target VALUES (1, 'old'); \
+         INSERT INTO merge_source VALUES (1, 'merged'), (2, 'inserted'); \
+         MERGE INTO merge_target USING merge_source \
+             ON merge_target.id = merge_source.id \
+             WHEN MATCHED THEN UPDATE SET value = merge_source.value \
+             WHEN NOT MATCHED THEN INSERT (id, value) \
+                 VALUES (merge_source.id, merge_source.value); \
+         SELECT id, value FROM merge_target ORDER BY id",
+    ]);
+
+    let value = parse_json_stdout(&output);
+    let sets = value.as_array().expect("top-level JSON array");
+    assert_eq!(
+        sets.last().unwrap(),
+        &serde_json::json!([
+            {"id": 1, "value": "merged"},
+            {"id": 2, "value": "inserted"}
+        ])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_cli_streams_copy_csv_through_process_stdio() {
+    let imported = run_alopex_with_stdin(
+        &[
+            "--in-memory",
+            "--batch",
+            "--quiet",
+            "--output",
+            "json",
+            "sql",
+            "CREATE TABLE items (id INTEGER, label TEXT); \
+             COPY items FROM STDIN WITH (FORMAT CSV, HEADER TRUE); \
+             SELECT id, label FROM items ORDER BY id",
+        ],
+        b"id,label\n1,one\n2,two\n",
+    );
+    assert_eq!(
+        parse_json_stdout(&imported),
+        serde_json::json!([[{"id": 1, "label": "one"}, {"id": 2, "label": "two"}]])
+    );
+
+    let exported = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--quiet",
+        "sql",
+        "CREATE TABLE items (id INTEGER, label TEXT); \
+         INSERT INTO items VALUES (1, 'one'), (2, 'two'); \
+         COPY items TO STDOUT WITH (FORMAT CSV, HEADER TRUE)",
+    ]);
+    assert!(
+        exported.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&exported.stdout),
+        "id,label\n1,one\n2,two\n"
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

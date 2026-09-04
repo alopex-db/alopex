@@ -1113,11 +1113,10 @@ fn validate_shared_statement(sql: &str, require_query: bool) -> std::result::Res
     if statements.len() != 1 {
         return Err("shared execution steps require exactly one SQL statement".into());
     }
-    let is_query = statements[0].kind.is_query();
-    if require_query && !is_query {
+    if require_query && statements[0].kind.requires_write() {
         return Err("post-commit read requires a query statement".into());
     }
-    Ok(is_query)
+    Ok(!statements[0].kind.requires_write())
 }
 
 fn shared_step_timeout(
