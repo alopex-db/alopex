@@ -1,12 +1,12 @@
 {
   "comparison": {
     "advisory_only": true,
-    "current_commit": "cec643d3a4feefb8e082309ff6159e1676888212",
-    "environment_fingerprint": "5085be655afe9b76",
+    "current_commit": "c0ef1f7f77bf0ed966bc3b11dfbc239ed2806c53",
+    "environment_fingerprint": "d56d34aaac792ebd",
     "has_regressions": false,
     "metrics": {
       "read_overhead_pct": {
-        "current": 0.7438178484709741,
+        "current": 0.4556487750059622,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -15,7 +15,7 @@
         "unit": "%"
       },
       "scan_overhead_ms": {
-        "current": 0.0016056999925240234,
+        "current": 0.0022945000182517114,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -24,7 +24,7 @@
         "unit": "ms"
       },
       "write_overhead_pct": {
-        "current": 1.3685442963280243,
+        "current": 0.8287508045707455,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -40,7 +40,7 @@
     "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
   },
   "record": {
-    "commit": "cec643d3a4feefb8e082309ff6159e1676888212",
+    "commit": "c0ef1f7f77bf0ed966bc3b11dfbc239ed2806c53",
     "dependencies": {
       "alopex": "0.8.11",
       "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
@@ -63,33 +63,33 @@
       "setuptools": "65.5.0"
     },
     "environment": {
-      "cpu": "AMD EPYC 7763 64-Core Processor",
-      "cpu_governor": "unavailable",
-      "fingerprint": "5085be655afe9b76",
+      "cpu": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+      "cpu_governor": "performance",
+      "fingerprint": "d56d34aaac792ebd",
       "kernel": "6.17.0-1022-azure",
       "machine": "x86_64",
       "profile": "gha-ubuntu-24.04-x64-single-core-v1",
       "python": "3.11.11",
       "system": "Linux",
-      "turbo_policy": "unavailable"
+      "turbo_policy": "no_turbo=0"
     },
     "lock_hash": "3f63c69d693dd80cb3500c09683ef58b6331dfb92a06240ab04c16b6da3caa2c",
-    "measured_at": "2026-09-07T12:50:27.086030+00:00",
+    "measured_at": "2026-09-07T15:40:41.334529+00:00",
     "metrics": {
       "read_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 0.7438178484709741
+        "value": 0.4556487750059622
       },
       "scan_overhead_ms": {
         "direction": "lower_is_better",
         "unit": "ms",
-        "value": 0.0016056999925240234
+        "value": 0.0022945000182517114
       },
       "write_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 1.3685442963280243
+        "value": 0.8287508045707455
       }
     },
     "profile": "gha-ubuntu-24.04-x64-single-core-v1",
