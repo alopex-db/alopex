@@ -745,6 +745,9 @@ jobs:
     name: Post-release HNSW diagnostic
     needs: [final-release-join]
     if: ${{ needs.final-release-join.result == 'success' }}
+    permissions:
+      contents: write
+      issues: write
     uses: ./.github/workflows/post-release-hnsw.yml
     with:
       version: ${{ inputs.release_tag || github.ref_name }}
