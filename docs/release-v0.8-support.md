@@ -87,6 +87,17 @@ existing `v08-release-gate` owns the checked-out implementation surface; the
 post-publication workflow must not run its release demos as a second, late
 source of truth.
 
+## Tag failure recovery
+
+Before any GitHub Release, registry package, or other public artifact exists, a
+failed or cancelled tag-triggered workflow requires cancelling active workflows,
+independently verifying that no public artifact exists, and must delete every
+unpublished release tag immediately. The corrected commit must pass exact-main
+verification before it is retagged.
+
+After any public artifact exists, the release uses repair-forward only; it never
+rewrites or replaces published bytes.
+
 ## Cleanup is part of acceptance
 
 Every Development CI, Extended Verification, RC Qualification, and local

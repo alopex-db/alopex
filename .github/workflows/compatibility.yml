@@ -10,12 +10,14 @@ on:
       - 'scripts/release/**'
       - 'scripts/parity/**'
       - 'formal/release-report/**'
+      - '.codex/skills/alopex-development-release/**'
   pull_request:
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'
       - 'scripts/parity/**'
       - 'formal/release-report/**'
+      - '.codex/skills/alopex-development-release/**'
 
 env:
   RUST_BACKTRACE: 1

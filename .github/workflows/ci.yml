@@ -42,7 +42,7 @@ jobs:
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
             case "${path}" in
-              .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
+              .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*|.codex/skills/alopex-development-release/*) ;;
               *) production=true ;;
             esac
           done < <(git diff --name-only -z "${base_sha}" "${GITHUB_SHA}")

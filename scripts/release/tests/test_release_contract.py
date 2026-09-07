@@ -8,6 +8,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
+RECOVERY_POLICY_SOURCES = (
+    ".codex/skills/alopex-development-release/SKILL.md",
+    ".codex/skills/alopex-development-release/references/checklist.md",
+    "docs/release-pipeline-responsibilities.md",
+    "docs/release-v0.8-support.md",
+)
 
 
 class ReleaseContractTests(unittest.TestCase):
@@ -56,6 +62,42 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("parity-performance.yml", ci)
         self.assertNotIn("Required parity", ci)
         self.assertIn("issue_number:", performance)
+
+    def test_unpublished_release_tags_require_immediate_rollback(self) -> None:
+        source_map = (
+            ROOT / "docs/release-pipeline-responsibilities.md"
+        ).read_text(encoding="utf-8")
+
+        for source in RECOVERY_POLICY_SOURCES:
+            self.assertIn(f"`{source}`", source_map)
+            self.assertRegex(
+                (ROOT / source).read_text(encoding="utf-8"),
+                r"delete every\s+unpublished release tag immediately",
+            )
+        discovered_sources = {
+            str(path.relative_to(ROOT))
+            for directory in (ROOT / "docs", ROOT / ".codex/skills")
+            for path in directory.rglob("*.md")
+            if re.search(
+                r"unpublished release tag|repair-forward|tag-triggered workflow",
+                path.read_text(encoding="utf-8"),
+            )
+        }
+        self.assertSetEqual(set(RECOVERY_POLICY_SOURCES), discovered_sources)
+        skill = (ROOT / RECOVERY_POLICY_SOURCES[0]).read_text(encoding="utf-8")
+        checklist = (ROOT / RECOVERY_POLICY_SOURCES[1]).read_text(encoding="utf-8")
+        self.assertIn("prepare-python-release.sh", skill)
+        self.assertIn("release recovery policy source map", skill)
+        self.assertIn("release recovery policy source map", checklist)
+
+    def test_release_skill_changes_skip_production_and_advisory_wasm_jobs(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compatibility = (
+            ROOT / ".github/workflows/compatibility.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".codex/skills/alopex-development-release/*", ci)
+        self.assertIn(".codex/skills/alopex-development-release/**", compatibility)
 
     def test_sql_type_capability_gate_runs_in_ci_and_release(self) -> None:
         surface_gate = (
