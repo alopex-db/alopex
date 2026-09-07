@@ -200,6 +200,14 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("publish_report: true", python)
         self.assertIn("verify_python_vector_api.py", python)
 
+    def test_python_post_release_workflow_forwards_required_permissions(self) -> None:
+        python = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        post_release = python.split("  post-release-hnsw:", maxsplit=1)[1]
+
+        self.assertIn("permissions:\n      contents: write\n      issues: write", post_release)
+
     def test_immutable_tag_can_resume_full_release_after_early_gate_failure(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
