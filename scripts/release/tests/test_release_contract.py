@@ -57,6 +57,19 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("Required parity", ci)
         self.assertIn("issue_number:", performance)
 
+    def test_unpublished_release_tags_require_immediate_rollback(self) -> None:
+        skill = (
+            ROOT / ".codex/skills/alopex-development-release/SKILL.md"
+        ).read_text(encoding="utf-8")
+        checklist = (
+            ROOT
+            / ".codex/skills/alopex-development-release/references/checklist.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("delete every unpublished release tag immediately", skill)
+        self.assertIn("Core workflow creates the matching Python tag", skill)
+        self.assertIn("delete every unpublished release tag immediately", checklist)
+
     def test_sql_type_capability_gate_runs_in_ci_and_release(self) -> None:
         surface_gate = (
             ROOT / "crates/alopex-tools/v08/verify-v08-surfaces.sh"
