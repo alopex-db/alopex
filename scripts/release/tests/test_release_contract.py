@@ -223,6 +223,14 @@ class ReleaseContractTests(unittest.TestCase):
             release,
         )
         self.assertIn('git rev-parse "${RELEASE_TAG_NAME}^{commit}"', gate)
+        create_release = release.split("  create-release:", maxsplit=1)[1].split(
+            "  publish-crate:", maxsplit=1
+        )[0]
+        self.assertNotIn('git describe --tags --exact-match HEAD', create_release)
+        self.assertIn(
+            'test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"',
+            create_release,
+        )
         self.assertIn('--commit "${RELEASE_TARGET_SHA}"', gate)
         self.assertIn("for attempt in $(seq 1 30)", gate)
         self.assertNotIn("env.GITHUB_SHA", gate)
