@@ -63,11 +63,9 @@ async fn send_empty(router: axum::Router, method: Method, path: &str) -> (Status
 
 async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
     let path = format!("/api/admin/restore/{handle}");
-    let timeout = if cfg!(windows) {
-        TokioDuration::from_secs(60)
-    } else {
-        TokioDuration::from_secs(20)
-    };
+    // Coverage instrumentation makes the blocking restore copy substantially
+    // slower on Linux too. Keep the same bounded contract on every platform.
+    let timeout = TokioDuration::from_secs(60);
     let deadline = TokioInstant::now() + timeout;
     loop {
         let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
@@ -82,11 +80,10 @@ async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
             return value;
         }
         if TokioInstant::now() >= deadline {
-            break;
+            panic!("restore did not complete within {timeout:?}; last state: {state}");
         }
         sleep(TokioDuration::from_millis(100)).await;
     }
-    panic!("restore did not complete in time");
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -151,7 +148,8 @@ async fn export_restore_consistency_verify() {
     let restore_state = restore_done.get("state").expect("restore state");
     assert_eq!(
         restore_state.get("status").and_then(|v| v.as_str()),
-        Some("completed")
+        Some("completed"),
+        "restore ended unsuccessfully: {restore_state}"
     );
 
     drop(router);
