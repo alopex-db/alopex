@@ -38,6 +38,25 @@ class ReleaseContractTests(unittest.TestCase):
         ):
             self.assertIn(checkpoint, checklist)
 
+    def test_performance_acceptance_is_owned_by_its_issue_not_release(self) -> None:
+        skill = (
+            ROOT / ".codex/skills/alopex-development-release/SKILL.md"
+        ).read_text(encoding="utf-8")
+        checklist = (
+            ROOT
+            / ".codex/skills/alopex-development-release/references/checklist.md"
+        ).read_text(encoding="utf-8")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        performance = (
+            ROOT / ".github/workflows/parity-performance.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Performance acceptance belongs to its owning issue", skill)
+        self.assertIn("does not block release", checklist)
+        self.assertNotIn("parity-performance.yml", ci)
+        self.assertNotIn("Required parity", ci)
+        self.assertIn("issue_number:", performance)
+
     def test_sql_type_capability_gate_runs_in_ci_and_release(self) -> None:
         surface_gate = (
             ROOT / "crates/alopex-tools/v08/verify-v08-surfaces.sh"

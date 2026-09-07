@@ -1,16 +1,14 @@
 name: Required parity performance
 
 on:
-  workflow_call:
-    inputs:
-      suite:
-        type: string
-        required: false
-        default: curated
   schedule:
     - cron: '23 2 * * 3'
   workflow_dispatch:
     inputs:
+      issue_number:
+        description: 'Owning issue number for this acceptance run'
+        required: true
+        type: string
       suite:
         type: choice
         options: [curated, full]

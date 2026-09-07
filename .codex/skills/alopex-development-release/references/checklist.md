@@ -6,6 +6,14 @@ Create one milestone-scoped release tracker issue before running release command
 the checkpoints below into it and attach evidence as each item completes. Required-CI
 failure returns ownership to an implementation issue; it is not a release-phase repair.
 
+## Performance acceptance ownership
+
+Performance acceptance belongs to its owning issue, does not block release, and must
+be completed before that issue is closed. Codex must dispatch the performance workflow
+with the issue number, then comment the workflow URL and result on that issue. Scheduled
+performance runs are advisory monitoring only; no performance runner availability or
+performance result is a required CI, pre-tag, tag, publication, or release-tracker gate.
+
 ## Checkpoint 0 — tracker and candidate
 
 - [ ] Create the release tracker in the target milestone before release work.
