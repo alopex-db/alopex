@@ -209,7 +209,6 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          test "$(git describe --tags --exact-match HEAD)" = "${RELEASE_TAG_NAME}"
           test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
 
