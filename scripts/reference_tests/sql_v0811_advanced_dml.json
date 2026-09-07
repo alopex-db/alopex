@@ -1,0 +1,44 @@
+{
+  "schema": "alopex.sql-advanced-dml-corpus/v1",
+  "references": {
+    "postgresql": {"version":"16.14","commit":"0d1c00c624fa7367d4a895f44381887757289682","license":"PostgreSQL"},
+    "duckdb": {"version":"1.4.0","commit":"b8a06e4a22672e254cd0baa68a3dbed2eb51c56e","license":"MIT"}
+  },
+  "cases": [
+    {
+      "id": "returning",
+      "setup": ["CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)"],
+      "statement": "INSERT INTO dml_target VALUES (1, 'one'), (2, 'two') RETURNING id, value",
+      "result": true,
+      "verify": "SELECT id, value FROM dml_target ORDER BY id"
+    },
+    {
+      "id": "on-conflict",
+      "setup": ["CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)", "INSERT INTO dml_target VALUES (1, 'old')"],
+      "statement": "INSERT INTO dml_target VALUES (1, 'new') ON CONFLICT (id) DO UPDATE SET value = 'updated' RETURNING id, value",
+      "result": true,
+      "verify": "SELECT id, value FROM dml_target ORDER BY id"
+    },
+    {
+      "id": "update-from",
+      "setup": ["CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)", "CREATE TABLE dml_source (id INTEGER, value TEXT)", "INSERT INTO dml_target VALUES (1, 'old'), (2, 'keep')", "INSERT INTO dml_source VALUES (1, 'new')"],
+      "statement": "UPDATE dml_target SET value = dml_source.value FROM dml_source WHERE dml_target.id = dml_source.id",
+      "result": false,
+      "verify": "SELECT id, value FROM dml_target ORDER BY id"
+    },
+    {
+      "id": "delete-using",
+      "setup": ["CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)", "CREATE TABLE dml_source (id INTEGER)", "INSERT INTO dml_target VALUES (1, 'drop'), (2, 'keep')", "INSERT INTO dml_source VALUES (1)"],
+      "statement": "DELETE FROM dml_target USING dml_source WHERE dml_target.id = dml_source.id",
+      "result": false,
+      "verify": "SELECT id, value FROM dml_target ORDER BY id"
+    },
+    {
+      "id": "merge",
+      "setup": ["CREATE TABLE dml_target (id INTEGER PRIMARY KEY, value TEXT)", "CREATE TABLE dml_source (id INTEGER, value TEXT)", "INSERT INTO dml_target VALUES (1, 'old')", "INSERT INTO dml_source VALUES (1, 'updated')"],
+      "statement": "MERGE INTO dml_target USING dml_source ON dml_target.id = dml_source.id WHEN MATCHED THEN UPDATE SET value = dml_source.value",
+      "result": false,
+      "verify": "SELECT id, value FROM dml_target ORDER BY id"
+    }
+  ]
+}

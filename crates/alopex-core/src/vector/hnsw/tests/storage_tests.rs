@@ -11,6 +11,16 @@ use crate::vector::hnsw::HnswStorage;
 use crate::vector::Metric;
 use crate::Error;
 
+#[derive(serde::Serialize)]
+struct FormatV1Node {
+    key: Vec<u8>,
+    vector: Vec<f32>,
+    metadata: Vec<u8>,
+    neighbors: Vec<Vec<u32>>,
+    deleted: bool,
+    level: usize,
+}
+
 fn storage() -> HnswStorage {
     HnswStorage::new("test_index")
 }
@@ -46,6 +56,39 @@ fn save_and_load_roundtrip_preserves_graph() {
     let keys: Vec<_> = results.iter().map(|r| r.key.clone()).collect();
     assert!(keys.contains(&b"a".to_vec()));
     assert!(keys.contains(&b"b".to_vec()));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn format_v1_without_persisted_norm_rebuilds_cached_norm() {
+    let node_bytes = bincode::serialize(&FormatV1Node {
+        key: b"legacy".to_vec(),
+        vector: vec![3.0, 4.0],
+        metadata: b"v1".to_vec(),
+        neighbors: vec![Vec::new()],
+        deleted: false,
+        level: 0,
+    })
+    .unwrap();
+    let mut metadata = HnswMetadata {
+        version: HNSW_FORMAT_VERSION,
+        config: base_config().with_metric(Metric::Cosine),
+        entry_point: Some(0),
+        max_level: 0,
+        node_count: 1,
+        deleted_count: 0,
+        next_node_id: 1,
+        checksum: 0,
+    };
+    let metadata_bytes = bincode::serialize(&metadata).unwrap();
+    metadata.checksum = crc32fast::hash(&metadata_bytes).wrapping_add(crc32fast::hash(&node_bytes));
+
+    let graph = storage()
+        .build_graph_from_bytes(metadata, vec![Some(node_bytes)])
+        .unwrap();
+
+    assert_eq!(graph.nodes[0].as_ref().unwrap().norm, 5.0);
+    assert_eq!(graph.search(&[3.0, 4.0], 1, 8).unwrap().0[0].distance, 0.0);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

@@ -204,9 +204,9 @@ impl HnswIndex {
         txn: &mut T,
         state: &mut HnswTransactionState,
     ) -> Result<()> {
-        let (modified, inserted, deleted_keys) = state.prepare_for_commit();
+        let (modified, inserted, deleted_keys, requires_full_save) = state.prepare_for_commit();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        if inserted.is_empty() {
+        if inserted.is_empty() && !requires_full_save {
             self.storage
                 .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
         } else {
@@ -369,6 +369,7 @@ pub struct HnswTransactionState {
     inserted_nodes: HashSet<u32>,
     deleted_nodes: HashSet<u32>,
     deleted_key_indices: Vec<Vec<u8>>,
+    requires_full_save: bool,
 }
 
 impl HnswTransactionState {
@@ -383,6 +384,8 @@ impl HnswTransactionState {
             self.inserted_nodes.insert(node_id);
         } else {
             self.modified_nodes.insert(node_id);
+            // Reconnecting an existing node can rewrite every neighbor list.
+            self.requires_full_save = true;
         }
         if let Some(key) = old_key {
             self.deleted_key_indices.push(key);
@@ -394,7 +397,7 @@ impl HnswTransactionState {
         self.modified_nodes.insert(node_id);
     }
 
-    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>) {
+    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>, bool) {
         let modified: Vec<u32> = self
             .modified_nodes
             .difference(&self.inserted_nodes)
@@ -402,7 +405,7 @@ impl HnswTransactionState {
             .collect();
         let inserted: Vec<u32> = self.inserted_nodes.iter().copied().collect();
         let deleted_keys = self.deleted_key_indices.clone();
-        (modified, inserted, deleted_keys)
+        (modified, inserted, deleted_keys, self.requires_full_save)
     }
 
     fn clear(&mut self) {
@@ -411,6 +414,7 @@ impl HnswTransactionState {
         self.inserted_nodes.clear();
         self.deleted_nodes.clear();
         self.deleted_key_indices.clear();
+        self.requires_full_save = false;
     }
 }
 

@@ -55,7 +55,8 @@ pub use memory::MemoryCatalog;
 pub use persistent::TxnCatalogView;
 pub use persistent::{CatalogError, CatalogOverlay, PersistentCatalog};
 pub use table::{
-    ColumnMetadata, Compression, RowIdMode, StorageOptions, StorageType, TableMetadata,
+    ColumnMetadata, Compression, RELATIONAL_CONSTRAINTS_PROPERTY, RowIdMode, StorageOptions,
+    StorageType, TableMetadata, VIEW_DEFINITION_PROPERTY, VIEW_DEPENDENCIES_PROPERTY,
 };
 
 use crate::planner::PlannerError;

@@ -1,6 +1,7 @@
 use alopex_core::kv::KVStore;
 use std::collections::HashSet;
 
+use crate::ast::ddl::TableConstraint;
 use crate::catalog::{
     Catalog, Compression, IndexMetadata, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
@@ -29,23 +30,41 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     // WITH オプションを解析してストレージ設定へ反映
     table.storage_options = parse_storage_options(&with_options)?;
+    resolve_and_validate_foreign_keys(catalog, &mut table)?;
 
-    // Resolve PK column indices before mutating the catalog to avoid partial writes.
-    let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
-        let column_indices = resolve_column_indices(&table, &pk_columns)?;
-        ensure_indexable_columns(&table, &column_indices, "PRIMARY KEY")?;
-        let index_id = catalog.next_index_id();
-        let index_name = create_pk_index_name(&table.name);
-
-        Some(
-            IndexMetadata::new(index_id, index_name, table.name.clone(), pk_columns)
-                .with_column_indices(column_indices)
-                .with_unique(true),
-        )
-    } else {
-        None
-    };
-
+    // Resolve unique indexes before mutating the catalog to avoid partial writes.
+    let mut unique_columns = Vec::new();
+    if let Some(pk_columns) = table.primary_key.clone() {
+        unique_columns.push((create_pk_index_name(&table.name), pk_columns));
+    }
+    for (position, constraint) in table.constraints.iter().enumerate() {
+        if let TableConstraint::Unique { name, columns, .. } = constraint {
+            unique_columns.push((
+                name.clone()
+                    .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
+                columns.clone(),
+            ));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut unique_indexes = Vec::new();
+    for (index_name, columns) in unique_columns {
+        if !seen.insert(columns.clone()) {
+            continue;
+        }
+        let column_indices = resolve_column_indices(&table, &columns)?;
+        ensure_indexable_columns(&table, &column_indices, "UNIQUE")?;
+        unique_indexes.push(
+            IndexMetadata::new(
+                catalog.next_index_id(),
+                index_name,
+                table.name.clone(),
+                columns,
+            )
+            .with_column_indices(column_indices)
+            .with_unique(true),
+        );
+    }
     let table_id = catalog.next_table_id();
     table = table.with_table_id(table_id);
 
@@ -57,20 +76,92 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     catalog.create_table(table.clone())?;
 
-    if let Some(index) = pk_index.clone()
-        && let Err(err) = catalog.create_index(index)
-    {
-        // Best-effort rollback to keep catalog consistent.
-        let _ = catalog.drop_table(&table.name);
-        return Err(err.into());
+    for column in &table.columns {
+        if let Some(sequence) = &column.generated_sequence {
+            super::sequence::create_generated(
+                txn,
+                sequence.clone(),
+                format!("{}.{}", table.name, column.name),
+                column
+                    .generated_sequence_options
+                    .clone()
+                    .unwrap_or_default(),
+            )?;
+        }
+    }
+
+    for index in unique_indexes.iter().cloned() {
+        if let Err(err) = catalog.create_index(index) {
+            let _ = catalog.drop_table(&table.name);
+            return Err(err.into());
+        }
     }
 
     persist_table(txn.inner_mut(), &table)?;
-    if let Some(index) = pk_index.as_ref() {
+    for index in &unique_indexes {
         persist_index(txn.inner_mut(), index)?;
     }
 
     Ok(ExecutionResult::Success)
+}
+
+fn resolve_and_validate_foreign_keys<C: Catalog + ?Sized>(
+    catalog: &C,
+    table: &mut TableMetadata,
+) -> Result<()> {
+    let snapshot = table.clone();
+    for constraint in &mut table.constraints {
+        let TableConstraint::ForeignKey {
+            columns,
+            referenced_table,
+            referenced_columns,
+            ..
+        } = constraint
+        else {
+            continue;
+        };
+        resolve_column_indices(&snapshot, columns)?;
+        let target = if referenced_table == &snapshot.name {
+            &snapshot
+        } else {
+            catalog
+                .get_table(referenced_table)
+                .ok_or_else(|| ExecutorError::TableNotFound(referenced_table.clone()))?
+        };
+        if referenced_columns.is_empty() {
+            *referenced_columns =
+                target
+                    .primary_key
+                    .clone()
+                    .ok_or_else(|| ExecutorError::InvalidOperation {
+                        operation: "CREATE TABLE".into(),
+                        reason: format!("referenced table {referenced_table} has no primary key"),
+                    })?;
+        }
+        if columns.len() != referenced_columns.len() {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "CREATE TABLE".into(),
+                reason: "foreign key column count does not match referenced key".into(),
+            });
+        }
+        resolve_column_indices(target, referenced_columns)?;
+        let unique = target.primary_key.as_ref() == Some(referenced_columns)
+            || target.constraints.iter().any(|candidate| {
+                matches!(
+                    candidate,
+                    TableConstraint::Unique { columns, .. } if columns == referenced_columns
+                )
+            });
+        if !unique {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "CREATE TABLE".into(),
+                reason: format!(
+                    "referenced columns on {referenced_table} must be PRIMARY KEY or UNIQUE"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resolve_column_indices(table: &TableMetadata, columns: &[String]) -> Result<Vec<usize>> {

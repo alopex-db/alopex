@@ -1128,6 +1128,8 @@ struct OwnedMemoryTransactionState {
     start_version: u64,
     writes: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
+    next_savepoint_id: u64,
+    savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>)>,
     cursor_open: bool,
 }
 
@@ -1144,6 +1146,8 @@ impl OwnedMemoryTransaction {
                 start_version,
                 writes: BTreeMap::new(),
                 read_set: HashMap::new(),
+                next_savepoint_id: 1,
+                savepoints: Vec::new(),
                 cursor_open: false,
             })),
         }
@@ -1258,6 +1262,68 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
             return Err(Error::TxnClosed);
         }
         state.writes.insert(key, None);
+        Ok(())
+    }
+
+    fn create_savepoint(&mut self) -> Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let id = state.next_savepoint_id;
+        state.next_savepoint_id = id.checked_add(1).ok_or_else(|| Error::InvalidParameter {
+            param: "savepoint".into(),
+            reason: "savepoint identifier overflow".into(),
+        })?;
+        let writes = state.writes.clone();
+        state.savepoints.push((id, writes));
+        Ok(id)
+    }
+
+    fn rollback_to_savepoint(&mut self, id: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let position = state
+            .savepoints
+            .iter()
+            .rposition(|(candidate, _)| *candidate == id)
+            .ok_or_else(|| Error::InvalidParameter {
+                param: "savepoint".into(),
+                reason: "unknown savepoint identifier".into(),
+            })?;
+        state.writes = state.savepoints[position].1.clone();
+        state.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    fn release_savepoint(&mut self, id: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let position = state
+            .savepoints
+            .iter()
+            .rposition(|(candidate, _)| *candidate == id)
+            .ok_or_else(|| Error::InvalidParameter {
+                param: "savepoint".into(),
+                reason: "unknown savepoint identifier".into(),
+            })?;
+        state.savepoints.truncate(position);
         Ok(())
     }
 

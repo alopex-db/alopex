@@ -1072,6 +1072,39 @@ class RemoteDatabase:
     def query_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Database.query_stream", _STREAM_REASON)
 
+    def execute_shared(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Database.execute_shared",
+            "the server exposes its transaction lifecycle through session endpoints, "
+            "not the embedded shared-execution request object",
+        )
+
+    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Database.prepare",
+            "prepared-statement handles are local to an embedded database handle",
+        )
+
+    def copy_from_csv(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Database.copy_from_csv",
+            "the server has no request body stream equivalent to the embedded "
+            "CSV reader",
+        )
+
+    def copy_to_csv(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Database.copy_to_csv",
+            "the server has no response body stream equivalent to the embedded "
+            "CSV writer",
+        )
+
+    def list_sequences(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Database.list_sequences",
+            "the server does not expose the embedded sequence catalog accessor",
+        )
+
     def flush(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported(
             "Database.flush",

@@ -79,6 +79,18 @@ with remote.begin() as txn:          # サーバーセッション（/session/be
 remote.close()
 ```
 
+組み込み`Database`では、繰り返し実行する1文を`prepare()`できます。bind indexは
+1-basedで、`?`だけを受け付けます。
+
+```python
+statement = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+statement.bind(1, 2)
+statement.bind(2, "beta")
+statement.execute()
+statement.reset()
+statement.finalize()
+```
+
 | target | 結果 |
 | --- | --- |
 | `http://host:port` / `https://host:port` | `RemoteDatabase` |
@@ -169,7 +181,7 @@ early close、cancel、failure は `transaction.status["stream_effect"]` と str
 
 ### Python DataFrame streaming / expressions
 
-`LazyFrame.collect(streaming=True)` は Phase 3 と同じ source、row order、schema、NULL、resource
+`LazyFrame.collect_batches()` は Phase 3 と同じ source、row order、schema、NULL、resource
 contract で有限 `DataFrame` batch を返します。`concat`、`concat_str`、`select`、`filter`、
 `with_columns` は同じ expression semantics を使用します。
 
@@ -186,9 +198,9 @@ plan = (
     ])
 )
 
-with plan.collect(streaming=True, batch_rows=1) as batches:
+with plan.collect_batches(chunk_size=1) as batches:
     for batch in batches:
-        print(batch.to_dict())
+        print(batch.to_dict(as_series=False))
 ```
 
 ### asyncio
@@ -272,7 +284,7 @@ with db.begin(TxnMode.READ_WRITE) as txn:
     txn.commit()
 
 results, stats = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 1)
-print(stats.node_count)
+print(stats.nodes_visited, stats.distance_computations, stats.search_time_us)
 ```
 
 ### Catalog API（polars 必須）

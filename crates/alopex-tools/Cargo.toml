@@ -26,6 +26,10 @@ path = "src/bin/verify_release_embedded.rs"
 name = "demo-v08-embedded"
 path = "src/bin/demo_v08_embedded.rs"
 
+[[bin]]
+name = "verify-sql-transaction-failures"
+path = "src/bin/verify_sql_transaction_failures.rs"
+
 [dependencies]
 serde_json = "1.0"
 

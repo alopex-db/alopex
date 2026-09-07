@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
 use alopex_cli::cli::{OutputFormat, SqlCommand};
@@ -16,7 +16,7 @@ fn batch_mode() -> BatchMode {
     }
 }
 
-fn setup_db() -> Database {
+fn setup_db() -> Arc<Database> {
     let db = Database::open_in_memory().expect("db");
     db.execute_sql("CREATE TABLE streaming_test (id INTEGER PRIMARY KEY);")
         .expect("create table");
@@ -24,7 +24,7 @@ fn setup_db() -> Database {
         db.execute_sql(&format!("INSERT INTO streaming_test (id) VALUES ({});", i))
             .expect("insert row");
     }
-    db
+    Arc::new(db)
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -37,6 +37,7 @@ fn streaming_max_rows_limits_output() {
         fetch_size: None,
         max_rows: Some(2),
         deadline: None,
+        params: Vec::new(),
         read_mode: None,
         routing_report: None,
         tui: false,
@@ -80,6 +81,7 @@ fn streaming_deadline_exceeded() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        params: Vec::new(),
         read_mode: None,
         routing_report: None,
         tui: false,
@@ -125,6 +127,7 @@ fn streaming_cancelled() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        params: Vec::new(),
         read_mode: None,
         routing_report: None,
         tui: false,

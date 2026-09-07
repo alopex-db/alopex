@@ -3,9 +3,15 @@
 //! This module defines [`TableMetadata`] and [`ColumnMetadata`] which store
 //! schema information for tables and their columns.
 
+use crate::ast::ddl::SequenceOptions;
+use crate::ast::ddl::TableConstraint;
 use crate::ast::expr::Expr;
 use crate::catalog::persistent::{DataSourceFormat, TableType};
 use crate::planner::types::ResolvedType;
+
+pub const VIEW_DEFINITION_PROPERTY: &str = "alopex.view.definition";
+pub const VIEW_DEPENDENCIES_PROPERTY: &str = "alopex.view.dependencies";
+pub const RELATIONAL_CONSTRAINTS_PROPERTY: &str = "alopex.relational.constraints";
 use std::collections::HashMap;
 
 /// Storage layout for a table.
@@ -97,6 +103,8 @@ pub struct TableMetadata {
     pub columns: Vec<ColumnMetadata>,
     /// Primary key columns (supports composite keys).
     pub primary_key: Option<Vec<String>>,
+    /// CHECK, UNIQUE, and FOREIGN KEY definitions in declaration order.
+    pub constraints: Vec<TableConstraint>,
     /// Storage configuration (row/columnar, compression, row group sizing).
     pub storage_options: StorageOptions,
     /// Storage location path.
@@ -122,6 +130,7 @@ impl TableMetadata {
             data_source_format: DataSourceFormat::default(),
             columns,
             primary_key: None,
+            constraints: Vec::new(),
             storage_options: StorageOptions::default(),
             storage_location: None,
             comment: None,
@@ -229,6 +238,10 @@ pub struct ColumnMetadata {
     pub unique: bool,
     /// DEFAULT value expression.
     pub default: Option<Expr>,
+    /// Internal sequence used by SERIAL/IDENTITY columns.
+    pub generated_sequence: Option<String>,
+    /// Sequence options declared by an IDENTITY column.
+    pub generated_sequence_options: Option<SequenceOptions>,
 }
 
 impl ColumnMetadata {
@@ -243,6 +256,8 @@ impl ColumnMetadata {
             primary_key: false,
             unique: false,
             default: None,
+            generated_sequence: None,
+            generated_sequence_options: None,
         }
     }
 
@@ -267,6 +282,18 @@ impl ColumnMetadata {
     /// Set the DEFAULT value.
     pub fn with_default(mut self, default: Expr) -> Self {
         self.default = Some(default);
+        self
+    }
+
+    /// Set the internal sequence used for automatic integer generation.
+    pub fn with_generated_sequence(mut self, sequence: impl Into<String>) -> Self {
+        self.generated_sequence = Some(sequence.into());
+        self
+    }
+
+    /// Set sequence options for an automatically generated column.
+    pub fn with_generated_sequence_options(mut self, options: SequenceOptions) -> Self {
+        self.generated_sequence_options = Some(options);
         self
     }
 }

@@ -108,6 +108,8 @@ pub struct SearchStats {
     pub distance_computations: u64,
     /// Elapsed search time in microseconds.
     pub search_time_us: u64,
+    #[cfg(test)]
+    pub(crate) query_norm_computations: u64,
 }
 
 /// HNSW 検索結果の 1 件。
@@ -143,6 +145,8 @@ pub(crate) struct HnswNode {
     pub key: Vec<u8>,
     /// Vector payload.
     pub vector: Vec<f32>,
+    /// Cached L2 norm for cosine scoring.
+    pub norm: f32,
     /// Metadata blob associated with the vector.
     pub metadata: Vec<u8>,
     /// Adjacency lists per level (level -> node IDs).

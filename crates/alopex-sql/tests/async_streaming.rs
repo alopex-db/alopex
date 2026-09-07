@@ -60,6 +60,8 @@ async fn dropping_stream_allows_commit_to_finish() {
         table: "users".into(),
         columns: vec!["id".into(), "name".into()],
         values,
+        conflict: None,
+        returning: None,
     };
     let result = executor.execute(insert).unwrap();
     assert!(matches!(result, ExecutionResult::RowsAffected(256)));

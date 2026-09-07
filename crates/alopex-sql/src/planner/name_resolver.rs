@@ -288,8 +288,10 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
                 Ok(())
             }
 
-            ExprKind::Literal { .. } | ExprKind::VectorLiteral { .. } => {
-                // Literals don't need resolution
+            ExprKind::Parameter { .. }
+            | ExprKind::Literal { .. }
+            | ExprKind::VectorLiteral { .. } => {
+                // Value leaves don't need name resolution.
                 Ok(())
             }
 

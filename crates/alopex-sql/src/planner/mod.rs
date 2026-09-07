@@ -26,8 +26,9 @@ pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
-    JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator,
-    TableFunctionKind, ValueWindowFunction, WindowExpr, WindowFunction,
+    JoinType, JoinedDmlSource, LogicalPlan, MergeActionPlan, MergeClausePlan, OffsetWindowFunction,
+    OnConflictActionPlan, OnConflictPlan, RecursiveCteLimits, SetOperator, TableFunctionKind,
+    ValueWindowFunction, WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -37,12 +38,13 @@ pub use typed_expr::{
 pub use types::ResolvedType;
 
 use crate::ast::ddl::{
-    ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
+    AlterSequence, AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateSequence,
+    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
-    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
-    Select, SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update,
-    Values,
+    CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
+    LITERAL_TABLE, Merge, MergeAction, OnConflictAction, OrderByExpr, QueryBody, Select,
+    SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -68,6 +70,193 @@ struct WindowSelectStages {
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
+
+fn metadata_schema(columns: &[(&str, ResolvedType)]) -> Vec<ColumnMetadata> {
+    columns
+        .iter()
+        .map(|(name, data_type)| ColumnMetadata::new(*name, data_type.clone()))
+        .collect()
+}
+
+fn metadata_text(value: Option<String>) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(value.map_or(Literal::Null, Literal::String)),
+        resolved_type: ResolvedType::Text,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_bool(value: bool) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Boolean(value)),
+        resolved_type: ResolvedType::Boolean,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_bigint(value: usize) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Number(value.to_string())),
+        resolved_type: ResolvedType::BigInt,
+        span: crate::ast::Span::default(),
+    }
+}
+
+fn metadata_index_type(index: &IndexMetadata) -> String {
+    match index.method {
+        Some(crate::ast::IndexMethod::Hnsw) => "HNSW",
+        Some(crate::ast::IndexMethod::Fts) => "FTS",
+        Some(crate::ast::IndexMethod::BTree) | None => "BTREE",
+    }
+    .to_string()
+}
+
+fn metadata_default(expr: &Expr) -> Option<String> {
+    Some(match &expr.kind {
+        ExprKind::Literal {
+            literal: Literal::Number(value),
+        } => value.clone(),
+        ExprKind::Literal {
+            literal: Literal::String(value),
+        } => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+        ExprKind::Literal {
+            literal: Literal::Boolean(value),
+        } => if *value { "TRUE" } else { "FALSE" }.to_string(),
+        ExprKind::Literal {
+            literal: Literal::Null,
+        } => "NULL".to_string(),
+        ExprKind::Literal {
+            literal: Literal::Interval(value),
+        } => {
+            format!("INTERVAL '{}'", value.replace('\'', "''"))
+        }
+        // ponytail: expose only stable SQL literals until the AST owns a canonical SQL formatter.
+        _ => return None,
+    })
+}
+
+fn view_dependencies(query: &Select) -> Result<Vec<String>, PlannerError> {
+    fn visit_query(
+        value: &serde_json::Value,
+        outer_ctes: &HashSet<String>,
+        dependencies: &mut HashSet<String>,
+    ) {
+        let Some(fields) = value.as_object() else {
+            return;
+        };
+        let mut visible_ctes = outer_ctes.clone();
+        if let Some(with) = fields.get("with").and_then(serde_json::Value::as_object)
+            && let Some(ctes) = with.get("ctes").and_then(serde_json::Value::as_array)
+        {
+            if with
+                .get("recursive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                visible_ctes.extend(ctes.iter().filter_map(|cte| {
+                    cte.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }));
+            }
+            for cte in ctes {
+                if let Some(cte_query) = cte.get("query") {
+                    visit_query(cte_query, &visible_ctes, dependencies);
+                }
+                if let Some(name) = cte.get("name").and_then(serde_json::Value::as_str) {
+                    visible_ctes.insert(name.to_string());
+                }
+            }
+        }
+        for (name, value) in fields {
+            if name != "with" {
+                visit(value, &visible_ctes, dependencies);
+            }
+        }
+    }
+
+    fn visit(
+        value: &serde_json::Value,
+        visible_ctes: &HashSet<String>,
+        dependencies: &mut HashSet<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let variant = fields.get("variant").and_then(serde_json::Value::as_str);
+                if fields.contains_key("from") || matches!(variant, Some("Select" | "Values")) {
+                    visit_query(value, visible_ctes, dependencies);
+                    return;
+                }
+                if fields.get("variant").and_then(serde_json::Value::as_str) == Some("Table")
+                    && let Some(name) = fields.get("name").and_then(serde_json::Value::as_str)
+                    && !visible_ctes.contains(name)
+                {
+                    dependencies.insert(name.to_string());
+                }
+                for value in fields.values() {
+                    visit(value, visible_ctes, dependencies);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, visible_ctes, dependencies);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let value = serde_json::to_value(query).map_err(|error| PlannerError::InvalidExpression {
+        message: format!("cannot serialize view definition: {error}"),
+    })?;
+    let mut dependencies = HashSet::new();
+    visit_query(&value, &HashSet::new(), &mut dependencies);
+    let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+    dependencies.sort();
+    Ok(dependencies)
+}
+
+pub(crate) fn column_metadata_from_def(col: &ColumnDef) -> ColumnMetadata {
+    let mut meta = ColumnMetadata::new(col.name.clone(), ResolvedType::from_ast(&col.data_type));
+    let auto_sequence = matches!(
+        col.data_type,
+        crate::ast::ddl::DataType::SmallSerial
+            | crate::ast::ddl::DataType::Serial
+            | crate::ast::ddl::DataType::BigSerial
+    );
+    let identity_options = col
+        .constraints
+        .iter()
+        .find_map(|constraint| match constraint {
+            ColumnConstraint::Identity { options, .. } => Some(options.clone()),
+            _ => None,
+        });
+    if auto_sequence || identity_options.is_some() {
+        meta = meta.with_generated_sequence(crate::executor::ddl::sequence::generated_name(
+            "pending", &col.name,
+        ));
+        if let Some(options) = identity_options {
+            meta = meta.with_generated_sequence_options(options);
+        }
+    }
+    for constraint in &col.constraints {
+        match constraint {
+            ColumnConstraint::NotNull { .. } => meta.not_null = true,
+            ColumnConstraint::PrimaryKey { .. } => {
+                meta.primary_key = true;
+                meta.not_null = true;
+            }
+            ColumnConstraint::Unique { .. } => meta.unique = true,
+            ColumnConstraint::Default { value, .. } => meta.default = Some(value.clone()),
+            ColumnConstraint::Check { .. }
+            | ColumnConstraint::References { .. }
+            | ColumnConstraint::Identity { .. } => {}
+        }
+    }
+    meta
+}
 
 fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
     items
@@ -190,9 +379,10 @@ fn cte_dependency_cycle(with: &crate::ast::WithClause) -> bool {
 
 fn expr_contains_subquery(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Literal { .. } | ExprKind::ColumnRef { .. } | ExprKind::VectorLiteral { .. } => {
-            false
-        }
+        ExprKind::Parameter { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::VectorLiteral { .. } => false,
         ExprKind::BinaryOp { left, right, .. } => {
             expr_contains_subquery(left) || expr_contains_subquery(right)
         }
@@ -611,6 +801,9 @@ impl TableReferenceExtractor {
         references: &mut Vec<TableReference>,
     ) {
         match plan {
+            LogicalPlan::Explain { input, .. } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references)
+            }
             LogicalPlan::Scan { table, projection } => {
                 if table != LITERAL_TABLE {
                     push_table_reference(
@@ -807,6 +1000,7 @@ impl TableReferenceExtractor {
                 table,
                 assignments,
                 filter,
+                ..
             } => {
                 push_table_reference(
                     references,
@@ -821,7 +1015,7 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete { table, filter, .. } => {
                 push_table_reference(
                     references,
                     table,
@@ -832,6 +1026,71 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(filter, diagnostics, references);
                 }
             }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                push_table_reference(
+                    references,
+                    target,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                push_table_reference(
+                    references,
+                    source,
+                    TableReferenceAccess::Read,
+                    TableReferenceSource::LogicalPlanScan,
+                );
+                self.extract_typed_expr(on, diagnostics, references);
+                for clause in clauses {
+                    if let Some(condition) = &clause.condition {
+                        self.extract_typed_expr(condition, diagnostics, references);
+                    }
+                    match &clause.action {
+                        MergeActionPlan::Update { assignments } => {
+                            for assignment in assignments {
+                                self.extract_typed_expr(&assignment.value, diagnostics, references);
+                            }
+                        }
+                        MergeActionPlan::Insert { values, .. } => {
+                            for value in values {
+                                self.extract_typed_expr(value, diagnostics, references);
+                            }
+                        }
+                        MergeActionPlan::DoNothing => {}
+                    }
+                }
+            }
+            LogicalPlan::Copy {
+                table,
+                direction,
+                query,
+                ..
+            } => {
+                if let Some(query) = query {
+                    self.extract_plan(
+                        query,
+                        TableReferenceAccess::Read,
+                        scan_source,
+                        diagnostics,
+                        references,
+                    );
+                } else {
+                    push_table_reference(
+                        references,
+                        table,
+                        if *direction == CopyDirection::From {
+                            root_access
+                        } else {
+                            TableReferenceAccess::Read
+                        },
+                        TableReferenceSource::LogicalPlanMutationTarget,
+                    );
+                }
+            }
             LogicalPlan::CreateTable { table, .. } => push_table_reference(
                 references,
                 &table.name,
@@ -839,6 +1098,20 @@ impl TableReferenceExtractor {
                 TableReferenceSource::LogicalPlanDdlTarget,
             ),
             LogicalPlan::DropTable { name, .. } => push_table_reference(
+                references,
+                name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
+            LogicalPlan::CreateView { table, .. } => push_table_reference(
+                references,
+                &table.name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
+            LogicalPlan::DropView { name, .. }
+            | LogicalPlan::AlterTable { name, .. }
+            | LogicalPlan::Truncate { name } => push_table_reference(
                 references,
                 name,
                 root_access,
@@ -857,6 +1130,9 @@ impl TableReferenceExtractor {
                 ),
             )),
             LogicalPlan::Pragma { .. } => {}
+            LogicalPlan::CreateSequence(_)
+            | LogicalPlan::AlterSequence(_)
+            | LogicalPlan::DropSequence(_) => {}
         }
     }
 
@@ -1007,6 +1283,10 @@ fn push_table_reference(
 enum GenericHostStatement<'a> {
     CreateTable(&'a CreateTable),
     DropTable(&'a DropTable),
+    CreateView(&'a CreateView),
+    DropView(&'a DropView),
+    AlterTable(&'a AlterTable),
+    Truncate(&'a Truncate),
     CreateIndex(&'a CreateIndex),
     DropIndex(&'a DropIndex),
     Pragma {
@@ -1018,16 +1298,24 @@ enum GenericHostStatement<'a> {
     Insert(&'a Insert),
     Update(&'a Update),
     Delete(&'a Delete),
+    Merge(&'a Merge),
+    Copy(&'a crate::ast::CopyStatement),
+    CreateSequence(&'a CreateSequence),
+    AlterSequence(&'a AlterSequence),
+    DropSequence(&'a DropSequence),
     Unsupported,
 }
 
 fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHostStatement<'_> {
-    // The fallback is intentionally unreachable for the current enum. It
-    // becomes the safe route before a future statement-specific host is added.
-    #[allow(unreachable_patterns)]
+    // Session-level control statements never enter the generic statement
+    // planner; fail closed if a caller bypasses the session dispatcher.
     match statement_kind {
         StatementKind::CreateTable(statement) => GenericHostStatement::CreateTable(statement),
         StatementKind::DropTable(statement) => GenericHostStatement::DropTable(statement),
+        StatementKind::CreateView(statement) => GenericHostStatement::CreateView(statement),
+        StatementKind::DropView(statement) => GenericHostStatement::DropView(statement),
+        StatementKind::AlterTable(statement) => GenericHostStatement::AlterTable(statement),
+        StatementKind::Truncate(statement) => GenericHostStatement::Truncate(statement),
         StatementKind::CreateIndex(statement) => GenericHostStatement::CreateIndex(statement),
         StatementKind::DropIndex(statement) => GenericHostStatement::DropIndex(statement),
         StatementKind::Pragma { name, value } => GenericHostStatement::Pragma { name, value },
@@ -1036,6 +1324,11 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
+        StatementKind::Merge(statement) => GenericHostStatement::Merge(statement),
+        StatementKind::Copy(statement) => GenericHostStatement::Copy(statement),
+        StatementKind::CreateSequence(statement) => GenericHostStatement::CreateSequence(statement),
+        StatementKind::AlterSequence(statement) => GenericHostStatement::AlterSequence(statement),
+        StatementKind::DropSequence(statement) => GenericHostStatement::DropSequence(statement),
         _ => GenericHostStatement::Unsupported,
     }
 }
@@ -1065,9 +1358,22 @@ fn table_reference_access_for_classified(
         }
         GenericHostStatement::Insert(_)
         | GenericHostStatement::Update(_)
-        | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
+        | GenericHostStatement::Delete(_)
+        | GenericHostStatement::Merge(_) => Ok(TableReferenceAccess::Write),
+        GenericHostStatement::Copy(statement) => Ok(match statement.direction {
+            CopyDirection::From => TableReferenceAccess::Write,
+            CopyDirection::To => TableReferenceAccess::Read,
+        }),
+        GenericHostStatement::CreateSequence(_) | GenericHostStatement::AlterSequence(_) => {
+            Ok(TableReferenceAccess::Metadata)
+        }
+        GenericHostStatement::DropSequence(_) => Ok(TableReferenceAccess::Metadata),
         GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
         GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
+        GenericHostStatement::CreateView(_)
+        | GenericHostStatement::DropView(_)
+        | GenericHostStatement::AlterTable(_)
+        | GenericHostStatement::Truncate(_) => Ok(TableReferenceAccess::Metadata),
         GenericHostStatement::CreateIndex(_)
         | GenericHostStatement::DropIndex(_)
         | GenericHostStatement::Pragma { .. } => Ok(TableReferenceAccess::Metadata),
@@ -1128,6 +1434,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// - Type checking fails
     /// - DDL validation fails (e.g., table already exists for CREATE TABLE)
     pub fn plan(&self, stmt: &Statement) -> Result<LogicalPlan, PlannerError> {
+        if let StatementKind::Explain {
+            analyze,
+            format,
+            statement,
+        } = &stmt.kind
+        {
+            return Ok(LogicalPlan::Explain {
+                analyze: *analyze,
+                format: *format,
+                input: Box::new(self.plan(statement)?),
+            });
+        }
         self.plan_classified_statement(stmt, classify_generic_host_statement(&stmt.kind))
     }
 
@@ -1140,6 +1458,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // DDL statements
             GenericHostStatement::CreateTable(statement) => self.plan_create_table(statement),
             GenericHostStatement::DropTable(statement) => self.plan_drop_table(statement),
+            GenericHostStatement::CreateView(statement) => self.plan_create_view(statement),
+            GenericHostStatement::DropView(statement) => self.plan_drop_view(statement),
+            GenericHostStatement::AlterTable(statement) => self.plan_alter_table(statement),
+            GenericHostStatement::Truncate(statement) => self.plan_truncate(statement),
             GenericHostStatement::CreateIndex(statement) => self.plan_create_index(statement),
             GenericHostStatement::DropIndex(statement) => self.plan_drop_index(statement),
             GenericHostStatement::Pragma { name, value } => self.plan_pragma(name, value),
@@ -1150,6 +1472,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
+            GenericHostStatement::Merge(statement) => self.plan_merge(statement),
+            GenericHostStatement::Copy(statement) => self.plan_copy(statement),
+            GenericHostStatement::CreateSequence(statement) => {
+                Ok(LogicalPlan::CreateSequence(statement.clone()))
+            }
+            GenericHostStatement::AlterSequence(statement) => {
+                Ok(LogicalPlan::AlterSequence(statement.clone()))
+            }
+            GenericHostStatement::DropSequence(statement) => {
+                Ok(LogicalPlan::DropSequence(statement.clone()))
+            }
             GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
     }
@@ -1160,6 +1493,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         value: &Option<PragmaValue>,
     ) -> Result<LogicalPlan, PlannerError> {
         let name = raw_name.to_ascii_lowercase();
+        if matches!(name.as_str(), "show_tables" | "show_indexes" | "describe") {
+            let target = match value {
+                Some(PragmaValue::Text(target)) => Some(target.as_str()),
+                Some(PragmaValue::Int(_)) => {
+                    return Err(PlannerError::InvalidPragma {
+                        name,
+                        reason: "metadata targets must be table names".to_string(),
+                    });
+                }
+                None => None,
+            };
+            return self.metadata_values(&name, target, crate::ast::Span::default());
+        }
         if !matches!(name.as_str(), "cache_size" | "memory_limit" | "io_stats") {
             return Err(PlannerError::InvalidPragma {
                 name,
@@ -1209,6 +1555,237 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         })
     }
 
+    fn metadata_values(
+        &self,
+        surface: &str,
+        target: Option<&str>,
+        span: crate::ast::Span,
+    ) -> Result<LogicalPlan, PlannerError> {
+        let mut tables = self.catalog.list_tables();
+        tables.sort_by(|left, right| {
+            (&left.catalog_name, &left.namespace_name, &left.name).cmp(&(
+                &right.catalog_name,
+                &right.namespace_name,
+                &right.name,
+            ))
+        });
+        let (schema, rows) = match surface {
+            "show_tables" => (
+                vec![ColumnMetadata::new("table_name", ResolvedType::Text)],
+                tables
+                    .iter()
+                    .map(|table| vec![metadata_text(Some(table.name.clone()))])
+                    .collect(),
+            ),
+            "show_indexes" => {
+                if let Some(table) = target
+                    && !self.catalog.table_exists(table)
+                {
+                    return Err(PlannerError::table_not_found(table, span));
+                }
+                let schema = vec![
+                    ColumnMetadata::new("table_name", ResolvedType::Text),
+                    ColumnMetadata::new("index_name", ResolvedType::Text),
+                    ColumnMetadata::new("is_unique", ResolvedType::Boolean),
+                    ColumnMetadata::new("index_type", ResolvedType::Text),
+                ];
+                let mut rows = Vec::new();
+                for table in tables
+                    .iter()
+                    .filter(|table| target.is_none_or(|name| table.name == name))
+                {
+                    let mut indexes = self.catalog.get_indexes_for_table(&table.name);
+                    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+                    for index in indexes {
+                        rows.push(vec![
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(index.name.clone())),
+                            metadata_bool(index.unique),
+                            metadata_text(Some(metadata_index_type(index))),
+                        ]);
+                    }
+                }
+                (schema, rows)
+            }
+            "describe" => {
+                let target = target.ok_or_else(|| PlannerError::InvalidPragma {
+                    name: surface.to_string(),
+                    reason: "DESCRIBE requires a table name".to_string(),
+                })?;
+                let table = self
+                    .catalog
+                    .get_table(target)
+                    .ok_or_else(|| PlannerError::table_not_found(target, span))?;
+                let schema = [
+                    "column_name",
+                    "column_type",
+                    "null",
+                    "key",
+                    "default",
+                    "extra",
+                ]
+                .into_iter()
+                .map(|name| ColumnMetadata::new(name, ResolvedType::Text))
+                .collect();
+                let rows = table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        vec![
+                            metadata_text(Some(column.name.clone())),
+                            metadata_text(Some(column.data_type.to_string())),
+                            metadata_text(Some(if column.not_null { "NO" } else { "YES" }.into())),
+                            metadata_text(Some(
+                                if column.primary_key {
+                                    "PRI"
+                                } else if column.unique {
+                                    "UNI"
+                                } else {
+                                    ""
+                                }
+                                .into(),
+                            )),
+                            metadata_text(column.default.as_ref().and_then(metadata_default)),
+                            metadata_text(Some(String::new())),
+                        ]
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.tables" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("table_type", ResolvedType::Text),
+                ]);
+                let rows = tables
+                    .iter()
+                    .map(|table| {
+                        vec![
+                            metadata_text(Some(table.catalog_name.clone())),
+                            metadata_text(Some(table.namespace_name.clone())),
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(
+                                match table.table_type {
+                                    TableType::Managed => "BASE TABLE",
+                                    TableType::External => "FOREIGN TABLE",
+                                    TableType::Temporary => "LOCAL TEMPORARY",
+                                    TableType::View => "VIEW",
+                                }
+                                .into(),
+                            )),
+                        ]
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.columns" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("column_name", ResolvedType::Text),
+                    ("ordinal_position", ResolvedType::BigInt),
+                    ("column_default", ResolvedType::Text),
+                    ("is_nullable", ResolvedType::Text),
+                    ("data_type", ResolvedType::Text),
+                ]);
+                let rows = tables
+                    .iter()
+                    .flat_map(|table| {
+                        table
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(move |(position, column)| {
+                                vec![
+                                    metadata_text(Some(table.catalog_name.clone())),
+                                    metadata_text(Some(table.namespace_name.clone())),
+                                    metadata_text(Some(table.name.clone())),
+                                    metadata_text(Some(column.name.clone())),
+                                    metadata_bigint(position + 1),
+                                    metadata_text(
+                                        column.default.as_ref().and_then(metadata_default),
+                                    ),
+                                    metadata_text(Some(
+                                        if column.not_null { "NO" } else { "YES" }.into(),
+                                    )),
+                                    metadata_text(Some(column.data_type.to_string())),
+                                ]
+                            })
+                    })
+                    .collect();
+                (schema, rows)
+            }
+            "information_schema.indexes" => {
+                let schema = metadata_schema(&[
+                    ("table_catalog", ResolvedType::Text),
+                    ("table_schema", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("index_name", ResolvedType::Text),
+                    ("is_unique", ResolvedType::Boolean),
+                    ("index_type", ResolvedType::Text),
+                    ("ordinal_position", ResolvedType::BigInt),
+                    ("column_name", ResolvedType::Text),
+                ]);
+                let mut rows = Vec::new();
+                for table in &tables {
+                    let mut indexes = self.catalog.get_indexes_for_table(&table.name);
+                    indexes.sort_by(|left, right| left.name.cmp(&right.name));
+                    for index in indexes {
+                        for (position, column) in index.columns.iter().enumerate() {
+                            rows.push(vec![
+                                metadata_text(Some(index.catalog_name.clone())),
+                                metadata_text(Some(index.namespace_name.clone())),
+                                metadata_text(Some(table.name.clone())),
+                                metadata_text(Some(index.name.clone())),
+                                metadata_bool(index.unique),
+                                metadata_text(Some(metadata_index_type(index))),
+                                metadata_bigint(position + 1),
+                                metadata_text(Some(column.clone())),
+                            ]);
+                        }
+                    }
+                }
+                (schema, rows)
+            }
+            "information_schema.table_constraints" => {
+                use crate::ast::ddl::TableConstraint;
+                let schema = metadata_schema(&[
+                    ("constraint_catalog", ResolvedType::Text),
+                    ("constraint_schema", ResolvedType::Text),
+                    ("constraint_name", ResolvedType::Text),
+                    ("table_name", ResolvedType::Text),
+                    ("constraint_type", ResolvedType::Text),
+                ]);
+                let mut rows = Vec::new();
+                for table in &tables {
+                    for (position, constraint) in table.constraints.iter().enumerate() {
+                        let (name, kind) = match constraint {
+                            TableConstraint::PrimaryKey { name, .. } => (name, "PRIMARY KEY"),
+                            TableConstraint::Unique { name, .. } => (name, "UNIQUE"),
+                            TableConstraint::Check { name, .. } => (name, "CHECK"),
+                            TableConstraint::ForeignKey { name, .. } => (name, "FOREIGN KEY"),
+                        };
+                        rows.push(vec![
+                            metadata_text(Some(table.catalog_name.clone())),
+                            metadata_text(Some(table.namespace_name.clone())),
+                            metadata_text(Some(name.clone().unwrap_or_else(|| {
+                                format!("{}_constraint_{}", table.name, position)
+                            }))),
+                            metadata_text(Some(table.name.clone())),
+                            metadata_text(Some(kind.into())),
+                        ]);
+                    }
+                }
+                (schema, rows)
+            }
+            _ => unreachable!("validated metadata surface"),
+        };
+        Ok(LogicalPlan::Values { rows, schema })
+    }
+
     // ============================================================
     // DDL Planning Methods (Task 16)
     // ============================================================
@@ -1224,11 +1801,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Convert column definitions to metadata
-        let columns: Vec<ColumnMetadata> = stmt
-            .columns
-            .iter()
-            .map(|col| self.convert_column_def(col))
-            .collect();
+        let mut columns: Vec<ColumnMetadata> =
+            stmt.columns.iter().map(column_metadata_from_def).collect();
+        for column in &mut columns {
+            if column.generated_sequence.is_some() {
+                column.generated_sequence = Some(crate::executor::ddl::sequence::generated_name(
+                    &stmt.name,
+                    &column.name,
+                ));
+            }
+        }
 
         // Collect primary key from table constraints
         let primary_key = Self::extract_primary_key(stmt);
@@ -1239,9 +1821,29 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         if let Some(pk) = primary_key {
             table = table.with_primary_key(pk);
         }
+        table.constraints = Self::normalized_table_constraints(stmt);
+        if table.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                crate::ast::ddl::TableConstraint::ForeignKey {
+                    deferrable: true,
+                    ..
+                }
+            )
+        }) {
+            return Err(PlannerError::unsupported_feature(
+                "DEFERRABLE constraints",
+                "a future version",
+                stmt.span,
+            ));
+        }
         table.catalog_name = "default".to_string();
         table.namespace_name = "default".to_string();
-        table.table_type = TableType::Managed;
+        table.table_type = if stmt.temporary {
+            TableType::Temporary
+        } else {
+            TableType::Managed
+        };
         table.data_source_format = DataSourceFormat::Alopex;
         table.properties = HashMap::new();
 
@@ -1254,42 +1856,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .map(|opt| (opt.key.clone(), opt.value.clone()))
                 .collect(),
         })
-    }
-
-    /// Convert an AST column definition to catalog column metadata.
-    fn convert_column_def(&self, col: &ColumnDef) -> ColumnMetadata {
-        let data_type = ResolvedType::from_ast(&col.data_type);
-        let mut meta = ColumnMetadata::new(col.name.clone(), data_type);
-
-        // Process constraints
-        for constraint in &col.constraints {
-            meta = Self::apply_column_constraint(meta, constraint);
-        }
-
-        meta
-    }
-
-    /// Apply a column constraint to column metadata.
-    fn apply_column_constraint(
-        mut meta: ColumnMetadata,
-        constraint: &ColumnConstraint,
-    ) -> ColumnMetadata {
-        match constraint {
-            ColumnConstraint::NotNull { .. } => {
-                meta.not_null = true;
-            }
-            ColumnConstraint::PrimaryKey { .. } => {
-                meta.primary_key = true;
-                meta.not_null = true; // PRIMARY KEY implies NOT NULL
-            }
-            ColumnConstraint::Unique { .. } => {
-                meta.unique = true;
-            }
-            ColumnConstraint::Default { value: expr, .. } => {
-                meta.default = Some(expr.clone());
-            }
-        }
-        meta
     }
 
     /// Extract primary key columns from table constraints.
@@ -1318,6 +1884,56 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
     }
 
+    fn normalized_table_constraints(stmt: &CreateTable) -> Vec<crate::ast::ddl::TableConstraint> {
+        use crate::ast::ddl::{ColumnConstraint, TableConstraint};
+
+        let mut constraints = stmt.constraints.clone();
+        for column in &stmt.columns {
+            for constraint in &column.constraints {
+                match constraint {
+                    ColumnConstraint::Unique { name, span } => {
+                        constraints.push(TableConstraint::Unique {
+                            name: name.clone(),
+                            columns: vec![column.name.clone()],
+                            span: *span,
+                        })
+                    }
+                    ColumnConstraint::Check {
+                        name,
+                        expression,
+                        span,
+                    } => constraints.push(TableConstraint::Check {
+                        name: name.clone(),
+                        expression: expression.clone(),
+                        span: *span,
+                    }),
+                    ColumnConstraint::References {
+                        name,
+                        table,
+                        columns,
+                        on_delete,
+                        on_update,
+                        deferrable,
+                        initially_deferred,
+                        span,
+                    } => constraints.push(TableConstraint::ForeignKey {
+                        name: name.clone(),
+                        columns: vec![column.name.clone()],
+                        referenced_table: table.clone(),
+                        referenced_columns: columns.clone(),
+                        on_delete: *on_delete,
+                        on_update: *on_update,
+                        deferrable: *deferrable,
+                        initially_deferred: *initially_deferred,
+                        span: *span,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        constraints
+    }
+
     /// Check if a column constraint is a PRIMARY KEY constraint.
     fn is_primary_key_constraint(constraint: &ColumnConstraint) -> bool {
         matches!(constraint, ColumnConstraint::PrimaryKey { .. })
@@ -1342,10 +1958,168 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         })
     }
 
+    fn plan_create_view(&self, stmt: &CreateView) -> Result<LogicalPlan, PlannerError> {
+        if let Some(existing) = self.catalog.get_table(&stmt.name) {
+            if !stmt.if_not_exists {
+                return Err(PlannerError::table_already_exists(&stmt.name));
+            }
+            return Ok(LogicalPlan::CreateView {
+                table: existing.clone(),
+                if_not_exists: true,
+            });
+        }
+
+        let StatementKind::Select(query) = &stmt.query.kind else {
+            return Err(PlannerError::unsupported_feature(
+                "non-SELECT view definition",
+                "a future version",
+                stmt.span,
+            ));
+        };
+        let relation = self.plan_select_relation(query, &[], &HashMap::new())?;
+        let mut columns = relation.schema;
+        apply_alias_columns(&stmt.name, &stmt.columns, &mut columns, stmt.span)?;
+        let mut table = TableMetadata::new(&stmt.name, columns);
+        table.table_type = TableType::View;
+        table.properties.insert(
+            crate::catalog::VIEW_DEFINITION_PROPERTY.to_string(),
+            serde_json::to_string(&stmt.query).map_err(|error| {
+                PlannerError::InvalidExpression {
+                    message: format!("cannot serialize view definition: {error}"),
+                }
+            })?,
+        );
+        table.properties.insert(
+            crate::catalog::VIEW_DEPENDENCIES_PROPERTY.to_string(),
+            serde_json::to_string(&view_dependencies(query)?).expect("string list serializes"),
+        );
+        Ok(LogicalPlan::CreateView {
+            table,
+            if_not_exists: stmt.if_not_exists,
+        })
+    }
+
+    fn plan_drop_view(&self, stmt: &DropView) -> Result<LogicalPlan, PlannerError> {
+        let is_view = self
+            .catalog
+            .get_table(&stmt.name)
+            .is_some_and(|table| table.table_type == TableType::View);
+        if !stmt.if_exists && !is_view {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::DropView {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+        })
+    }
+
+    fn plan_alter_table(&self, stmt: &AlterTable) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.if_exists && !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::AlterTable {
+            name: stmt.name.clone(),
+            if_exists: stmt.if_exists,
+            action: stmt.action.clone(),
+        })
+    }
+
+    fn plan_truncate(&self, stmt: &Truncate) -> Result<LogicalPlan, PlannerError> {
+        if !self.table_exists_in_default(&stmt.name) {
+            return Err(PlannerError::table_not_found(&stmt.name, stmt.span));
+        }
+        Ok(LogicalPlan::Truncate {
+            name: stmt.name.clone(),
+        })
+    }
+
+    fn plan_copy(&self, stmt: &crate::ast::CopyStatement) -> Result<LogicalPlan, PlannerError> {
+        let path = match &stmt.target {
+            CopyTarget::File { path } => path.clone(),
+            CopyTarget::Stdin => "-".to_string(),
+            CopyTarget::Stdout => "-".to_string(),
+        };
+        if matches!(stmt.target, CopyTarget::Stdin)
+            && stmt.direction != crate::ast::CopyDirection::From
+        {
+            return Err(PlannerError::unsupported_feature(
+                "COPY TO STDIN",
+                "COPY FROM STDIN",
+                stmt.span,
+            ));
+        }
+        if matches!(stmt.target, CopyTarget::Stdout)
+            && stmt.direction != crate::ast::CopyDirection::To
+        {
+            return Err(PlannerError::unsupported_feature(
+                "COPY FROM STDOUT",
+                "COPY TO STDOUT",
+                stmt.span,
+            ));
+        }
+        let (table, query) = match &stmt.source {
+            CopySource::Table { name, columns } => {
+                let table = self
+                    .catalog
+                    .get_table(name)
+                    .ok_or_else(|| PlannerError::table_not_found(name, stmt.span))?;
+                if !columns.is_empty()
+                    && columns
+                        .iter()
+                        .any(|column| !table.columns.iter().any(|c| c.name == *column))
+                {
+                    return Err(PlannerError::invalid_expression(
+                        "COPY column does not exist".to_string(),
+                    ));
+                }
+                (name.clone(), None)
+            }
+            CopySource::Query { query } => {
+                if stmt.direction != crate::ast::CopyDirection::To {
+                    return Err(PlannerError::unsupported_feature(
+                        "COPY query source for FROM",
+                        "COPY table",
+                        stmt.span,
+                    ));
+                }
+                (
+                    String::new(),
+                    Some(Box::new(
+                        self.plan_query_body_relation(query, &[], &CtePlans::new())?
+                            .plan,
+                    )),
+                )
+            }
+        };
+        Ok(LogicalPlan::Copy {
+            table,
+            path,
+            direction: stmt.direction,
+            options: stmt.options.clone(),
+            query,
+        })
+    }
+
     fn table_exists_in_default(&self, name: &str) -> bool {
         match self.catalog.get_table(name) {
             Some(table) => table.catalog_name == "default" && table.namespace_name == "default",
             None => false,
+        }
+    }
+
+    fn ensure_writable_table(
+        table: &TableMetadata,
+        operation: &str,
+        span: crate::ast::Span,
+    ) -> Result<(), PlannerError> {
+        if table.table_type == TableType::View {
+            Err(PlannerError::unsupported_feature(
+                format!("{operation} on view '{}'", table.name),
+                "views are read-only",
+                span,
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -1363,6 +2137,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Validate table exists
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "CREATE INDEX", stmt.span)?;
 
         // Validate column exists
         self.name_resolver
@@ -2851,6 +3626,29 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 columns,
                 span,
             } => {
+                if matches!(
+                    name.as_str(),
+                    "information_schema.tables"
+                        | "information_schema.columns"
+                        | "information_schema.indexes"
+                        | "information_schema.table_constraints"
+                ) {
+                    let plan = self.metadata_values(name, None, *span)?;
+                    let LogicalPlan::Values { schema, .. } = &plan else {
+                        unreachable!("metadata surfaces are local VALUES plans");
+                    };
+                    let mut schema = schema.clone();
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut schema, *span)?;
+                    return Ok(PlannedRelation {
+                        plan,
+                        schema: schema.clone(),
+                        scope: vec![ScopedTable::new(
+                            TableMetadata::new(relation_name, schema),
+                            start_index,
+                        )],
+                    });
+                }
                 if let Some(cte) = ctes.get(name) {
                     let mut relation = cte.clone();
                     relation.plan = LogicalPlan::Project {
@@ -2868,6 +3666,50 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     return Ok(relation);
                 }
                 let table = self.name_resolver.resolve_table(name, *span)?.clone();
+                if table.table_type == TableType::View {
+                    let definition = table
+                        .properties
+                        .get(crate::catalog::VIEW_DEFINITION_PROPERTY)
+                        .ok_or_else(|| PlannerError::InvalidExpression {
+                            message: format!("view '{}' has no stored definition", table.name),
+                        })?;
+                    let statement: Statement =
+                        serde_json::from_str(definition).map_err(|error| {
+                            PlannerError::InvalidExpression {
+                                message: format!(
+                                    "view '{}' definition is invalid: {error}",
+                                    table.name
+                                ),
+                            }
+                        })?;
+                    let StatementKind::Select(query) = &statement.kind else {
+                        return Err(PlannerError::InvalidExpression {
+                            message: format!("view '{}' is not a SELECT", table.name),
+                        });
+                    };
+                    let mut relation = self.plan_select_relation(query, outer_scope, ctes)?;
+                    // Keep the view's projection as an optimization boundary.
+                    // Otherwise an outer SELECT can replace a projected base
+                    // Scan and resolve its column indexes against the view.
+                    relation.plan = LogicalPlan::Project {
+                        input: Box::new(relation.plan),
+                        projection: Projection::All(
+                            relation
+                                .schema
+                                .iter()
+                                .map(|column| column.name.clone())
+                                .collect(),
+                        ),
+                    };
+                    relation.schema = table.columns.clone();
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut relation.schema, *span)?;
+                    relation.scope = vec![ScopedTable::new(
+                        TableMetadata::new(relation_name, relation.schema.clone()),
+                        start_index,
+                    )];
+                    return Ok(relation);
+                }
                 let mut scope_table = table.clone();
                 if let Some(alias) = alias {
                     scope_table.name = alias.clone();
@@ -4968,6 +5810,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_insert(&self, stmt: &Insert) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "INSERT", stmt.span)?;
 
         // Determine the column list
         let columns: Vec<String> = if let Some(ref cols) = stmt.columns {
@@ -4979,6 +5822,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         } else {
             // Implicit - use all columns in table definition order
             table.column_names().into_iter().map(String::from).collect()
+        };
+        let returning = if stmt.returning.is_empty() {
+            None
+        } else {
+            Some(self.build_projection(&stmt.returning, table)?)
         };
 
         match &stmt.source {
@@ -5001,17 +5849,80 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     table: table.name.clone(),
                     columns,
                     values: typed_values,
+                    conflict: self.plan_on_conflict(stmt.on_conflict.as_ref(), table)?,
+                    returning,
                 })
             }
             InsertSource::Select { select } => {
                 let source = self.plan_select_relation(select, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
             InsertSource::Query { query } => {
                 let source = self.plan_query_body_relation(query, &[], &CtePlans::new())?;
-                self.finish_insert_query(stmt, table, columns, source)
+                self.finish_insert_query(stmt, table, columns, source, returning)
             }
         }
+    }
+
+    fn plan_on_conflict(
+        &self,
+        conflict: Option<&crate::ast::dml::OnConflict>,
+        table: &TableMetadata,
+    ) -> Result<Option<crate::planner::logical_plan::OnConflictPlan>, PlannerError> {
+        let Some(conflict) = conflict else {
+            return Ok(None);
+        };
+        for column in &conflict.columns {
+            self.name_resolver
+                .resolve_column(table, column, conflict.span)?;
+        }
+        let action = match &conflict.action {
+            OnConflictAction::DoNothing => OnConflictActionPlan::DoNothing,
+            OnConflictAction::DoUpdate {
+                assignments,
+                selection,
+            } => {
+                let mut typed = Vec::with_capacity(assignments.len());
+                for assignment in assignments {
+                    let column_meta = self.name_resolver.resolve_column(
+                        table,
+                        &assignment.column,
+                        assignment.span,
+                    )?;
+                    let column_index = table
+                        .get_column_index(&assignment.column)
+                        .expect("resolved column");
+                    let value = self.type_checker.infer_type(&assignment.value, table)?;
+                    self.validate_type_assignment(
+                        &value,
+                        &column_meta.data_type,
+                        assignment.value.span,
+                    )?;
+                    typed.push(TypedAssignment::new(
+                        assignment.column.clone(),
+                        column_index,
+                        self.coerce_assignment_value(
+                            value,
+                            &column_meta.data_type,
+                            assignment.value.span,
+                        ),
+                    ));
+                }
+                let selection = selection
+                    .as_ref()
+                    .map(|expr| self.type_checker.infer_type(expr, table))
+                    .transpose()?;
+                OnConflictActionPlan::DoUpdate {
+                    assignments: typed,
+                    selection,
+                }
+            }
+        };
+        Ok(Some(OnConflictPlan {
+            columns: conflict.columns.clone(),
+            constraint: conflict.constraint.clone(),
+            action,
+        }))
     }
 
     fn finish_insert_query(
@@ -5020,6 +5931,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         table: &TableMetadata,
         columns: Vec<String>,
         source: PlannedRelation,
+        returning: Option<Projection>,
     ) -> Result<LogicalPlan, PlannerError> {
         if source.schema.len() != columns.len() {
             return Err(PlannerError::column_value_count_mismatch(
@@ -5050,6 +5962,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table: table.name.clone(),
             columns,
             source: Box::new(source.plan),
+            conflict: self.plan_on_conflict(stmt.on_conflict.as_ref(), table)?,
+            returning,
         })
     }
 
@@ -5190,6 +6104,73 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_update(&self, stmt: &Update) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
+
+        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.from.first() {
+            let source = self.name_resolver.resolve_table(name, *span)?;
+            let scope = [
+                ScopedTable::new(table.clone(), 0),
+                ScopedTable::new(source.clone(), table.column_count()),
+            ];
+            let assignments = stmt
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let column_meta = self.name_resolver.resolve_column(
+                        table,
+                        &assignment.column,
+                        assignment.span,
+                    )?;
+                    let value = self.type_checker.infer_type_with_scope(
+                        &assignment.value,
+                        &scope,
+                        &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        },
+                    )?;
+                    self.validate_type_assignment(
+                        &value,
+                        &column_meta.data_type,
+                        assignment.value.span,
+                    )?;
+                    Ok(TypedAssignment::new(
+                        assignment.column.clone(),
+                        table.get_column_index(&assignment.column).unwrap(),
+                        self.coerce_assignment_value(
+                            value,
+                            &column_meta.data_type,
+                            assignment.value.span,
+                        ),
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+            let condition = stmt
+                .selection
+                .as_ref()
+                .map(|expr| {
+                    self.type_checker
+                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        })
+                })
+                .transpose()?;
+            return Ok(LogicalPlan::Update {
+                table: table.name.clone(),
+                assignments,
+                filter: None,
+                join_source: Some(JoinedDmlSource {
+                    table: source.name.clone(),
+                    condition,
+                }),
+                returning: if stmt.returning.is_empty() {
+                    None
+                } else {
+                    Some(self.build_projection(&stmt.returning, table)?)
+                },
+            });
+        }
 
         // Process assignments
         let mut typed_assignments = Vec::new();
@@ -5256,6 +6237,185 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table: table.name.clone(),
             assignments: typed_assignments,
             filter,
+            join_source: None,
+            returning: if stmt.returning.is_empty() {
+                None
+            } else {
+                Some(self.build_projection(&stmt.returning, table)?)
+            },
+        })
+    }
+
+    fn plan_merge(&self, stmt: &Merge) -> Result<LogicalPlan, PlannerError> {
+        if !stmt.returning.is_empty() {
+            return Err(PlannerError::unsupported_feature(
+                "MERGE RETURNING",
+                "a later release",
+                stmt.span,
+            ));
+        }
+        let FromItem::Table {
+            name: target_name,
+            span: target_span,
+            ..
+        } = &stmt.target
+        else {
+            return Err(PlannerError::unsupported_feature(
+                "non-table MERGE target",
+                "a later release",
+                stmt.span,
+            ));
+        };
+        let FromItem::Table {
+            name: source_name,
+            span: source_span,
+            ..
+        } = &stmt.source
+        else {
+            return Err(PlannerError::unsupported_feature(
+                "non-table MERGE source",
+                "a later release",
+                stmt.span,
+            ));
+        };
+
+        let target = self
+            .name_resolver
+            .resolve_table(target_name, *target_span)?;
+        Self::ensure_writable_table(target, "MERGE", stmt.span)?;
+        let source = self
+            .name_resolver
+            .resolve_table(source_name, *source_span)?;
+        let scope = [
+            ScopedTable::new(target.clone(), 0),
+            ScopedTable::new(source.clone(), target.column_count()),
+        ];
+        let infer = |expr: &Expr| {
+            self.type_checker
+                .infer_type_with_scope(expr, &scope, &|statement, _| {
+                    let plan = Planner::new(self.catalog).plan(statement)?;
+                    Ok((plan, Vec::new()))
+                })
+        };
+
+        let on = infer(&stmt.on)?;
+        if on.resolved_type != ResolvedType::Boolean {
+            return Err(PlannerError::type_mismatch(
+                "Boolean",
+                on.resolved_type.to_string(),
+                stmt.on.span,
+            ));
+        }
+
+        let mut clauses = Vec::with_capacity(stmt.clauses.len());
+        for clause in &stmt.clauses {
+            let condition = clause.condition.as_ref().map(&infer).transpose()?;
+            if let (Some(expression), Some(typed)) = (&clause.condition, &condition)
+                && typed.resolved_type != ResolvedType::Boolean
+            {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean",
+                    typed.resolved_type.to_string(),
+                    expression.span,
+                ));
+            }
+
+            let action = match &clause.action {
+                MergeAction::Update { assignments } if clause.matched => {
+                    let assignments = assignments
+                        .iter()
+                        .map(|assignment| {
+                            let column = self.name_resolver.resolve_column(
+                                target,
+                                &assignment.column,
+                                assignment.span,
+                            )?;
+                            let value = infer(&assignment.value)?;
+                            self.validate_type_assignment(
+                                &value,
+                                &column.data_type,
+                                assignment.value.span,
+                            )?;
+                            Ok(TypedAssignment::new(
+                                assignment.column.clone(),
+                                target.get_column_index(&assignment.column).unwrap(),
+                                self.coerce_assignment_value(
+                                    value,
+                                    &column.data_type,
+                                    assignment.value.span,
+                                ),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    MergeActionPlan::Update { assignments }
+                }
+                MergeAction::Insert { columns, values } if !clause.matched => {
+                    let columns = if columns.is_empty() {
+                        target
+                            .column_names()
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    } else {
+                        columns.clone()
+                    };
+                    if columns.len() != values.len() {
+                        return Err(PlannerError::column_value_count_mismatch(
+                            columns.len(),
+                            values.len(),
+                            clause.span,
+                        ));
+                    }
+                    let values = columns
+                        .iter()
+                        .zip(values)
+                        .map(|(column_name, expression)| {
+                            let column = self.name_resolver.resolve_column(
+                                target,
+                                column_name,
+                                expression.span,
+                            )?;
+                            let value = infer(expression)?;
+                            self.validate_type_assignment(
+                                &value,
+                                &column.data_type,
+                                expression.span,
+                            )?;
+                            Ok(self.coerce_assignment_value(
+                                value,
+                                &column.data_type,
+                                expression.span,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    MergeActionPlan::Insert { columns, values }
+                }
+                MergeAction::DoNothing => MergeActionPlan::DoNothing,
+                MergeAction::Delete => {
+                    return Err(PlannerError::unsupported_feature(
+                        "MERGE DELETE",
+                        "a later release",
+                        clause.span,
+                    ));
+                }
+                MergeAction::Update { .. } | MergeAction::Insert { .. } => {
+                    return Err(PlannerError::invalid_expression(
+                        "MERGE UPDATE requires WHEN MATCHED and MERGE INSERT requires WHEN NOT MATCHED",
+                    ));
+                }
+            };
+            clauses.push(MergeClausePlan {
+                matched: clause.matched,
+                condition,
+                action,
+            });
+        }
+
+        Ok(LogicalPlan::Merge {
+            target: target.name.clone(),
+            source: source.name.clone(),
+            on,
+            clauses,
         })
     }
 
@@ -5265,6 +6425,39 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn plan_delete(&self, stmt: &Delete) -> Result<LogicalPlan, PlannerError> {
         // Resolve the target table
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
+        Self::ensure_writable_table(table, "DELETE", stmt.span)?;
+
+        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.using.first() {
+            let source = self.name_resolver.resolve_table(name, *span)?;
+            let scope = [
+                ScopedTable::new(table.clone(), 0),
+                ScopedTable::new(source.clone(), table.column_count()),
+            ];
+            let condition = stmt
+                .selection
+                .as_ref()
+                .map(|expr| {
+                    self.type_checker
+                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
+                            let plan = Planner::new(self.catalog).plan(stmt)?;
+                            Ok((plan, Vec::new()))
+                        })
+                })
+                .transpose()?;
+            return Ok(LogicalPlan::Delete {
+                table: table.name.clone(),
+                filter: None,
+                join_source: Some(JoinedDmlSource {
+                    table: source.name.clone(),
+                    condition,
+                }),
+                returning: if stmt.returning.is_empty() {
+                    None
+                } else {
+                    Some(self.build_projection(&stmt.returning, table)?)
+                },
+            });
+        }
 
         // Process optional WHERE clause
         let filter = if let Some(ref selection) = stmt.selection {
@@ -5287,6 +6480,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(LogicalPlan::Delete {
             table: table.name.clone(),
             filter,
+            join_source: None,
+            returning: if stmt.returning.is_empty() {
+                None
+            } else {
+                Some(self.build_projection(&stmt.returning, table)?)
+            },
         })
     }
 }
@@ -5516,7 +6715,8 @@ fn substitute_projection_aliases(
         },
         // Qualified column refs, literals, and subquery-bearing expressions are
         // left untouched (see the subquery note above).
-        ExprKind::ColumnRef { .. }
+        ExprKind::Parameter { .. }
+        | ExprKind::ColumnRef { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
         | ExprKind::ScalarSubquery { .. }
@@ -5636,7 +6836,8 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
         | ExprKind::Quantified { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
-        | ExprKind::ColumnRef { .. } => false,
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::Parameter { .. } => false,
     }
 }
 
@@ -6864,7 +8065,8 @@ fn expr_contains_grouping(expr: &crate::ast::expr::Expr) -> bool {
         | ExprKind::Quantified { .. }
         | ExprKind::Literal { .. }
         | ExprKind::VectorLiteral { .. }
-        | ExprKind::ColumnRef { .. } => false,
+        | ExprKind::ColumnRef { .. }
+        | ExprKind::Parameter { .. } => false,
     }
 }
 

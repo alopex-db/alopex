@@ -522,6 +522,7 @@ where
                 table,
                 columns,
                 values,
+                ..
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
@@ -531,6 +532,7 @@ where
                 table,
                 columns,
                 source,
+                ..
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
@@ -547,15 +549,31 @@ where
                 table,
                 assignments,
                 filter,
+                ..
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_update(txn, &*guard, &table, assignments, filter)?
             }
-            LogicalPlan::Delete { table, filter } => {
+            LogicalPlan::Delete { table, filter, .. } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_delete(txn, &*guard, &table, filter)?
+            }
+            LogicalPlan::Merge {
+                target,
+                source,
+                on,
+                clauses,
+            } => {
+                ensure_write(mode, op_name)?;
+                let guard = catalog.read().expect("catalog lock poisoned");
+                dml::execute_merge(txn, &*guard, &target, &source, on, clauses)?
+            }
+            LogicalPlan::Copy { .. } => {
+                return Err(ExecutorError::UnsupportedOperation(
+                    "COPY is not available through the async executor".into(),
+                ));
             }
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");

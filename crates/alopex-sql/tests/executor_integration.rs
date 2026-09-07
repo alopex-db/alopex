@@ -90,6 +90,8 @@ fn executor_end_to_end_manual_plans() {
                     ),
                 ],
             ],
+            conflict: None,
+            returning: None,
         })
         .unwrap();
 
@@ -125,6 +127,8 @@ fn executor_end_to_end_manual_plans() {
                 resolved_type: ResolvedType::Boolean,
                 span: Span::default(),
             }),
+            join_source: None,
+            returning: None,
         })
         .unwrap();
 
@@ -152,6 +156,8 @@ fn executor_end_to_end_manual_plans() {
                 resolved_type: ResolvedType::Boolean,
                 span: Span::default(),
             }),
+            join_source: None,
+            returning: None,
         })
         .unwrap();
 

@@ -98,7 +98,7 @@ def test_async_query_stream_uses_native_bridge_for_phase_three_csv_batches(tmp_p
                 max_buffered_batches=1,
             )
             batch = await stream.__anext__()
-            assert batch.to_dict() == {"value": [1, 2]}
+            assert batch.to_dict(as_series=False) == {"value": [1, 2]}
             with pytest.raises(StopAsyncIteration):
                 await stream.__anext__()
         finally:

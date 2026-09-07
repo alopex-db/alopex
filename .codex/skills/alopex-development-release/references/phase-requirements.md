@@ -17,6 +17,8 @@ each concrete item, not only for a crate name:
 | Owning phase | Exactly one broad phase; cross-phase policy may be referenced separately |
 | Requirement | User story and observable EARS acceptance criteria |
 | Compatibility | Local/remote, single-node/cluster, sync/async, supported/rejected behavior |
+| Reference contract | Canonical project plus exact version/commit and `ported`/`extended`/`diverged`/`not-yet-implemented`/`unsupported`/`alopex-native` classification |
+| Upstream evidence | Reference implementation path, upstream test file/case, provenance/license, and expected fixture or live differential |
 | Evidence | Unit/integration/e2e/tooling viewpoint and release-gate evidence |
 
 Reject an inventory that contains only coarse rows such as “SQL”, “CLI”, or “Python”.
@@ -71,6 +73,15 @@ Run this review before requesting requirements approval:
   surface matrix it must execute.
 - Require every concrete row to map through `requirements → design → task →
   test/evidence`; “one of these documents” is insufficient.
+- For every compatibility-sensitive row, require the canonical reference project,
+  exact version/commit, inspected implementation source, upstream test file/case,
+  relationship classification, and planned fixture/differential evidence. Apply
+  `docs/reference-compatibility-development-policy.md` and block approval when an
+  extension or divergence is not explicit.
+- Require reference-derived fixtures to carry machine-readable provenance. When
+  Alopex extends an upstream case, require the base case, exact added behavior,
+  reason, and expected difference in the fixture; do not count a handwritten
+  expected value as conformance evidence.
 - Compare phase effort, surface count, dependency order, and verification load. Block
   approval when one phase is materially larger or when a later phase is being used to
   hide unfinished earlier scope.

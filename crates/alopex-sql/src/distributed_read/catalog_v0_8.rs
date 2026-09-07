@@ -144,6 +144,7 @@ pub const REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS: &[&str] = &[
     "age",
     "current_date",
     "current_time",
+    "currval",
     "current_timestamp",
     "date",
     "date_add",
@@ -175,6 +176,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "array_value",
     "current_date",
     "current_time",
+    "currval",
     "date",
     "date_add",
     "date_sub",
@@ -223,6 +225,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "gen_random_uuid",
     "uuidv7",
     "memory_stats",
+    "nextval",
     "io_stats",
     "clear_cache",
     "websearch_to_tsquery",
@@ -709,6 +712,10 @@ fn validate_plan(
     analysis: &mut Analysis,
 ) -> Result<(), RemoteReadClassification> {
     match plan {
+        LogicalPlan::Explain { .. } => Err(RemoteReadRejection::local_only(
+            "explain_local_only",
+            "EXPLAIN is rendered by the coordinating local executor",
+        )),
         LogicalPlan::Pragma { .. } => Err(RemoteReadRejection::local_only(
             "pragma_local_only",
             "PRAGMA remains available only to the local executor",
@@ -716,12 +723,18 @@ fn validate_plan(
         LogicalPlan::Insert { .. }
         | LogicalPlan::InsertSelect { .. }
         | LogicalPlan::Update { .. }
-        | LogicalPlan::Delete { .. } => Err(RemoteReadRejection::unsupported(
+        | LogicalPlan::Delete { .. }
+        | LogicalPlan::Merge { .. }
+        | LogicalPlan::Copy { .. } => Err(RemoteReadRejection::unsupported(
             "dml_not_supported_remote",
             "DML is outside the read-only remote-read catalog",
         )),
         LogicalPlan::CreateTable { .. }
         | LogicalPlan::DropTable { .. }
+        | LogicalPlan::CreateView { .. }
+        | LogicalPlan::DropView { .. }
+        | LogicalPlan::AlterTable { .. }
+        | LogicalPlan::Truncate { .. }
         | LogicalPlan::CreateIndex { .. }
         | LogicalPlan::DropIndex { .. } => Err(RemoteReadRejection::unsupported(
             "ddl_not_supported_remote",
@@ -862,6 +875,12 @@ fn validate_plan(
         LogicalPlan::DistinctOn { .. } => Err(RemoteReadRejection::local_only(
             "distinct_on_local_only",
             "SELECT DISTINCT ON is not in the v0.8 remote-read catalog",
+        )),
+        LogicalPlan::CreateSequence(_)
+        | LogicalPlan::AlterSequence(_)
+        | LogicalPlan::DropSequence(_) => Err(RemoteReadRejection::unsupported(
+            "sequence_not_supported_remote",
+            "SEQUENCE is outside the read-only remote-read catalog",
         )),
     }
 }
@@ -1031,8 +1050,11 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::ast::expr::Literal;
-    use crate::catalog::ColumnMetadata;
-    use crate::planner::{Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr};
+    use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::planner::{
+        Planner, Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr,
+    };
+    use crate::{AlopexDialect, Parser};
 
     fn references() -> Vec<TableReference> {
         vec![TableReference::new(
@@ -1134,6 +1156,21 @@ mod tests {
     }
 
     #[test]
+    fn metadata_values_fail_closed_before_remote_transport() {
+        let catalog = MemoryCatalog::new();
+        let planner = Planner::new(&catalog);
+        let statement = Parser::parse_sql(&AlopexDialect, "SHOW TABLES")
+            .unwrap()
+            .remove(0);
+        let plan = planner.plan(&statement).unwrap();
+        assert!(matches!(
+            classify(&plan, &[]),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "values_local_only"
+        ));
+    }
+
+    #[test]
     fn recursive_cte_is_rejected_before_remote_transport() {
         let schema = vec![ColumnMetadata::new("id", ResolvedType::Integer)];
         let reference = LogicalPlan::RecursiveReference {
@@ -1186,6 +1223,25 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "vector_sql_local_only"
         ));
+    }
+
+    #[test]
+    fn sequence_allocation_remains_local_only_before_remote_transport() {
+        for name in ["nextval", "currval"] {
+            let expression = TypedExpr::function_call(
+                name.to_string(),
+                vec![],
+                false,
+                false,
+                ResolvedType::Integer,
+                Span::default(),
+            );
+            assert!(matches!(
+                classify(&LogicalPlan::filter(scan(), expression), &references()),
+                RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                    if code == "stateful_function_local_only"
+            ));
+        }
     }
 
     #[test]

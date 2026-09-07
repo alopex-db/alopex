@@ -47,7 +47,8 @@ pub mod unified_error;
 
 // AST types
 pub use ast::{
-    PragmaValue, Statement, StatementKind,
+    ExplainFormat, PragmaValue, Statement, StatementKind, TransactionAccessMode,
+    TransactionIsolationLevel,
     ddl::*,
     dml::*,
     expr::*,
@@ -90,8 +91,10 @@ pub use storage::{
 #[cfg(feature = "tokio")]
 pub use executor::AsyncExecutor;
 pub use executor::{
-    ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
-    QueryResult, Row,
+    ColumnInfo, CommitMetadata, ConstraintViolation, EvaluationError, ExecutionResult,
+    ExecutionStep, ExecutionStepError, ExecutionStepErrorKind, ExecutionStepKind,
+    ExecutionStepOutcome, ExecutionStepResult, Executor, ExecutorError, QueryResult, Row,
+    SharedExecutionReport, SharedExecutionRequest,
 };
 
 // Async facade types

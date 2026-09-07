@@ -191,8 +191,8 @@ if not isinstance(distributions, list) or not distributions or any(
 parser = data.get("parser")
 if not isinstance(parser, dict):
     fail("parser public surface is missing")
-if parser.get("contract") != "0.19.0":
-    fail("parser contract must be 0.19.0")
+if parser.get("contract") != "0.25.0":
+    fail("parser contract must be 0.25.0")
 for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")
@@ -227,6 +227,15 @@ for fts_surface in \
     crates/alopex-sql/tests/full_text_search.rs; do
     if [[ ! -s "${REPO_ROOT}/${fts_surface}" ]]; then
         echo "ERROR: missing v0.8.10 full-text search surface: ${fts_surface}" >&2
+        exit 1
+    fi
+done
+for mutation_surface in \
+    docs/sql-mutations-v0.8.11.md \
+    scripts/demo/v0811/demo_sql_mutations.py \
+    formal/tla/sql/SqlMutationLifecycle.tla; do
+    if [[ ! -s "${REPO_ROOT}/${mutation_surface}" ]]; then
+        echo "ERROR: missing v0.8.11 SQL mutation surface: ${mutation_surface}" >&2
         exit 1
     fi
 done
@@ -322,7 +331,7 @@ run_in_container() {
 }
 
 run_step "verify-release-embedded ビルド" \
-    "公開検証用の2つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
+    "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
     -- run_in_container bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
@@ -330,14 +339,23 @@ trap "rm -rf \"${tool_source}\"" EXIT
 mkdir -p "${tool_source}/src/bin"
 cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
 cp crates/alopex-tools/src/bin/demo_v08_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/verify_sql_transaction_failures.rs "${tool_source}/src/bin/"
 cat >"${tool_source}/src/bin/embedded-dependency-smoke.rs" <<'EOF'
+use std::sync::Arc;
+
 use alopex_embedded::Database;
+use alopex_sql::SqlValue;
 
 fn main() {
-    let database = Database::new();
+    let database = Arc::new(Database::new());
     database
-        .execute_sql("CREATE TABLE smoke (id INTEGER); INSERT INTO smoke VALUES (1);")
+        .execute_sql("CREATE TABLE smoke (id INTEGER)")
         .expect("published alopex-embedded must execute SQL without parser runtime assets");
+    let mut statement = database
+        .prepare("INSERT INTO smoke VALUES (?)")
+        .expect("published alopex-embedded must prepare SQL");
+    statement.bind(1, SqlValue::Integer(1)).expect("bind");
+    statement.execute().expect("execute prepared SQL");
     println!("ok");
 }
 EOF
@@ -361,6 +379,10 @@ path = "src/bin/demo_v08_embedded.rs"
 [[bin]]
 name = "embedded-dependency-smoke"
 path = "src/bin/embedded-dependency-smoke.rs"
+
+[[bin]]
+name = "verify-sql-transaction-failures"
+path = "src/bin/verify_sql_transaction_failures.rs"
 
 [dependencies]
 serde_json = "1.0"
@@ -400,6 +422,10 @@ run_step "公開版 alopex-embedded 実行時依存 smoke" \
     "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
     -- run_in_container bash -c \
     'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH /tools-target/release/embedded-dependency-smoke'
+
+run_step "公開版 SQL transaction failure conformance" \
+    "公開版 alopex-embedded の別プロセスを transaction 中に強制終了し、未 commit/rollback 済み書込みの不可視性、acknowledged commit の再起動後可視性、savepoint failure recovery、並行 session 競合を再検証する。" \
+    -- run_in_container /tools-target/release/verify-sql-transaction-failures
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
@@ -576,6 +602,10 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
 run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. native JSON/JSONB, JSON-on-TEXT, FETCH/WITH TIES pagination, TRY_CAST, standard predicates, frames, named WINDOW, and QUALIFY (demo_sql_v08.py)" \
     "PyPI 公開版で、v0.8 系の JSON-on-TEXT scalar/table/aggregate、FETCH FIRST/OFFSET/WITH TIES pagination、TRY_CAST/CAST failure contract、truth/distinctness/row-value predicate、TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
     -- run_in_container python3 scripts/demo/v08/demo_sql_v08.py
+
+run_step "v${ALOPEX_VERSION} v0.8.11 SQL mutation contracts" \
+    "PyPI公開版で、CHECK/FK、RETURNING/ON CONFLICT、SEQUENCE/CURRVAL、CSV COPY round-trip、未知FORMAT拒否、information_schema introspectionを自己検証する。" \
+    -- run_in_container python3 scripts/demo/v0811/demo_sql_mutations.py
 
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \

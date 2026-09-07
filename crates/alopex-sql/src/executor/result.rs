@@ -28,6 +28,134 @@ pub enum ExecutionResult {
     Query(QueryResult),
 }
 
+/// One transport-independent logical execution request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedExecutionRequest {
+    /// Correlation identifier for the whole logical execution.
+    pub execution_id: String,
+    /// Correlation identifier for the mutation transaction.
+    pub transaction_id: String,
+    /// Steps in their required execution order.
+    pub steps: Vec<ExecutionStep>,
+}
+
+impl SharedExecutionRequest {
+    /// Build a logical execution request with stable correlation identifiers.
+    pub fn new(
+        execution_id: impl Into<String>,
+        transaction_id: impl Into<String>,
+        steps: Vec<ExecutionStep>,
+    ) -> Self {
+        Self {
+            execution_id: execution_id.into(),
+            transaction_id: transaction_id.into(),
+            steps,
+        }
+    }
+}
+
+/// One correlated step in a shared logical execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionStep {
+    /// Correlation identifier unique within the execution.
+    pub step_id: String,
+    /// Operation performed by this step.
+    pub kind: ExecutionStepKind,
+}
+
+impl ExecutionStep {
+    /// Build one correlated execution step.
+    pub fn new(step_id: impl Into<String>, kind: ExecutionStepKind) -> Self {
+        Self {
+            step_id: step_id.into(),
+            kind,
+        }
+    }
+}
+
+/// Operation kinds supported by the shared execution layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionStepKind {
+    /// Execute one statement in the mutation transaction.
+    TransactionStatement {
+        /// SQL text containing exactly one statement.
+        sql: String,
+    },
+    /// Commit the mutation transaction before any post-commit read.
+    CommitBarrier,
+    /// Execute a statement in a new context after a successful commit.
+    PostCommitRead {
+        /// SQL text containing exactly one read statement.
+        sql: String,
+    },
+}
+
+/// Ordered results for one shared logical execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedExecutionReport {
+    /// Correlation identifier copied from the request.
+    pub execution_id: String,
+    /// Mutation transaction correlation identifier copied from the request.
+    pub transaction_id: String,
+    /// Completed step results in deterministic request order.
+    pub steps: Vec<ExecutionStepResult>,
+}
+
+/// Result envelope for one completed or failed step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionStepResult {
+    /// Correlation identifier for the whole logical execution.
+    pub execution_id: String,
+    /// Correlation identifier for the mutation transaction.
+    pub transaction_id: String,
+    /// Correlation identifier copied from the input step.
+    pub step_id: String,
+    /// Zero-based position copied from the request order.
+    pub step_index: usize,
+    /// Result or classified error for this step.
+    pub outcome: ExecutionStepOutcome,
+}
+
+/// Outcome of one shared execution step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionStepOutcome {
+    /// Statement result, including affected rows or a result set.
+    Execution(ExecutionResult),
+    /// Successful mutation commit metadata.
+    Commit(CommitMetadata),
+    /// Classified step failure. Earlier successful results remain present.
+    Error(ExecutionStepError),
+}
+
+/// Metadata proving which correlated mutation transaction committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMetadata {
+    /// Correlation identifier of the committed mutation transaction.
+    pub transaction_id: String,
+}
+
+/// Transport-independent classification of a failed execution step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionStepError {
+    /// Phase in which the failure occurred.
+    pub kind: ExecutionStepErrorKind,
+    /// Stable human-readable error description.
+    pub message: String,
+}
+
+/// Failure phase used to preserve commit and post-commit-read semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStepErrorKind {
+    /// A statement in the mutation transaction failed.
+    Transaction,
+    /// The explicit mutation commit failed.
+    Commit,
+    /// A read failed after the mutation commit had succeeded.
+    PostCommitRead,
+    /// The requested step order was invalid for the session lifecycle.
+    InvalidOrder,
+}
+
 /// Result of a SELECT query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {

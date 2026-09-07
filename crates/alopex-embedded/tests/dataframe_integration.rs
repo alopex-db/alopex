@@ -7,6 +7,33 @@ use arrow::array::{
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn dataframe_query_exposes_portable_metadata_schema() {
+    let db = Database::new();
+    db.execute_sql("CREATE TABLE items (id BIGINT, label TEXT)")
+        .unwrap();
+
+    let frame = db.query_df("DESCRIBE items").unwrap();
+    assert_eq!(
+        frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        [
+            "column_name",
+            "column_type",
+            "null",
+            "key",
+            "default",
+            "extra"
+        ]
+    );
+    assert_eq!(frame.height(), 2);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn dataframe_query_preserves_float_column_as_float32() {
     let db = Database::new();
     db.execute_sql(

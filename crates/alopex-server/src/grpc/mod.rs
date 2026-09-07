@@ -2,8 +2,13 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use alopex_sql::{
+    AlopexDialect, CommitMetadata, ExecutionResult, ExecutionStep, ExecutionStepError,
+    ExecutionStepErrorKind, ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult, Parser,
+    SharedExecutionReport, SharedExecutionRequest,
+};
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -318,6 +323,35 @@ impl AlopexService for AlopexServiceImpl {
 
         // Return the result sets directly without an intermediate channel.
         Ok(Response::new(tokio_stream::iter(result_sets)))
+    }
+
+    async fn execute_shared(
+        &self,
+        request: Request<proto::SharedExecutionRequest>,
+    ) -> std::result::Result<Response<proto::SharedExecutionReport>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let deadline = grpc_timeout(request.metadata()).map(|duration| {
+            Instant::now()
+                + duration
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap_or(Duration::ZERO)
+        });
+        let shared = shared_request_from_proto(request.into_inner())?;
+        let report =
+            execute_shared_request(self.state.clone(), shared, &ctx.correlation_id, deadline).await;
+        let report = shared_report_to_proto(report);
+        let encoded_len = report.encoded_len();
+        MemoryControlPolicy::from_env()
+            .enforce_output_bytes(encoded_len as u64)
+            .map_err(|error| map_status(error, &ctx.correlation_id))?;
+        if encoded_len > self.state.config.max_response_size {
+            return Err(map_status(
+                ServerError::PayloadTooLarge("response size exceeds limit".into()),
+                &ctx.correlation_id,
+            ));
+        }
+        Ok(Response::new(report))
     }
 
     async fn execute_ddl(
@@ -785,6 +819,447 @@ impl AlopexService for AlopexServiceImpl {
     }
 }
 
+struct SharedSessionGuard {
+    state: Arc<ServerState>,
+    session_id: Option<SessionId>,
+}
+
+impl SharedSessionGuard {
+    fn new(state: Arc<ServerState>) -> Self {
+        Self {
+            state,
+            session_id: None,
+        }
+    }
+
+    fn arm(&mut self, session_id: SessionId) {
+        self.session_id = Some(session_id);
+    }
+
+    fn disarm(&mut self) {
+        self.session_id = None;
+    }
+
+    async fn rollback(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        if let Ok(effects) = self.state.session_manager.rollback(&session_id).await {
+            let _ = self.state.apply_catalog_rollback_effects(effects);
+        }
+    }
+}
+
+impl Drop for SharedSessionGuard {
+    fn drop(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Ok(effects) = state.session_manager.rollback(&session_id).await {
+                let _ = state.apply_catalog_rollback_effects(effects);
+            }
+        });
+    }
+}
+
+fn shared_request_from_proto(
+    request: proto::SharedExecutionRequest,
+) -> std::result::Result<SharedExecutionRequest, Status> {
+    use proto::shared_execution_step::Kind;
+
+    if request.execution_id.is_empty() {
+        return Err(Status::invalid_argument("execution_id must not be empty"));
+    }
+    if request.transaction_id.is_empty() {
+        return Err(Status::invalid_argument("transaction_id must not be empty"));
+    }
+    if request.steps.is_empty() {
+        return Err(Status::invalid_argument("steps must not be empty"));
+    }
+    let mut step_ids = std::collections::HashSet::with_capacity(request.steps.len());
+    let mut steps = Vec::with_capacity(request.steps.len());
+    for step in request.steps {
+        if step.step_id.is_empty() {
+            return Err(Status::invalid_argument("step_id must not be empty"));
+        }
+        if !step_ids.insert(step.step_id.clone()) {
+            return Err(Status::invalid_argument("step_id must be unique"));
+        }
+        let kind = match step.kind {
+            Some(Kind::TransactionStatement(sql)) => {
+                ExecutionStepKind::TransactionStatement { sql }
+            }
+            Some(Kind::CommitBarrier(_)) => ExecutionStepKind::CommitBarrier,
+            Some(Kind::PostCommitRead(sql)) => ExecutionStepKind::PostCommitRead { sql },
+            None => return Err(Status::invalid_argument("step kind must be set")),
+        };
+        steps.push(ExecutionStep::new(step.step_id, kind));
+    }
+    Ok(SharedExecutionRequest::new(
+        request.execution_id,
+        request.transaction_id,
+        steps,
+    ))
+}
+
+async fn execute_shared_request(
+    state: Arc<ServerState>,
+    request: SharedExecutionRequest,
+    correlation_id: &str,
+    deadline: Option<Instant>,
+) -> SharedExecutionReport {
+    let SharedExecutionRequest {
+        execution_id,
+        transaction_id,
+        steps,
+    } = request;
+    let mut results = Vec::with_capacity(steps.len());
+    let mut committed = false;
+    let mut session = SharedSessionGuard::new(state.clone());
+
+    for (step_index, step) in steps.into_iter().enumerate() {
+        let outcome = match step.kind {
+            ExecutionStepKind::TransactionStatement { .. } if committed => shared_step_error(
+                ExecutionStepErrorKind::InvalidOrder,
+                "transaction statement follows the commit barrier",
+            ),
+            ExecutionStepKind::TransactionStatement { sql } => {
+                match validate_shared_statement(&sql, false) {
+                    Err(error) => shared_step_error(ExecutionStepErrorKind::Transaction, error),
+                    Ok(is_query) => {
+                        if !is_query {
+                            if let Err(error) = state.lifecycle_state.check_write_allowed() {
+                                let outcome =
+                                    shared_step_error(ExecutionStepErrorKind::Transaction, error);
+                                results.push(shared_step_result(
+                                    &execution_id,
+                                    &transaction_id,
+                                    step.step_id,
+                                    step_index,
+                                    outcome,
+                                ));
+                                break;
+                            }
+                        }
+                        if session.session_id.is_none() {
+                            match begin_shared_session(&state).await {
+                                Ok(session_id) => session.arm(session_id),
+                                Err(error) => {
+                                    let outcome = shared_step_error(
+                                        ExecutionStepErrorKind::Transaction,
+                                        error,
+                                    );
+                                    results.push(shared_step_result(
+                                        &execution_id,
+                                        &transaction_id,
+                                        step.step_id,
+                                        step_index,
+                                        outcome,
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                        let timeout = shared_step_timeout(deadline, state.config.query_timeout);
+                        match timeout {
+                            Err(message) => {
+                                shared_step_error(ExecutionStepErrorKind::Transaction, message)
+                            }
+                            Ok(timeout) => {
+                                let session_id = session
+                                    .session_id
+                                    .as_ref()
+                                    .expect("shared session was opened");
+                                match execute_session_statement_with_routing(
+                                    &state,
+                                    session_id,
+                                    &sql,
+                                    correlation_id,
+                                    timeout,
+                                )
+                                .await
+                                {
+                                    Ok((result, _)) => ExecutionStepOutcome::Execution(result),
+                                    Err(error) => shared_step_error(
+                                        ExecutionStepErrorKind::Transaction,
+                                        error,
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExecutionStepKind::CommitBarrier if committed => shared_step_error(
+                ExecutionStepErrorKind::InvalidOrder,
+                "commit barrier follows a successful commit barrier",
+            ),
+            ExecutionStepKind::CommitBarrier => {
+                let Some(session_id) = session.session_id.as_ref() else {
+                    let outcome = shared_step_error(
+                        ExecutionStepErrorKind::Commit,
+                        "commit barrier requires a transaction statement",
+                    );
+                    results.push(shared_step_result(
+                        &execution_id,
+                        &transaction_id,
+                        step.step_id,
+                        step_index,
+                        outcome,
+                    ));
+                    break;
+                };
+                match shared_step_timeout(deadline, state.config.query_timeout) {
+                    Err(message) => shared_step_error(ExecutionStepErrorKind::Commit, message),
+                    Ok(timeout) => {
+                        let commit =
+                            tokio::time::timeout(timeout, state.session_manager.commit(session_id))
+                                .await;
+                        match commit {
+                            Err(_) => shared_step_error(
+                                ExecutionStepErrorKind::Commit,
+                                "deadline exceeded during commit",
+                            ),
+                            Ok(Err(error)) => {
+                                shared_step_error(ExecutionStepErrorKind::Commit, error)
+                            }
+                            Ok(Ok(effects)) => {
+                                session.disarm();
+                                let publish = if effects.is_empty() {
+                                    Ok(())
+                                } else {
+                                    state
+                                        .apply_table_lifecycle_effects(effects)
+                                        .and_then(|()| sync_catalog_to_store(&state))
+                                };
+                                match publish {
+                                    Ok(()) => {
+                                        committed = true;
+                                        ExecutionStepOutcome::Commit(CommitMetadata {
+                                            transaction_id: transaction_id.clone(),
+                                        })
+                                    }
+                                    Err(error) => {
+                                        shared_step_error(ExecutionStepErrorKind::Commit, error)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExecutionStepKind::PostCommitRead { .. } if !committed => shared_step_error(
+                ExecutionStepErrorKind::InvalidOrder,
+                "post-commit read precedes a successful commit barrier",
+            ),
+            ExecutionStepKind::PostCommitRead { sql } => {
+                match validate_shared_statement(&sql, true) {
+                    Err(error) => shared_step_error(ExecutionStepErrorKind::PostCommitRead, error),
+                    Ok(_) => match shared_step_timeout(deadline, state.config.query_timeout) {
+                        Err(message) => {
+                            shared_step_error(ExecutionStepErrorKind::PostCommitRead, message)
+                        }
+                        Ok(timeout) => {
+                            match execute_non_session_statement_with_routing(
+                                &state,
+                                &sql,
+                                correlation_id,
+                                timeout,
+                            )
+                            .await
+                            {
+                                Ok((result, _)) => ExecutionStepOutcome::Execution(result),
+                                Err(error) => {
+                                    shared_step_error(ExecutionStepErrorKind::PostCommitRead, error)
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        };
+        let failed = matches!(outcome, ExecutionStepOutcome::Error(_));
+        results.push(shared_step_result(
+            &execution_id,
+            &transaction_id,
+            step.step_id,
+            step_index,
+            outcome,
+        ));
+        if failed {
+            session.rollback().await;
+            break;
+        }
+    }
+
+    session.rollback().await;
+    SharedExecutionReport {
+        execution_id,
+        transaction_id,
+        steps: results,
+    }
+}
+
+async fn begin_shared_session(state: &ServerState) -> Result<SessionId> {
+    let session_id = state.session_manager.create_session().await?;
+    state.session_manager.begin_transaction(&session_id).await?;
+    Ok(session_id)
+}
+
+fn validate_shared_statement(sql: &str, require_query: bool) -> std::result::Result<bool, String> {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).map_err(|error| error.to_string())?;
+    if statements.len() != 1 {
+        return Err("shared execution steps require exactly one SQL statement".into());
+    }
+    if require_query && statements[0].kind.requires_write() {
+        return Err("post-commit read requires a query statement".into());
+    }
+    Ok(!statements[0].kind.requires_write())
+}
+
+fn shared_step_timeout(
+    deadline: Option<Instant>,
+    configured: Duration,
+) -> std::result::Result<Duration, &'static str> {
+    let Some(deadline) = deadline else {
+        return Ok(configured);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err("gRPC deadline exceeded before step execution")
+    } else {
+        Ok(configured.min(remaining))
+    }
+}
+
+fn shared_step_error(
+    kind: ExecutionStepErrorKind,
+    error: impl std::fmt::Display,
+) -> ExecutionStepOutcome {
+    ExecutionStepOutcome::Error(ExecutionStepError {
+        kind,
+        message: error.to_string(),
+    })
+}
+
+fn shared_step_result(
+    execution_id: &str,
+    transaction_id: &str,
+    step_id: String,
+    step_index: usize,
+    outcome: ExecutionStepOutcome,
+) -> ExecutionStepResult {
+    ExecutionStepResult {
+        execution_id: execution_id.into(),
+        transaction_id: transaction_id.into(),
+        step_id,
+        step_index,
+        outcome,
+    }
+}
+
+fn shared_report_to_proto(report: SharedExecutionReport) -> proto::SharedExecutionReport {
+    proto::SharedExecutionReport {
+        execution_id: report.execution_id,
+        transaction_id: report.transaction_id,
+        steps: report
+            .steps
+            .into_iter()
+            .map(|step| {
+                let outcome = match step.outcome {
+                    ExecutionStepOutcome::Execution(result) => {
+                        proto::shared_execution_step_result::Outcome::Execution(
+                            execution_result_to_proto(result),
+                        )
+                    }
+                    ExecutionStepOutcome::Commit(metadata) => {
+                        proto::shared_execution_step_result::Outcome::Commit(
+                            proto::SharedCommitMetadata {
+                                transaction_id: metadata.transaction_id,
+                            },
+                        )
+                    }
+                    ExecutionStepOutcome::Error(error) => {
+                        proto::shared_execution_step_result::Outcome::Error(
+                            proto::SharedExecutionStepError {
+                                kind: shared_error_kind_to_proto(error.kind) as i32,
+                                message: error.message,
+                            },
+                        )
+                    }
+                };
+                proto::SharedExecutionStepResult {
+                    execution_id: step.execution_id,
+                    transaction_id: step.transaction_id,
+                    step_id: step.step_id,
+                    step_index: step.step_index as u64,
+                    outcome: Some(outcome),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn shared_error_kind_to_proto(kind: ExecutionStepErrorKind) -> proto::SharedExecutionStepErrorKind {
+    match kind {
+        ExecutionStepErrorKind::Transaction => proto::SharedExecutionStepErrorKind::Transaction,
+        ExecutionStepErrorKind::Commit => proto::SharedExecutionStepErrorKind::Commit,
+        ExecutionStepErrorKind::PostCommitRead => {
+            proto::SharedExecutionStepErrorKind::PostCommitRead
+        }
+        ExecutionStepErrorKind::InvalidOrder => proto::SharedExecutionStepErrorKind::InvalidOrder,
+    }
+}
+
+fn execution_result_to_proto(result: ExecutionResult) -> proto::SqlResultSet {
+    match result {
+        ExecutionResult::Success => proto::SqlResultSet {
+            success: true,
+            ..Default::default()
+        },
+        ExecutionResult::RowsAffected(affected_rows) => proto::SqlResultSet {
+            affected_rows,
+            has_affected_rows: true,
+            ..Default::default()
+        },
+        ExecutionResult::Query(result) => proto::SqlResultSet {
+            columns: result
+                .columns
+                .into_iter()
+                .map(|column| proto::SqlColumn {
+                    name: column.name,
+                    data_type: column.data_type.to_string(),
+                })
+                .collect(),
+            rows: result
+                .rows
+                .into_iter()
+                .map(|row| proto::Row {
+                    values: row.iter().map(sql_value_to_proto).collect(),
+                })
+                .collect(),
+            ..Default::default()
+        },
+    }
+}
+
+fn grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
+    let value = metadata.get("grpc-timeout")?.to_str().ok()?;
+    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
+    let amount = digits.parse::<u64>().ok()?;
+    match unit {
+        "H" => Some(Duration::from_secs(amount.saturating_mul(60 * 60))),
+        "M" => Some(Duration::from_secs(amount.saturating_mul(60))),
+        "S" => Some(Duration::from_secs(amount)),
+        "m" => Some(Duration::from_millis(amount)),
+        "u" => Some(Duration::from_micros(amount)),
+        "n" => Some(Duration::from_nanos(amount)),
+        _ => None,
+    }
+}
+
 fn cluster_json(
     cluster: &alopex_cluster::ClusterStatusSnapshot,
     correlation_id: &str,
@@ -901,9 +1376,33 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
 
 #[cfg(test)]
 mod temporal_wire_tests {
-    use super::{proto, sql_value_to_proto};
+    use super::{grpc_timeout, proto, shared_step_timeout, sql_value_to_proto};
     use alopex_sql::{storage::DecimalValue, SqlValue};
     use prost::Message;
+    use std::time::{Duration, Instant};
+    use tonic::Request;
+
+    #[test]
+    fn shared_execution_honors_standard_grpc_timeout_budget() {
+        let mut request = Request::new(());
+        request.set_timeout(Duration::from_millis(25));
+        assert_eq!(
+            grpc_timeout(request.metadata()),
+            Some(Duration::from_millis(25))
+        );
+        let remaining = shared_step_timeout(
+            Some(Instant::now() + Duration::from_millis(10)),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .as_millis();
+        assert!((9..=10).contains(&remaining));
+        assert!(shared_step_timeout(
+            Some(Instant::now() - Duration::from_millis(1)),
+            Duration::from_secs(1),
+        )
+        .is_err());
+    }
 
     #[test]
     fn temporal_values_use_appended_wire_variants() {

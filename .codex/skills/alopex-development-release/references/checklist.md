@@ -2,6 +2,53 @@
 
 Use these as patterns, substituting the target version and approved worktree. Keep `rtk` on every shell segment.
 
+Create one milestone-scoped release tracker issue before running release commands. Copy
+the checkpoints below into it and attach evidence as each item completes. Required-CI
+failure returns ownership to an implementation issue; it is not a release-phase repair.
+
+## Performance acceptance ownership
+
+Performance acceptance belongs to its owning issue, does not block release, and must
+be completed before that issue is closed. Codex must dispatch the performance workflow
+with the issue number, then comment the workflow URL and result on that issue. Scheduled
+performance runs are advisory monitoring only; no performance runner availability or
+performance result is a required CI, pre-tag, tag, publication, or release-tracker gate.
+
+## Checkpoint 0 — tracker and candidate
+
+- [ ] Create the release tracker in the target milestone before release work.
+- [ ] Record target version, milestone, worktree, branch, base SHA, and head SHA.
+- [ ] Record every open target issue and every explicitly deferred post-release issue.
+
+## Checkpoint 1 — implementation and review
+
+- [ ] Every target issue has implementation, regression tests, and an issue comment.
+- [ ] Push the exact candidate SHA to a pull request.
+- [ ] Require all required CI, coverage, and target-version implementation-surface checks on that SHA.
+- [ ] On failure, keep the tracker open, create or reopen the owning implementation issue, fix it, and rerun focused, full, and remote checks.
+- [ ] Confirm that no target-version implementation issue remains open.
+
+## Checkpoint 2 — main and pre-tag verification
+
+- [ ] Merge the approved pull request and record the exact main SHA.
+- [ ] Require all required CI checks on that exact main SHA.
+- [ ] Run candidate verification, formatting, clippy, release checks, and `safe-tag.sh`.
+- [ ] Confirm that the target tags and registry versions do not already exist.
+- [ ] Confirm explicit user authorization before creating or publishing a tag.
+
+## Checkpoint 3 — publication
+
+- [ ] Create and push annotated Rust and Python tags at the recorded main SHA.
+- [ ] Record both workflow URLs and require every publish job to succeed.
+- [ ] Verify GitHub Release assets, all crates.io packages, and PyPI wheels/sdist independently.
+
+## Checkpoint 4 — public verification and close
+
+- [ ] Record tag SHAs, workflow conclusions, registry evidence, and public verifier evidence.
+- [ ] Verify worktree/branch state, generated-artifact cleanup, and the 50 GiB limit.
+- [ ] Record remaining post-release work in separate issues.
+- [ ] Close the release tracker only after every preceding item has evidence.
+
 ## State and hygiene
 
 ```bash
@@ -26,6 +73,23 @@ rtk bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 ```
 
 Also run the repository's candidate verifier, then the focused test suites for any changed contract. Before and after Cargo/maturin work, perform the hygiene commands above.
+
+## Reference compatibility gate
+
+Apply `docs/reference-compatibility-development-policy.md` before approving or
+implementing any compatibility-sensitive API.
+
+- [ ] The inventory names the canonical reference project for each observable contract.
+- [ ] The inventory pins the exact version and full commit, not only `main`, `current`, `stable`, or `latest`.
+- [ ] The design records the upstream implementation path and upstream test file/case inspected by the implementer.
+- [ ] Each item is classified as `ported`, `extended`, `diverged`, `not-yet-implemented`, `unsupported`, or `alopex-native`.
+- [ ] Every compatibility fixture has machine-readable project/version/commit/source/test provenance and a reproducible generation command.
+- [ ] Every fixture derived from a reference and extended by Alopex names its base case, exact change, reason, and expected difference.
+- [ ] Handwritten expectations are marked `handwritten-regression` and are excluded from conformance evidence.
+- [ ] The curated reference/differential cases for the changed contract run in required CI without skip.
+- [ ] Licensing and attribution permit any copied or adapted test material.
+
+Block approval, implementation completion, and release when any applicable item is unchecked.
 
 ## spec-workflow approval sequence
 
@@ -58,7 +122,7 @@ roadmap, but preserve exact per-surface enumeration, one owning phase per row,
 explicit support/rejection classification, target-version gate coverage, and the
 full requirements → design → task → test/evidence crosswalk.
 
-Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
+Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, reference project/version/commit, upstream implementation and test locations, relationship classification, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
 
 ## Release safety and tags
 

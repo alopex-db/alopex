@@ -244,7 +244,8 @@ impl NamedWindowResolver {
             ExprKind::InSubquery { expr, .. } | ExprKind::Quantified { expr, .. } => {
                 **expr = self.resolve_expr(expr)?;
             }
-            ExprKind::Literal { .. }
+            ExprKind::Parameter { .. }
+            | ExprKind::Literal { .. }
             | ExprKind::ColumnRef { .. }
             | ExprKind::VectorLiteral { .. }
             | ExprKind::ScalarSubquery { .. }

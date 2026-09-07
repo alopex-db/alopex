@@ -1,38 +1,49 @@
+#![allow(clippy::while_let_on_iterator)]
+
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute DELETE statements.
+#[allow(dead_code)]
 pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     table_name: &str,
     filter: Option<TypedExpr>,
 ) -> Result<ExecutionResult> {
+    execute_delete_with_returning(txn, catalog, table_name, filter, None, None)
+}
+
+pub fn execute_delete_with_returning<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    filter: Option<TypedExpr>,
+    _join_source: Option<crate::planner::JoinedDmlSource>,
+    returning: Option<Projection>,
+) -> Result<ExecutionResult> {
     let table = catalog
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
-    let indexes: Vec<IndexMetadata> = catalog
-        .get_indexes_for_table(table_name)
-        .into_iter()
-        .cloned()
-        .collect();
-    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
-        .into_iter()
-        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
-    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
-        .into_iter()
-        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
-
     let mut rows_affected = 0u64;
+    let mut deleted_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;
     const BATCH: usize = 512;
 
@@ -47,7 +58,26 @@ pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
 
         for (row_id, row) in batch {
             next_row_id = row_id.saturating_add(1);
-            if !predicate_matches(&filter, &row)? {
+            let joined = if let Some(source) = &_join_source {
+                let source_table = catalog
+                    .get_table(&source.table)
+                    .ok_or_else(|| ExecutorError::TableNotFound(source.table.clone()))?;
+                find_join_row(txn, source_table, source.condition.as_ref(), &row)?
+            } else {
+                None
+            };
+            if _join_source.is_some() && joined.is_none() {
+                continue;
+            }
+            let eval_row = joined.as_ref().map_or_else(
+                || row.clone(),
+                |source| {
+                    let mut values = row.clone();
+                    values.extend(source.clone());
+                    values
+                },
+            );
+            if !predicate_matches(&filter, &eval_row)? {
                 continue;
             }
 
@@ -58,15 +88,89 @@ pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
             continue;
         }
 
-        remove_indexes_batch(txn, &btree_indexes, &deletes)?;
-        remove_fts_indexes(txn, &fts_indexes, &deletes)?;
-        remove_hnsw_indexes(txn, &hnsw_indexes, &deletes)?;
-        delete_rows(txn, &table, &deletes)?;
+        for (_, row) in &deletes {
+            super::constraints::apply_parent_delete::<S, C, T>(txn, catalog, &table, row, 0)?;
+        }
+        apply_deletes(txn, catalog, &table, &deletes)?;
 
         rows_affected += deletes.len() as u64;
+        if returning.is_some() {
+            deleted_rows.extend(deletes);
+        }
     }
 
-    Ok(ExecutionResult::RowsAffected(rows_affected))
+    if let Some(projection) = returning {
+        let columns = projected_columns(&projection, &table.columns)?;
+        let rows = deleted_rows
+            .iter()
+            .map(|(row_id, values)| {
+                project_row_values(
+                    &Row::new(*row_id, values.clone()),
+                    &projection,
+                    &table.columns,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ExecutionResult::Query(crate::executor::QueryResult::new(
+            columns, rows,
+        )))
+    } else {
+        Ok(ExecutionResult::RowsAffected(rows_affected))
+    }
+}
+
+fn find_join_row<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    source: &TableMetadata,
+    condition: Option<&TypedExpr>,
+    target: &[SqlValue],
+) -> Result<Option<Vec<SqlValue>>> {
+    let mut storage = txn.table_storage(source);
+    let mut iter = storage.range_scan(0, u64::MAX)?;
+    while let Some(item) = iter.next() {
+        let (_, source_row) = item?;
+        let mut joined = target.to_vec();
+        joined.extend(source_row.clone());
+        let matches_condition = match condition {
+            None => true,
+            Some(expr) => matches!(
+                evaluate(expr, &EvalContext::new(&joined))?,
+                SqlValue::Boolean(true)
+            ),
+        };
+        if matches_condition {
+            return Ok(Some(source_row));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn apply_deletes<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
+    let indexes: Vec<IndexMetadata> = catalog
+        .get_indexes_for_table(&table.name)
+        .into_iter()
+        .cloned()
+        .collect();
+    let (hnsw, indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|index| matches!(index.method, Some(IndexMethod::Hnsw)));
+    let (fts, btree): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|index| matches!(index.method, Some(IndexMethod::Fts)));
+    remove_indexes_batch(txn, &btree, deletes)?;
+    remove_fts_indexes(txn, &fts, deletes)?;
+    remove_hnsw_indexes(txn, &hnsw, deletes)?;
+    delete_rows(txn, table, deletes)
 }
 
 fn remove_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(

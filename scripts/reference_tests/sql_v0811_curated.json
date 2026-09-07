@@ -1,0 +1,22 @@
+{
+  "schema": "alopex.sql-reference-corpus/v1",
+  "references": {
+    "sqlite": {"version":"3.46.1","commit":"f3d536d37825302e31ed0eddd811c689f38f85a3","source":"test/select1.test","license":"blessing"},
+    "postgresql": {"version":"16.14","commit":"0d1c00c624fa7367d4a895f44381887757289682","source":"src/test/regress/sql/select.sql","license":"PostgreSQL"},
+    "duckdb": {"version":"1.4.0","commit":"b8a06e4a22672e254cd0baa68a3dbed2eb51c56e","source":"test/sql/select","license":"MIT"},
+    "datafusion": {"version":"50.0.0","commit":"d0a0c5a7d5867da949161b6065642d15293806de","source":"datafusion/sqllogictest/test_files/select.slt","license":"Apache-2.0"}
+  },
+  "setup": {
+    "columns": ["id", "value", "label", "enabled"],
+    "rows": [[1, 10.5, "one", true], [2, null, "βeta", false], [3, 30.25, null, true]]
+  },
+  "cases": [
+    {"id":"select-null-unicode-order","sql":"SELECT id, value, label FROM parity_rows ORDER BY id DESC","contracts":["column-order","row-order","null","unicode","float"]},
+    {"id":"filter-boolean","sql":"SELECT id FROM parity_rows WHERE enabled = true ORDER BY id","contracts":["boolean","filter","row-order"]},
+    {"id":"aggregate-null","sql":"SELECT COUNT(value) AS n, SUM(value) AS total FROM parity_rows","contracts":["aggregate","null","float"]},
+    {"id":"coercion","sql":"SELECT id, value + 1.0 AS value FROM parity_rows WHERE value IS NOT NULL ORDER BY id","contracts":["coercion","null","row-order"]}
+  ],
+  "error_cases": [
+    {"id":"missing-column","sql":"SELECT missing FROM parity_rows","contracts":["name-resolution","error"]}
+  ]
+}

@@ -78,7 +78,9 @@ fn system_placeholder(_values: &[SqlValue]) -> Result<SqlValue> {
 
 fn evaluator_for(name: &str) -> (EvalFn, Option<LazyEvalFn>) {
     match name {
-        "memory_stats" | "io_stats" | "clear_cache" => (system_placeholder, None),
+        "memory_stats" | "io_stats" | "clear_cache" | "nextval" | "currval" => {
+            (system_placeholder, None)
+        }
         "now" | "current_timestamp" => (datetime::eval_now_values, Some(datetime::eval_now_lazy)),
         "vector_similarity" => (super::function_call::eval_vector_similarity_values, None),
         "vector_distance" => (super::function_call::eval_vector_distance_values, None),

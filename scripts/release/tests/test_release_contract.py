@@ -11,6 +11,52 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_release_procedure_requires_a_checkpoint_issue_before_tagging(self) -> None:
+        skill = (
+            ROOT / ".codex/skills/alopex-development-release/SKILL.md"
+        ).read_text(encoding="utf-8")
+        checklist = (
+            ROOT
+            / ".codex/skills/alopex-development-release/references/checklist.md"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "Create the milestone-scoped release tracker issue before release work",
+            "exact candidate SHA",
+            "required CI",
+            "return to implementation",
+            "record checkpoint evidence immediately",
+            "Close the release tracker only after public verification",
+        ):
+            self.assertIn(required, skill)
+        for checkpoint in (
+            "Checkpoint 0 — tracker and candidate",
+            "Checkpoint 1 — implementation and review",
+            "Checkpoint 2 — main and pre-tag verification",
+            "Checkpoint 3 — publication",
+            "Checkpoint 4 — public verification and close",
+        ):
+            self.assertIn(checkpoint, checklist)
+
+    def test_performance_acceptance_is_owned_by_its_issue_not_release(self) -> None:
+        skill = (
+            ROOT / ".codex/skills/alopex-development-release/SKILL.md"
+        ).read_text(encoding="utf-8")
+        checklist = (
+            ROOT
+            / ".codex/skills/alopex-development-release/references/checklist.md"
+        ).read_text(encoding="utf-8")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        performance = (
+            ROOT / ".github/workflows/parity-performance.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Performance acceptance belongs to its owning issue", skill)
+        self.assertIn("does not block release", checklist)
+        self.assertNotIn("parity-performance.yml", ci)
+        self.assertNotIn("Required parity", ci)
+        self.assertIn("issue_number:", performance)
+
     def test_sql_type_capability_gate_runs_in_ci_and_release(self) -> None:
         surface_gate = (
             ROOT / "crates/alopex-tools/v08/verify-v08-surfaces.sh"

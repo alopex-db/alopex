@@ -1,0 +1,199 @@
+{
+  "schema": "alopex.performance-conformance/v1",
+  "runner_profile": {
+    "labels": ["self-hosted", "linux", "x64", "alopex-performance"],
+    "os": "ubuntu-24.04",
+    "cpu_model": "AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx",
+    "logical_cpu_count": 8,
+    "memory_bytes": 54744252416,
+    "cpu_affinity": [0],
+    "build_profile": "release",
+    "thread_count": 1
+  },
+  "contracts": {
+    "polars-eager-v1": {
+      "kind": "tabular",
+      "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "scripts/performance/parity_v0811_measure.py",
+      "evidence_ids": ["polars-eager-api"],
+      "evidence_coverage": {
+        "polars-eager-api": ["DataFrame.__init__", "DataFrame.explode", "DataFrame.height", "DataFrame.lazy", "DataFrame.to_dict", "DataFrame.width", "Expr.add", "Expr.alias", "Expr.and_", "Expr.eq", "Expr.ge", "Expr.gt", "Expr.le", "Expr.lt", "Expr.mul", "Expr.not_", "Expr.or_", "Expr.sub", "LazyFrame.filter", "LazyFrame.select", "LazyFrame.with_columns", "Series.name", "Series.to_list", "col", "concat", "concat_str", "lit"]
+      },
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff",
+        "rows": 34250,
+        "columns": 2,
+        "dtypes": ["int64", "utf8"],
+        "null_ratio": 0.1,
+        "chunk_rows": [1024, 8192],
+        "cache_states": ["warm"],
+        "warmup_runs": 3,
+        "measurement_runs": 21
+      },
+      "metrics": ["latency_p50_ms", "latency_p95_ms", "rows_per_second", "peak_rss_bytes"],
+      "compatibility_thresholds": {"max_latency_ratio": 2.0, "min_throughput_ratio": 0.5, "max_peak_memory_ratio": 2.0},
+      "thresholds": {"max_latency_ratio": 2.0, "min_throughput_ratio": 0.5, "max_peak_memory_ratio": 2.0},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
+    },
+    "polars-lazy-streaming-v1": {
+      "kind": "streaming",
+      "reference_revision": "pola-rs/polars@ae588a9f2c91171f45bace43a99fb7b80b90847b",
+      "evidence": "scripts/performance/parity_v0811_measure.py",
+      "evidence_ids": ["polars-csv-streaming", "polars-parquet-streaming"],
+      "evidence_coverage": {
+        "polars-csv-streaming": ["LazyFrame.collect", "LazyFrame.collect_batches"],
+        "polars-parquet-streaming": ["LazyFrame.collect", "LazyFrame.collect_batches"]
+      },
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff",
+        "rows": 34250,
+        "columns": 2,
+        "dtypes": ["int64", "utf8"],
+        "null_ratio": 0.1,
+        "chunk_rows": [1024, 8192],
+        "cache_states": ["warm"],
+        "warmup_runs": 3,
+        "measurement_runs": 21,
+        "resource_limit_bytes": 1073741824
+      },
+      "metrics": ["plan_build_p50_ms", "collect_p50_ms", "time_to_first_batch_p50_ms", "total_p50_ms", "steady_state_rows_per_second", "peak_rss_bytes"],
+      "compatibility_thresholds": {"max_latency_ratio": 2.0, "min_throughput_ratio": 0.5, "max_peak_memory_ratio": 2.0},
+      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.001, "max_peak_memory_ratio": 2.0, "max_ratio_by_metric": {"collect_p50_ms": 20.0, "total_p50_ms": 125.0}},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
+    },
+    "hnsw-pareto-v1": {
+      "kind": "hnsw",
+      "reference_revision": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d;facebookresearch/faiss@20f14b31a6d54e243a3d1de6ae193fc4c3ec18ed",
+      "evidence": "scripts/performance/hnsw_v0811_contract.py",
+      "evidence_ids": ["hnsw-pareto"],
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291",
+        "rows": 9171,
+        "columns": 128,
+        "dtypes": ["float32"],
+        "null_ratio": 0.0,
+        "chunk_rows": [9171],
+        "cache_states": ["cold-build", "warm-query"],
+        "warmup_runs": 1,
+        "measurement_runs": 3,
+        "build_runs": 1,
+        "query_runs": 3,
+        "warmup_seconds": 2.0,
+        "dimension": 128,
+        "metric": "cosine",
+        "seed": 42,
+        "insertion_order": "dataset-order",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": [16, 32, 64, 128, 256]
+      },
+      "metrics": ["recall_at_10", "build_latency_ms", "query_latency_p50_ms", "query_latency_p95_ms", "query_latency_p99_ms", "queries_per_second", "index_size_bytes", "peak_rss_bytes", "update_latency_ms", "delete_latency_ms", "reopen_latency_ms"],
+      "compatibility_thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 2.0, "min_recall": 0.99, "max_recall_delta": 0.01},
+      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.2, "max_peak_memory_ratio": 3.0, "min_recall": 0.99, "max_recall_delta": 0.01, "max_ratio_by_metric": {"update_latency_ms": 500.0, "delete_latency_ms": 25000.0}},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95, "match_on": ["recall_at_10"]}
+    },
+    "sql-sqlite-v1": {
+      "kind": "sql",
+      "reference_revision": "sqlite/sqlite@f3d536d37825302e31ed0eddd811c689f38f85a3",
+      "evidence": "scripts/performance/parity_v0811_measure.py",
+      "evidence_ids": ["sql-sqlite-curated"],
+      "evidence_coverage": {
+        "sql-sqlite-curated": ["portable SELECT/null/order/coercion", "parser/lexer", "transactions/savepoints", "prepared statements", "CHECK/FK constraints"]
+      },
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
+        "rows": 34250,
+        "columns": 3,
+        "dtypes": ["int64", "float64", "boolean"],
+        "null_ratio": 0.0,
+        "chunk_rows": [1024, 8192],
+        "cache_states": ["warm"],
+        "warmup_runs": 3,
+        "measurement_runs": 21,
+        "queries": "scripts/performance/fixtures/sql-v0.8.11-curated.json",
+        "parameters": ["none"],
+        "concurrency": [1],
+        "timeout_seconds": 30
+      },
+      "metrics": ["plan_latency_p50_ms", "execution_latency_p50_ms", "latency_p50_ms", "latency_p95_ms", "queries_per_second", "peak_rss_bytes", "temporary_io_bytes"],
+      "compatibility_thresholds": {"max_latency_ratio": 3.0, "min_throughput_ratio": 0.34, "max_peak_memory_ratio": 2.0, "max_temporary_io_ratio": 2.0},
+      "thresholds": {"max_latency_ratio": 35.0, "min_throughput_ratio": 0.025, "max_peak_memory_ratio": 4.5, "max_temporary_io_ratio": 2.0, "max_ratio_by_metric": {"plan_latency_p50_ms": 60.0}},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
+    },
+    "sql-postgresql-v1": {
+      "kind": "sql",
+      "reference_revision": "postgres/postgres@0d1c00c624fa7367d4a895f44381887757289682",
+      "evidence": "scripts/performance/parity_v0811_measure.py",
+      "evidence_ids": ["sql-postgresql-curated"],
+      "evidence_coverage": {
+        "sql-postgresql-curated": ["EXPLAIN JSON", "RETURNING", "ON CONFLICT", "SERIAL/IDENTITY/SEQUENCE", "VIEW/ALTER TABLE/TRUNCATE", "MERGE/UPDATE FROM/DELETE USING", "information_schema"]
+      },
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
+        "rows": 34250,
+        "columns": 3,
+        "dtypes": ["int64", "float64", "boolean"],
+        "null_ratio": 0.0,
+        "chunk_rows": [1024, 8192],
+        "cache_states": ["warm"],
+        "warmup_runs": 3,
+        "measurement_runs": 21,
+        "queries": "scripts/performance/fixtures/sql-v0.8.11-curated.json",
+        "parameters": ["none"],
+        "concurrency": [1],
+        "timeout_seconds": 30
+      },
+      "metrics": ["plan_latency_p50_ms", "execution_latency_p50_ms", "latency_p50_ms", "latency_p95_ms", "queries_per_second", "peak_rss_bytes", "temporary_io_bytes"],
+      "compatibility_thresholds": {"max_latency_ratio": 3.0, "min_throughput_ratio": 0.34, "max_peak_memory_ratio": 2.0, "max_temporary_io_ratio": 2.0},
+      "thresholds": {"max_latency_ratio": 30.0, "min_throughput_ratio": 0.025, "max_peak_memory_ratio": 4.5, "max_temporary_io_ratio": 2.0},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
+    },
+    "sql-datafusion-streaming-v1": {
+      "kind": "streaming",
+      "reference_revision": "apache/datafusion@d0a0c5a7d5867da949161b6065642d15293806de",
+      "evidence": "scripts/performance/parity_v0811_measure.py",
+      "evidence_ids": ["sql-streaming"],
+      "evidence_coverage": {
+        "sql-streaming": ["streaming query"]
+      },
+      "fixture": {
+        "hardware_profile": "alopex-performance-x64-v1",
+        "build_profile": "release",
+        "thread_count": 1,
+        "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
+        "rows": 34250,
+        "columns": 3,
+        "dtypes": ["int64", "float64", "boolean"],
+        "null_ratio": 0.0,
+        "chunk_rows": [1024, 8192],
+        "cache_states": ["warm"],
+        "warmup_runs": 3,
+        "measurement_runs": 21,
+        "queries": "scripts/performance/fixtures/sql-v0.8.11-curated.json",
+        "parameters": ["none"],
+        "concurrency": [1],
+        "timeout_seconds": 30,
+        "resource_limit_bytes": 1073741824
+      },
+      "metrics": ["plan_build_p50_ms", "time_to_first_batch_p50_ms", "total_p50_ms", "steady_state_rows_per_second", "peak_rss_bytes"],
+      "compatibility_thresholds": {"max_latency_ratio": 3.0, "min_throughput_ratio": 0.34, "max_peak_memory_ratio": 2.0},
+      "thresholds": {"max_latency_ratio": 5.0, "min_throughput_ratio": 0.004, "max_peak_memory_ratio": 4.5, "max_ratio_by_metric": {"total_p50_ms": 100.0}},
+      "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
+    }
+  }
+}

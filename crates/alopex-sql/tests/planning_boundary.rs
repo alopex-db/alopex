@@ -77,6 +77,7 @@ fn plan_statement_for_routing_marks_create_table_access() {
     let stmt = Statement {
         kind: StatementKind::CreateTable(CreateTable {
             if_not_exists: false,
+            temporary: false,
             name: "events".to_string(),
             columns: vec![ColumnDef {
                 name: "id".to_string(),

@@ -152,6 +152,8 @@ struct OwnedLsmTransactionState {
     start_timestamp: u64,
     read_set: HashSet<Key>,
     write_set: BTreeMap<Key, Option<Value>>,
+    next_savepoint_id: u64,
+    savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>)>,
     cursor_open: bool,
 }
 
@@ -169,6 +171,8 @@ impl OwnedLsmTransaction {
                 start_timestamp,
                 read_set: HashSet::new(),
                 write_set: BTreeMap::new(),
+                next_savepoint_id: 1,
+                savepoints: Vec::new(),
                 cursor_open: false,
             })),
         })
@@ -289,6 +293,68 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
             return Err(Error::TxnClosed);
         }
         state.write_set.insert(key, None);
+        Ok(())
+    }
+
+    fn create_savepoint(&mut self) -> Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let id = state.next_savepoint_id;
+        state.next_savepoint_id = id.checked_add(1).ok_or_else(|| Error::InvalidParameter {
+            param: "savepoint".into(),
+            reason: "savepoint identifier overflow".into(),
+        })?;
+        let write_set = state.write_set.clone();
+        state.savepoints.push((id, write_set));
+        Ok(id)
+    }
+
+    fn rollback_to_savepoint(&mut self, id: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let position = state
+            .savepoints
+            .iter()
+            .rposition(|(candidate, _)| *candidate == id)
+            .ok_or_else(|| Error::InvalidParameter {
+                param: "savepoint".into(),
+                reason: "unknown savepoint identifier".into(),
+            })?;
+        state.write_set = state.savepoints[position].1.clone();
+        state.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    fn release_savepoint(&mut self, id: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        let position = state
+            .savepoints
+            .iter()
+            .rposition(|(candidate, _)| *candidate == id)
+            .ok_or_else(|| Error::InvalidParameter {
+                param: "savepoint".into(),
+                reason: "unknown savepoint identifier".into(),
+            })?;
+        state.savepoints.truncate(position);
         Ok(())
     }
 
@@ -900,6 +966,38 @@ mod tests {
             None
         );
         lease.finish(OwnedLeaseOutcome::Exhausted).unwrap();
+    }
+
+    #[test]
+    fn owned_lsm_savepoint_restores_staged_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = disk_store(directory.path());
+        let transaction = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .with_transaction(|transaction| {
+                transaction.put(b"kept".to_vec(), b"before".to_vec())?;
+                let savepoint = transaction.create_savepoint()?;
+                transaction.put(b"discarded".to_vec(), b"after".to_vec())?;
+                transaction.rollback_to_savepoint(savepoint)?;
+                Ok(())
+            })
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let read = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
+        read.with_transaction(|transaction| {
+            assert_eq!(
+                transaction.get(&b"kept".to_vec())?,
+                Some(b"before".to_vec())
+            );
+            assert_eq!(transaction.get(&b"discarded".to_vec())?, None);
+            Ok(())
+        })
+        .unwrap();
+        read.rollback().unwrap();
     }
 
     #[test]

@@ -118,9 +118,9 @@ def _load_python_dataframe_v06_default_expected():
 
 
 def _assert_dataframe_contract(df, expected):
-    assert df.height() == expected["height"]
-    assert df.width() == expected["width"]
-    assert df.to_dict() == expected["to_dict"]
+    assert df.height == expected["height"]
+    assert df.width == expected["width"]
+    assert df.to_dict(as_series=False) == expected["to_dict"]
 
 
 def test_known_python_error_codes_are_stable():
@@ -300,6 +300,6 @@ def test_python_dataframe_v06_default_schema_aliases_match_fixture():
 
 def test_dataframe_p3_namespaces_are_additive_to_default_contract():
     df = DataFrame({"name": [" Alopex ", None], "id": [1, 2]})
-    out = df.str("name").strip_chars(output="trimmed").to_dict()
+    out = df.str("name").strip_chars(output="trimmed").to_dict(as_series=False)
     assert out["name"] == [" Alopex ", None]
     assert out["trimmed"] == ["Alopex", None]

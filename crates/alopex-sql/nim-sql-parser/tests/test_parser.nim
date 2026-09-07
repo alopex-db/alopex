@@ -21,6 +21,14 @@ suite "Tokenizer":
     let tok = lex.nextToken()
     check tok.kind == tkPragma
 
+  test "transaction control keywords are recognized":
+    var lex = initLexer("BEGIN START TRANSACTION COMMIT ROLLBACK")
+    check lex.nextToken().kind == tkBegin
+    check lex.nextToken().kind == tkStart
+    check lex.nextToken().kind == tkTransaction
+    check lex.nextToken().kind == tkCommit
+    check lex.nextToken().kind == tkRollback
+
   test "keywords are case-insensitive":
     # All of these should produce keyword tokens regardless of case
     var lex = initLexer("SELECT select Select FROM from WHERE where")
@@ -54,6 +62,15 @@ suite "Tokenizer":
     let t2 = lex.nextToken()
     check t2.kind == tkIdent
     check t2.value == "_Bar1"
+
+  test "double-quoted identifiers keep keywords, spaces, and escaped quotes":
+    var lex = initLexer("\"Order Items\" \"a\"\"b\"")
+    let spaced = lex.nextToken()
+    check spaced.kind == tkIdent
+    check spaced.value == "Order Items"
+    let escaped = lex.nextToken()
+    check escaped.kind == tkIdent
+    check escaped.value == "a\"b"
 
   test "integer literal":
     var lex = initLexer("123")
@@ -189,6 +206,10 @@ suite "Expressions — literals":
     check ast.kind == nkSelect
     check ast.children[0].children[0].kind == nkColumnRef
 
+  test "portable information schema relations retain qualification":
+    let ast = parseSql("SELECT table_name FROM information_schema.tables")
+    check ast.children[1].children[0].strVal == "information_schema.tables"
+
   test "PRAGMA accepts integer and string values":
     let integerPragma = parseSql("PRAGMA cache_size = 16")
     check integerPragma.kind == nkPragma
@@ -197,6 +218,22 @@ suite "Expressions — literals":
     let textPragma = parseSql("PRAGMA memory_limit = '100MB'")
     check textPragma.kind == nkPragma
     check textPragma.children[1].strVal == "100MB"
+
+  test "portable metadata statements normalize to PRAGMA nodes":
+    for (sql, name, target) in [
+      ("SHOW TABLES", "show_tables", ""),
+      ("SHOW INDEXES", "show_indexes", ""),
+      ("SHOW INDEXES FROM \"Order Items\"", "show_indexes", "Order Items"),
+      ("DESCRIBE \"Order Items\"", "describe", "Order Items"),
+      ("DESC TABLE \"Order Items\"", "describe", "Order Items")
+    ]:
+      let metadata = parseSql(sql)
+      check metadata.kind == nkPragma
+      check metadata.children[0].strVal == name
+      if target.len == 0:
+        check metadata.children.len == 1
+      else:
+        check metadata.children[1].strVal == target
 
   test "integer literal":
     let ast = parseSql("SELECT 42")
@@ -1043,6 +1080,25 @@ suite "DML — INSERT":
     check ast.children[2].kind == nkExprList  # row 2
     check ast.children[2].children.len == 2
 
+  test "PostgreSQL ON CONFLICT and RETURNING":
+    let ast = parseSql("""
+      INSERT INTO users (id, name) VALUES (1, 'Alice')
+      ON CONFLICT (id) DO UPDATE SET name = 'updated' WHERE users.id = 1
+      RETURNING id, name AS saved_name
+    """)
+    check ast.kind == nkInsert
+    check ast.children[^2].kind == nkOnConflict
+    check ast.children[^2].statementAction == "UPDATE"
+    check ast.children[^2].constraintColumns == @["id"]
+    check ast.children[^1].kind == nkReturningClause
+    check ast.children[^1].children.len == 2
+
+  test "ON CONFLICT DO NOTHING":
+    let ast = parseSql("INSERT INTO users VALUES (1) ON CONFLICT DO NOTHING RETURNING *")
+    check ast.children[^2].kind == nkOnConflict
+    check ast.children[^2].statementAction == "NOTHING"
+    check ast.children[^1].children[0].kind == nkStar
+
 # ---------------------------------------------------------------------------
 # DML tests — UPDATE
 # ---------------------------------------------------------------------------
@@ -1070,6 +1126,15 @@ suite "DML — UPDATE":
     let ast = parseSql("UPDATE users SET active = FALSE")
     check ast.kind == nkUpdate
 
+  test "PostgreSQL UPDATE FROM with RETURNING":
+    let ast = parseSql("""
+      UPDATE inventory SET quantity = quantity - daily.amt
+      FROM daily WHERE inventory.id = daily.id RETURNING inventory.id
+    """)
+    check ast.kind == nkUpdate
+    check ast.children[2].kind == nkFromClause
+    check ast.children[^1].kind == nkReturningClause
+
 # ---------------------------------------------------------------------------
 # DML tests — DELETE
 # ---------------------------------------------------------------------------
@@ -1089,6 +1154,46 @@ suite "DML — DELETE":
     check ast.children.len == 1
     check ast.children[0].strVal == "users"
 
+  test "PostgreSQL DELETE USING with RETURNING":
+    let ast = parseSql("DELETE FROM films USING producers WHERE producer_id = producers.id RETURNING films.*")
+    check ast.children[1].kind == nkFromClause
+    check ast.children[^1].kind == nkReturningClause
+
+suite "DML — MERGE":
+
+  test "DuckDB and PostgreSQL compatible MERGE actions":
+    let ast = parseSql("""
+      MERGE INTO target USING source ON target.id = source.id
+      WHEN MATCHED THEN UPDATE SET value = source.value
+      WHEN MATCHED AND source.deleted = TRUE THEN DELETE
+      WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)
+      RETURNING *
+    """)
+    check ast.kind == nkMerge
+    check ast.children[3].kind == nkMergeWhen
+    check ast.children[3].statementAction == "UPDATE"
+    check ast.children[4].statementAction == "DELETE"
+    check ast.children[5].statementAction == "INSERT"
+    check ast.children[^1].kind == nkReturningClause
+
+suite "DML — COPY":
+
+  test "PostgreSQL COPY file options":
+    let ast = parseSql("COPY users (id, name) FROM 'users.csv' WITH (FORMAT CSV, HEADER TRUE)")
+    check ast.kind == nkCopy
+    check ast.copyDirection == "FROM"
+    check ast.copyTarget == "FILE"
+    check ast.copyFormat == "CSV"
+    check ast.constraintColumns == @["id", "name"]
+
+  test "COPY stream and query forms":
+    let fromStdin = parseSql("COPY users FROM STDIN WITH (FORMAT JSON)")
+    check fromStdin.copyTarget == "STDIN"
+    let toStdout = parseSql("COPY (SELECT * FROM users) TO STDOUT WITH (FORMAT PARQUET)")
+    check toStdout.copyDirection == "TO"
+    check toStdout.copyTarget == "STDOUT"
+    check toStdout.children[0].kind == nkSelect
+
 # ---------------------------------------------------------------------------
 # DDL tests — CREATE TABLE
 # ---------------------------------------------------------------------------
@@ -1105,6 +1210,7 @@ suite "DDL — CREATE TABLE":
       )
     """)
     check ast.kind == nkCreateTable
+
     # First non-flag child is the table name, then column defs
     # Find table name (nkIdentifier with value "users")
     var tableName = ""
@@ -1116,6 +1222,13 @@ suite "DDL — CREATE TABLE":
         inc colCount
     check tableName == "users"
     check colCount == 4
+
+  test "CREATE TEMP and TEMPORARY TABLE retain temporary metadata":
+    for sql in ["CREATE TEMP TABLE scratch (id INT)",
+                "CREATE TEMPORARY TABLE scratch (id INT)"]:
+      let ast = parseSql(sql)
+      check ast.kind == nkCreateTable
+      check ast.children[0].strVal == "TEMPORARY"
 
   test "CREATE TABLE IF NOT EXISTS":
     let ast = parseSql("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY)")
@@ -1173,6 +1286,35 @@ suite "DDL — CREATE TABLE":
           if c.children[0].strVal == "UNIQUE":
             uFound = true
     check uFound
+
+  test "SERIAL and generated identity columns":
+    let ast = parseSql("""
+      CREATE TABLE generated_ids (
+        legacy SERIAL,
+        standard BIGINT GENERATED BY DEFAULT AS IDENTITY
+          (START WITH 10 INCREMENT BY 5 CACHE 4 NO CYCLE)
+      )
+    """)
+    check ast.children[1].colType.children[0].strVal == "SERIAL"
+    check ast.children[2].colConstraints[0].constraintKind == "IDENTITY"
+    check ast.children[2].colConstraints[0].statementAction == "BY DEFAULT"
+
+suite "DDL — SEQUENCE":
+
+  test "CREATE ALTER DROP SEQUENCE":
+    let created = parseSql("CREATE SEQUENCE IF NOT EXISTS order_seq START WITH 10 INCREMENT BY 2 MINVALUE 10 MAXVALUE 100 CACHE 5 CYCLE")
+    check created.kind == nkCreateSequence
+    check created.children[0].strVal == "IF NOT EXISTS"
+    check created.children[1].strVal == "order_seq"
+    check created.sequenceOptions.len == 6
+
+    let altered = parseSql("ALTER SEQUENCE order_seq RESTART WITH 20 NO CYCLE OWNED BY orders.id")
+    check altered.kind == nkAlterSequence
+    check altered.sequenceOptions.len == 3
+
+    let dropped = parseSql("DROP SEQUENCE IF EXISTS order_seq")
+    check dropped.kind == nkDropSequence
+    check dropped.children[0].strVal == "IF EXISTS"
 
   test "column DEFAULT constraint":
     let ast = parseSql("CREATE TABLE t (active BOOLEAN DEFAULT TRUE)")
@@ -1437,6 +1579,99 @@ suite "DDL — DROP TABLE":
     check ast.kind == nkDropTable
     check ast.children[0].strVal == "IF EXISTS"
     check ast.children[1].strVal == "users"
+
+# ---------------------------------------------------------------------------
+# DDL tests — schema evolution
+# PostgreSQL/DuckDB-compatible spellings form the public parser contract.
+# ---------------------------------------------------------------------------
+
+suite "DDL — schema evolution":
+
+  test "CREATE and DROP VIEW preserve flags, aliases, and query":
+    let created = parseSql(
+      "CREATE VIEW IF NOT EXISTS active_users (id, name) AS " &
+      "SELECT id, name FROM users WHERE active = TRUE")
+    check created.kind == nkCreateView
+    check created.children[0].strVal == "IF NOT EXISTS"
+    check created.children[1].strVal == "active_users"
+    check created.children[2].kind == nkColumnList
+    check created.children[2].children.len == 2
+    check created.children[3].kind == nkSelect
+
+    let withQuery = parseSql(
+      "CREATE VIEW recent_users AS " &
+      "WITH recent AS (SELECT id FROM users) SELECT id FROM recent")
+    check withQuery.kind == nkCreateView
+    check withQuery.children[1].kind == nkColumnList
+    check withQuery.children[2].kind == nkSelect
+    check withQuery.children[2].children[0].kind == nkWithClause
+
+    let dropped = parseSql("DROP VIEW IF EXISTS active_users")
+    check dropped.kind == nkDropView
+    check dropped.children[0].strVal == "IF EXISTS"
+    check dropped.children[1].strVal == "active_users"
+
+  test "ALTER TABLE parses PostgreSQL and DuckDB action spellings":
+    let cases = [
+      ("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS age INT DEFAULT 0", nkAlterAddColumn),
+      ("ALTER TABLE users DROP COLUMN IF EXISTS age", nkAlterDropColumn),
+      ("ALTER TABLE users RENAME COLUMN name TO display_name", nkAlterRenameColumn),
+      ("ALTER TABLE users RENAME TO people", nkAlterRenameTable),
+      ("ALTER TABLE users ALTER COLUMN age TYPE BIGINT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET DATA TYPE TEXT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET DEFAULT 1", nkAlterColumn),
+      ("ALTER TABLE users ALTER age DROP DEFAULT", nkAlterColumn),
+      ("ALTER TABLE users ALTER age SET NOT NULL", nkAlterColumn),
+      ("ALTER TABLE users ALTER age DROP NOT NULL", nkAlterColumn)
+    ]
+    for (sql, actionKind) in cases:
+      let ast = parseSql(sql)
+      check ast.kind == nkAlterTable
+      check ast.children[^1].kind == actionKind
+
+  test "TRUNCATE accepts optional TABLE":
+    for sql in ["TRUNCATE users", "TRUNCATE TABLE users"]:
+      let ast = parseSql(sql)
+      check ast.kind == nkTruncate
+      check ast.children[0].strVal == "users"
+
+suite "DDL — relational constraints":
+
+  test "column CHECK and REFERENCES preserve actions":
+    let ast = parseSql(
+      "CREATE TABLE child (" &
+      "id BIGINT CONSTRAINT positive CHECK (id > 0), " &
+      "parent_id BIGINT REFERENCES parent (id) " &
+      "ON DELETE CASCADE ON UPDATE SET NULL)")
+    check ast.kind == nkCreateTable
+    let checked = ast.children[1]
+    check checked.colConstraints[0].constraintKind == "CHECK"
+    check checked.colConstraints[0].constraintName == "positive"
+    check checked.colConstraints[0].constraintExpression.kind == nkBinaryOp
+    let referenced = ast.children[2].colConstraints[0]
+    check referenced.constraintKind == "REFERENCES"
+    check referenced.referencedTable == "parent"
+    check referenced.referencedColumns == @["id"]
+    check referenced.onDeleteAction == "CASCADE"
+    check referenced.onUpdateAction == "SET NULL"
+
+  test "table composite constraints and deferrability are explicit":
+    let ast = parseSql(
+      "CREATE TABLE child (tenant BIGINT, parent_id BIGINT, " &
+      "CONSTRAINT child_fk FOREIGN KEY (tenant, parent_id) " &
+      "REFERENCES parent (tenant, id) ON DELETE RESTRICT " &
+      "DEFERRABLE INITIALLY DEFERRED, " &
+      "UNIQUE (tenant, parent_id), CHECK (tenant > 0))")
+    check ast.kind == nkCreateTable
+    let foreignKey = ast.children[3]
+    check foreignKey.constraintKind == "FOREIGN KEY"
+    check foreignKey.constraintName == "child_fk"
+    check foreignKey.constraintColumns == @["tenant", "parent_id"]
+    check foreignKey.referencedColumns == @["tenant", "id"]
+    check foreignKey.constraintDeferrable
+    check foreignKey.initiallyDeferred
+    check ast.children[4].constraintKind == "UNIQUE"
+    check ast.children[5].constraintKind == "CHECK"
 
 # ---------------------------------------------------------------------------
 # Roadmap coverage tests — Phase 2
@@ -1724,11 +1959,93 @@ suite "FETCH pagination (issue #152)":
       "SELECT 1 FETCH FIRST 10 PERCENT ROWS ONLY").contains(
       "FETCH ... PERCENT is not supported")
 
-  test "bind parameter placeholder reports a dedicated error":
-    let message = parseErrorMessage("SELECT ? FROM t")
-    check message.contains("bind parameters are not yet supported")
-    check parseErrorMessage("SELECT id FROM t LIMIT ?").contains(
-      "bind parameters are not yet supported")
+  test "bind parameters are numbered per statement in expression positions":
+    let paginated = parseSql("SELECT ?, ? LIMIT ? OFFSET ?")
+    check paginated.children[0].children[0].parameterIndex == 1
+    check paginated.children[0].children[1].parameterIndex == 2
+    check paginated.findClause(nkLimitClause).children[0].parameterIndex == 3
+    check paginated.findClause(nkOffsetClause).children[0].parameterIndex == 4
+
+    let fetched = parseSql("SELECT ? FETCH FIRST ? ROWS ONLY")
+    check fetched.children[0].children[0].parameterIndex == 1
+    check fetched.findClause(nkLimitClause).children[0].parameterIndex == 2
+
+    let statements = parseSql("SELECT ?; SELECT ?")
+    check statements.children[0].children[0].children[0].parameterIndex == 1
+    check statements.children[1].children[0].children[0].parameterIndex == 1
+
+  test "EXPLAIN keeps execution mode, output format, and inner statement":
+    let plain = parseSql("EXPLAIN SELECT 1")
+    check plain.kind == nkExplain
+    check plain.explainAnalyze == false
+    check plain.explainFormat == "Text"
+    check plain.children[0].kind == nkSelect
+
+    let analyzed = parseSql("EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1")
+    check analyzed.kind == nkExplain
+    check analyzed.explainAnalyze
+    check analyzed.explainFormat == "Json"
+    check analyzed.children[0].kind == nkSelect
+
+  test "EXPLAIN rejects unsupported formats and control statements":
+    check parseErrorMessage("EXPLAIN (FORMAT YAML) SELECT 1").contains(
+      "expected JSON or TEXT explain format")
+    check parseErrorMessage("EXPLAIN (ANALYZE, ANALYZE) SELECT 1").contains(
+      "duplicate ANALYZE explain option")
+    check parseErrorMessage("EXPLAIN COMMIT").contains(
+      "EXPLAIN requires a query, DML, DDL, or PRAGMA statement")
+    check parseErrorMessage("EXPLAIN EXPLAIN SELECT 1").contains(
+      "EXPLAIN requires a query, DML, DDL, or PRAGMA statement")
+
+  test "transaction control statements parse to dedicated nodes":
+    check parseSql("BEGIN").kind == nkBegin
+    check parseSql("START TRANSACTION").kind == nkBegin
+    check parseSql("COMMIT").kind == nkCommit
+    check parseSql("ROLLBACK").kind == nkRollback
+
+  test "savepoint control statements parse names and complete spans":
+    let saved = parseSql("SAVEPOINT retry")
+    check saved.kind == nkSavepoint
+    check saved.children[0].strVal == "retry"
+    check saved.span.`end`.column == 15
+
+    let rewound = parseSql("ROLLBACK TO SAVEPOINT retry")
+    check rewound.kind == nkRollbackToSavepoint
+    check rewound.children[0].strVal == "retry"
+    check rewound.span.`end`.column == 27
+
+    let released = parseSql("RELEASE SAVEPOINT retry")
+    check released.kind == nkReleaseSavepoint
+    check released.children[0].strVal == "retry"
+    check released.span.`end`.column == 23
+
+  test "transaction characteristics parse without silent fallback":
+    let started = parseSql(
+      "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    check started.kind == nkBegin
+    check started.isolationLevel == "RepeatableRead"
+    check started.accessMode == "ReadOnly"
+
+    let configured = parseSql(
+      "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE")
+    check configured.kind == nkSetTransaction
+    check configured.isolationLevel == "Serializable"
+    check configured.accessMode == "ReadWrite"
+
+    check parseErrorMessage("BEGIN DEFERRED").contains(
+      "unsupported transaction characteristic")
+
+  test "transaction control words remain legal identifiers outside statement position":
+    for name in ["begin", "start", "transaction", "commit", "rollback"]:
+      check parseSql("SELECT " & name & " FROM " & name).kind == nkSelect
+      check parseSql("CREATE TABLE t (" & name & " INTEGER)").kind == nkCreateTable
+
+  test "transaction control statements retain their complete span":
+    let started = parseSql("START TRANSACTION")
+    check started.span.start.column == 1
+    check started.span.`end`.column == 17
+    let committed = parseSql("COMMIT TRANSACTION")
+    check committed.span.`end`.column == 18
 
   test "fetch keywords stay usable as expression identifiers":
     let ast = parseSql("SELECT fetch, next, ties, only, row FROM t")

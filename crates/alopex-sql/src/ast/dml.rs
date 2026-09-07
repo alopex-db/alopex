@@ -240,7 +240,32 @@ pub struct Insert {
     pub table: String,
     pub columns: Option<Vec<String>>,
     pub source: InsertSource,
+    #[serde(default)]
+    pub on_conflict: Option<OnConflict>,
+    #[serde(default)]
+    pub returning: Vec<SelectItem>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnConflict {
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub constraint: Option<String>,
+    pub action: OnConflictAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
+pub enum OnConflictAction {
+    DoNothing,
+    DoUpdate {
+        assignments: Vec<Assignment>,
+        selection: Option<Expr>,
+    },
 }
 
 /// The row source for an INSERT statement.
@@ -256,7 +281,11 @@ pub enum InsertSource {
 pub struct Update {
     pub table: String,
     pub assignments: Vec<Assignment>,
+    #[serde(default)]
+    pub from: Vec<FromItem>,
     pub selection: Option<Expr>,
+    #[serde(default)]
+    pub returning: Vec<SelectItem>,
     pub span: Span,
 }
 
@@ -270,8 +299,82 @@ pub struct Assignment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     pub table: String,
+    #[serde(default)]
+    pub using: Vec<FromItem>,
     pub selection: Option<Expr>,
+    #[serde(default)]
+    pub returning: Vec<SelectItem>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Merge {
+    pub target: FromItem,
+    pub source: FromItem,
+    pub on: Expr,
+    pub clauses: Vec<MergeClause>,
+    #[serde(default)]
+    pub returning: Vec<SelectItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeClause {
+    pub matched: bool,
+    pub condition: Option<Expr>,
+    pub action: MergeAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum MergeAction {
+    Update {
+        assignments: Vec<Assignment>,
+    },
+    Delete,
+    Insert {
+        columns: Vec<String>,
+        values: Vec<Expr>,
+    },
+    DoNothing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyStatement {
+    pub source: CopySource,
+    pub direction: CopyDirection,
+    pub target: CopyTarget,
+    #[serde(default)]
+    pub options: Vec<CopyOption>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum CopySource {
+    Table { name: String, columns: Vec<String> },
+    Query { query: Box<QueryBody> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyDirection {
+    From,
+    To,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum CopyTarget {
+    File { path: String },
+    Stdin,
+    Stdout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyOption {
+    pub name: String,
+    pub value: String,
 }
 
 impl Spanned for Select {
@@ -346,6 +449,18 @@ impl Spanned for Assignment {
 }
 
 impl Spanned for Delete {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for Merge {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for CopyStatement {
     fn span(&self) -> Span {
         self.span
     }

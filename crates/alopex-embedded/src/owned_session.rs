@@ -106,6 +106,8 @@ impl Database {
             journal,
             hnsw_indices: HashMap::new(),
             vector_cache_invalidated: false,
+            failed: false,
+            savepoints: Vec::new(),
         })
     }
 }
@@ -123,6 +125,16 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
+    pub(crate) failed: bool,
+    savepoints: Vec<OwnedEmbeddedSavepoint>,
+}
+
+struct OwnedEmbeddedSavepoint {
+    name: String,
+    core_id: u64,
+    overlay: CatalogOverlay,
+    catalog_modified: bool,
+    vector_cache_invalidated: bool,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -162,6 +174,51 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
+    /// Create a named SQL savepoint.
+    pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
+        let core_id = self.session.create_savepoint().map_err(Error::Core)?;
+        self.savepoints.push(OwnedEmbeddedSavepoint {
+            name: name.to_owned(),
+            core_id,
+            overlay: self.overlay.clone(),
+            catalog_modified: self.catalog_modified,
+            vector_cache_invalidated: self.vector_cache_invalidated,
+        });
+        Ok(())
+    }
+
+    /// Roll back to the most recent matching named SQL savepoint.
+    pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        let position = self.savepoint_position(name)?;
+        let savepoint = &self.savepoints[position];
+        self.session
+            .rollback_to_savepoint(savepoint.core_id)
+            .map_err(Error::Core)?;
+        self.overlay = savepoint.overlay.clone();
+        self.catalog_modified = savepoint.catalog_modified;
+        self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
+        self.failed = false;
+        self.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    /// Release the most recent matching named SQL savepoint and nested savepoints.
+    pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        let position = self.savepoint_position(name)?;
+        self.session
+            .release_savepoint(self.savepoints[position].core_id)
+            .map_err(Error::Core)?;
+        self.savepoints.truncate(position);
+        Ok(())
+    }
+
+    fn savepoint_position(&self, name: &str) -> Result<usize> {
+        self.savepoints
+            .iter()
+            .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::SavepointNotFound(name.to_owned()))
+    }
+
     /// Preflight a streamable local SELECT against this transaction's catalog overlay.
     ///
     /// The plan copies its required catalog metadata before returning, so the resulting stream
@@ -172,6 +229,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Commit the owned transaction after staging catalog and range-change metadata.
     pub fn commit(&mut self) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
         let mut preparation = Ok(());
         let journal = self.journal.take();
         self.session

@@ -127,6 +127,8 @@ impl From<&IndexMetadata> for IndexFqn {
 pub enum TableType {
     Managed,
     External,
+    Temporary,
+    View,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +411,10 @@ pub struct PersistedColumnMeta {
     pub not_null: bool,
     pub primary_key: bool,
     pub unique: bool,
+    #[serde(default)]
+    pub generated_sequence: Option<String>,
+    #[serde(default)]
+    pub generated_sequence_options: Option<crate::ast::ddl::SequenceOptions>,
 }
 
 impl From<&ColumnMetadata> for PersistedColumnMeta {
@@ -419,16 +425,25 @@ impl From<&ColumnMetadata> for PersistedColumnMeta {
             not_null: value.not_null,
             primary_key: value.primary_key,
             unique: value.unique,
+            generated_sequence: value.generated_sequence.clone(),
+            generated_sequence_options: value.generated_sequence_options.clone(),
         }
     }
 }
 
 impl From<PersistedColumnMeta> for ColumnMetadata {
     fn from(value: PersistedColumnMeta) -> Self {
-        ColumnMetadata::new(value.name, value.data_type.into())
+        let mut metadata = ColumnMetadata::new(value.name, value.data_type.into())
             .with_not_null(value.not_null)
             .with_primary_key(value.primary_key)
-            .with_unique(value.unique)
+            .with_unique(value.unique);
+        if let Some(sequence) = value.generated_sequence {
+            metadata = metadata.with_generated_sequence(sequence);
+        }
+        if let Some(options) = value.generated_sequence_options {
+            metadata = metadata.with_generated_sequence_options(options);
+        }
+        metadata
     }
 }
 
@@ -459,6 +474,14 @@ struct PersistedTableMetaV1 {
 
 impl From<&TableMetadata> for PersistedTableMeta {
     fn from(value: &TableMetadata) -> Self {
+        let mut properties = value.properties.clone();
+        if !value.constraints.is_empty() {
+            properties.insert(
+                crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
+                serde_json::to_string(&value.constraints)
+                    .expect("relational constraints must serialize"),
+            );
+        }
         Self {
             table_id: value.table_id,
             name: value.name.clone(),
@@ -475,7 +498,7 @@ impl From<&TableMetadata> for PersistedTableMeta {
             storage_options: value.storage_options.clone().into(),
             storage_location: value.storage_location.clone(),
             comment: value.comment.clone(),
-            properties: value.properties.clone(),
+            properties,
         }
     }
 }
@@ -500,6 +523,11 @@ impl From<PersistedTableMeta> for TableMetadata {
         table.storage_location = value.storage_location;
         table.comment = value.comment;
         table.properties = value.properties;
+        table.constraints = table
+            .properties
+            .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
         table
     }
 }
@@ -1069,6 +1097,9 @@ impl<S: KVStore> PersistentCatalog<S> {
                 persisted.name = fqn.table.clone();
             }
             max_table_id = max_table_id.max(persisted.table_id);
+            if persisted.table_type == TableType::Temporary {
+                continue;
+            }
             let table: TableMetadata = persisted.into();
             inner.insert_table_unchecked(table);
         }

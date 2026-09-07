@@ -8,6 +8,17 @@ mod error;
 mod types;
 mod vector;
 
+#[cfg(test)]
+mod test_harness {
+    /// Every unit test process needs Python before an error path can create a `PyErr`.
+    /// cargo-nextest starts one process per test, so initialization cannot depend on
+    /// another test running first.
+    #[ctor::ctor]
+    fn initialize_python() {
+        pyo3::Python::initialize();
+    }
+}
+
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("AlopexError", py.get_type::<error::PyAlopexError>())?;
