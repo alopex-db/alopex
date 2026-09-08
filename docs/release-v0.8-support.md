@@ -58,24 +58,43 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 - [SQL full-text search](sql-full-text-search.md)
 - [v0.7.4 to v0.8 upgrade and recovery](upgrade-v0.7.4-to-v0.8.md)
 
-Post-release verification is intentionally `not_run` in every candidate report.
-It can only be performed after a separately authorized public release action.
+## Verification responsibility and release procedure
 
-## Mandatory post-release verification
+The release procedure follows issue #394. A failed check belongs to the layer
+whose owner must change it; adding it to Delivery does not transfer that
+responsibility.
+
+| Layer | Required evidence | Delivery boundary |
+| --- | --- | --- |
+| Development CI | unit/integration/API contracts, execution-path contracts, and fast performance regressions for the exact commit | Known functionality must finish here, before an RC tag. |
+| Extended Verification | expensive performance, compatibility, stress, durability, and formal evidence for the exact commit | A failure changes the commit or its configuration. |
+| RC Qualification | package/archive structure, installability, manifest/digest, and minimum runtime smoke for one produced candidate | It consumes prior evidence; it does not rerun ordinary functionality or performance suites. |
+| Stable Delivery | promotion of the approved same-SHA candidate and public registry availability | It never first tests known functionality, execution paths, completeness, or performance. |
+
+Before creating a stable tag, every owning issue must have recorded its required
+Development CI / Extended Verification evidence against the target commit. The
+existing `v08-release-gate` owns the checked-out implementation surface; the
+post-publication workflow must not run its release demos as a second, late
+source of truth.
+
+## Public downstream evidence
 
 The Python publication workflow calls
-`.github/workflows/public-release-verification.yml` after the immutable core/Python
-join succeeds. That workflow installs the exact crates.io and PyPI version, runs
-every release demo, saves structured JSON plus Markdown as an Actions artifact,
-and rejects a publication candidate containing `SKIP`.
+`.github/workflows/public-release-verification.yml` after publication only to
+confirm exact-version PyPI reachability and isolated installation/import. It
+does not decide whether known functionality is correct.
 
-Report generation has no Git or GitHub side effect. A successful report is
-published only by the workflow's explicit `publish_report: true` job, without a
-force push, and the job waits until `alopex-db/docs@main` contains identical
-bytes. A failed run retains the JSON/Markdown artifact but is not imported as a
-public guarantee. Weekly scheduled verification uses the same harness, never
-publishes automatically, and creates or updates a failure issue when the
-harness or latest public packages stop working.
+The workflow renders and publishes Markdown plus JSON for every run, including
+failure and incomplete execution. Each report is stored under a version and
+GitHub run/attempt identity, so a later success cannot overwrite or conceal an
+earlier failure. The report records the commit, tag, responsibility layer, run
+URL, outcome, and diagnostics. The publisher checks out `alopex-db/docs`
+directly and writes both files there; it does not rely on an `alopex` branch
+being imported elsewhere. Report publication itself is separately observable:
+a primary publication failure is appended to the run's JSON/Markdown and saved
+by an independent docs-writing job. Only if that independent write also fails
+does the workflow create an issue as the remaining visibility signal; an issue
+never substitutes for the required docs evidence.
 
 For local review, run the verifier with `--results-file` and `--report-dir`.
 `--report-only RESULTS.json` regenerates Markdown without rerunning Docker or

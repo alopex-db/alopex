@@ -7,10 +7,9 @@ on:
         description: "Release version or tag"
         required: true
         type: string
-      publish_report:
-        description: "Publish a successful, non-SKIP report to docs"
+    secrets:
+      DOCS_REPO_TOKEN:
         required: true
-        type: boolean
   workflow_dispatch:
     inputs:
       version:
@@ -18,11 +17,6 @@ on:
         required: false
         default: ""
         type: string
-      publish_report:
-        description: "Explicitly publish a successful, non-SKIP report"
-        required: true
-        default: false
-        type: boolean
   schedule:
     - cron: "23 3 * * 1"
 
@@ -37,7 +31,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.release.outputs.version }}
+      version: ${{ steps.release.outputs.version || steps.report_context.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +53,10 @@ jobs:
           mkdir -p "${report_root}"
           python3 scripts/release/verify-release/report.py init \
             --results "${report_root}/v${version}.json" \
-            --version "${version}" --rust "${rust_version:-unknown}" --nim "${nim_image:-unknown}"
+            --version "${version}" --rust "${rust_version:-unknown}" --nim "${nim_image:-unknown}" \
+            --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+            --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --responsibility "Stable Delivery / downstream availability"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
 
@@ -92,16 +89,21 @@ jobs:
           nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' scripts/release/verify-release/Dockerfile)"
           python3 scripts/release/verify-release/report.py init \
             --results "${report_root}/v${version}.json" \
-            --version "${version}" --rust "${rust_version}" --nim "${nim_image}"
+            --version "${version}" --rust "${rust_version}" --nim "${nim_image}" \
+            --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+            --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --responsibility "Stable Delivery / downstream availability"
 
-      - name: Wait for exact PyPI release
-        id: readiness
+      - name: Verify exact public package availability
+        id: availability
         env:
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           readiness_dir="${RUNNER_TEMP}/pypi-readiness-v${VERSION}"
+          install_dir="${RUNNER_TEMP}/pypi-install-v${VERSION}"
+          readiness_log="${readiness_dir}/availability.log"
           mkdir -p "${readiness_dir}"
           ready=false
           for attempt in $(seq 1 30); do
@@ -112,9 +114,16 @@ jobs:
               --only-binary=:all: \
               --no-deps \
               --dest "${readiness_dir}" \
-              "alopex==${VERSION}"; then
-              ready=true
-              break
+              "alopex==${VERSION}" 2>&1 | tee "${readiness_log}"; then
+              rm -rf "${install_dir}"
+              if python3 -m pip install --no-index --no-deps \
+                --target "${install_dir}" --find-links "${readiness_dir}" \
+                "alopex==${VERSION}" 2>&1 | tee -a "${readiness_log}" && \
+                PYTHONPATH="${install_dir}" python3 -c 'import alopex; print(alopex.__version__)' \
+                  2>&1 | tee -a "${readiness_log}"; then
+                ready=true
+                break
+              fi
             fi
             if [[ "${attempt}" -lt 30 ]]; then
               sleep 20
@@ -124,26 +133,18 @@ jobs:
             echo "PyPI did not make alopex==${VERSION} installable within 10 minutes" >&2
             exit 1
           fi
-
-      - name: Run public-package demos and generate reviewable report
-        id: demos
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${REPORT_ROOT}"
-          bash scripts/release/verify-release/run.sh "${VERSION}" \
-            --results-file "${REPORT_ROOT}/v${VERSION}.json" \
-            --report-dir "${REPORT_ROOT}"
+          python3 scripts/release/verify-release/report.py record \
+            --results "${REPORT_ROOT}/v${VERSION}.json" \
+            --name "public package availability" --status ok \
+            --description "PyPIから完全一致wheelを取得し、隔離先へ導入してimportできることを確認する。既知機能の正しさは対象commitのDevelopment CI/Extended Verificationが所有する。" \
+            --log "${readiness_log}"
 
       - name: Finalize verification report
         if: always()
         env:
           VERSION: ${{ steps.release.outputs.version || steps.report_context.outputs.version || 'unknown' }}
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
-          READINESS_OUTCOME: ${{ steps.readiness.outcome }}
-          DEMOS_OUTCOME: ${{ steps.demos.outcome }}
+          AVAILABILITY_OUTCOME: ${{ steps.availability.outcome }}
         shell: bash
         run: |
           set -u
@@ -153,10 +154,13 @@ jobs:
           mkdir -p "${report_root}"
           if [[ ! -f "${results}" ]]; then
             python3 scripts/release/verify-release/report.py init \
-              --results "${results}" --version "${version}" --rust unknown --nim unknown
+              --results "${results}" --version "${version}" --rust unknown --nim unknown \
+              --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+              --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              --responsibility "Stable Delivery / downstream availability"
           fi
           needs_failure=false
-          for outcome in "${RELEASE_OUTCOME:-skipped}" "${READINESS_OUTCOME:-skipped}" "${DEMOS_OUTCOME:-skipped}"; do
+          for outcome in "${RELEASE_OUTCOME:-skipped}" "${AVAILABILITY_OUTCOME:-skipped}"; do
             if [[ "${outcome}" != success ]]; then
               needs_failure=true
             fi
@@ -173,8 +177,7 @@ jobs:
             failure_log="${report_root}/workflow-failure.log"
             {
               echo "release=${RELEASE_OUTCOME:-skipped}"
-              echo "readiness=${READINESS_OUTCOME:-skipped}"
-              echo "demos=${DEMOS_OUTCOME:-skipped}"
+              echo "availability=${AVAILABILITY_OUTCOME:-skipped}"
             } > "${failure_log}"
             python3 scripts/release/verify-release/report.py record \
               --results "${results}" --name "workflow orchestration" --status fail \
@@ -195,17 +198,24 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish successful report
+    name: Publish immutable verification report
     needs: verify
-    if: needs.verify.result == 'success' && inputs.publish_report == true
+    if: always()
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     env:
       VERSION: ${{ needs.verify.outputs.version }}
       REPORT_ROOT: release-verification-output
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout public docs repository
+        uses: actions/checkout@v4
+        with:
+          repository: alopex-db/docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-repo
 
       - name: Download reviewed verification result
         uses: actions/download-artifact@v4
@@ -215,27 +225,41 @@ jobs:
 
       - name: Select downloaded verification report
         shell: bash
-        run: echo "REPORT_ROOT=${REPORT_ROOT}/release-verification-v${VERSION}" >> "${GITHUB_ENV}"
+        run: |
+          set -euo pipefail
+          results="$(find "${REPORT_ROOT}" -type f -name 'v*.json' -print -quit)"
+          test -n "${results}"
+          report_root="$(dirname "${results}")"
+          version="$(python3 - "${results}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
+          PY
+          )"
+          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
+          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
 
-      - name: Validate explicit publication candidate
-        id: candidate
+      - name: Validate complete publication report
         shell: bash
         run: |
           set -euo pipefail
-          report="${REPORT_ROOT}/v${VERSION}.md"
-          grep -Fxq '> 総合結果: **✅ 全ステップ成功**' "${report}"
-          python3 scripts/release/verify-release/report.py validate-public \
+          python3 scripts/release/verify-release/report.py validate-report \
             --results "${REPORT_ROOT}/v${VERSION}.json"
 
       - name: Publish candidate branch for docs ingestion
         id: publish
+        working-directory: docs-repo
         shell: bash
         run: |
           set -euo pipefail
-          branch="report/verify-release-v${VERSION}"
-          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          if curl -fsSL "${public_url}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-            cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
+          branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          public_base="https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}"
+          if curl -fsSL "${public_base}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+            curl -fsSL "${public_base}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -o "${RUNNER_TEMP}/docs-v${VERSION}.json" && \
+            cmp -s "../${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+            cmp -s "../${REPORT_ROOT}/v${VERSION}.json" "${RUNNER_TEMP}/docs-v${VERSION}.json"; then
             echo "The exact report is already present on docs main."
             echo "branch=" >> "${GITHUB_OUTPUT}"
             exit 0
@@ -244,13 +268,14 @@ jobs:
             echo "publication branch already exists: ${branch}" >&2
             exit 1
           fi
-          mkdir -p reports/release-verification
-          cp "${REPORT_ROOT}/v${VERSION}.md" "reports/release-verification/v${VERSION}.md"
+          mkdir -p "$(dirname "${REPORT_PATH}")"
+          cp "../${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
+          cp "../${REPORT_ROOT}/v${VERSION}.json" "${REPORT_PATH}.json"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "${branch}"
-          git add "reports/release-verification/v${VERSION}.md"
-          git commit -m "docs(release): v${VERSION} verified public-package report"
+          git add "${REPORT_PATH}.md" "${REPORT_PATH}.json"
+          git commit -m "docs(release): retain v${VERSION} verification report"
           git push origin "${branch}"
           echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
 
@@ -258,12 +283,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source_report="${REPORT_ROOT}/v${VERSION}.md"
+          source_markdown="${REPORT_ROOT}/v${VERSION}.md"
+          source_json="${REPORT_ROOT}/v${VERSION}.json"
           for attempt in $(seq 1 60); do
             if curl -fsSL \
-              "https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
               -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-              cmp -s "${source_report}" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
+              curl -fsSL \
+              "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              -o "${RUNNER_TEMP}/docs-v${VERSION}.json" && \
+              cmp -s "${source_markdown}" "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+              cmp -s "${source_json}" "${RUNNER_TEMP}/docs-v${VERSION}.json"; then
               exit 0
             fi
             sleep 30
@@ -273,10 +303,136 @@ jobs:
 
       - name: Cleanup publication branch
         if: always() && steps.publish.outputs.branch != ''
+        working-directory: docs-repo
         env:
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
         run: git push origin --delete "${BRANCH}"
+
+  publish-publication-failure-report:
+    name: Publish report-publication failure evidence
+    needs: [verify, publish]
+    if: always() && needs.publish.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout public docs repository
+        uses: actions/checkout@v4
+        with:
+          repository: alopex-db/docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-repo
+
+      - name: Download verification result
+        uses: actions/download-artifact@v4
+        with:
+          name: release-verification-${{ github.run_id }}
+          path: release-verification-output
+
+      - name: Mark report publication failure
+        env:
+          VERSION: ${{ needs.verify.outputs.version || 'unknown' }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$(find release-verification-output -type f -name 'v*.json' -print -quit)"
+          test -n "${results}"
+          report_root="$(dirname "${results}")"
+          version="$(python3 - "${results}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
+          PY
+          )"
+          failure_log="${RUNNER_TEMP}/report-publication-failure.log"
+          {
+            echo "failed step: Publish immutable verification report"
+            echo "primary publication job result: failure"
+            echo "run: ${RUN_URL}"
+          } > "${failure_log}"
+          python3 scripts/release/verify-release/report.py record \
+            --results "${results}" --name "immutable report publication" --status fail \
+            --description "公開docsへの主レポート保存に失敗したため、この失敗証跡を独立jobで保存する。" \
+            --log "${failure_log}"
+          python3 scripts/release/verify-release/report.py render \
+            --results "${results}" --output-dir "${report_root}"
+          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
+          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+
+      - name: Publish immutable failure report to docs
+        id: publish_failure
+        working-directory: docs-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="report/verify-release-failure-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$(dirname "${REPORT_PATH}")"
+          cp "../${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
+          cp "../${REPORT_ROOT}/v${VERSION}.json" "${REPORT_PATH}.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add "${REPORT_PATH}.md" "${REPORT_PATH}.json"
+          git commit -m "docs(release): retain v${VERSION} publication failure"
+          git push origin "${branch}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for immutable failure report on docs main
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -fsSL \
+              "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              -o "${RUNNER_TEMP}/docs-failure-v${VERSION}.json" && \
+              cmp -s "${REPORT_ROOT}/v${VERSION}.json" "${RUNNER_TEMP}/docs-failure-v${VERSION}.json"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "docs main did not publish the immutable failure report" >&2
+          exit 1
+
+      - name: Cleanup failure-report branch
+        if: always() && steps.publish_failure.outputs.branch != ''
+        working-directory: docs-repo
+        env:
+          BRANCH: ${{ steps.publish_failure.outputs.branch }}
+        shell: bash
+        run: git push origin --delete "${BRANCH}"
+
+  notify-publication-failure:
+    name: Notify immutable report publication failure
+    needs: [verify, publish, publish-publication-failure-report]
+    if: always() && needs.publish-publication-failure-report.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update publication failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.verify.outputs.version || 'unknown' }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="release verification: immutable report publication failed"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          body="v${VERSION} の検証結果と公開失敗のdocs記録の両方を保存できませんでした。Actionsの失敗とartifactを確認してください: ${RUN_URL}"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "${title}" --body "${body}"
+          fi
 
   notify-scheduled-failure:
     name: Notify scheduled verification failure
@@ -295,10 +451,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          title="release verification: scheduled public-package demo failed"
+          title="release verification: scheduled public-package availability failed"
           existing="$(gh issue list --repo "${REPOSITORY}" --state open \
             --search "${title} in:title" --json number --jq '.[0].number // empty')"
-          body="v${VERSION:-unknown} の週次公開パッケージ検証が失敗しました。結果 JSON と Markdown は Actions artifact に保存されています: ${RUN_URL}"
+          body="v${VERSION:-unknown} の週次公開パッケージ到達性検証が失敗しました。不変Markdown/JSONの公開とActions artifactを確認してください: ${RUN_URL}"
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
           else

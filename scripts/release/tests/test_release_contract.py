@@ -151,8 +151,22 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("dispatch-python-release:", rust)
         self.assertIn('gh run watch "${run_id}" --exit-status', rust)
         self.assertIn("verify-public-release:", python)
-        self.assertIn("publish_report: true", python)
+        self.assertNotIn("publish_report:", python)
         self.assertIn("verify_python_vector_api.py", python)
+
+    def test_release_procedure_keeps_known_functionality_before_delivery(self) -> None:
+        procedure = (ROOT / "docs/release-v0.8-support.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Known functionality must finish here, before an RC tag.", procedure)
+        self.assertIn("must not run its release demos", procedure)
+        self.assertIn("later success cannot overwrite or conceal an", procedure)
+
+        python_release = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Verify public package availability and publish docs report", python_release)
+        self.assertNotIn("Verify demos and publish docs report", python_release)
 
     def test_immutable_tag_can_resume_full_release_after_early_gate_failure(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(

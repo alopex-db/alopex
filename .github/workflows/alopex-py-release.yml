@@ -730,13 +730,13 @@ jobs:
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
 
   verify-public-release:
-    name: Verify demos and publish docs report
+    name: Verify public package availability and publish docs report
     needs: [final-release-join]
     if: ${{ always() && needs.final-release-join.result == 'success' }}
     permissions:
-      contents: write
+      contents: read
       issues: write
     uses: ./.github/workflows/public-release-verification.yml
     with:
       version: ${{ inputs.release_tag || github.ref_name }}
-      publish_report: true
+    secrets: inherit
