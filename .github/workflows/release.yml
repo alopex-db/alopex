@@ -6,11 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      repair_forward:
-        description: "Resume registry publication for an immutable release tag"
-        required: false
-        default: false
-        type: boolean
       release_tag:
         description: "Existing immutable core release tag"
         required: false
@@ -26,8 +21,7 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
-  # A tag push uses github.ref_name/github.sha. A workflow_dispatch recovery
-  # must name the already-immutable tag and its peeled SHA explicitly.
+  # A tag push uses github.ref_name/github.sha. A manual run names its tag.
   RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
   RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}
 
@@ -36,7 +30,6 @@ jobs:
   # Release only binds this immutable tag to already-approved CI evidence.
   ci-gate:
     name: Approved source evidence
-    if: ${{ !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -78,7 +71,6 @@ jobs:
   build-release:
     name: Build Release (${{ matrix.target }})
     needs: [ci-gate]
-    if: ${{ !inputs.repair_forward }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -190,7 +182,6 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: build-release
-    if: ${{ !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -269,21 +260,18 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [build-release, create-release]
-    if: ${{ always() && (inputs.repair_forward == true || (needs.build-release.result == 'success' && needs.create-release.result == 'success')) }}
+    if: ${{ needs.build-release.result == 'success' && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG_NAME: ${{ inputs.release_tag }}
       RELEASE_TARGET_SHA: ${{ inputs.target_sha }}
-      REPAIR_FORWARD: ${{ inputs.repair_forward || false }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Historical repair-forward needs the current workflow tooling;
-          # a pre-publication resume checks out the immutable release tag.
-          ref: ${{ inputs.repair_forward && github.ref || inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || github.ref }}
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
 
@@ -292,23 +280,10 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          release_tag="${RELEASE_TAG_NAME}"
-          release_target_sha="${RELEASE_TARGET_SHA}"
-          if [[ "${REPAIR_FORWARD}" == "true" ]]; then
-            [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-            [[ "${release_target_sha}" =~ ^[0-9a-f]{40}$ ]]
-            peeled_sha="$(git rev-parse "${release_tag}^{commit}")"
-            test "${peeled_sha}" = "${release_target_sha}"
-            gh release view "${release_tag}" --json isDraft --jq '.isDraft' \
-              | grep -qx false
-            gh release view "${release_tag}" --json tagName --jq '.tagName' \
-              | grep -qx "${release_tag}"
-          else
-            release_tag="${release_tag:-${GITHUB_REF_NAME}}"
-            release_target_sha="${release_target_sha:-${GITHUB_SHA}}"
-            test "$(git describe --tags --exact-match HEAD)" = "${release_tag}"
-            test "$(git rev-parse HEAD)" = "${release_target_sha}"
-          fi
+          release_tag="${RELEASE_TAG_NAME:-${GITHUB_REF_NAME}}"
+          release_target_sha="${RELEASE_TARGET_SHA:-${GITHUB_SHA}}"
+          test "$(git describe --tags --exact-match HEAD)" = "${release_tag}"
+          test "$(git rev-parse HEAD)" = "${release_target_sha}"
           RELEASE_TAG_NAME="${release_tag}"
           RELEASE_TARGET_SHA="${release_target_sha}"
           test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
@@ -494,10 +469,7 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    # repair-forward intentionally skips build/create ancestors; always() is
-    # required so GitHub evaluates the immediate publish result instead of
-    # applying the implicit success() gate to those skipped ancestors.
-    if: ${{ always() && needs.publish-crate.result == 'success' }}
+    if: ${{ needs.publish-crate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -508,12 +480,11 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
 
-      - name: Create or verify matching Python tag
+      - name: Create Python tag and dispatch publication
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          REPAIR_FORWARD: ${{ inputs.repair_forward }}
-          WORKFLOW_SHA: ${{ github.sha }}
+          CORE_RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -522,29 +493,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
           python_tag="alopex-py-v${version}"
           started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          if git rev-parse --verify --quiet "refs/tags/${python_tag}" >/dev/null; then
-            test "$(git rev-parse "${python_tag}^{commit}")" = "${RELEASE_TARGET_SHA}"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "${python_tag}" "${RELEASE_TARGET_SHA}" -m "Release ${python_tag}"
-            git push origin "${python_tag}"
-          fi
-          # Normal publication runs from the Python tag so environment tag
-          # protection applies. Repair-forward uses corrected orchestration,
-          # skips protected publication jobs, and verifies public packages.
+          bash scripts/release/prepare-python-release.sh
           python_workflow_ref="${python_tag}"
-          python_source_ref="${python_tag}"
-          expected_workflow_sha="${RELEASE_TARGET_SHA}"
-          if [[ "${REPAIR_FORWARD}" == "true" ]]; then
-            python_workflow_ref="${GITHUB_REF_NAME}"
-            python_source_ref="${RELEASE_TARGET_SHA}"
-            expected_workflow_sha="${WORKFLOW_SHA}"
-          fi
+          expected_workflow_sha="$(git rev-parse "${python_tag}^{commit}")"
           gh workflow run alopex-py-release.yml --ref "${python_workflow_ref}" \
-            -f "source_ref=${python_source_ref}" -f "target_sha=${RELEASE_TARGET_SHA}" \
-            -f "release_tag=${python_tag}" -f "core_run_id=${GITHUB_RUN_ID}" \
-            -f "repair_forward=${REPAIR_FORWARD}"
+            -f "core_run_id=${GITHUB_RUN_ID}"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
           echo "workflow_sha=${expected_workflow_sha}" >> "${GITHUB_OUTPUT}"
           echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"

@@ -12,7 +12,8 @@ python3 - "${TEMP_ROOT}/candidate.json" "${VERSION}" <<'PY'
 import json
 import sys
 
-sha = "a" * 40
+core_sha = "a" * 40
+python_sha = "c" * 40
 digest = "b" * 64
 targets = [
     "x86_64-unknown-linux-gnu",
@@ -23,15 +24,15 @@ targets = [
 version = sys.argv[2]
 candidate = {
     "version": version,
-    "reviewed_main_sha": sha,
-    "tag": {"name": f"v{version}", "peeled_sha": sha},
+    "core_tag": {"name": f"v{version}", "peeled_sha": core_sha},
+    "python_tag": {"name": f"alopex-py-v{version}", "peeled_sha": python_sha},
     "core": {
         "status": "success",
         "published": True,
         "run_id": "1001",
-        "head_sha": sha,
-        "source_sha": sha,
-        "peeled_sha": sha,
+        "head_sha": core_sha,
+        "source_sha": core_sha,
+        "peeled_sha": core_sha,
         "registry": "crates.io",
         "crates": [{"name": "alopex-core", "status": "published"}],
     },
@@ -39,8 +40,8 @@ candidate = {
         "status": "success",
         "published": True,
         "run_id": "1002",
-        "head_sha": sha,
-        "peeled_sha": sha,
+        "head_sha": python_sha,
+        "peeled_sha": python_sha,
         "registry": "pypi",
         "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],
     },
@@ -59,7 +60,7 @@ candidate = {
         ],
     },
     "publication_order": {"core_before_python": True},
-    "repair_forward": {"complete": True},
+    "provenance": {"python_descends_from_core": True},
 }
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
     json.dump(candidate, stream, sort_keys=True)
@@ -89,7 +90,7 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as stream:
     data = json.load(stream)
-data["core"]["head_sha"] = "c" * 40
+data["core"]["head_sha"] = "d" * 40
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(data, stream, sort_keys=True)
 PY
@@ -113,7 +114,7 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as stream:
     data = json.load(stream)
-data["core"]["peeled_sha"] = "c" * 40
+data["core"]["peeled_sha"] = "d" * 40
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(data, stream, sort_keys=True)
 PY
@@ -125,7 +126,7 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as stream:
     data = json.load(stream)
-data["core"]["peeled_sha"] = data["reviewed_main_sha"]
+data["core"]["peeled_sha"] = data["core_tag"]["peeled_sha"]
 data["parser"]["assets"].pop()
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(data, stream, sort_keys=True)
@@ -144,6 +145,33 @@ data["parser"]["assets"].append({
     "library_sha256": "not-a-digest",
     "native_smoke": True,
 })
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(data, stream, sort_keys=True)
+PY
+assert_fail bash "${RUNNER}" --verify-join "${TEMP_ROOT}/candidate.json"
+
+python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    data = json.load(stream)
+data["parser"]["assets"] = [
+    {
+        "target": target,
+        "archive_sha256": "b" * 64,
+        "library_sha256": "b" * 64,
+        "native_smoke": True,
+    }
+    for target in (
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    )
+]
+data["core"]["source_sha"] = data["core_tag"]["peeled_sha"]
+data["provenance"] = {"python_descends_from_core": False}
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(data, stream, sort_keys=True)
 PY

@@ -216,51 +216,23 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("stats.nodes_visited", smoke)
         self.assertNotIn("stats.node_count", smoke)
 
-    def test_immutable_tag_can_resume_full_release_after_early_gate_failure(self) -> None:
+    def test_python_tag_creation_is_independent_and_preflighted(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        gate = release.split("  ci-gate:", maxsplit=1)[1].split(
-            "  build-release:", maxsplit=1
-        )[0]
         dispatch = release.split("  dispatch-python-release:", maxsplit=1)[1]
+        tagger = (ROOT / "scripts/release/prepare-python-release.sh").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn(
-            "RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", release
-        )
-        self.assertIn(
-            "RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}", release
-        )
-        self.assertGreaterEqual(
-            release.count("ref: ${{ inputs.release_tag || github.ref }}"), 4
-        )
-        self.assertIn(
-            "ref: ${{ inputs.repair_forward && github.ref || inputs.release_tag || github.ref }}",
-            release,
-        )
-        self.assertIn('git rev-parse "${RELEASE_TAG_NAME}^{commit}"', gate)
-        create_release = release.split("  create-release:", maxsplit=1)[1].split(
-            "  publish-crate:", maxsplit=1
-        )[0]
-        self.assertNotIn('git describe --tags --exact-match HEAD', create_release)
-        self.assertIn(
-            'test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"',
-            create_release,
-        )
-        self.assertIn('--commit "${RELEASE_TARGET_SHA}"', gate)
-        self.assertIn("for attempt in $(seq 1 30)", gate)
-        self.assertNotIn("env.GITHUB_SHA", gate)
-        self.assertIn(
-            "always() && needs.publish-crate.result == 'success'", dispatch
-        )
+        self.assertIn("bash scripts/release/prepare-python-release.sh", dispatch)
+        self.assertIn("CORE_RUN_ID: ${{ github.run_id }}", dispatch)
         self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
-        self.assertIn('python_workflow_ref="${GITHUB_REF_NAME}"', dispatch)
-        self.assertIn('python_source_ref="${python_tag}"', dispatch)
-        self.assertIn('python_source_ref="${RELEASE_TARGET_SHA}"', dispatch)
-        self.assertIn('expected_workflow_sha="${RELEASE_TARGET_SHA}"', dispatch)
-        self.assertIn('target_sha=${RELEASE_TARGET_SHA}', dispatch)
         self.assertIn('core_run_id=${GITHUB_RUN_ID}', dispatch)
         self.assertIn('--event workflow_dispatch', dispatch)
+        self.assertIn('git merge-base --is-ancestor "${core_sha}" HEAD', tagger)
+        self.assertIn('gh run list --workflow ci.yml --commit "${candidate_sha}"', tagger)
+        self.assertIn('git tag -a "${python_tag}" "${candidate_sha}"', tagger)
 
     def test_crate_publish_verifies_the_packaged_vendor_tree(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -306,39 +278,19 @@ class ReleaseContractTests(unittest.TestCase):
 
         compile(textwrap.dedent(script), "release parser staging", "exec")
 
-    def test_core_repair_forward_is_bound_to_the_immutable_release_tag(self) -> None:
+    def test_release_has_no_repair_forward_path(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        publish = release.split("  publish-crate:", maxsplit=1)[1].split(
-            "  dispatch-python-release:", maxsplit=1
-        )[0]
-        dispatch = release.split("  dispatch-python-release:", maxsplit=1)[1]
+        python = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn("repair_forward:", release)
-        self.assertIn("release_tag:", release)
-        self.assertIn("target_sha:", release)
-        self.assertNotIn("branches:\n      - 'repair/v*-release'", release)
-        self.assertNotIn("startsWith(github.ref_name, 'repair/v')", publish)
-        self.assertIn(
-            '[[ "${release_tag}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
-            publish,
-        )
-        self.assertIn(
-            '[[ "${release_target_sha}" =~ ^[0-9a-f]{40}$ ]]', publish
-        )
-        self.assertIn(
-            'git rev-parse "${RELEASE_TAG_NAME}^{commit}"', publish
-        )
-        self.assertIn('"${RELEASE_TARGET_SHA}"', publish)
-        self.assertIn('gh release view "${release_tag}"', publish)
-        self.assertIn(
-            "needs.build-release.result == 'success'", publish
-        )
-        self.assertIn('-f "repair_forward=${REPAIR_FORWARD}"', dispatch)
-        self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+        self.assertNotIn("repair_forward", release)
+        self.assertNotIn("repair_forward", python)
+        self.assertFalse((ROOT / "scripts/release/prepare-python-repair.sh").exists())
 
-    def test_python_repair_builds_missing_artifacts_and_runs_public_join(self) -> None:
+    def test_python_release_runs_from_its_immutable_tag(self) -> None:
         workflow = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
             encoding="utf-8"
         )
@@ -346,12 +298,12 @@ class ReleaseContractTests(unittest.TestCase):
             header = workflow.split(f"  {job}:", maxsplit=1)[1].split(
                 "    steps:", maxsplit=1
             )[0]
-            self.assertNotIn("if: ${{ !inputs.repair_forward }}", header)
+            self.assertNotIn("needs:", header)
         join = workflow.split("  final-release-join:", maxsplit=1)[1].split(
             "  verify-public-release:", maxsplit=1
         )[0]
-        self.assertIn("inputs.repair_forward ||", join)
-        self.assertIn("prepare-repair-release", join)
+        self.assertIn("needs: [publish-pypi, github-release]", join)
+        self.assertIn('git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}"', join)
         public = workflow.split("  verify-public-release:", maxsplit=1)[1]
         self.assertIn(
             "always() && needs.final-release-join.result == 'success'", public

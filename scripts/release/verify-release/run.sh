@@ -138,14 +138,18 @@ except (OSError, json.JSONDecodeError) as exc:
 
 if data.get("version") != version:
     fail(f"candidate version {data.get('version')!r} != {version!r}")
-reviewed = data.get("reviewed_main_sha")
-if not isinstance(reviewed, str) or not sha40.fullmatch(reviewed):
-    fail("reviewed_main_sha must be a full 40-hex SHA")
-tag = data.get("tag")
-if not isinstance(tag, dict) or tag.get("name") != expected_tag:
-    fail(f"tag must be {expected_tag}")
-if tag.get("peeled_sha") != reviewed:
-    fail("peeled tag SHA does not match reviewed main SHA")
+core_tag = data.get("core_tag")
+if not isinstance(core_tag, dict) or core_tag.get("name") != expected_tag:
+    fail(f"core tag must be {expected_tag}")
+core_sha = core_tag.get("peeled_sha")
+if not isinstance(core_sha, str) or not sha40.fullmatch(core_sha):
+    fail("core tag must have a full peeled SHA")
+python_tag = data.get("python_tag")
+if not isinstance(python_tag, dict) or python_tag.get("name") != f"alopex-py-v{version}":
+    fail(f"python tag must be alopex-py-v{version}")
+python_sha = python_tag.get("peeled_sha")
+if not isinstance(python_sha, str) or not sha40.fullmatch(python_sha):
+    fail("python tag must have a full peeled SHA")
 
 for surface_name in ("core", "python"):
     surface = data.get(surface_name)
@@ -159,16 +163,14 @@ for surface_name in ("core", "python"):
     if not isinstance(head_sha, str) or not sha40.fullmatch(head_sha):
         fail(f"{surface_name} workflow head SHA is missing or invalid")
     if surface_name == "core":
-        # A repair-forward core run may execute from a CI-fix branch.  The
-        # published release envelope still has to bind its source to the
-        # reviewed main SHA; keep both identities in the evidence.
         source_sha = surface.get("source_sha", head_sha)
-        if source_sha != reviewed:
-            fail("core release source SHA does not match reviewed main SHA")
-    elif head_sha != reviewed:
-        fail("python workflow head SHA does not match reviewed main SHA")
-    if surface.get("peeled_sha") != reviewed:
-        fail(f"{surface_name} surface is bound to a different SHA")
+        if source_sha != core_sha:
+            fail("core release source SHA does not match the core tag")
+        if surface.get("peeled_sha") != core_sha:
+            fail("core surface is bound to a different SHA")
+    else:
+        if head_sha != python_sha or surface.get("peeled_sha") != python_sha:
+            fail("python surface is not bound to the Python tag")
     if not isinstance(surface.get("registry"), str) or not surface["registry"]:
         fail(f"{surface_name} registry identity is missing")
 
@@ -209,10 +211,10 @@ for asset in assets:
 
 if data.get("publication_order", {}).get("core_before_python") is not True:
     fail("publication order does not prove core-before-Python")
-if data.get("repair_forward", {}).get("complete") is not True:
-    fail("repair-forward closeout is incomplete")
+if data.get("provenance", {}).get("python_descends_from_core") is not True:
+    fail("Python tag ancestry from the core tag is not proven")
 
-print(f"release-join: complete for {expected_tag} at {reviewed}")
+print(f"release-join: complete for {expected_tag} at {core_sha} / {python_sha}")
 PY
 }
 
