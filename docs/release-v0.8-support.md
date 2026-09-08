@@ -77,6 +77,17 @@ existing `v08-release-gate` owns the checked-out implementation surface; the
 post-publication workflow must not run its release demos as a second, late
 source of truth.
 
+## Cleanup is part of acceptance
+
+Every Development CI, Extended Verification, RC Qualification, and local
+release-verification run ends with scoped cleanup. Its owner inventories the
+processes, containers, temporary directories, build targets, and artifacts
+created by that run; stops owned persistent processes; and removes owned,
+reproducible outputs that are no longer needed. Source, fixtures, user data,
+active worktrees, and published evidence are never cleanup targets. The owning
+issue records retained generated outputs, their owner, and the reason to retain
+them alongside the verification evidence.
+
 ## Public downstream evidence
 
 The Python publication workflow calls
