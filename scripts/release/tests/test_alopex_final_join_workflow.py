@@ -13,9 +13,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_final_join_is_required_after_public_surfaces(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  final-release-join:", maxsplit=1)[1]
-        self.assertIn(
-            "needs: [prepare-repair-release, publish-pypi, github-release]", block
-        )
+        self.assertIn("needs: [publish-pypi, github-release]", block)
         self.assertIn("contents: read", block)
         self.assertIn("actions: read", block)
         self.assertIn('actions/runs/${CORE_RUN_ID}', block)
@@ -28,7 +26,8 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn('parser-vendor-manifest-v${VERSION}.json', block)
         self.assertIn('f"parser-assets-v{version}.json"', block)
         self.assertIn('f"parser-vendor-manifest-v{version}.json"', block)
-        self.assertIn("core and Python tags do not share a peeled SHA", block)
+        self.assertIn('git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}"', block)
+        self.assertIn('git merge-base --is-ancestor "${python_tag_sha}" origin/main', block)
 
     def test_join_does_not_use_unbound_latest_run_or_rebuild(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -37,21 +36,20 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("cargo publish", block)
         self.assertNotIn("maturin build", block)
 
-    def test_repair_forward_run_binds_source_and_target_explicitly(self) -> None:
+    def test_dispatch_runs_from_the_python_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", text)
-        self.assertIn("source_ref:", text)
-        self.assertIn("target_sha:", text)
-        self.assertIn("release_tag:", text)
         self.assertIn("core_run_id:", text)
-        self.assertIn("repair_forward:", text)
-        self.assertIn("type: boolean", text)
-        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", text)
-        self.assertIn("PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}", text)
-        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", text)
+        self.assertNotIn("source_ref:", text)
+        self.assertNotIn("target_sha:", text)
+        self.assertNotIn("release_tag:", text)
+        self.assertNotIn("repair_forward:", text)
+        self.assertIn("ref: ${{ github.ref }}", text)
+        self.assertIn('PYTHON_HEAD_SHA="$(git rev-parse HEAD)"', text)
+        self.assertIn("PYTHON_TAG_NAME: ${{ github.ref_name }}", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
-    def test_python_head_sha_is_exported_for_normal_and_repair_runs(self) -> None:
+    def test_python_head_sha_is_exported_from_the_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split(
             "      - name: Resolve exact core and Python workflow identities",
@@ -60,38 +58,26 @@ class FinalJoinWorkflowTests(unittest.TestCase):
             "      - name: Download the immutable parser envelope",
             maxsplit=1,
         )[0]
-        repair = block.split(
-            '          if [[ "${REPAIR_FORWARD}" == "true" ]]; then',
-            maxsplit=1,
-        )[1]
-        conditional, after_conditional = repair.split("          fi", maxsplit=1)
-        self.assertIn('PYTHON_HEAD_SHA="${python_tag_sha}"', conditional)
-        self.assertNotIn("GITHUB_ENV", conditional)
         self.assertIn(
             "printf 'PYTHON_HEAD_SHA=%s\\n' \"${PYTHON_HEAD_SHA}\" >> \"${GITHUB_ENV}\"",
-            after_conditional,
+            block,
         )
 
-    def test_repair_dispatch_creates_or_verifies_tag_before_packaging(self) -> None:
+    def test_release_has_no_repair_prepare_job(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  prepare-repair-release:", maxsplit=1)[1].split(
-            "  linux:", maxsplit=1
-        )[0]
-        self.assertIn("contents: write", block)
-        self.assertIn("SOURCE_SHA: ${{ inputs.source_ref }}", block)
-        self.assertIn("TARGET_SHA: ${{ inputs.target_sha }}", block)
-        self.assertIn("RELEASE_TAG: ${{ inputs.release_tag }}", block)
-        self.assertIn("run: bash scripts/release/prepare-python-repair.sh", block)
+        self.assertNotIn("prepare-repair-release", text)
+        self.assertNotIn("repair_forward", text)
+        self.assertNotIn("prepare-python-repair", text)
         for job in ("linux", "macos", "windows", "sdist"):
             job_block = text.split(f"  {job}:", maxsplit=1)[1]
-            self.assertIn("needs: [prepare-repair-release]", job_block.split("    steps:", maxsplit=1)[0])
+            self.assertNotIn("needs:", job_block.split("    steps:", maxsplit=1)[0])
 
-    def test_repair_dispatch_selects_core_repair_evidence_explicitly(self) -> None:
+    def test_join_records_independent_core_and_python_identities(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  final-release-join:", maxsplit=1)[1]
-        self.assertIn("REPAIR_FORWARD: ${{ inputs.repair_forward }}", block)
-        self.assertIn('REPAIR_FORWARD="${REPAIR_FORWARD}"', block)
-        self.assertNotIn("repair/v", block)
+        self.assertIn('"core_tag": {"name": f"v{version}", "peeled_sha": core_sha}', block)
+        self.assertIn('"python_tag": {"name": f"alopex-py-v{version}", "peeled_sha": python_sha}', block)
+        self.assertIn('"python_descends_from_core": True', block)
 
     def test_python_release_requires_explicit_core_dispatch(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -99,11 +85,11 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("push:", trigger)
         self.assertIn("core release dispatches", trigger)
 
-    def test_public_verifier_uses_immutable_tag_for_repair_run(self) -> None:
+    def test_public_verifier_uses_the_python_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  verify-public-release:", maxsplit=1)[1]
         self.assertIn(
-            "version: ${{ inputs.release_tag || github.ref_name }}",
+            "version: ${{ github.ref_name }}",
             block,
         )
 
@@ -115,7 +101,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
 
     def test_every_wheel_target_retargets_parser_pins_from_release_manifest(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(text.count("ref: ${{ github.sha }}"), 4)
+        self.assertEqual(text.count("ref: ${{ github.sha }}"), 3)
         self.assertEqual(text.count("path: .release-tools"), 3)
         self.assertEqual(
             text.count(
@@ -154,10 +140,10 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("find crates/alopex-sql/nim-sql-parser/vendor", block)
         self.assertIn("-type d -exec rm -rf {} +", block)
 
-    def test_manual_release_uses_the_existing_immutable_tag(self) -> None:
+    def test_github_release_uses_the_python_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  github-release:", maxsplit=1)[1].split("  final-release-join:", maxsplit=1)[0]
-        self.assertIn("tag_name: ${{ inputs.release_tag || github.ref_name }}", block)
+        self.assertIn("tag_name: ${{ github.ref_name }}", block)
 
 
 if __name__ == "__main__":

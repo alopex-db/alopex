@@ -75,14 +75,14 @@ else
 fi
 
 if git rev-parse --verify --quiet "refs/tags/${TAG_NAME}" >/dev/null; then
-    fail "tag ${TAG_NAME} already exists; use repair-forward or a new patch release"
+    fail "tag ${TAG_NAME} already exists; verify publication and use a new patch release when it is public"
 else
     log_ok "tag name is unused locally"
 fi
 
 REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/${TAG_NAME}" "refs/tags/${TAG_NAME}^{}" 2>/dev/null || true)"
 if [[ -n "${REMOTE_TAG}" ]]; then
-    fail "tag ${TAG_NAME} already exists on origin; use repair-forward or a new patch release"
+    fail "tag ${TAG_NAME} already exists on origin; verify publication and use a new patch release when it is public"
 else
     log_ok "tag name is unused on origin"
 fi

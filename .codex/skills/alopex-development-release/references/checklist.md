@@ -38,7 +38,7 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 
 ## Checkpoint 3 — publication
 
-- [ ] Create and push annotated Rust and Python tags at the recorded main SHA.
+- [ ] Create and push annotated Rust and Python tags at their separately recorded, CI-approved main SHAs; require the Python SHA to descend from the Core SHA and retain the same version.
 - [ ] Record both workflow URLs and require every publish job to succeed.
 - [ ] Verify GitHub Release assets, all crates.io packages, and PyPI wheels/sdist independently.
 
@@ -127,15 +127,14 @@ Implementation logs are mandatory searchable evidence. Include task ID, summary,
 ## Release safety and tags
 
 ```bash
-rtk bash scripts/release/safe-tag.sh v<version>
-rtk bash scripts/release/safe-tag.sh alopex-py-v<version>
+rtk bash scripts/release/safe-tag.sh v<version> <core-sha>
+rtk bash scripts/release/safe-tag.sh alopex-py-v<version> <python-sha>
 rtk git tag -a v<version> -m "Release v<version>" <intended-commit>
 rtk git push origin v<version>
-rtk git tag -a alopex-py-v<version> -m "Release alopex-py-v<version>" <intended-commit>
-rtk git push origin alopex-py-v<version>
+CORE_RUN_ID=<core-run-id> GH_TOKEN=<token> rtk bash scripts/release/prepare-python-release.sh
 ```
 
-Run `safe-tag.sh` from the branch it requires and treat every failure as blocking. The script checks safety; it does not create the tag.
+Run `safe-tag.sh` from the branch it requires and treat every failure as blocking. The Python tag script checks Core publication, ancestry, matching version, CI evidence, and tag absence before creating the tag.
 
 ## Post-release evidence
 
