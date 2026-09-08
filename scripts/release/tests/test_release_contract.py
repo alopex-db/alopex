@@ -208,6 +208,14 @@ class ReleaseContractTests(unittest.TestCase):
 
         self.assertIn("permissions:\n      contents: write\n      issues: write", post_release)
 
+    def test_python_wheel_smoke_uses_search_stats_public_fields(self) -> None:
+        smoke = (ROOT / "scripts/release/verify_python_vector_api.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("stats.nodes_visited", smoke)
+        self.assertNotIn("stats.node_count", smoke)
+
     def test_immutable_tag_can_resume_full_release_after_early_gate_failure(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"

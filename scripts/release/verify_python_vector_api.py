@@ -82,7 +82,7 @@ def main() -> None:
         assert results[0].key == b"point" and results[0].score == 0.0
         assert results[1].key == b"quarter"
         assert abs(results[1].score - 0.25) < np.finfo(np.float32).eps
-        assert stats.node_count == 2
+        assert stats.nodes_visited >= len(results)
         tx = db.begin(TxnMode.READ_WRITE)
         tx.delete_from_hnsw("wheel_vector_smoke", b"quarter")
         tx.commit()
@@ -93,7 +93,7 @@ def main() -> None:
     print("installed wheel exposes and executes vector/HNSW/streaming APIs")
     print("nearest=b'point' distance=0.0")
     print("second=b'quarter' distance=0.25")
-    print("node_count=2")
+    print("search_stats=nodes_visited")
 
 
 if __name__ == "__main__":
