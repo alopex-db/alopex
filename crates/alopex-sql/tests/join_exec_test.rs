@@ -219,6 +219,46 @@ fn nested_loop_and_hash_join_match_for_equi_join() {
 }
 
 #[test]
+fn hash_and_nested_loop_joins_keep_null_keys_unmatched() {
+    let left = vec![
+        Row::new(0, vec![SqlValue::Null]),
+        Row::new(1, vec![SqlValue::Integer(7)]),
+    ];
+    let right = vec![
+        Row::new(0, vec![SqlValue::Null]),
+        Row::new(1, vec![SqlValue::Integer(7)]),
+    ];
+    let condition = TypedExpr::binary_op(
+        TypedExpr::column_ref(
+            "l".into(),
+            "k".into(),
+            0,
+            ResolvedType::Integer,
+            Default::default(),
+        ),
+        alopex_sql::ast::expr::BinaryOp::Eq,
+        TypedExpr::column_ref(
+            "r".into(),
+            "k".into(),
+            1,
+            ResolvedType::Integer,
+            Default::default(),
+        ),
+        ResolvedType::Boolean,
+        Default::default(),
+    );
+
+    let nested = nested_loop_join(&left, &right, &condition, JoinType::Inner).unwrap();
+    let hashed = hash_join(&left, &right, 0, 0, JoinType::Inner).unwrap();
+    assert_eq!(nested, hashed);
+    assert_eq!(hashed.len(), 1);
+    assert_eq!(
+        hashed[0].values,
+        vec![SqlValue::Integer(7), SqlValue::Integer(7)]
+    );
+}
+
+#[test]
 fn natural_join_coalesces_common_columns_and_other_join_forms_remain_available() {
     let natural = last_query(
         r#"
