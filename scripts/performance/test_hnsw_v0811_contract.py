@@ -130,8 +130,33 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         "reopen_latency_ms": 0.2,
                     }
                 ],
+                recall_ceiling=[
+                    {
+                        "engine": "alopex-hnsw",
+                        "ef_search": 512,
+                        "query_count": 200,
+                        "recall_at_10": 0.99,
+                        "tie_aware_recall_at_10": 1.0,
+                    }
+                ],
                 diagnostics={
-                    "recall_investigation": {"conclusion": "boundary tie"},
+                    "recall_investigation": {
+                        "conclusion": "boundary tie",
+                        "index_count": DATASET_SIZE,
+                        "input_count": DATASET_SIZE,
+                        "index_count_matches_input": True,
+                        "self_match_rate": 1.0,
+                        "ef_construction_and_m": [
+                            {
+                                "engine": "alopex-hnsw",
+                                "m": 16,
+                                "ef_construction": 200,
+                                "ef_search": 64,
+                                "recall_at_10": 0.99,
+                                "tie_aware_recall_at_10": 1.0,
+                            }
+                        ],
+                    },
                     "fixed_cost_runs": [{"engine": "alopex-hnsw", "latency_us": 1.0}],
                     "latency_decomposition": [
                         {
@@ -148,7 +173,19 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                                 "latency_p50_us": 3.0,
                             }
                         ],
+                        "summary": [
+                            {
+                                "arm": "alopex-sql-hnsw-postfilter",
+                                "selectivity": 0.01,
+                                "median_latency_p50_us": 3.0,
+                                "median_latency_p95_us": 4.0,
+                                "filtered_top_k_accuracy": 1.0,
+                                "median_overfetch_amplification": 2.0,
+                                "returns_k": True,
+                            }
+                        ],
                         "alopex_advantageous_selectivities": [0.01],
+                        "filter_aware_traversal": False,
                     },
                 },
                 scale={
@@ -156,9 +193,32 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         {
                             "dataset_size": 10_000,
                             "engine": "alopex-hnsw",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
                             "qps_at_recall_095": 10.0,
+                            "ef_search_at_recall_095": 64,
+                            "recall_at_selected_setting": 0.96,
+                            "curve": [
+                                {
+                                    "engine": "alopex-hnsw",
+                                    "ef_search": 64,
+                                    "median_queries_per_second": 10.0,
+                                    "median_recall_at_10": 0.96,
+                                }
+                            ],
+                        },
+                        {
+                            "dataset_size": 10_000,
+                            "engine": "hnswlib",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
+                            "qps_at_recall_095": 0.0,
+                            "ef_search_at_recall_095": None,
+                            "recall_at_selected_setting": None,
                             "curve": [],
-                        }
+                        },
                     ],
                     "brute_force_crossover": {"alopex-hnsw": 10_000},
                     "limits": [],
@@ -171,9 +231,20 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertTrue(
                 (Path(directory) / "hnsw-latency-decomposition.csv").is_file()
             )
+            self.assertTrue((Path(directory) / "hnsw-recall-ceiling.csv").is_file())
+            self.assertTrue(
+                (Path(directory) / "hnsw-recall-configurations.csv").is_file()
+            )
+            self.assertTrue((Path(directory) / "hnsw-builds.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-fixed-cost-runs.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-hybrid.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-hybrid-summary.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-scale-curve.csv").is_file())
             payload = json.loads((Path(directory) / "hnsw-diagnostic.json").read_text())
+            raw = json.loads(
+                (Path(directory) / "hnsw-diagnostic.raw.json").read_text()
+            )
             self.assertEqual(
                 payload["contract"]["metrics"],
                 [
@@ -194,6 +265,13 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(payload["release_version"], "0.8.11")
+            self.assertEqual(raw["dataset"], payload["dataset"])
+            self.assertEqual(raw["provenance"], payload["provenance"])
+            self.assertEqual(raw["recall_ceiling"], payload["recall_ceiling"])
+            self.assertRegex(payload["provenance"]["source_commit"], r"^[0-9a-f]{40}$")
+            self.assertIn("python", payload["provenance"])
+            self.assertIn("platform", payload["provenance"])
+            self.assertIn("alopex", payload["provenance"]["dependencies"])
             markdown = (Path(directory) / "hnsw-diagnostic.md").read_bytes()
             self.assertEqual(markdown.decode(), render_markdown(payload))
             self.assertEqual(
@@ -204,6 +282,29 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertEqual(
                 payload["recall_investigation"]["conclusion"], "boundary tie"
             )
+            report = markdown.decode()
+            self.assertIn("## Recall ceiling", report)
+            self.assertIn("## Latency decomposition", report)
+            self.assertIn("## Hybrid", report)
+            self.assertIn("## Scale", report)
+            self.assertIn("alopex-sql-hnsw-postfilter", report)
+            self.assertIn("10,000", report)
+            self.assertIn("| 10,000 | hnswlib |", report)
+            self.assertIn("not met", report)
+
+            write_artifacts(Path(directory), payload["runs"])
+            for stale in (
+                "hnsw-recall-ceiling.csv",
+                "hnsw-recall-configurations.csv",
+                "hnsw-builds.csv",
+                "hnsw-fixed-cost-runs.csv",
+                "hnsw-latency-decomposition.csv",
+                "hnsw-hybrid.csv",
+                "hnsw-hybrid-summary.csv",
+                "hnsw-scale.csv",
+                "hnsw-scale-curve.csv",
+            ):
+                self.assertFalse((Path(directory) / stale).exists())
 
     def test_post_release_workflow_uses_exact_wheel_and_keeps_environment_evidence(
         self,
