@@ -70,7 +70,7 @@ CREATE TABLE knowledge_chunks (
 );
 
 -- Hybrid Search: SQL Filter + ANN Search
-SELECT content, cosine_similarity(embedding, [0.1, 0.5, ...]) as score
+SELECT content, vector_similarity(embedding, [0.1, 0.5, ...], 'cosine') as score
 FROM knowledge_chunks
 WHERE created_at > '2024-01-01'
 ORDER BY score DESC
