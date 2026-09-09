@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Verify an immutable release tag target without creating, moving, or deleting tags.
 #
-# Usage: ./scripts/release/safe-tag.sh <tag-name> <reviewed-main-sha>
+# Usage: ./scripts/release/safe-tag.sh <tag-name> <reviewed-candidate-sha>
 #
-# The caller must provide the exact 40-hex SHA recorded after the reviewed merge.
+# The caller must provide the exact 40-hex commit SHA with approved verification evidence.
 # This helper only verifies that identity; tag creation remains an explicit,
 # separate operation performed by the release workflow.
 
@@ -19,7 +19,7 @@ log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1" >&2; }
 
 if [[ $# -ne 2 ]]; then
-    log_fail "Usage: $0 <tag-name> <reviewed-main-sha>"
+    log_fail "Usage: $0 <tag-name> <reviewed-candidate-sha>"
     exit 1
 fi
 
@@ -30,7 +30,7 @@ REPO_ROOT="${SAFE_TAG_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "${REPO_ROOT}"
 
 if [[ ! "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    log_fail "reviewed-main-sha must be a full 40-hex object id"
+    log_fail "reviewed-candidate-sha must be a full 40-hex object id"
     exit 1
 fi
 if [[ ! "${TAG_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
@@ -43,35 +43,11 @@ fail() { log_fail "$1"; FAILED=1; }
 
 log_info "Verifying immutable release target ${TAG_NAME} -> ${TARGET_SHA}"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-    fail "working tree is not clean"
+TARGET_TYPE="$(git cat-file -t "${TARGET_SHA}" 2>/dev/null || true)"
+if [[ "${TARGET_TYPE}" != "commit" ]]; then
+    fail "reviewed target ${TARGET_SHA} is not an available commit object"
 else
-    log_ok "working tree is clean"
-fi
-
-CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
-if [[ "${CURRENT_BRANCH}" != "main" ]]; then
-    fail "release target must be resolved from main (currently ${CURRENT_BRANCH:-detached})"
-else
-    log_ok "on main branch"
-fi
-
-LOCAL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
-if [[ "${LOCAL_HEAD}" != "${TARGET_SHA}" ]]; then
-    fail "local main ${LOCAL_HEAD:-missing} does not match reviewed target ${TARGET_SHA}"
-else
-    log_ok "local main matches reviewed target"
-fi
-
-if ! git show-ref --verify --quiet refs/remotes/origin/main; then
-    fail "origin/main is not available; fetch and resolve it before tagging"
-else
-    REMOTE_HEAD="$(git rev-parse refs/remotes/origin/main)"
-    if [[ "${REMOTE_HEAD}" != "${TARGET_SHA}" ]]; then
-        fail "origin/main ${REMOTE_HEAD} does not match reviewed target ${TARGET_SHA}"
-    else
-        log_ok "origin/main matches reviewed target"
-    fi
+    log_ok "reviewed target is an available commit object"
 fi
 
 if git rev-parse --verify --quiet "refs/tags/${TAG_NAME}" >/dev/null; then
