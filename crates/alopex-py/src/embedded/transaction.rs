@@ -21,6 +21,39 @@ enum TxnState {
     RolledBack,
 }
 
+enum FinalizeError {
+    StateLockPoisoned,
+    TransactionLockPoisoned,
+    Closed,
+    StreamActive,
+    RollbackStreamActive,
+    StreamAbortRequired,
+    Embedded(alopex_embedded::Error),
+}
+
+impl FinalizeError {
+    fn into_py(self) -> PyErr {
+        match self {
+            Self::StateLockPoisoned => error::to_py_err("transaction state lock poisoned"),
+            Self::TransactionLockPoisoned => error::to_py_err("transaction lock poisoned"),
+            Self::Closed => error::to_py_err("transaction is closed"),
+            Self::StreamActive => error::stream_error(
+                "stream_active",
+                "commit is not allowed while a transaction stream is active",
+            ),
+            Self::RollbackStreamActive => error::stream_error(
+                "stream_active",
+                "rollback is not allowed while a transaction stream is active",
+            ),
+            Self::StreamAbortRequired => error::stream_error(
+                "stream_abort_required",
+                "transaction stream requires rollback before commit",
+            ),
+            Self::Embedded(err) => error::embedded_err(err),
+        }
+    }
+}
+
 pub(crate) struct PyTransactionInner {
     pub(crate) txn: Mutex<Option<alopex_embedded::OwnedEmbeddedTransaction>>,
     state: Mutex<TxnState>,
@@ -74,15 +107,6 @@ impl PyTransaction {
         Ok(())
     }
 
-    fn is_active(&self) -> PyResult<bool> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
-        Ok(*state == TxnState::Active)
-    }
-
     fn state_name(&self) -> PyResult<&'static str> {
         let state = self
             .inner
@@ -114,40 +138,50 @@ impl PyTransaction {
         op(txn).map_err(error::embedded_err)
     }
 
-    fn finalize_with<F>(&self, op: F, success_state: TxnState) -> PyResult<()>
-    where
-        F: FnOnce(
-            &mut alopex_embedded::OwnedEmbeddedTransaction,
-        ) -> Result<(), alopex_embedded::Error>,
-    {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
-        if *state != TxnState::Active {
-            return Err(error::to_py_err("transaction is closed"));
-        }
-        let mut guard = self
-            .inner
-            .txn
-            .lock()
-            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
-        match op(txn) {
-            Ok(()) => {
-                *guard = None;
-                *state = success_state;
-                Ok(())
+    fn rollback_with(&self, py: Python<'_>, closed_is_success: bool) -> PyResult<()> {
+        py.detach(|| {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| FinalizeError::StateLockPoisoned)?;
+            if *state != TxnState::Active {
+                return if closed_is_success {
+                    Ok(())
+                } else {
+                    Err(FinalizeError::Closed)
+                };
             }
-            Err(err) => {
-                *guard = None;
-                *state = TxnState::RolledBack;
-                Err(error::embedded_err(err))
+            let mut guard = self
+                .inner
+                .txn
+                .lock()
+                .map_err(|_| FinalizeError::TransactionLockPoisoned)?;
+            let txn = guard.as_mut().ok_or(FinalizeError::Closed)?;
+            if txn.session().status()
+                == alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive
+            {
+                return Err(FinalizeError::RollbackStreamActive);
             }
-        }
+            match txn.rollback() {
+                Ok(()) => {
+                    *guard = None;
+                    *state = TxnState::RolledBack;
+                    Ok(())
+                }
+                Err(err) => {
+                    if txn.session().status()
+                        == alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive
+                    {
+                        return Err(FinalizeError::RollbackStreamActive);
+                    }
+                    *guard = None;
+                    *state = TxnState::RolledBack;
+                    Err(FinalizeError::Embedded(err))
+                }
+            }
+        })
+        .map_err(FinalizeError::into_py)
     }
 }
 
@@ -578,70 +612,57 @@ impl PyTransaction {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
-        if *state != TxnState::Active {
-            return Err(error::to_py_err("transaction is closed"));
-        }
-        let mut guard = self
-            .inner
-            .txn
-            .lock()
-            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
-        match txn.session().status() {
-            alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
-                return Err(error::stream_error(
-                    "stream_active",
-                    "commit is not allowed while a transaction stream is active",
-                ));
+        py.detach(|| {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| FinalizeError::StateLockPoisoned)?;
+            if *state != TxnState::Active {
+                return Err(FinalizeError::Closed);
             }
-            alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
-                return Err(error::stream_error(
-                    "stream_abort_required",
-                    "transaction stream requires rollback before commit",
-                ));
+            let mut guard = self
+                .inner
+                .txn
+                .lock()
+                .map_err(|_| FinalizeError::TransactionLockPoisoned)?;
+            let txn = guard.as_mut().ok_or(FinalizeError::Closed)?;
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(FinalizeError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(FinalizeError::StreamAbortRequired);
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        let result = py.detach(|| txn.commit());
-        match result {
-            Ok(()) => {
-                *guard = None;
-                *state = TxnState::Committed;
-                Ok(())
+            match txn.commit() {
+                Ok(()) => {
+                    *guard = None;
+                    *state = TxnState::Committed;
+                    Ok(())
+                }
+                Err(err) => {
+                    match txn.session().status() {
+                        alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                            return Err(FinalizeError::StreamActive);
+                        }
+                        alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                            return Err(FinalizeError::StreamAbortRequired);
+                        }
+                        _ => {}
+                    }
+                    *guard = None;
+                    *state = TxnState::RolledBack;
+                    Err(FinalizeError::Embedded(err))
+                }
             }
-            Err(err) => {
-                *guard = None;
-                *state = TxnState::RolledBack;
-                Err(error::embedded_err(err))
-            }
-        }
+        })
+        .map_err(FinalizeError::into_py)
     }
 
-    fn rollback(&self) -> PyResult<()> {
-        if let Some(txn) = self
-            .inner
-            .txn
-            .lock()
-            .map_err(|_| error::to_py_err("transaction lock poisoned"))?
-            .as_ref()
-        {
-            if txn.session().status()
-                == alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive
-            {
-                return Err(error::stream_error(
-                    "stream_active",
-                    "rollback is not allowed while a transaction stream is active",
-                ));
-            }
-        }
-        self.finalize_with(|txn| txn.rollback(), TxnState::RolledBack)
+    fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        self.rollback_with(py, false)
     }
 
     fn __enter__(slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
@@ -652,13 +673,12 @@ impl PyTransaction {
     #[pyo3(signature = (_exc_type = None, _exc = None, _traceback = None))]
     fn __exit__(
         &self,
+        py: Python<'_>,
         _exc_type: Option<Py<PyAny>>,
         _exc: Option<Py<PyAny>>,
         _traceback: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        if self.is_active()? {
-            self.finalize_with(|txn| txn.rollback(), TxnState::RolledBack)?;
-        }
+        self.rollback_with(py, true)?;
         Ok(false)
     }
 }
@@ -718,6 +738,10 @@ mod tests {
         }
     }
 
+    fn rollback(txn: &super::PyTransaction) {
+        Python::attach(|py| txn.rollback(py).expect("rollback"));
+    }
+
     #[test]
     fn execute_sql_insert_and_select_within_transaction() {
         pyo3::Python::initialize();
@@ -758,7 +782,7 @@ mod tests {
             txn.execute_sql(py, "INSERT INTO t (id) VALUES (?)", Some(params.into_any()))
                 .expect("insert");
         });
-        txn.rollback().expect("rollback");
+        rollback(&txn);
         assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
     }
 
@@ -769,7 +793,7 @@ mod tests {
         db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
             .expect("ddl");
         let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
-        txn.rollback().expect("rollback");
+        rollback(&txn);
         Python::attach(|py| {
             let err = txn
                 .execute_sql(py, "SELECT id FROM t", None)
@@ -783,7 +807,7 @@ mod tests {
         let db = Arc::new(alopex_embedded::Database::new());
         let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         txn.put(b"key", b"value").expect("put");
-        txn.rollback().expect("rollback");
+        rollback(&txn);
 
         let mut txn2 = db.begin(TxnMode::ReadOnly).expect("txn2");
         let value = txn2.get(b"key").expect("get");
@@ -827,7 +851,7 @@ mod tests {
                     .unwrap(),
                 "committable"
             );
-            txn.rollback().unwrap();
+            txn.rollback(py).unwrap();
             let status = txn.status(py).unwrap();
             assert_eq!(
                 status
@@ -920,7 +944,7 @@ mod tests {
                     .unwrap(),
                 "stream_abort_required"
             );
-            aborted.rollback().unwrap();
+            aborted.rollback(py).unwrap();
         });
     }
 
