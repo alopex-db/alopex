@@ -22,7 +22,11 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
     def test_every_run_is_an_immutable_public_report(self) -> None:
         self.assertIn("- name: Finalize verification report", self.text)
         self.assertIn("if: always()", self.text)
-        self.assertIn("name: release-verification-${{ github.run_id }}", self.text)
+        artifact_name = (
+            "name: release-verification-${{ github.run_id }}-"
+            "${{ github.run_attempt }}"
+        )
+        self.assertEqual(self.text.count(artifact_name), 3)
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.json", self.text)
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.md", self.text)
         self.assertIn(
@@ -48,6 +52,37 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
             self.assertIn(f'"{field}"', reporter)
         for outcome in ("success", "failure", "incomplete"):
             self.assertIn(f'"{outcome}"', reporter)
+
+    def test_resolved_python_tag_and_peeled_commit_own_report_identity(self) -> None:
+        release = self.text.split("      - name: Resolve exact public version\n", 1)[
+            1
+        ].split("      - name: Verify exact public package availability\n", 1)[0]
+        self.assertIn('python_tag="alopex-py-v${version}"', release)
+        self.assertIn(
+            '"refs/tags/${python_tag}:refs/tags/${python_tag}"', release
+        )
+        self.assertIn('git rev-parse "${python_tag}^{commit}"', release)
+        self.assertIn('--commit "${python_commit}" --tag "${python_tag}"', release)
+        self.assertIn('if [[ "${GITHUB_REF_TYPE}" == tag ]]; then', release)
+        self.assertIn('[[ "${GITHUB_REF_NAME}" == "${python_tag}" ]]', release)
+        self.assertIn('[[ "${GITHUB_SHA}" == "${python_commit}" ]]', release)
+        self.assertIn('provisional_report_root="${REPORT_ROOT}"', release)
+        self.assertIn(
+            'rm -f "${provisional_report_root}/vunknown.json" '
+            '"${provisional_report_root}/vunknown.md"',
+            release,
+        )
+        self.assertLess(
+            release.index('echo "REPORT_COMMIT=${python_commit}"'),
+            release.index('if [[ "${GITHUB_REF_TYPE}" == tag ]]; then'),
+        )
+        self.assertLess(
+            release.index('rm -f "${provisional_report_root}/vunknown.json"'),
+            release.index('if [[ "${GITHUB_REF_TYPE}" == tag ]]; then'),
+        )
+        self.assertNotIn(
+            '--commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}"', self.text
+        )
 
     def test_report_context_exists_before_failure_prone_steps(self) -> None:
         self.assertIn("- name: Initialize verification report context", self.text)
@@ -93,7 +128,11 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("if: always()", publish)
         self.assertIn("contents: read", publish)
         self.assertIn("actions/download-artifact@v4", publish)
-        self.assertIn("name: release-verification-${{ github.run_id }}", publish)
+        self.assertIn(
+            "name: release-verification-${{ github.run_id }}-"
+            "${{ github.run_attempt }}",
+            publish,
+        )
         self.assertIn("Select downloaded verification report", publish)
         self.assertIn('echo "REPORT_ROOT=${report_root}"', publish)
 
@@ -106,6 +145,16 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("DOCS_REPO_TOKEN", fallback)
         self.assertIn("Mark report publication failure", fallback)
         self.assertIn("immutable report publication", fallback)
+        self.assertIn(
+            'report_path="reports/release-verification/v${version}/run-'
+            '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-publication-failure"',
+            fallback,
+        )
+        self.assertNotIn(
+            'report_path="reports/release-verification/v${version}/run-'
+            '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
+            fallback,
+        )
         self.assertIn("Wait for immutable failure report on docs main", fallback)
         self.assertIn("notify-publication-failure:", self.text)
         notification = self.text.split("  notify-publication-failure:\n", 1)[1].split(

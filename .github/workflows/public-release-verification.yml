@@ -44,8 +44,11 @@ jobs:
           set -euo pipefail
           version="${REQUESTED_VERSION#alopex-py-v}"
           version="${version#v}"
+          report_tag="unresolved"
           if [[ -z "${version}" || ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             version="unknown"
+          else
+            report_tag="alopex-py-v${version}"
           fi
           report_root="${RUNNER_TEMP}/release-verification-v${version}"
           rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' scripts/release/verify-release/Dockerfile)"
@@ -54,7 +57,7 @@ jobs:
           python3 scripts/release/verify-release/report.py init \
             --results "${report_root}/v${version}.json" \
             --version "${version}" --rust "${rust_version:-unknown}" --nim "${nim_image:-unknown}" \
-            --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+            --commit unresolved --tag "${report_tag}" \
             --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --responsibility "Stable Delivery / downstream availability"
@@ -68,6 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          provisional_report_root="${REPORT_ROOT}"
           version="${REQUESTED_VERSION}"
           version="${version#alopex-py-v}"
           version="${version#v}"
@@ -81,17 +85,35 @@ jobs:
           )"
           fi
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          git fetch --force origin "refs/tags/v${version}:refs/tags/v${version}"
+          python_tag="alopex-py-v${version}"
+          git fetch --force origin "refs/tags/${python_tag}:refs/tags/${python_tag}"
+          python_commit="$(git rev-parse "${python_tag}^{commit}")"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${RUNNER_TEMP}/release-verification-v${version}" >> "${GITHUB_ENV}"
+          echo "REPORT_COMMIT=${python_commit}" >> "${GITHUB_ENV}"
+          echo "REPORT_TAG=${python_tag}" >> "${GITHUB_ENV}"
           report_root="${RUNNER_TEMP}/release-verification-v${version}"
+          if [[ "${provisional_report_root}" != "${report_root}" ]]; then
+            rm -f "${provisional_report_root}/vunknown.json" "${provisional_report_root}/vunknown.md"
+            rmdir "${provisional_report_root}" 2>/dev/null || true
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            [[ "${GITHUB_REF_NAME}" == "${python_tag}" ]] || {
+              echo "tag workflow ref does not match resolved Python tag" >&2
+              exit 1
+            }
+            [[ "${GITHUB_SHA}" == "${python_commit}" ]] || {
+              echo "tag workflow commit does not match peeled Python tag" >&2
+              exit 1
+            }
+          fi
           mkdir -p "${report_root}"
           rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' scripts/release/verify-release/Dockerfile)"
           nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' scripts/release/verify-release/Dockerfile)"
           python3 scripts/release/verify-release/report.py init \
             --results "${report_root}/v${version}.json" \
             --version "${version}" --rust "${rust_version}" --nim "${nim_image}" \
-            --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+            --commit "${python_commit}" --tag "${python_tag}" \
             --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --responsibility "Stable Delivery / downstream availability"
@@ -155,9 +177,13 @@ jobs:
           results="${report_root}/v${version}.json"
           mkdir -p "${report_root}"
           if [[ ! -f "${results}" ]]; then
+            report_tag="${REPORT_TAG:-unresolved}"
+            if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              report_tag="${REPORT_TAG:-alopex-py-v${version}}"
+            fi
             python3 scripts/release/verify-release/report.py init \
               --results "${results}" --version "${version}" --rust unknown --nim unknown \
-              --commit "${GITHUB_SHA}" --tag "${GITHUB_REF_NAME}" \
+              --commit "${REPORT_COMMIT:-unresolved}" --tag "${report_tag}" \
               --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
               --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
               --responsibility "Stable Delivery / downstream availability"
@@ -198,7 +224,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-verification-${{ github.run_id }}
+          name: release-verification-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/release-verification-v*/v*.json
             ${{ runner.temp }}/release-verification-v*/v*.md
@@ -227,7 +253,7 @@ jobs:
       - name: Download reviewed verification result
         uses: actions/download-artifact@v4
         with:
-          name: release-verification-${{ github.run_id }}
+          name: release-verification-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.REPORT_ROOT }}
 
       - name: Select downloaded verification report
@@ -340,7 +366,7 @@ jobs:
       - name: Download verification result
         uses: actions/download-artifact@v4
         with:
-          name: release-verification-${{ github.run_id }}
+          name: release-verification-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-verification-output
 
       - name: Mark report publication failure
@@ -372,7 +398,7 @@ jobs:
           python3 scripts/release/verify-release/report.py finalize --results "${results}"
           python3 scripts/release/verify-release/report.py render \
             --results "${results}" --output-dir "${report_root}"
-          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-publication-failure"
           echo "VERSION=${version}" >> "${GITHUB_ENV}"
           echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
           echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
