@@ -10,9 +10,9 @@
 # 検証になる)。
 #
 # 実行結果は JSON と Markdown に保存するが、このスクリプト自身は push しない。
-# 公開は .github/workflows/public-release-verification.yml の明示的な成功時ジョブが
-# 担当する。失敗結果は Actions artifact として保持し、一般向け保証書へ自動公開
-# しない。--report-only では保存済み JSON から再検証なしで Markdown を再生成する。
+# 公開は .github/workflows/public-release-verification.yml が担当し、成功・失敗・
+# incomplete の全結果をrun identity別に保存する。--report-only では保存済み JSON
+# から再検証なしで Markdown を再生成する。
 #
 # 新しいステップを追加する場合は run_step 呼び出しに DESCRIPTION も
 # 必ず添える(結果一覧だけのステップを増やさない)。
@@ -270,12 +270,12 @@ run_step() {
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status ok --description "${description}" --log "${logfile}"
+            --name "${name}" --status success --description "${description}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
         OVERALL_STATUS="fail"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status fail --description "${description}" --log "${logfile}"
+            --name "${name}" --status failure --description "${description}" --log "${logfile}"
         write_report
         exit "${status}"
     fi
@@ -287,6 +287,7 @@ write_report() {
         log_info "--no-report 指定により Markdown 生成をスキップします(JSON は保存済み)"
         return 0
     fi
+    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
     python3 "${SCRIPT_DIR}/report.py" render \
         --results "${RESULTS_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
 }

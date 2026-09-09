@@ -4,8 +4,9 @@
 
 The public Kaggle Version 4 notebook demonstrates the Alopex vector API. Its
 timings are not release performance claims. The canonical v0.8.11 performance
-evidence is the `hnsw-diagnostic-*` artifact produced after publication by
-[`post-release-hnsw.yml`](../.github/workflows/post-release-hnsw.yml).
+evidence is `performance-artifacts/hnsw/hnsw-diagnostic.json` inside the
+exact-commit `parity-performance-*` artifact produced by Extended Verification
+in [`parity-performance.yml`](../.github/workflows/parity-performance.yml).
 
 ## What the artifact answers
 

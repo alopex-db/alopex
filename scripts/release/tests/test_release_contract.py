@@ -197,16 +197,33 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("dispatch-python-release:", rust)
         self.assertIn('gh run watch "${run_id}" --exit-status', rust)
         self.assertIn("verify-public-release:", python)
-        self.assertIn("publish_report: true", python)
+        self.assertNotIn("publish_report:", python)
         self.assertIn("verify_python_vector_api.py", python)
 
-    def test_python_post_release_workflow_forwards_required_permissions(self) -> None:
-        python = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+    def test_release_procedure_keeps_known_functionality_before_delivery(self) -> None:
+        procedure = (ROOT / "docs/release-v0.8-support.md").read_text(
             encoding="utf-8"
         )
-        post_release = python.split("  post-release-hnsw:", maxsplit=1)[1]
+        self.assertIn("Known functionality must finish here, before an RC tag.", procedure)
+        self.assertIn("must not run its release demos", procedure)
+        self.assertIn("later success cannot overwrite or conceal an", procedure)
 
-        self.assertIn("permissions:\n      contents: write\n      issues: write", post_release)
+        python_release = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Verify public package availability and publish docs report", python_release)
+        self.assertNotIn("Verify demos and publish docs report", python_release)
+        self.assertNotIn("post-release-hnsw:", python_release)
+        for moved_check in (
+            "demo_cluster.py / demo_routing.py",
+            "demo_dataframe_p3.py / demo_api_surfaces.py",
+            "demo_sql_v074.sh / demo_sql_v08.py / demo_sql_mutations.py",
+            "demo_vector_api.py / demo_embedded_v08.sh",
+            "hnsw_v0811_contract.py",
+        ):
+            self.assertIn(moved_check, procedure)
+        self.assertIn("Development CI (`v08-release-gate`)", procedure)
+        self.assertIn("Extended Verification (`parity-performance.yml`)", procedure)
 
     def test_python_wheel_smoke_uses_search_stats_public_fields(self) -> None:
         smoke = (ROOT / "scripts/release/verify_python_vector_api.py").read_text(

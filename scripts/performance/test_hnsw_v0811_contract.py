@@ -306,52 +306,37 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             ):
                 self.assertFalse((Path(directory) / stale).exists())
 
-    def test_post_release_workflow_uses_exact_wheel_and_keeps_environment_evidence(
+    def test_extended_verification_owns_hnsw_performance_evidence(
         self,
     ):
         workflow = (
             Path(__file__).resolve().parents[2]
-            / ".github/workflows/post-release-hnsw.yml"
+            / ".github/workflows/parity-performance.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn('default: "v0.8.11"', workflow)
-        self.assertIn('"alopex==${version}"', workflow)
-        self.assertIn("--only-binary=:all:", workflow)
-        self.assertIn("--release-version", workflow)
-        self.assertIn("artifacts-environment.txt", workflow)
+        self.assertIn("issue_number:", workflow)
+        self.assertIn("actions/checkout@v4", workflow)
+        self.assertIn("maturin develop --release", workflow)
         self.assertIn("31764184/archive.zip", workflow)
-        self.assertIn('"faiss-cpu==1.15.0"', workflow)
-        self.assertIn('"hnswlib==0.8.0"', workflow)
-        self.assertIn('"h5py==3.15.1"', workflow)
-        self.assertIn("glove-100-angular.hdf5", workflow)
-        self.assertIn(
-            "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4", workflow
-        )
-        self.assertIn("--max-scale-n 1000000", workflow)
-        self.assertNotIn("--baseline-only", workflow)
+        self.assertIn("faiss-cpu==1.15.0", workflow)
+        self.assertIn("hnswlib==0.8.0", workflow)
+        self.assertIn("--baseline-only", workflow)
         self.assertIn('OMP_NUM_THREADS: "1"', workflow)
         self.assertIn('RAYON_NUM_THREADS: "1"', workflow)
-        self.assertNotIn("  release:\n", workflow)
-        self.assertIn("report/vector-benchmark-v${VERSION}", workflow)
-        self.assertIn('report="reports/vector-benchmarks/v${VERSION}"', workflow)
-        self.assertIn('"${report}.json"', workflow)
-        self.assertIn('"${report}.md"', workflow)
-        self.assertIn("Create or update benchmark failure issue", workflow)
-        self.assertIn("steps.generate.outcome == 'success'", workflow)
-        self.assertIn("if: needs.diagnostic.outputs.publishable == 'true'", workflow)
+        self.assertIn(
+            "parity-performance-${{ github.run_id }}-${{ github.run_attempt }}",
+            workflow,
+        )
         release_workflow = (
             Path(__file__).resolve().parents[2]
             / ".github/workflows/alopex-py-release.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("post-release-hnsw:", release_workflow)
-        self.assertIn("needs: [final-release-join]", release_workflow)
-        self.assertIn(
-            "uses: ./.github/workflows/post-release-hnsw.yml", release_workflow
+        self.assertNotIn("post-release-hnsw:", release_workflow)
+        self.assertFalse(
+            (
+                Path(__file__).resolve().parents[2]
+                / ".github/workflows/post-release-hnsw.yml"
+            ).exists()
         )
-        parity_workflow = (
-            Path(__file__).resolve().parents[2]
-            / ".github/workflows/parity-performance.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("--baseline-only", parity_workflow)
 
 
 if __name__ == "__main__":
