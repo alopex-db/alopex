@@ -7,6 +7,7 @@ import csv
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import re
 import resource
@@ -71,10 +72,24 @@ def provenance() -> dict[str, object]:
             dependencies[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             dependencies[package] = "not installed"
+    cpu_model = ""
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("model name"):
+                cpu_model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    cpu_model = cpu_model or platform.processor() or "unknown"
+    affinity = (
+        sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else []
+    )
     return {
         "source_commit": commit,
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "cpu_model": cpu_model,
+        "cpu_affinity": affinity,
         "dependencies": dependencies,
     }
 
@@ -1283,6 +1298,27 @@ def render_markdown(payload: dict[str, object]) -> str:
         "{median_queries_per_second:.1f} | {median_latency_us:.1f} |".format(**row)
         for row in summary
     )
+    threshold_table = [
+        "| recall threshold | engine | ef_search | recall@10 | QPS | us/query |",
+        "|---:|---|---:|---:|---:|---:|",
+    ]
+    best = payload["best_at_recall"]
+    engines = sorted({str(row["engine"]) for row in summary})
+    for threshold in ("0.95", "0.99"):
+        winners = best.get(threshold, {})
+        for engine in engines:
+            row = winners.get(engine)
+            if row is None:
+                threshold_table.append(
+                    f"| {threshold} | {engine} | not met | not met | not met | not met |"
+                )
+            else:
+                threshold_table.append(
+                    f"| {threshold} | {engine} | {row['ef_search']} | "
+                    f"{float(row['median_recall_at_10']):.4f} | "
+                    f"{float(row['median_queries_per_second']):.1f} | "
+                    f"{float(row['median_latency_us']):.1f} |"
+                )
     recall = payload["recall_investigation"]
     hybrid = payload["hybrid"]
     scale = payload["scale"]
@@ -1352,10 +1388,13 @@ def render_markdown(payload: dict[str, object]) -> str:
         f"Release: `{payload.get('release_version', 'local')}`. Dataset: `{DATASET_SIZE} x "
         f"{DIMENSION}`; minimum queries/run: `{QUERY_COUNT}`; seed: `{SEED}`. "
         f"Source commit: `{run['source_commit']}`; Python: `{run['python']}`; "
-        f"platform: `{run['platform']}`. Dataset SHA-256: "
+        f"platform: `{run['platform']}`; CPU: `{run['cpu_model']}`; "
+        f"CPU affinity: `{json.dumps(run['cpu_affinity'])}`. Dataset SHA-256: "
         f"`{payload['dataset'].get('source_sha256', 'not recorded')}`. Dependencies: "
         f"`{json.dumps(run['dependencies'], sort_keys=True)}`.\n\n"
         + "\n".join(table)
+        + "\n\n## Fastest settings at recall thresholds\n\n"
+        + "\n".join(threshold_table)
         + "\n\n## Recall ceiling\n\n"
         + "\n".join(recall_table)
         + "\n\nConclusion: "

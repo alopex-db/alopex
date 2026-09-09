@@ -183,6 +183,40 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("Run public-package demos", verify)
         self.assertNotIn('verify-release/run.sh "${VERSION}"', verify)
 
+    def test_stable_delivery_only_imports_exact_sha_benchmark_evidence(self) -> None:
+        benchmark = self.text.split("  publish-vector-benchmark:\n", 1)[1].split(
+            "  publish-publication-failure-report:\n", 1
+        )[0]
+        self.assertIn("needs: [verify, publish]", benchmark)
+        self.assertIn("actions: read", benchmark)
+        self.assertIn("PARITY_RUN_ID: ${{ inputs.parity_run_id || '' }}", benchmark)
+        self.assertNotIn("actions/workflows/parity-performance.yml/runs", benchmark)
+        self.assertIn("actions/runs/${PARITY_RUN_ID}", benchmark)
+        self.assertIn('run.get("head_sha") != os.environ["SOURCE_COMMIT"]', benchmark)
+        self.assertIn(
+            'run.get("path") != ".github/workflows/parity-performance.yml"',
+            benchmark,
+        )
+        self.assertIn("gh run download", benchmark)
+        self.assertIn("release_hnsw_evidence.py", benchmark)
+        self.assertIn("--public-pair", benchmark)
+        self.assertIn("already_published=true", benchmark)
+        self.assertIn('report="reports/vector-benchmarks/v${VERSION}"', benchmark)
+        self.assertIn("repository: alopex-db/docs", benchmark)
+        self.assertIn('branch="report/vector-benchmark-v${VERSION}"', benchmark)
+        self.assertIn(
+            "[Vector benchmark reports](reports/vector-benchmarks/README.md)",
+            benchmark,
+        )
+        self.assertIn("publish-vector-benchmarks.yml", benchmark)
+        self.assertIn("candidate-benchmark.json", benchmark)
+        self.assertIn('cmp -s "${REPORT_ROOT}/hnsw-diagnostic.json"', benchmark)
+        self.assertIn("Wait for identical benchmark bytes on docs main", benchmark)
+        self.assertIn("Cleanup benchmark publication branch", benchmark)
+        self.assertNotIn("hnsw_v0811_contract.py", benchmark)
+        self.assertNotIn("maturin", benchmark)
+        self.assertNotIn("pip install", benchmark)
+
 
 if __name__ == "__main__":
     unittest.main()

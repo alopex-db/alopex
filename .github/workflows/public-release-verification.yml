@@ -7,6 +7,11 @@ on:
         description: "Release version or tag"
         required: true
         type: string
+      parity_run_id:
+        description: "RC-approved exact-SHA parity-performance run ID"
+        required: false
+        default: ""
+        type: string
     secrets:
       DOCS_REPO_TOKEN:
         required: true
@@ -14,6 +19,11 @@ on:
     inputs:
       version:
         description: "Release version or tag; empty resolves the latest PyPI version"
+        required: false
+        default: ""
+        type: string
+      parity_run_id:
+        description: "RC-approved parity run ID; optional for an existing report"
         required: false
         default: ""
         type: string
@@ -29,9 +39,11 @@ jobs:
     name: Verify public packages
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     outputs:
       version: ${{ steps.release.outputs.version || steps.report_context.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,6 +101,7 @@ jobs:
           git fetch --force origin "refs/tags/${python_tag}:refs/tags/${python_tag}"
           python_commit="$(git rev-parse "${python_tag}^{commit}")"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "commit=${python_commit}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${RUNNER_TEMP}/release-verification-v${version}" >> "${GITHUB_ENV}"
           echo "REPORT_COMMIT=${python_commit}" >> "${GITHUB_ENV}"
           echo "REPORT_TAG=${python_tag}" >> "${GITHUB_ENV}"
@@ -345,6 +358,169 @@ jobs:
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
         run: git push origin --delete "${BRANCH}"
+
+  publish-vector-benchmark:
+    name: Publish reviewed vector benchmark snapshot
+    needs: [verify, publish]
+    if: always() && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
+      PARITY_RUN_ID: ${{ inputs.parity_run_id || '' }}
+      REPORT_ROOT: benchmark-output/hnsw
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout public docs repository
+        uses: actions/checkout@v4
+        with:
+          repository: alopex-db/docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-repo
+
+      - name: Download successful exact-SHA Extended Verification evidence
+        id: benchmark_evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          published="benchmark-output/published"
+          mkdir -p "${published}"
+          if cp "docs-repo/reports/vector-benchmarks/v${VERSION}.json" "${published}/hnsw-diagnostic.json" 2>/dev/null && \
+             cp "docs-repo/reports/vector-benchmarks/v${VERSION}.md" "${published}/hnsw-diagnostic.md" 2>/dev/null && \
+             python3 scripts/performance/release_hnsw_evidence.py \
+               --root "${published}" --version "${VERSION}" --commit "${SOURCE_COMMIT}" --public-pair; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          rm -rf "${published}"
+          [[ "${PARITY_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          run="${RUNNER_TEMP}/parity-performance-run.json"
+          gh api "repos/${REPOSITORY}/actions/runs/${PARITY_RUN_ID}" > "${run}"
+          run_attempt="$(python3 - "${run}" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              run = json.load(stream)
+          if run.get("head_sha") != os.environ["SOURCE_COMMIT"]:
+              raise SystemExit("RC-approved parity run does not match the release commit")
+          if run.get("path") != ".github/workflows/parity-performance.yml":
+              raise SystemExit("RC-approved run is not parity-performance")
+          if run.get("conclusion") != "success":
+              raise SystemExit("RC-approved parity run is not successful")
+          print(run["run_attempt"])
+          PY
+          )"
+          gh run download "${PARITY_RUN_ID}" --repo "${REPOSITORY}" \
+            --name "parity-performance-${PARITY_RUN_ID}-${run_attempt}" \
+            --dir benchmark-output
+          echo "already_published=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate the canonical benchmark pair
+        if: steps.benchmark_evidence.outputs.already_published != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/performance/release_hnsw_evidence.py \
+            --root "${REPORT_ROOT}" --version "${VERSION}" --commit "${SOURCE_COMMIT}"
+
+      - name: Publish candidate branch for docs ingestion
+        id: candidate
+        if: steps.benchmark_evidence.outputs.already_published != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="report/vector-benchmark-v${VERSION}"
+          report="reports/vector-benchmarks/v${VERSION}"
+          grep -Fq '[Vector benchmark reports](reports/vector-benchmarks/README.md)' docs-repo/README.md
+          grep -Fq 'report/vector-benchmark-v*' docs-repo/.github/workflows/publish-vector-benchmarks.yml
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git show "refs/remotes/origin/${branch}:${report}.json" > "${RUNNER_TEMP}/candidate-benchmark.json"
+            git show "refs/remotes/origin/${branch}:${report}.md" > "${RUNNER_TEMP}/candidate-benchmark.md"
+            cmp -s "${REPORT_ROOT}/hnsw-diagnostic.json" "${RUNNER_TEMP}/candidate-benchmark.json"
+            cmp -s "${REPORT_ROOT}/hnsw-diagnostic.md" "${RUNNER_TEMP}/candidate-benchmark.md"
+            echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git switch -c "${branch}"
+          mkdir -p reports/vector-benchmarks
+          cp "${REPORT_ROOT}/hnsw-diagnostic.json" "${report}.json"
+          cp "${REPORT_ROOT}/hnsw-diagnostic.md" "${report}.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${report}.json" "${report}.md"
+          git commit -m "docs(vector): publish v${VERSION} benchmark candidate"
+          git push origin "${branch}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for identical benchmark bytes on docs main
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="${REPORT_ROOT}"
+          if [[ "${{ steps.benchmark_evidence.outputs.already_published }}" == true ]]; then
+            source_root="benchmark-output/published"
+          fi
+          report="reports/vector-benchmarks/v${VERSION}"
+          public="https://raw.githubusercontent.com/alopex-db/docs/main/${report}"
+          for attempt in $(seq 1 60); do
+            if curl -fsSL "${public}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+                -o "${RUNNER_TEMP}/published-benchmark.json" && \
+               curl -fsSL "${public}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+                -o "${RUNNER_TEMP}/published-benchmark.md" && \
+               cmp -s "${source_root}/hnsw-diagnostic.json" "${RUNNER_TEMP}/published-benchmark.json" && \
+               cmp -s "${source_root}/hnsw-diagnostic.md" "${RUNNER_TEMP}/published-benchmark.md"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "docs main did not publish the exact benchmark bytes" >&2
+          exit 1
+
+      - name: Cleanup benchmark publication branch
+        if: always() && steps.candidate.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+        shell: bash
+        run: git push origin --delete "${BRANCH}"
+
+  notify-vector-benchmark-failure:
+    name: Notify vector benchmark publication failure
+    needs: [verify, publish-vector-benchmark]
+    if: always() && needs.verify.result == 'success' && needs.publish-vector-benchmark.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update benchmark publication failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="release benchmark publication failed: v${VERSION}"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          body="v${VERSION} のexact-SHA Extended Verification成果物を公開docsへ取り込めませんでした。Actions artifactを確認してください: ${RUN_URL}"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "${title}" --body "${body}"
+          fi
 
   publish-publication-failure-report:
     name: Publish report-publication failure evidence

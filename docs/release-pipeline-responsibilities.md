@@ -46,7 +46,6 @@ job's owner.
 | `alopex-py-release.yml:github-release` | Stable Delivery | exact wheel/sdist promotion |
 | `alopex-py-release.yml:final-release-join` | Stable Delivery | publication identity join |
 | `alopex-py-release.yml:verify-public-release` | Stable Delivery | public package reachability result |
-| `alopex-py-release.yml:post-release-hnsw` | Stable Delivery | version snapshot dispatch only |
 | `alopex-py.yml:rust-check` | Development CI | exact-SHA binding lint result |
 | `alopex-py.yml:test` | Development CI | exact-SHA binding behavior result |
 | `alopex-py.yml:polars-test` | Development CI | exact-SHA Polars compatibility result |
@@ -70,12 +69,14 @@ job's owner.
 | `compatibility.yml:native` | Development CI | exact-SHA native compatibility result |
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
-| `parity-performance.yml:performance` | Extended Verification | exact-SHA reference metrics JSON |
-| `post-release-hnsw.yml:diagnostic` | Stable Delivery | public-version snapshot only; no release gate |
-| `post-release-hnsw.yml:publish` | Stable Delivery | generated version report publication |
-| `post-release-hnsw.yml:notify-failure` | Stable Delivery | advisory report failure notification |
+| `parity-performance.yml:performance` | Extended Verification | exact-SHA canonical benchmark JSON/Markdown and raw evidence |
+| `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
 | `public-release-verification.yml:verify` | Stable Delivery | package reachability and minimal import |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
+| `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | validated projection of retained exact-SHA evidence into public docs |
+| `public-release-verification.yml:notify-vector-benchmark-failure` | Stable Delivery | version-scoped benchmark publication failure notification |
+| `public-release-verification.yml:publish-publication-failure-report` | Stable Delivery | immutable report-publication failure evidence |
+| `public-release-verification.yml:notify-publication-failure` | Stable Delivery | report-publication failure notification |
 | `public-release-verification.yml:notify-scheduled-failure` | Stable Delivery | scheduled reachability notification |
 | `release-process.yml:contract` | Development CI | workflow contract tests |
 | `release-process.yml:state-model` | Development CI | legal transition model result |
@@ -104,6 +105,9 @@ contract test then requires their new workflow-qualified names.
 | `scripts/release/safe-tag.sh` | main/worktree gate | commit-object and immutable-tag gate | replace | branch checks are absent | `test_safe_tag.sh` |
 | `candidate-manifest.json` | absent | canonical qualified artifact inventory | replace | never; retention is release evidence | schema and digest replay tests |
 | post-publication functionality demos | first-run correctness evidence | package reachability/minimal import only | shrink | every removed check has a commit-level owner | contract test and dead-path search |
+| `performance-artifacts/hnsw/` | partial exact-SHA measurements | reviewable run-scoped raw/JSON/CSV/Markdown/environment benchmark evidence | replace | 30-day Actions retention expires after public JSON/Markdown byte verification | schema, identity, and render-hash validation |
+| `parity-performance-outcome-*` | absent | runner-independent exact-SHA run ID/attempt and terminal outcome | replace | 90-day Actions retention expires | dependent-job contract and outcome schema test |
+| `reports/vector-benchmarks/vX.Y.Z.{json,md}` | absent | public version view of retained exact-SHA evidence | replace | source evidence is withdrawn with a recorded correction | docs public-surface and byte comparison |
 
 ## Operations and rollback
 

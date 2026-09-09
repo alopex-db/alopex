@@ -105,6 +105,13 @@ The Python publication workflow calls
 confirm exact-version PyPI reachability and isolated installation/import. It
 does not decide whether known functionality is correct.
 
+The same workflow may publish the versioned vector benchmark only by locating a
+successful `parity-performance.yml` run for the Python tag's peeled commit and
+validating its retained canonical JSON/Markdown pair. Stable Delivery does not
+execute the HNSW benchmark or reinterpret its values. The docs update is
+idempotent at `reports/vector-benchmarks/vX.Y.Z.{json,md}` and the docs index is
+regenerated from those versioned files.
+
 The workflow renders and publishes Markdown plus JSON for every run, including
 failure and incomplete execution. Each report is stored under a version and
 GitHub run/attempt identity, so a later success cannot overwrite or conceal an

@@ -271,6 +271,8 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertRegex(payload["provenance"]["source_commit"], r"^[0-9a-f]{40}$")
             self.assertIn("python", payload["provenance"])
             self.assertIn("platform", payload["provenance"])
+            self.assertTrue(payload["provenance"]["cpu_model"])
+            self.assertIsInstance(payload["provenance"]["cpu_affinity"], list)
             self.assertIn("alopex", payload["provenance"]["dependencies"])
             markdown = (Path(directory) / "hnsw-diagnostic.md").read_bytes()
             self.assertEqual(markdown.decode(), render_markdown(payload))
@@ -284,6 +286,9 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             )
             report = markdown.decode()
             self.assertIn("## Recall ceiling", report)
+            self.assertIn("## Fastest settings at recall thresholds", report)
+            self.assertIn("| 0.95 |", report)
+            self.assertIn("| 0.99 |", report)
             self.assertIn("## Latency decomposition", report)
             self.assertIn("## Hybrid", report)
             self.assertIn("## Scale", report)
@@ -317,9 +322,32 @@ class HnswDiagnosticContractTests(unittest.TestCase):
         self.assertIn("actions/checkout@v4", workflow)
         self.assertIn("maturin develop --release", workflow)
         self.assertIn("31764184/archive.zip", workflow)
+        self.assertIn("glove-100-angular.hdf5", workflow)
+        self.assertIn(
+            "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+            workflow,
+        )
         self.assertIn("faiss-cpu==1.15.0", workflow)
         self.assertIn("hnswlib==0.8.0", workflow)
-        self.assertIn("--baseline-only", workflow)
+        self.assertIn('--release-version "$RELEASE_VERSION"', workflow)
+        self.assertIn('--glove-dataset "$GLOVE_DATASET"', workflow)
+        self.assertIn("--max-scale-n 50000", workflow)
+        self.assertNotIn("--baseline-only", workflow)
+        self.assertIn("environment.txt", workflow)
+        self.assertIn("benchmark-status.json", workflow)
+        self.assertIn("benchmark-status.md", workflow)
+        self.assertIn('"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])', workflow)
+        self.assertIn('"failure_stage": failure or incomplete', workflow)
+        self.assertIn("retain-run-outcome:", workflow)
+        self.assertIn("needs: performance", workflow)
+        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("${{ needs.performance.result }}", workflow)
+        self.assertIn("alopex.parity-performance-run/v1", workflow)
+        self.assertIn(
+            "parity-performance-outcome-${{ github.run_id }}-${{ github.run_attempt }}",
+            workflow,
+        )
+        self.assertIn("retention-days: 90", workflow)
         self.assertIn('OMP_NUM_THREADS: "1"', workflow)
         self.assertIn('RAYON_NUM_THREADS: "1"', workflow)
         self.assertIn(
