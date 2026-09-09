@@ -28,6 +28,109 @@ fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn btree_index_answers_equality_and_range_filters() {
+    use alopex_sql::ast::ddl::IndexMethod;
+    use alopex_sql::storage::SqlValue;
+
+    let (mut executor, _catalog) = create_executor();
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "items",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer)
+                        .with_primary_key(true)
+                        .with_not_null(true),
+                    ColumnMetadata::new("score", ResolvedType::Integer),
+                ],
+            )
+            .with_primary_key(vec!["id".into()]),
+            if_not_exists: false,
+            with_options: vec![],
+        })
+        .unwrap();
+
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["id".into(), "score".into()],
+            values: vec![
+                vec![number(1), number(10)],
+                vec![number(2), number(20)],
+                vec![number(3), number(30)],
+            ],
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    executor
+        .execute(LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "idx_items_score",
+                "items",
+                vec!["score".into()],
+            )
+            .with_method(IndexMethod::BTree),
+            if_not_exists: false,
+        })
+        .unwrap();
+
+    let predicate = |op, value| TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(TypedExpr {
+                kind: TypedExprKind::ColumnRef {
+                    table: "items".into(),
+                    column: "score".into(),
+                    column_index: 1,
+                },
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            }),
+            op,
+            right: Box::new(number(value)),
+        },
+        resolved_type: ResolvedType::Boolean,
+        span: Span::default(),
+    };
+    let scan = || {
+        LogicalPlan::scan(
+            "items".into(),
+            Projection::All(vec!["id".into(), "score".into()]),
+        )
+    };
+    let query_rows = |plan| match executor.execute(plan).unwrap() {
+        ExecutionResult::Query(query) => query.rows,
+        other => panic!("unexpected result {other:?}"),
+    };
+
+    assert_eq!(
+        query_rows(LogicalPlan::filter(
+            scan(),
+            predicate(alopex_sql::ast::expr::BinaryOp::Eq, 20),
+        )),
+        vec![vec![SqlValue::Integer(2), SqlValue::Integer(20)]]
+    );
+    assert_eq!(
+        query_rows(LogicalPlan::filter(
+            scan(),
+            predicate(alopex_sql::ast::expr::BinaryOp::GtEq, 20),
+        )),
+        vec![
+            vec![SqlValue::Integer(2), SqlValue::Integer(20)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn executor_end_to_end_manual_plans() {
     let (mut executor, _catalog) = create_executor();
 
