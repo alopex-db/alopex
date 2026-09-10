@@ -12,3 +12,5 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 | 1,000,000 | not attempted | larger N is not justified before bounded path exists |
 
 Codexは次に、全体診断を呼び出さず、Alopexのbuild-only経路を上限付きで計測できる最小ハーネスへ切り分けます。
+
+Codexは比較エンジン（FAISS flat/HNSW、hnswlib）のbuild-only実行も開始しましたが、1Mまでの集計が20分を超えたため中断しました。Codexは部分結果を出力していないため、比較エンジンの値も成功値として採用していません。Codexは次に、Alopexのper-vector Python挿入を避けるRust-side build harnessを用意し、実行上限を明示して再測定します。

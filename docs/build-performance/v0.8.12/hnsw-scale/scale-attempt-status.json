@@ -10,6 +10,12 @@
   "requested_sizes": [10000, 50000, 200000, 1000000],
   "attempted_max_n": 10000,
   "result_rows": 0,
+  "build_only_attempt": {
+    "engines": ["faiss-flat", "faiss-hnsw", "hnswlib"],
+    "requested_sizes": [10000, 50000, 200000, 1000000],
+    "status": "incomplete",
+    "reason": "The isolated build-only comparison exceeded a 20-minute controlled budget before emitting its first aggregate row; no timing value is accepted."
+  },
   "reason": "Existing run_scale_benchmark did not produce a result within the 10-minute controlled execution budget while building the Alopex 10k index; the process was interrupted in I/O wait. No timing value is accepted.",
-  "next_action": "Split scale ownership from the full diagnostic and add a bounded build-only measurement path before retrying larger N."
+  "next_action": "Replace per-vector Python insertion with a bounded Rust-side build harness before retrying larger N."
 }
