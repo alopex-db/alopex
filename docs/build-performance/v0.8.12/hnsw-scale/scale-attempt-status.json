@@ -1,0 +1,15 @@
+{
+  "schema": "alopex.hnsw-scale-attempt/v1",
+  "status": "incomplete",
+  "dataset": "glove-100-angular.hdf5",
+  "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+  "amazon_attachment": {
+    "url": "https://github.com/user-attachments/files/31764184/archive.zip",
+    "sha256": "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea"
+  },
+  "requested_sizes": [10000, 50000, 200000, 1000000],
+  "attempted_max_n": 10000,
+  "result_rows": 0,
+  "reason": "Existing run_scale_benchmark did not produce a result within the 10-minute controlled execution budget while building the Alopex 10k index; the process was interrupted in I/O wait. No timing value is accepted.",
+  "next_action": "Split scale ownership from the full diagnostic and add a bounded build-only measurement path before retrying larger N."
+}
