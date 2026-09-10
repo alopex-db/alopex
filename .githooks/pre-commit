@@ -17,6 +17,14 @@
 
 set -e
 
+# Documentation-only commits do not affect compiled behavior. Skip this hook
+# entirely; implementation/configuration changes continue through all checks.
+staged_files="$(git diff --cached --name-only)"
+if [ -n "${staged_files}" ] && ! printf '%s\n' "${staged_files}" | grep -qvE '(^|/)(docs?/|docs-public/|docs-internal/)|\.(md|mdx)$'; then
+    echo "Documentation-only commit: pre-commit checks skipped"
+    exit 0
+fi
+
 echo "=== Pre-commit checks ==="
 
 # Colors for output
