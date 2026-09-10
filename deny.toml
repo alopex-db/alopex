@@ -53,7 +53,6 @@ skip = [
     { crate = "nix@0.30.1", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "ordered-float@2.10.1", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "ordered-float@4.6.0", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
-    { crate = "petgraph@0.6.5", reason = "Bevy 0.14/0.15 test-stack convergence is tracked by #196; remove after migration." },
     { crate = "rand@0.8.7", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "rand@0.9.5", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "rand_chacha@0.3.1", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
