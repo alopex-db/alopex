@@ -29,6 +29,12 @@
     "profile": "release-no-lto",
     "reason": "Rust core build-only path completed 10,000 inserts. Search recall/QPS was not run in this case."
   },
+  "core_50k_attempt": {
+    "status": "incomplete",
+    "budget_seconds": 300,
+    "result_row_emitted": false,
+    "reason": "Rust core build-only path did not complete 50,000 inserts within the per-case budget."
+  },
   "build_only_attempt": {
     "engines": ["faiss-flat", "faiss-hnsw", "hnswlib"],
     "requested_sizes": [10000, 50000, 200000, 1000000],
