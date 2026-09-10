@@ -88,7 +88,7 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3.8"
 criterion = { workspace = true }
 portable-pty = "0.8"
-ratatui-testlib = { version = "0.1", features = ["mvp"] }
+ratatui-testlib = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # e2e_tui.rs: PR_SET_PDEATHSIG for the spawned alopex-server test instance.
