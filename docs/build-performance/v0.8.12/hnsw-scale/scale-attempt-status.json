@@ -10,12 +10,27 @@
   "requested_sizes": [10000, 50000, 200000, 1000000],
   "attempted_max_n": 10000,
   "result_rows": 0,
+  "core_build_probe": {
+    "n": 1000,
+    "dimension": 100,
+    "build_ms": 15115.205,
+    "node_count": 1000,
+    "memory_bytes": 636420,
+    "profile": "debug",
+    "accepted_as_scale_result": false
+  },
+  "core_10k_attempt": {
+    "status": "incomplete",
+    "budget_seconds": 300,
+    "result_row_emitted": false,
+    "reason": "Rust core build-only path did not complete 10,000 inserts within the per-case budget."
+  },
   "build_only_attempt": {
     "engines": ["faiss-flat", "faiss-hnsw", "hnswlib"],
     "requested_sizes": [10000, 50000, 200000, 1000000],
     "status": "incomplete",
-    "reason": "The isolated build-only comparison exceeded a 20-minute controlled budget before emitting its first aggregate row; no timing value is accepted."
+    "reason": "The mixed engine-by-size process exceeded a 20-minute controlled budget before emitting its first aggregate row. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
-  "reason": "Existing run_scale_benchmark did not produce a result within the 10-minute controlled execution budget while building the Alopex 10k index; the process was interrupted in I/O wait. No timing value is accepted.",
-  "next_action": "Replace per-vector Python insertion with a bounded Rust-side build harness before retrying larger N."
+  "reason": "Existing run_scale_benchmark did not produce a result within the 10-minute controlled execution budget while building the Alopex 10k index through per-vector Python insertion; the process was interrupted in I/O wait. This measures an unsuitable harness path, not Alopex build performance. No timing value is accepted.",
+  "next_action": "Separate Alopex Rust-side build-only measurement and comparison-engine-by-size processes; persist each case before starting the next case."
 }
