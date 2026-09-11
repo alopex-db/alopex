@@ -719,12 +719,7 @@ impl HnswGraph {
                 if query.norm == 0.0 || node.norm == 0.0 {
                     return 0.0;
                 }
-                let dot = query
-                    .values
-                    .iter()
-                    .zip(&node.vector)
-                    .map(|(left, right)| left * right)
-                    .sum::<f32>();
+                let dot = self.kernel.inner_product(query.values, &node.vector);
                 return dot / (query.norm * node.norm);
             }
             return self.distance_raw(query.values, &node.vector);
