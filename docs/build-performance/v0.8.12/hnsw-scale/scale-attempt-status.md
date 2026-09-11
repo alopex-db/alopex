@@ -23,6 +23,10 @@ Codexは今後、製品ごとの任意のwall-clock上限を測定契約にし�
 
 Codexは上記の試行履歴を `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ保存し、完成した比較行は別責務の `glove-scale-matrix.*` へ保存しました。
 
-CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exactを同一入力・同一query契約で測定し、`glove-scale-matrix.json`とbuild/search別CSV/Markdownへ保存しました。50kはengine×N独立worker、10kは既存fixed-query artifactです。200k/1Mは同じworkerで測定可能ですが、まだ実行していないため受入未達です。
+CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exactを同一入力・同一query契約で測定し、`glove-scale-matrix.json`とbuild/search別CSV/Markdownへ保存しました。50kはengine×N独立worker、10kは既存fixed-query artifactです。200kはFlat/FAISS/hnswlibのraw測定済みですがAlopex build未完了、1Mは未実行のため、両セルとも受入未達です。
+
+## AlopexDB形式fixtureの責務
+
+Codexは、build測定とsearch測定を別トラックとして扱います。buildトラックは空のDBへ投入してindex readyまでを測るため、事前構築DBを使いません。searchトラックはbuild済みAlopexDBディレクトリをfixtureとして保持し、open後のsearchだけを測ります。fixtureには入力SHA、Alopex commit、file format version、HNSW設定、node数、容量、manifest/digestを記録し、fixture準備時間をsearch値へ混ぜません。Alopex 200k buildが未完了のため、200kの正当なAlopexDB fixtureは未作成です。
 
 Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しており、200k/1Mは比較結果を確定していません。
