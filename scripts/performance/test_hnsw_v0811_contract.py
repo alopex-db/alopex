@@ -193,10 +193,22 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 scale={
                     "results": [
                         {
+                            "phase": "search",
                             "dataset_size": 10_000,
                             "engine": "alopex-hnsw",
                             "qps_at_recall_095": 10.0,
                             "curve": [],
+                        }
+                    ],
+                    "build_results": [
+                        {
+                            "phase": "build",
+                            "dataset_size": 10_000,
+                            "engine": "alopex-hnsw",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
+                            "node_count": 10_000,
                         }
                     ],
                     "brute_force_crossover": {"alopex-hnsw": 10_000},
@@ -212,6 +224,7 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             )
             self.assertTrue((Path(directory) / "hnsw-hybrid.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-scale-build.csv").is_file())
             payload = json.loads((Path(directory) / "hnsw-diagnostic.json").read_text())
             self.assertEqual(
                 payload["contract"]["metrics"],

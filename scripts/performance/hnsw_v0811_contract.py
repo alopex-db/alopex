@@ -1037,7 +1037,8 @@ def run_scale_benchmark(
     digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
     if digest != GLOVE_SHA256:
         raise ValueError(f"unexpected glove-100-angular checksum: {digest}")
-    results = []
+    build_results = []
+    search_results = []
     raw_runs = []
     with h5py.File(dataset) as source:
         queries = np.asarray(source["test"][:200], dtype=np.float32)
@@ -1093,8 +1094,9 @@ def run_scale_benchmark(
                         key=lambda row: float(row["median_queries_per_second"]),
                         default=None,
                     )
-                    results.append(
+                    build_results.append(
                         {
+                            "phase": "build",
                             "dataset_size": size,
                             "engine": (
                                 "flat"
@@ -1104,6 +1106,18 @@ def run_scale_benchmark(
                             "build_time_seconds": engine.build_time_seconds,
                             "index_size_bytes": engine.index_size_bytes,
                             "peak_rss_bytes": engine.peak_rss_bytes,
+                            "node_count": engine.node_count,
+                        }
+                    )
+                    search_results.append(
+                        {
+                            "phase": "search",
+                            "dataset_size": size,
+                            "engine": (
+                                "flat"
+                                if engine.name == "faiss-flat-exact"
+                                else engine.name
+                            ),
                             "qps_at_recall_095": (
                                 float(fastest["median_queries_per_second"])
                                 if fastest
@@ -1122,7 +1136,7 @@ def run_scale_benchmark(
                     engine.close()
                     del engine
             del vectors
-    analysis = analyze_scale(results, requested_sizes=SCALE_SIZES)
+    analysis = analyze_scale(search_results, requested_sizes=SCALE_SIZES)
     for limit in analysis["limits"]:
         limit["reason"] = (
             f"configured max_n={max_n} for the hosted runner"
@@ -1134,7 +1148,8 @@ def run_scale_benchmark(
         "sha256": digest,
         "requested_sizes": list(SCALE_SIZES),
         "max_n": max_n,
-        "results": results,
+        "results": search_results,
+        "build_results": build_results,
         "runs": raw_runs,
         **analysis,
     }
@@ -1390,6 +1405,7 @@ def write_artifacts(
     for filename, rows in (
         ("hnsw-latency-decomposition.csv", payload["latency_decomposition"]),
         ("hnsw-hybrid.csv", payload["hybrid"].get("runs", [])),
+        ("hnsw-scale-build.csv", payload["scale"].get("build_results", [])),
         ("hnsw-scale.csv", payload["scale"].get("results", [])),
     ):
         if not rows:
