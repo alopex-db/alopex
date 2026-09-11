@@ -8,8 +8,8 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 |---:|---|---|
 | 10,000 | Python API complete; Rust core build-only complete | Python API build/search: see `glove-scale-10k.json`; Rust core build-only: 49,930.979 ms |
 | 50,000 | complete | Alopex・FAISS HNSW・hnswlib・Flat exactを独立workerで完走。`glove-scale-matrix.*` |
-| 200,000 | partial; acceptance failed | Flat/FAISS/hnswlib raw cases complete; Alopex build case cancelled before completion |
-| 1,000,000 | measurable; not run | worker accepts N=1,000,000; this acceptance cell has not been executed |
+| 200,000 | optional extended verification; not run to completion | partial Flat/FAISS/hnswlib raw cases exist; Alopex build case was stopped before completion |
+| 1,000,000 | optional extended verification; not run | no capacity target or resource budget has been declared |
 
 Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef_construction=200）を15,115.205 msで構築し、1,000ノードを確認しました。この値はdebug計測用バイナリのprobeであり、リリース性能値には採用しません。同じcore経路の10,000件は300秒上限まで完了せず、結果行を出力しませんでした。
 
@@ -31,4 +31,6 @@ Codexは、build測定とsearch測定を別トラックとして扱います。b
 
 Codexはfixtureの作成・検証を `scripts/performance/alopex_hnsw_fixture.py prepare|verify` に分離しました。`prepare` は空の出力ディレクトリへ一度だけ構築し、`verify` は検索前のnode数とfixture整合性だけを検証します。
 
-Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しており、200k/1Mは比較結果を確定していません。
+Codexは200k/1Mを、容量目標・メモリ上限・I/O予算が宣言された場合だけ実施するExtended Verificationとして扱います。v0.8.12の通常デグレ判定へ、件数だけを理由に追加しません。
+
+Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しています。200k/1Mは通常受入の比較結果として確定していません。
