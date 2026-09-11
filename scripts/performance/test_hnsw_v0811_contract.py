@@ -3,23 +3,51 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from scripts.performance.hnsw_v0811_contract import (
     DATASET_SIZE,
     DIMENSION,
     analyze_scale,
     decompose_latency,
     load_amazon_products,
+    measure_setting,
     recall_at_k,
     render_markdown,
     summarize_by_engine,
     tie_aware_recall_at_k,
     validate_comparison_row,
     validate_comparison_rows,
+    SearchEngine,
     write_artifacts,
 )
 
 
 class HnswDiagnosticContractTests(unittest.TestCase):
+    def test_search_measurement_terminates_on_fixed_query_count(self):
+        calls = []
+        engine = SearchEngine(
+            "fake",
+            0.0,
+            lambda query, k, ef: calls.append((query, k, ef)) or [0] * k,
+            lambda: None,
+            0,
+            0,
+        )
+        queries = np.zeros((2, 2), dtype=np.float32)
+        rows = measure_setting(
+            engine,
+            queries,
+            [[0], [0]],
+            [[0], [0]],
+            ef_search=16,
+            min_queries=3,
+            run_count=1,
+            dataset_size=2,
+        )
+        self.assertEqual(rows[0]["query_count"], 3)
+        self.assertEqual(len(calls), 2 + 2 + 3)
+
     def test_reference_dataset_preprocessing_keeps_meaningful_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "products.csv"

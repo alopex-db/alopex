@@ -415,7 +415,6 @@ def measure_setting(
     acceptable_truth,
     *,
     ef_search: int,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
     k: int = 10,
@@ -438,9 +437,7 @@ def measure_setting(
         started = time.perf_counter()
         executed = 0
         latencies = []
-        while (
-            executed < min_queries or time.perf_counter() - started < duration_seconds
-        ):
+        for _ in range(min_queries):
             query_started = time.perf_counter_ns()
             engine.search(queries[executed % len(queries)], k, ef_search)
             latencies.append((time.perf_counter_ns() - query_started) / 1000)
@@ -480,7 +477,6 @@ def measure_setting(
 def measure_call_floor(
     vectors,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> list[dict[str, object]]:
@@ -495,10 +491,7 @@ def measure_call_floor(
             for run in range(1, run_count + 1):
                 started = time.perf_counter()
                 executed = 0
-                while (
-                    executed < min_queries
-                    or time.perf_counter() - started < duration_seconds
-                ):
+                for _ in range(min_queries):
                     engine.search(vectors[executed % 10], 1, 1)
                     executed += 1
                 elapsed = time.perf_counter() - started
@@ -904,7 +897,6 @@ def measure_hybrid(
     vectors,
     queries,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> list[dict[str, object]]:
@@ -973,10 +965,7 @@ def measure_hybrid(
                     latencies = []
                     started = time.perf_counter()
                     executed = 0
-                    while (
-                        executed < min_queries
-                        or time.perf_counter() - started < duration_seconds
-                    ):
+                    for _ in range(min_queries):
                         query_started = time.perf_counter_ns()
                         operation(queries[executed % len(queries)])
                         latencies.append(
@@ -1066,7 +1055,6 @@ def run_scale_benchmark(
     dataset: Path,
     *,
     max_n: int,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> dict[str, object]:
@@ -1115,7 +1103,6 @@ def run_scale_benchmark(
                                 truth,
                                 acceptable,
                                 ef_search=ef_search,
-                                duration_seconds=duration_seconds,
                                 min_queries=min_queries,
                                 run_count=run_count,
                                 dataset_size=size,
@@ -1197,7 +1184,6 @@ def run_scale_benchmark(
 def run_benchmark(
     dataset: Path,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
     extended: bool = True,
@@ -1259,7 +1245,6 @@ def run_benchmark(
                         truth,
                         acceptable_truth,
                         ef_search=ef_search,
-                        duration_seconds=duration_seconds,
                         min_queries=min_queries,
                         run_count=run_count,
                     )
@@ -1291,7 +1276,6 @@ def run_benchmark(
         return runs, metadata, builds, recall_ceiling, {}
     fixed_cost_runs = measure_call_floor(
         vectors,
-        duration_seconds=duration_seconds,
         min_queries=min_queries,
         run_count=run_count,
     )
@@ -1308,7 +1292,6 @@ def run_benchmark(
     hybrid_runs = measure_hybrid(
         vectors,
         queries,
-        duration_seconds=0.0,
         min_queries=min(HYBRID_QUERY_COUNT, min_queries),
         run_count=run_count,
     )
@@ -1339,7 +1322,7 @@ def run_benchmark(
         "hybrid": summarize_hybrid(hybrid_runs),
         "hybrid_measurement_contract": {
             "query_count_minimum": min(HYBRID_QUERY_COUNT, min_queries),
-            "duration_seconds_minimum": 0.0,
+            "termination": "fixed query count and run count",
             "reason": "hybrid has five selectivities and three end-to-end arms; its bounded query set isolates filter responsibility without duplicating the primary search gate",
         },
     }
@@ -1398,8 +1381,7 @@ def write_artifacts(
             "dataset_size": DATASET_SIZE,
             "dimension": DIMENSION,
             "warmup": "one complete query cycle per engine/setting",
-            "min_duration_seconds": WARMUP_SECONDS,
-            "min_queries": QUERY_COUNT,
+            "query_count_per_run": QUERY_COUNT,
             "runs": 3,
             "metrics": [
                 "recall_at_10",
@@ -1484,7 +1466,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--duration-seconds", type=float, default=WARMUP_SECONDS)
     parser.add_argument("--min-queries", type=int, default=QUERY_COUNT)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--release-version")
@@ -1493,15 +1474,12 @@ def main() -> int:
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--embedding-cache", type=Path)
     args = parser.parse_args()
-    if args.duration_seconds < WARMUP_SECONDS:
-        parser.error("duration must be at least 2 seconds")
     if args.min_queries < QUERY_COUNT:
         parser.error("min-queries must be at least 10000")
     if args.runs != 3:
         parser.error("runs must be exactly 3")
     benchmark_runs, dataset, builds, recall_ceiling, diagnostics = run_benchmark(
         args.dataset,
-        duration_seconds=args.duration_seconds,
         min_queries=args.min_queries,
         run_count=args.runs,
         extended=not args.baseline_only,
@@ -1511,7 +1489,6 @@ def main() -> int:
         run_scale_benchmark(
             args.glove_dataset,
             max_n=args.max_scale_n,
-            duration_seconds=args.duration_seconds,
             min_queries=args.min_queries,
             run_count=args.runs,
         )

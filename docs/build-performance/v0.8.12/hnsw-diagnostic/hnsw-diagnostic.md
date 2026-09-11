@@ -2,6 +2,8 @@
 
 Release: `local`. Dataset: `9171 x 128`; minimum queries/run: `10000`; seed: `42`.
 
+Codexはこのartifactを旧「時間下限 + query下限」契約の履歴証跡として保持します。固定query数契約へ移行したため、Codexはこのartifactをv0.8.12の製品間受入比較には使用せず、同じケースを新契約で再生成します。
+
 | engine | ef_search | recall@10 | tie-aware recall@10 | QPS | us/query |
 |---|---:|---:|---:|---:|---:|
 | alopex-hnsw | 16 | 0.9965 | 0.9970 | 2293.9 | 435.9 |

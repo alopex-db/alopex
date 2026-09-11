@@ -1,4 +1,6 @@
 {
+  "measurement_status": "historical_not_acceptance",
+  "measurement_status_reason": "Generated under the superseded time-floor contract; regenerate with fixed query-count termination before product comparison acceptance.",
   "best_at_recall": {
     "0.95": {
       "alopex-hnsw": {
@@ -1196,7 +1198,7 @@
       "slope_us_per_ef": 5.632359545342373
     }
   ],
-  "markdown_sha256": "b02ba87db641a38b6b1421c2231f3ea2169e8a63cb4ece6b9edd8df080f2ce67",
+  "markdown_sha256": "606dc5c566cf8e059cadf4629f57c690187ef0401f4b71a32b7f6d6381737e4e",
   "median_queries_per_second": 1118.2968054694734,
   "recall_ceiling": [
     {
