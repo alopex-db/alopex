@@ -9,6 +9,7 @@
   "data_commit": "8735a7fe",
   "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
   "extended_verification_issue": 410,
+  "extended_verification_milestone": null,
   "normal_regression_scope": [10000, 50000],
   "amazon_attachment": {
     "url": "https://github.com/user-attachments/files/31764184/archive.zip",
@@ -22,7 +23,7 @@
     "artifact": "glove-scale-matrix.json",
     "completed_sizes": [10000, 50000],
     "pending_sizes": [200000, 1000000],
-    "pending_reason": "Separated into Issue #410 for capacity/resource verification; not part of #298 normal regression acceptance",
+    "pending_reason": "Separated into independent Issue #410 (outside v0.8.12) for capacity/resource verification; not part of #298 normal regression acceptance",
     "engines_per_completed_size": 4,
     "measurement_contract": "independent engine x N worker, fixed ann ef=256 (flat ef=N), fixed 10000 queries per run, three runs"
   },
@@ -93,6 +94,6 @@
     "status": "incomplete",
     "reason": "Codex interrupted the mixed engine-by-size process before its first aggregate row because build, search, and aggregation responsibilities were mixed. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
-  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells belong to Issue #410 and are not part of the v0.8.12 normal regression gate.",
+  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells belong to independent Issue #410 and are not part of the v0.8.12 normal regression gate.",
   "next_action": "Issue #410 must declare capacity targets, memory limits, and I/O budgets before executing 200k or 1M; do not infer or interpolate missing values."
 }
