@@ -1,0 +1,15 @@
+{
+  "dataset": "glove-100-angular",
+  "n": 10000,
+  "dimension": 100,
+  "query_count": 200,
+  "runs": 3,
+  "comparison_scope": "short scoped comparison; not the issue's 10000-query acceptance run",
+  "results": [
+    {"engine": "polars-exact-scan", "query_ms_200_median": 622.859365, "qps": 321.101, "build_ms": 0.039354, "execution_kernel": "numpy-via-polars-dataframe"},
+    {"engine": "faiss-flat-exact", "query_ms_200_median": 1142.016151, "qps": 175.131, "build_ms": 4.816135},
+    {"engine": "faiss-hnsw", "query_ms_200_median": 31.098866, "qps": 6431.057, "build_ms": 480.872178},
+    {"engine": "hnswlib", "query_ms_200_median": 32.595018, "qps": 6135.617, "build_ms": 1881.494125}
+  ],
+  "limitations": ["recall was not measured in this short comparison", "Polars is a dataframe exact-scan baseline, not a vector database", "Alopex is covered by the separate Rust core scale artifact"]
+}
