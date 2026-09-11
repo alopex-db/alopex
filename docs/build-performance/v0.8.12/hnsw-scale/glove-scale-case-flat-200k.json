@@ -1,0 +1,83 @@
+{
+  "build": {
+    "build_time_seconds": 0.5545631470013177,
+    "index_size_bytes": 80000045,
+    "node_count": 200000,
+    "peak_rss_bytes": 537088000
+  },
+  "dataset": "glove-100-angular",
+  "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+  "dataset_size": 200000,
+  "engine": "flat",
+  "query_count_per_run": 10000,
+  "run_count": 3,
+  "runs": [
+    {
+      "dataset_size": 200000,
+      "dimension": 100,
+      "duration_seconds": 383.44687547298963,
+      "ef_search": 200000,
+      "engine": "faiss-flat-exact",
+      "latency_us": 38344.68754729896,
+      "native_search_latency_us": null,
+      "python_binding_residual_us": null,
+      "queries_per_second": 26.07923193444931,
+      "query_count": 10000,
+      "query_latency_p50_us": 35677.1575,
+      "query_latency_p95_us": 63612.521,
+      "query_latency_p99_us": 98412.916,
+      "recall_at_10": 1.0,
+      "run": 1,
+      "tie_aware_recall_at_10": 1.0
+    },
+    {
+      "dataset_size": 200000,
+      "dimension": 100,
+      "duration_seconds": 321.5104742800031,
+      "ef_search": 200000,
+      "engine": "faiss-flat-exact",
+      "latency_us": 32151.047428000315,
+      "native_search_latency_us": null,
+      "python_binding_residual_us": null,
+      "queries_per_second": 31.10318574346356,
+      "query_count": 10000,
+      "query_latency_p50_us": 31549.4195,
+      "query_latency_p95_us": 44926.947,
+      "query_latency_p99_us": 54106.72,
+      "recall_at_10": 1.0,
+      "run": 2,
+      "tie_aware_recall_at_10": 1.0
+    },
+    {
+      "dataset_size": 200000,
+      "dimension": 100,
+      "duration_seconds": 348.7293516469945,
+      "ef_search": 200000,
+      "engine": "faiss-flat-exact",
+      "latency_us": 34872.93516469945,
+      "native_search_latency_us": null,
+      "python_binding_residual_us": null,
+      "queries_per_second": 28.67553291046927,
+      "query_count": 10000,
+      "query_latency_p50_us": 34131.9485,
+      "query_latency_p95_us": 47175.025,
+      "query_latency_p99_us": 56047.924,
+      "recall_at_10": 1.0,
+      "run": 3,
+      "tie_aware_recall_at_10": 1.0
+    }
+  ],
+  "schema": "alopex.hnsw-scale-case/v1",
+  "search": {
+    "curve": [
+      {
+        "ef_search": 200000,
+        "median_queries_per_second": 28.67553291046927,
+        "median_recall_at_10": 1.0
+      }
+    ],
+    "ef_search_at_recall_095": 200000,
+    "qps_at_recall_095": 28.67553291046927,
+    "recall_at_selected_setting": 1.0
+  }
+}

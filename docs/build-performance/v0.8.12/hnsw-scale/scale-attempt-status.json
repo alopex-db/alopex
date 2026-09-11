@@ -1,6 +1,6 @@
 {
   "schema": "alopex.hnsw-scale-attempt/v1",
-  "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md", "glove-scale-matrix.json", "glove-scale-matrix-build.csv", "glove-scale-matrix-search.csv", "glove-scale-matrix.md"],
+  "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md", "glove-scale-matrix.json", "glove-scale-matrix-build.csv", "glove-scale-matrix-search.csv", "glove-scale-matrix.md", "glove-scale-case-flat-200k.json", "glove-scale-case-faiss-200k.json", "glove-scale-case-hnswlib-200k.json"],
   "status": "incomplete",
   "dataset": "glove-100-angular.hdf5",
   "dataset_source_status": "branch_pinned",
@@ -23,6 +23,15 @@
     "pending_reason": "measurement path accepts both sizes; cases have not been executed yet",
     "engines_per_completed_size": 4,
     "measurement_contract": "independent engine x N worker, fixed 10000 queries per run, three runs"
+  },
+  "partial_200k_cases": {
+    "completed_engines": ["flat", "faiss-hnsw", "hnswlib"],
+    "missing_engines": ["alopex-hnsw"],
+    "missing_reason": "Alopex build case was cancelled before completion; no value is accepted",
+    "recall_threshold": 0.95,
+    "faiss_hnsw_recall_at_ef_256": 0.9365,
+    "hnswlib_recall_at_ef_256": 0.9275,
+    "flat_qps": 28.67553291046927
   },
   "termination_contract": "Build ends only after all requested inserts complete; search ends after the fixed query and run counts. No wall-clock cutoff is a measurement contract or a result.",
   "python_api_10k": {

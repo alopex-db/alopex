@@ -8,7 +8,7 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 |---:|---|---|
 | 10,000 | Python API complete; Rust core build-only complete | Python API build/search: see `glove-scale-10k.json`; Rust core build-only: 49,930.979 ms |
 | 50,000 | complete | Alopex・FAISS HNSW・hnswlib・Flat exactを独立workerで完走。`glove-scale-matrix.*` |
-| 200,000 | measurable; not run | worker accepts N=200,000; this acceptance cell has not been executed |
+| 200,000 | partial; acceptance failed | Flat/FAISS/hnswlib raw cases complete; Alopex build case cancelled before completion |
 | 1,000,000 | measurable; not run | worker accepts N=1,000,000; this acceptance cell has not been executed |
 
 Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef_construction=200）を15,115.205 msで構築し、1,000ノードを確認しました。この値はdebug計測用バイナリのprobeであり、リリース性能値には採用しません。同じcore経路の10,000件は300秒上限まで完了せず、結果行を出力しませんでした。
