@@ -13,4 +13,4 @@ Input: data/issue-298-glove-v2@8735a7fe; SHA-256: 544af1d5e84e112cd4749571dcfd8c
 | 50000 | flat | 0.034 | 117.494 | 1.0 | 50000 |
 | 50000 | hnswlib | 95.345 | 350.988 | 0.958 | 256 |
 
-Pending sizes: 200000, 1000000. These cells have no result until all engines complete the same worker contract.
+Pending sizes: 200000, 1000000. The worker accepts both sizes; these acceptance cells are measurable but not yet executed, so no result is claimed.

@@ -3,5 +3,5 @@ n,status,build_ms,node_count,memory_bytes,local_interrupt_after_seconds,reason
 10000,build_only_complete,49930.979,10000,6651852,,"Rust core build-only completed after SIMD cosine-dot optimization; search recall/QPS not run"
 50000,codex_interrupted,,,,600,"Codex interrupted the Rust core build-only case at a local safety limit; this is not a product timing or failure"
 50000,codex_interrupted,,,,900,"Codex interrupted the fresh release Rust core build-only case at a local safety limit; this is not a product timing or failure"
-200000,not_attempted,,,,,"not measured under the fixed-query engine-by-size contract"
-1000000,not_attempted,,,,,"not measured under the fixed-query engine-by-size contract"
+200000,measurable_not_run,,,,,"worker accepts N=200000; acceptance cell has not been executed"
+1000000,measurable_not_run,,,,,"worker accepts N=1000000; acceptance cell has not been executed"

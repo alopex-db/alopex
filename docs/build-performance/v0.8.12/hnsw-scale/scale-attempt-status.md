@@ -8,8 +8,8 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 |---:|---|---|
 | 10,000 | Python API complete; Rust core build-only complete | Python API build/search: see `glove-scale-10k.json`; Rust core build-only: 49,930.979 ms |
 | 50,000 | complete | Alopex・FAISS HNSW・hnswlib・Flat exactを独立workerで完走。`glove-scale-matrix.*` |
-| 200,000 | not attempted | larger N is not justified before bounded path exists |
-| 1,000,000 | not attempted | larger N is not justified before bounded path exists |
+| 200,000 | measurable; not run | worker accepts N=200,000; this acceptance cell has not been executed |
+| 1,000,000 | measurable; not run | worker accepts N=1,000,000; this acceptance cell has not been executed |
 
 Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef_construction=200）を15,115.205 msで構築し、1,000ノードを確認しました。この値はdebug計測用バイナリのprobeであり、リリース性能値には採用しません。同じcore経路の10,000件は300秒上限まで完了せず、結果行を出力しませんでした。
 
@@ -23,6 +23,6 @@ Codexは今後、製品ごとの任意のwall-clock上限を測定契約にし�
 
 Codexは上記の試行履歴を `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ保存し、完成した比較行は別責務の `glove-scale-matrix.*` へ保存しました。
 
-CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exactを同一入力・同一query契約で測定し、`glove-scale-matrix.json`とbuild/search別CSV/Markdownへ保存しました。50kはengine×N独立worker、10kは既存fixed-query artifactです。200k/1Mは同じ契約で未測定です。
+CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exactを同一入力・同一query契約で測定し、`glove-scale-matrix.json`とbuild/search別CSV/Markdownへ保存しました。50kはengine×N独立worker、10kは既存fixed-query artifactです。200k/1Mは同じworkerで測定可能ですが、まだ実行していないため受入未達です。
 
 Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しており、200k/1Mは比較結果を確定していません。

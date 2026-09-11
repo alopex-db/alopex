@@ -16,10 +16,11 @@
   "attempted_max_n": 50000,
   "result_rows": 8,
   "matrix_artifact": {
-    "status": "partial_complete",
+    "status": "partial_complete_measurement_possible",
     "artifact": "glove-scale-matrix.json",
     "completed_sizes": [10000, 50000],
     "pending_sizes": [200000, 1000000],
+    "pending_reason": "measurement path accepts both sizes; cases have not been executed yet",
     "engines_per_completed_size": 4,
     "measurement_contract": "independent engine x N worker, fixed 10000 queries per run, three runs"
   },
@@ -81,6 +82,6 @@
     "status": "incomplete",
     "reason": "Codex interrupted the mixed engine-by-size process before its first aggregate row because build, search, and aggregation responsibilities were mixed. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
-  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells remain unmeasured.",
-  "next_action": "Run only the 200k and 1M cells with the same isolated engine-by-size worker when those measurements are required; do not infer or interpolate missing values."
+  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells are measurable but not yet executed, so acceptance is incomplete.",
+  "next_action": "Execute the 200k and 1M cells with the same isolated engine-by-size worker; do not infer or interpolate missing values."
 }
