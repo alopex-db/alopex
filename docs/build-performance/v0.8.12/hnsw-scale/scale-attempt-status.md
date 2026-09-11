@@ -7,7 +7,7 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 | requested N | status | reason |
 |---:|---|---|
 | 10,000 | Python API complete; Rust core build-only complete | Python API build/search: see `glove-scale-10k.json`; Rust core build-only: 49,930.979 ms |
-| 50,000 | codex_interrupted | Codexは600秒でローカル実行を中断。製品の完了時間・失敗とは判定しない |
+| 50,000 | complete | Alopex・FAISS HNSW・hnswlib・Flat exactを独立workerで完走。`glove-scale-matrix.*` |
 | 200,000 | not attempted | larger N is not justified before bounded path exists |
 | 1,000,000 | not attempted | larger N is not justified before bounded path exists |
 
@@ -19,10 +19,10 @@ Codexは同じRust core build-only経路で50,000件を単独実行しました�
 
 Codexは入力SHA-256 `a88c65b881c5461d7f793f75e20cb63ecf5bf58c3dda4adab16d1b99c2599449`を固定したfresh release単独ケースを実行し、自身が設定した900秒の安全中断で停止しました。これは製品の完了時間・失敗ではなく、Codexの運用中断です。Codexは600秒試行と900秒試行を履歴証跡として保持し、50kのbuild_msを推定・補間しません。
 
-Codexは今後、製品ごとの任意のwall-clock上限を測定契約にしません。buildは対象N件の挿入完了を終了条件とし、searchは固定query数・run数の完走を終了条件とします。インフラ保護のため中断した場合は、全engineに同じ保護を適用し、測定値ではなくハーネス中断として記録します。
+Codexは今後、製品ごとの任意のwall-clock上限を測定契約にしません。buildは対象N件の挿入完了を終了条件とし、searchは固定query数・run数の完走を終了条件とします。過去の時間打切り試行は測定値として採用せず、完了セルの根拠にも使用しません。
 
-Codexは上記ケースを `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ同一内容で保存しました。
+Codexは上記の試行履歴を `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ保存し、完成した比較行は別責務の `glove-scale-matrix.*` へ保存しました。
 
-CodexはGloVe 10kについて、Alopex Python APIとFAISS/hnswlib/exactを同一入力・同一query契約で個別測定し、構築と検索を別artifactへ保存しました。Alopexの検索QPSは329.593、recall@10は0.9825（ef_search=128）で、構築は94,149.296 msです。Codexはこの10kセルを受入証跡として採用します。
+CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exactを同一入力・同一query契約で測定し、`glove-scale-matrix.json`とbuild/search別CSV/Markdownへ保存しました。50kはengine×N独立worker、10kは既存fixed-query artifactです。200k/1Mは同じ契約で未測定です。
 
-Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を集計責務が混在したため中断しました。これは比較エンジンの性能値ではなく、ハーネス設計の診断です。Codexはその後、10kをエンジン×Nの個別ケースとして完走させ、Alopex・FAISS・hnswlib・Flat exactの同一条件結果を保存しました。50k/200k/1MはAlopexを含む全engineで同じ入力・設定・終了条件を完走させるまで比較結果を確定しません。
+Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しており、200k/1Mは比較結果を確定していません。

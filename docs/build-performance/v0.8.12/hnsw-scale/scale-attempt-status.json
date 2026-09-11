@@ -1,6 +1,6 @@
 {
   "schema": "alopex.hnsw-scale-attempt/v1",
-  "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md"],
+  "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md", "glove-scale-matrix.json", "glove-scale-matrix-build.csv", "glove-scale-matrix-search.csv", "glove-scale-matrix.md"],
   "status": "incomplete",
   "dataset": "glove-100-angular.hdf5",
   "dataset_source_status": "branch_pinned",
@@ -13,9 +13,17 @@
     "sha256": "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea"
   },
   "requested_sizes": [10000, 50000, 200000, 1000000],
-  "attempted_max_n": 10000,
-  "result_rows": 4,
-  "termination_contract": "Build ends only after all requested inserts complete; search ends after the fixed query and run counts. No product-specific wall-clock cutoff is a measurement result. A local safety interruption is recorded as codex_interrupted.",
+  "attempted_max_n": 50000,
+  "result_rows": 8,
+  "matrix_artifact": {
+    "status": "partial_complete",
+    "artifact": "glove-scale-matrix.json",
+    "completed_sizes": [10000, 50000],
+    "pending_sizes": [200000, 1000000],
+    "engines_per_completed_size": 4,
+    "measurement_contract": "independent engine x N worker, fixed 10000 queries per run, three runs"
+  },
+  "termination_contract": "Build ends only after all requested inserts complete; search ends after the fixed query and run counts. No wall-clock cutoff is a measurement contract or a result.",
   "python_api_10k": {
     "status": "complete",
     "artifact": "glove-scale-10k.json",
@@ -73,6 +81,6 @@
     "status": "incomplete",
     "reason": "Codex interrupted the mixed engine-by-size process before its first aggregate row because build, search, and aggregation responsibilities were mixed. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
-  "reason": "The bounded Python API 10k case now has a complete build/search artifact. The remaining 50k/200k/1M cases retain their incomplete or not-attempted status.",
-  "next_action": "Keep 50k/200k/1M as explicit incomplete cells until an engine-by-size process can complete without mixing cases."
+  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells remain unmeasured.",
+  "next_action": "Run only the 200k and 1M cells with the same isolated engine-by-size worker when those measurements are required; do not infer or interpolate missing values."
 }
