@@ -7,7 +7,7 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 | requested N | status | reason |
 |---:|---|---|
 | 10,000 | build-only complete; search scale incomplete | Rust core build-only: 88,166.685 ms; search/recall contract not run |
-| 50,000 | incomplete | Rust core build-only exceeded 300-second per-case budget; no row emitted |
+| 50,000 | incomplete | Rust core build-only exceeded 600-second per-case budget; no row emitted |
 | 200,000 | not attempted | larger N is not justified before bounded path exists |
 | 1,000,000 | not attempted | larger N is not justified before bounded path exists |
 
@@ -15,7 +15,7 @@ Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef
 
 その後、Codexは同じ入力の10,000件をrelease最適化（計測用にLTO無効）で単独実行し、88,166.685 ms、10,000 nodes、6,651,852 bytesを得ました。この行はbuild-only成果物として採用しますが、Issueの検索recall/QPS契約を満たすscale行ではありません。
 
-Codexは同じRust core build-only経路で50,000件を単独実行しましたが、300秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
+Codexは同じRust core build-only経路で50,000件を単独実行しましたが、600秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
 
 Codexは次に、全体診断を呼び出さず、Alopexのbuild-only経路を上限付きで計測できる最小ハーネスへ切り分けます。
 

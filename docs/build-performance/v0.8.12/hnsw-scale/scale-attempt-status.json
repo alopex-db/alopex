@@ -31,7 +31,7 @@
   },
   "core_50k_attempt": {
     "status": "incomplete",
-    "budget_seconds": 300,
+    "budget_seconds": 600,
     "result_row_emitted": false,
     "reason": "Rust core build-only path did not complete 50,000 inserts within the per-case budget."
   },
