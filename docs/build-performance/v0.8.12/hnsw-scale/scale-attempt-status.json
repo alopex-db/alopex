@@ -8,6 +8,8 @@
   "data_branch": "data/issue-298-glove-v2",
   "data_commit": "8735a7fe",
   "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+  "extended_verification_issue": 410,
+  "normal_regression_scope": [10000, 50000],
   "amazon_attachment": {
     "url": "https://github.com/user-attachments/files/31764184/archive.zip",
     "sha256": "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea"
@@ -20,7 +22,7 @@
     "artifact": "glove-scale-matrix.json",
     "completed_sizes": [10000, 50000],
     "pending_sizes": [200000, 1000000],
-    "pending_reason": "measurement path accepts both sizes; cases have not been executed yet",
+    "pending_reason": "Separated into Issue #410 for capacity/resource verification; not part of #298 normal regression acceptance",
     "engines_per_completed_size": 4,
     "measurement_contract": "independent engine x N worker, fixed ann ef=256 (flat ef=N), fixed 10000 queries per run, three runs"
   },
@@ -91,6 +93,6 @@
     "status": "incomplete",
     "reason": "Codex interrupted the mixed engine-by-size process before its first aggregate row because build, search, and aggregation responsibilities were mixed. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
-  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells are optional extended verification and are not required for the v0.8.12 regression gate without declared capacity targets.",
-  "next_action": "Execute 200k or 1M only when capacity targets, memory limits, and I/O budgets are declared; do not infer or interpolate missing values."
+  "reason": "The fixed-query matrix has complete 10k and 50k rows for four engines. The 200k and 1M cells belong to Issue #410 and are not part of the v0.8.12 normal regression gate.",
+  "next_action": "Issue #410 must declare capacity targets, memory limits, and I/O budgets before executing 200k or 1M; do not infer or interpolate missing values."
 }
