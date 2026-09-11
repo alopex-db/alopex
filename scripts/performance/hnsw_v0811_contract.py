@@ -129,18 +129,55 @@ def load_amazon_products(path: Path):
     return products
 
 
-def build_embeddings(products):
+def build_embeddings(products, *, cache_path: Path | None = None, cache_key: str = ""):
     """Build the reference TF-IDF -> SVD -> L2-normalized 128-d vectors."""
     import numpy as np
     from sklearn.decomposition import TruncatedSVD
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.preprocessing import normalize
 
+    metadata_path = (
+        cache_path.with_suffix(cache_path.suffix + ".json") if cache_path else None
+    )
+    if (
+        cache_path
+        and metadata_path
+        and cache_path.is_file()
+        and metadata_path.is_file()
+    ):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata == {
+            "cache_key": cache_key,
+            "rows": len(products),
+            "dimension": DIMENSION,
+        }:
+            with np.load(cache_path) as cached:
+                return (
+                    np.ascontiguousarray(cached["vectors"]),
+                    float(cached["explained_variance"]),
+                )
+
     tfidf = TfidfVectorizer(max_features=50_000, stop_words="english", min_df=2)
     sparse = tfidf.fit_transform(products["text"])
     svd = TruncatedSVD(n_components=DIMENSION, random_state=SEED)
     vectors = normalize(svd.fit_transform(sparse)).astype(np.float32)
-    return np.ascontiguousarray(vectors), float(svd.explained_variance_ratio_.sum())
+    vectors = np.ascontiguousarray(vectors)
+    explained_variance = float(svd.explained_variance_ratio_.sum())
+    if cache_path and metadata_path:
+        np.savez(cache_path, vectors=vectors, explained_variance=explained_variance)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "cache_key": cache_key,
+                    "rows": len(products),
+                    "dimension": DIMENSION,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return vectors, explained_variance
 
 
 def recall_at_k(predicted, expected) -> float:
@@ -1164,6 +1201,7 @@ def run_benchmark(
     min_queries: int,
     run_count: int,
     extended: bool = True,
+    embedding_cache: Path | None = None,
 ) -> tuple[
     list[dict[str, object]],
     dict[str, object],
@@ -1178,7 +1216,11 @@ def run_benchmark(
         raise ValueError(
             f"expected {DATASET_SIZE} cleaned products, found {len(products)}"
         )
-    vectors, explained_variance = build_embeddings(products)
+    vectors, explained_variance = build_embeddings(
+        products,
+        cache_path=embedding_cache,
+        cache_key=hashlib.sha256(dataset.read_bytes()).hexdigest(),
+    )
     rng = np.random.default_rng(SEED)
     query_indexes = rng.choice(len(vectors), size=200, replace=False)
     queries = vectors[query_indexes]
@@ -1449,6 +1491,7 @@ def main() -> int:
     parser.add_argument("--glove-dataset", type=Path)
     parser.add_argument("--max-scale-n", type=int, default=1_000_000)
     parser.add_argument("--baseline-only", action="store_true")
+    parser.add_argument("--embedding-cache", type=Path)
     args = parser.parse_args()
     if args.duration_seconds < WARMUP_SECONDS:
         parser.error("duration must be at least 2 seconds")
@@ -1462,6 +1505,7 @@ def main() -> int:
         min_queries=args.min_queries,
         run_count=args.runs,
         extended=not args.baseline_only,
+        embedding_cache=args.embedding_cache,
     )
     scale = (
         run_scale_benchmark(
