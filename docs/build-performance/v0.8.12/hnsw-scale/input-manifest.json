@@ -8,7 +8,7 @@
   "retrieval": "one-time acquisition; verify sha256 before use",
   "runtime_network": false,
   "required_issue_attachment": true,
-  "attachment_status": "pending_issue_upload",
+  "attachment_status": "ready_for_issue_attachment",
   "procedure": [
     "Obtain the file once from source_url or the issue attachment.",
     "Verify exact bytes and sha256 before any benchmark run.",
