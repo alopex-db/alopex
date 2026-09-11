@@ -17,6 +17,8 @@ Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef
 
 Codexは同じRust core build-only経路で50,000件を単独実行しましたが、600秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
 
+Codexは上記ケースを `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ同一内容で保存しました。
+
 Codexは次に、全体診断を呼び出さず、Alopexのbuild-only経路を上限付きで計測できる最小ハーネスへ切り分けます。
 
 Codexは比較エンジン（FAISS flat/HNSW、hnswlib）のbuild-only実行も開始しましたが、複数エンジン・複数Nを同一プロセスで順に処理する経路が20分を超える前に最初の集計行を出力しなかったため中断しました。これは比較エンジンの性能値ではなく、集計責務を分離できていない実行経路の診断です。Codexは部分結果を出力していないため、比較エンジンの値も成功値として採用していません。Codexは次に、AlopexはRust-side build harness、比較エンジンはエンジン×Nごとの個別プロセスへ分離し、各ケースの結果を即時保存して再測定します。
