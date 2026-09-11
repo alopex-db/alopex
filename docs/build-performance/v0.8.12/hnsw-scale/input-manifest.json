@@ -1,0 +1,18 @@
+{
+  "schema": "alopex.benchmark-input/v1",
+  "issue": 298,
+  "dataset": "glove-100-angular.hdf5",
+  "source_url": "https://ann-benchmarks.com/glove-100-angular.hdf5",
+  "sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+  "bytes": 485413888,
+  "retrieval": "one-time acquisition; verify sha256 before use",
+  "runtime_network": false,
+  "required_issue_attachment": true,
+  "attachment_status": "pending_issue_upload",
+  "procedure": [
+    "Obtain the file once from source_url or the issue attachment.",
+    "Verify exact bytes and sha256 before any benchmark run.",
+    "Attach the verified file to issue #298 and record the resulting user-attachments URL.",
+    "Run the benchmark only from the attached/local verified file; never fetch from the network during a run."
+  ]
+}
