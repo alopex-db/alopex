@@ -223,9 +223,14 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 (Path(directory) / "hnsw-latency-decomposition.csv").is_file()
             )
             self.assertTrue((Path(directory) / "hnsw-hybrid.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-build.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale-build.csv").is_file())
             payload = json.loads((Path(directory) / "hnsw-diagnostic.json").read_text())
+            raw = json.loads(
+                (Path(directory) / "hnsw-diagnostic.raw.json").read_text()
+            )
+            self.assertEqual(raw["builds"][0]["engine"], "alopex-hnsw")
             self.assertEqual(
                 payload["contract"]["metrics"],
                 [
@@ -237,6 +242,11 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                     "native_search_latency_us",
                     "python_binding_residual_us",
                     "queries_per_second",
+                ],
+            )
+            self.assertEqual(
+                payload["contract"]["build_metrics"],
+                [
                     "build_time_seconds",
                     "index_size_bytes",
                     "peak_rss_bytes",

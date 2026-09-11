@@ -434,7 +434,6 @@ def measure_setting(
                 ],
                 "recall_at_10": recall,
                 "tie_aware_recall_at_10": tie_aware_recall,
-                "build_time_seconds": engine.build_time_seconds,
             }
         )
     return rows
@@ -1191,6 +1190,7 @@ def run_benchmark(
         try:
             builds.append(
                 {
+                    "phase": "build",
                     "engine": engine.name,
                     "build_time_seconds": engine.build_time_seconds,
                     "index_size_bytes": engine.index_size_bytes,
@@ -1360,6 +1360,8 @@ def write_artifacts(
                 "native_search_latency_us",
                 "python_binding_residual_us",
                 "queries_per_second",
+            ],
+            "build_metrics": [
                 "build_time_seconds",
                 "index_size_bytes",
                 "peak_rss_bytes",
@@ -1388,6 +1390,7 @@ def write_artifacts(
     raw = {
         "schema": "alopex.hnsw-diagnostic-raw/v3",
         "runs": runs,
+        "builds": payload["builds"],
         "fixed_cost_runs": payload["fixed_cost_runs"],
         "hybrid_runs": payload["hybrid"].get("runs", []),
         "scale_runs": payload["scale"].get("runs", []),
@@ -1405,6 +1408,7 @@ def write_artifacts(
     for filename, rows in (
         ("hnsw-latency-decomposition.csv", payload["latency_decomposition"]),
         ("hnsw-hybrid.csv", payload["hybrid"].get("runs", [])),
+        ("hnsw-build.csv", payload["builds"]),
         ("hnsw-scale-build.csv", payload["scale"].get("build_results", [])),
         ("hnsw-scale.csv", payload["scale"].get("results", [])),
     ):
