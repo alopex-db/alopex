@@ -1,4 +1,5 @@
 {
+  "schema": "alopex.vector-comparison/v2",
   "dataset": "glove-100-angular",
   "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
   "n": 10000,
@@ -6,12 +7,24 @@
   "query_count": 200,
   "runs": 3,
   "environment": {"polars": "1.43.2", "faiss": "1.15.0", "hnswlib": "0.8.0", "threads": 1},
-  "comparison_scope": "short scoped comparison; not the issue's 10000-query acceptance run",
-  "results": [
-    {"engine": "polars-exact-scan", "query_ms_200_median": 622.859365, "qps": 321.101, "build_ms": 112.284058, "execution_kernel": "numpy-via-polars-dataframe"},
-    {"engine": "faiss-flat-exact", "query_ms_200_median": 1142.016151, "qps": 175.131, "build_ms": 4.816135},
-    {"engine": "faiss-hnsw", "query_ms_200_median": 31.098866, "qps": 6431.057, "build_ms": 480.872178},
-    {"engine": "hnswlib", "query_ms_200_median": 32.595018, "qps": 6135.617, "build_ms": 1881.494125}
+  "measurement_contract": {
+    "input": "GloVe train[:10000] and test[:200]",
+    "build_metrics": ["build_ms"],
+    "search_metrics": ["query_ms_200_median", "qps"],
+    "comparison_rule": "build and search are separate responsibilities; no cross-phase ranking"
+  },
+  "build_results": [
+    {"phase": "build", "engine": "polars-exact-scan", "build_ms": 112.284058, "execution_kernel": "numpy-via-polars-dataframe"},
+    {"phase": "build", "engine": "faiss-flat-exact", "build_ms": 4.816135},
+    {"phase": "build", "engine": "faiss-hnsw", "build_ms": 480.872178},
+    {"phase": "build", "engine": "hnswlib", "build_ms": 1881.494125}
   ],
-  "limitations": ["recall was not measured in this short comparison", "Polars is a dataframe exact-scan baseline, not a vector database", "Alopex is covered by the separate Rust core scale artifact"]
+  "search_results": [
+    {"phase": "search", "engine": "polars-exact-scan", "query_ms_200_median": 622.859365, "qps": 321.101, "recall": null, "execution_kernel": "numpy-via-polars-dataframe"},
+    {"phase": "search", "engine": "faiss-flat-exact", "query_ms_200_median": 1142.016151, "qps": 175.131, "recall": null},
+    {"phase": "search", "engine": "faiss-hnsw", "query_ms_200_median": 31.098866, "qps": 6431.057, "recall": null},
+    {"phase": "search", "engine": "hnswlib", "query_ms_200_median": 32.595018, "qps": 6135.617, "recall": null}
+  ],
+  "acceptance": "incomplete: recall and the same Alopex user-API search case are required before a performance conclusion",
+  "limitations": ["recall was not measured", "Polars is a dataframe exact-scan baseline, not a vector database", "Alopex is covered by the separate Rust core scale artifact"]
 }

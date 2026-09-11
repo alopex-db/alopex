@@ -25,6 +25,50 @@ WARMUP_SECONDS = 2.0
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
 RECALL_CEILING_VALUES = (512, 1024, 4096, DATASET_SIZE)
 
+# Comparison rows are deliberately phase-specific.  A build duration cannot
+# share a row with query throughput or latency: doing so makes unlike
+# responsibilities look comparable and permits incomplete acceptance data.
+BUILD_COMPARISON_FIELDS = frozenset({"build_ms", "index_memory_bytes", "node_count"})
+SEARCH_COMPARISON_FIELDS = frozenset(
+    {"query_count", "qps", "p50_ms", "p95_ms", "p99_ms", "recall_at_k"}
+)
+
+
+def validate_comparison_row(row: dict[str, object]) -> None:
+    """Reject mixed or incomplete engine comparison measurements."""
+    phase = row.get("phase")
+    if phase not in {"build", "search"}:
+        raise ValueError("comparison row phase must be 'build' or 'search'")
+    fields = set(row)
+    if phase == "build":
+        required = {"build_ms", "index_memory_bytes", "node_count"}
+        forbidden = SEARCH_COMPARISON_FIELDS
+    else:
+        required = {
+            "query_count",
+            "qps",
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "recall_at_k",
+        }
+        forbidden = BUILD_COMPARISON_FIELDS
+    missing = sorted(required - fields)
+    missing.extend(sorted(field for field in required & fields if row[field] is None))
+    mixed = sorted(forbidden & fields)
+    if missing:
+        raise ValueError(f"{phase} comparison row is missing: {', '.join(missing)}")
+    if mixed:
+        raise ValueError(f"{phase} comparison row mixes metrics: {', '.join(mixed)}")
+
+
+def validate_comparison_rows(rows: list[dict[str, object]]) -> None:
+    """Validate every row before it can be used as comparison evidence."""
+    if not rows:
+        raise ValueError("comparison evidence must contain at least one row")
+    for row in rows:
+        validate_comparison_row(row)
+
 
 @dataclass
 class SearchEngine:

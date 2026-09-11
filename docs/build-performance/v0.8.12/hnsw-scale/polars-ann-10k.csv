@@ -1,5 +1,5 @@
-engine,build_ms,query_ms_200_median,qps,recall,classification
-polars-exact-scan,112.284058,622.859365,321.101,,dataframe exact-scan baseline
-faiss-flat-exact,4.816135,1142.016151,175.131,,exact vector index
-faiss-hnsw,480.872178,31.098866,6431.057,,ANN vector index
-hnswlib,1881.494125,32.595018,6135.617,,ANN vector index
+phase,engine,build_ms,execution_kernel
+build,polars-exact-scan,112.284058,numpy-via-polars-dataframe
+build,faiss-flat-exact,4.816135,
+build,faiss-hnsw,480.872178,
+build,hnswlib,1881.494125,

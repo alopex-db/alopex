@@ -1,0 +1,5 @@
+phase,engine,query_ms_200_median,qps,recall,execution_kernel
+search,polars-exact-scan,622.859365,321.101,,numpy-via-polars-dataframe
+search,faiss-flat-exact,1142.016151,175.131,,
+search,faiss-hnsw,31.098866,6431.057,,
+search,hnswlib,32.595018,6135.617,,

@@ -13,6 +13,8 @@ from scripts.performance.hnsw_v0811_contract import (
     render_markdown,
     summarize_by_engine,
     tie_aware_recall_at_k,
+    validate_comparison_row,
+    validate_comparison_rows,
     write_artifacts,
 )
 
@@ -76,6 +78,43 @@ class HnswDiagnosticContractTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["slope_us_per_ef"], 0.5)
         self.assertEqual(rows[0]["fixed_lower_bound_us"], 3.0)
         self.assertEqual(rows[0]["exploration_residual_us"], 9.0)
+
+    def test_comparison_contract_separates_build_and_search_responsibilities(self):
+        validate_comparison_row(
+            {
+                "phase": "build",
+                "build_ms": 10.0,
+                "index_memory_bytes": 1024,
+                "node_count": 100,
+            }
+        )
+        validate_comparison_rows(
+            [
+                {
+                    "phase": "search",
+                    "query_count": 200,
+                    "qps": 1000.0,
+                    "p50_ms": 0.8,
+                    "p95_ms": 1.2,
+                    "p99_ms": 1.5,
+                    "recall_at_k": 0.95,
+                }
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "mixes metrics"):
+            validate_comparison_row(
+                {
+                    "phase": "build",
+                    "build_ms": 10.0,
+                    "index_memory_bytes": 1024,
+                    "node_count": 100,
+                    "qps": 1000.0,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "missing"):
+            validate_comparison_row(
+                {"phase": "search", "query_count": 200, "qps": 1000.0}
+            )
 
     def test_scale_analysis_records_crossovers_trends_and_limits(self):
         analysis = analyze_scale(
