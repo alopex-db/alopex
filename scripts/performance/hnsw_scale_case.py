@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 
 from hnsw_v0811_contract import (
-    EF_SEARCH_VALUES,
     GLOVE_SHA256,
     build_alopex,
     build_faiss_flat,
@@ -24,6 +23,7 @@ BUILDERS = {
     "hnswlib": build_hnswlib,
     "flat": build_faiss_flat,
 }
+SCALE_ACCEPTANCE_EF = 256
 
 
 def run_case(dataset: Path, engine_name: str, size: int, query_count: int) -> dict:
@@ -48,10 +48,9 @@ def run_case(dataset: Path, engine_name: str, size: int, query_count: int) -> di
             oracle.close()
         engine = builder(vectors)
         try:
-            # Scale acceptance needs one comparable recall-qualified operating
-            # point, not a full ef sweep.  The maximum ANN ef is the configured
-            # candidate; the three fixed-query runs below provide the evidence.
-            ef_values = (size,) if engine_name == "flat" else (max(EF_SEARCH_VALUES),)
+            # Scale acceptance needs one configured operating point, not an
+            # implicit ef sweep. The three fixed-query runs provide the evidence.
+            ef_values = (size,) if engine_name == "flat" else (SCALE_ACCEPTANCE_EF,)
             runs = []
             for ef_search in ef_values:
                 runs.extend(
@@ -102,7 +101,7 @@ def run_case(dataset: Path, engine_name: str, size: int, query_count: int) -> di
                     "ef_search_at_recall_095": fastest["ef_search"] if fastest else None,
                     "recall_at_selected_setting": fastest["median_recall_at_10"] if fastest else None,
                     "curve": curve,
-                    "ef_search_policy": "flat_N_or_max_configured_ann_ef",
+                    "ef_search_policy": "flat_N_or_fixed_256_ann_ef",
                 },
                 "runs": runs,
             }

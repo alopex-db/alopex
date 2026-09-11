@@ -1,6 +1,6 @@
 # GloVe scale matrix (fixed-query)
 
-Input: data/issue-298-glove-v2@8735a7fe; SHA-256: 544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4. Each cell uses fixed 10,000 queries × 3 runs; 50,000-node cells use independent engine×N workers, while 10,000-node rows reuse the fixed-query canonical artifact.
+Input: data/issue-298-glove-v2@8735a7fe; SHA-256: 544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4. Each cell uses one configured operating point (ANN ef=256, Flat ef=N) and fixed 10,000 queries × 3 runs; 50,000-node cells use independent engine×N workers, while 10,000-node rows reuse the fixed-query canonical artifact.
 
 | N | engine | build s | QPS at recall>=0.95 | recall | ef |
 |---:|---|---:|---:|---:|---:|

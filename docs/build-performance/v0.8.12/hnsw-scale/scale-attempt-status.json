@@ -22,7 +22,7 @@
     "pending_sizes": [200000, 1000000],
     "pending_reason": "measurement path accepts both sizes; cases have not been executed yet",
     "engines_per_completed_size": 4,
-    "measurement_contract": "independent engine x N worker, fixed 10000 queries per run, three runs"
+    "measurement_contract": "independent engine x N worker, fixed ann ef=256 (flat ef=N), fixed 10000 queries per run, three runs"
   },
   "partial_200k_cases": {
     "completed_engines": ["flat", "faiss-hnsw", "hnswlib"],
