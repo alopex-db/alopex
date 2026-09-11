@@ -8,7 +8,10 @@
   "retrieval": "one-time acquisition; verify sha256 before use",
   "runtime_network": false,
   "required_issue_attachment": true,
-  "attachment_status": "ready_for_issue_attachment",
+  "attachment_status": "branch_pinned",
+  "data_branch": "data/issue-298-glove-v2",
+  "data_commit": "8735a7fe",
+  "repository_path": "data/glove-100-angular",
   "procedure": [
     "Obtain the file once from source_url or the issue attachment.",
     "Verify exact bytes and sha256 before any benchmark run.",
