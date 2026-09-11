@@ -1,25 +1,10 @@
-# GloVe scale: 10k
+# GloVe scale fixed-query 10k
 
-Codexは、このGloVe HDF5がIssue #298の添付データではないため、本artifactを履歴診断として保持し、Issue受入比較から除外します。
+Codexはデータブランチ`data/issue-298-glove-v2`（commit `8735a7fe`）から再構成し、SHA-256 `544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4`を検証した入力で測定しました。各設定は固定10,000 query×3 runです。
 
-Codexは、GloVe `train[:10000]`（100次元）と `test[:200]` を同一入力、スレッド数1、3run中央値、10,000-query条件で測定しました。構築と検索は別責務・別CSVです。
-
-## Build
-
-| engine | build ms | index memory bytes | nodes |
-|---|---:|---:|---:|
-| Alopex HNSW | 94,149.296 | 13,594,624 | 10,000 |
-| FAISS HNSW | 8,795.166 | 5,440,442 | 10,000 |
-| hnswlib | 15,985.137 | 5,486,948 | 10,000 |
-| FAISS Flat exact | 3.470 | 4,000,045 | 10,000 |
-
-## Search
-
-| engine | ef_search | QPS | recall@10 |
-|---|---:|---:|---:|
-| Alopex HNSW | 128 | 329.593 | 0.9825 |
-| FAISS HNSW | 128 | 622.531 | 0.9805 |
-| hnswlib | 128 | 926.543 | 0.9630 |
-| FAISS Flat exact | 10,000 | 504.978 | 1.0000 |
-
-このartifactは、Alopex Python APIと参照実装を同一入力・同一単位で比較する10kセルの完走証跡です。50k/200k/1Mセルは別ケースで、未完了・未実行状態を成功扱いにしません。Alopexの10k検索QPSは、Rust core build-only値とは比較していません。
+| N | engine | QPS at recall>=0.95 | recall | ef |
+|---:|---|---:|---:|---:|
+| 10000 | alopex-hnsw | 167.331 | 0.9825 | 128 |
+| 10000 | faiss-hnsw | 577.945 | 0.9804999999999999 | 128 |
+| 10000 | hnswlib | 490.389 | 0.9555 | 128 |
+| 10000 | flat | 490.562 | 1.0 | 10000 |

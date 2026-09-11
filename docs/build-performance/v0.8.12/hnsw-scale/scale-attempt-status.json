@@ -3,8 +3,10 @@
   "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md"],
   "status": "incomplete",
   "dataset": "glove-100-angular.hdf5",
-  "dataset_source_status": "not_issue_attachment_historical",
-  "dataset_source_reason": "Issue #298 acceptance input is the attached Amazon archive; GloVe is retained only as prior diagnostic history and is not an acceptance input.",
+  "dataset_source_status": "branch_pinned",
+  "dataset_source_reason": "The verified GloVe input is stored on data/issue-298-glove-v2 and referenced by input-manifest.json.",
+  "data_branch": "data/issue-298-glove-v2",
+  "data_commit": "8735a7fe",
   "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
   "amazon_attachment": {
     "url": "https://github.com/user-attachments/files/31764184/archive.zip",
@@ -25,6 +27,11 @@
     "alopex_recall_at_10": 0.9825,
     "alopex_ef_search": 128,
     "alopex_build_ms": 94149.29600300001
+  },
+  "fixed_query_10k": {
+    "status": "complete",
+    "artifact": "glove-scale-10k.json",
+    "measurement_contract": "data branch 8735a7fe, fixed 10000 queries per run, three runs per setting, build/search separated"
   },
   "core_build_probe": {
     "n": 1000,

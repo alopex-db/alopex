@@ -1,0 +1,5 @@
+phase,engine,dataset_size,ef_search,qps,recall_at_10
+search,alopex-hnsw,10000,128,329.592773,0.9825
+search,faiss-hnsw,10000,128,622.530554,0.9805
+search,hnswlib,10000,128,926.542715,0.9630
+search,flat,10000,10000,504.977776,1.0000
