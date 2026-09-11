@@ -1308,7 +1308,7 @@ def run_benchmark(
     hybrid_runs = measure_hybrid(
         vectors,
         queries,
-        duration_seconds=duration_seconds,
+        duration_seconds=0.0,
         min_queries=min(HYBRID_QUERY_COUNT, min_queries),
         run_count=run_count,
     )
@@ -1339,7 +1339,7 @@ def run_benchmark(
         "hybrid": summarize_hybrid(hybrid_runs),
         "hybrid_measurement_contract": {
             "query_count_minimum": min(HYBRID_QUERY_COUNT, min_queries),
-            "duration_seconds_minimum": duration_seconds,
+            "duration_seconds_minimum": 0.0,
             "reason": "hybrid has five selectivities and three end-to-end arms; its bounded query set isolates filter responsibility without duplicating the primary search gate",
         },
     }

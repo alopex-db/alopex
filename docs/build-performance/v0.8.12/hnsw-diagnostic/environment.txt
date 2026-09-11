@@ -1,0 +1,6 @@
+alopex==installed wheel in the isolated benchmark environment
+numpy/pandas/scikit-learn/faiss-cpu/hnswlib/h5py versions were captured by the environment probe
+threads=1
+schema=alopex.hnsw-diagnostic/v3
+runs=48
+hybrid_runs=45
