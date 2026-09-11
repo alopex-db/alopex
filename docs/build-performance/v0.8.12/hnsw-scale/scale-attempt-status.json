@@ -35,7 +35,7 @@
   },
   "core_10k_attempt": {
     "status": "build_only_complete",
-    "budget_seconds": 300,
+    "local_interrupt_after_seconds": 300,
     "result_row_emitted": true,
     "build_ms": 49930.979,
     "node_count": 10000,
@@ -62,7 +62,7 @@
     "engines": ["faiss-flat", "faiss-hnsw", "hnswlib"],
     "requested_sizes": [10000, 50000, 200000, 1000000],
     "status": "incomplete",
-    "reason": "The mixed engine-by-size process exceeded a 20-minute controlled budget before emitting its first aggregate row. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
+    "reason": "Codex interrupted the mixed engine-by-size process before its first aggregate row because build, search, and aggregation responsibilities were mixed. This is a harness-responsibility finding, not an engine timing value; no timing value is accepted."
   },
   "reason": "The bounded Python API 10k case now has a complete build/search artifact. The remaining 50k/200k/1M cases retain their incomplete or not-attempted status.",
   "next_action": "Keep 50k/200k/1M as explicit incomplete cells until an engine-by-size process can complete without mixing cases."

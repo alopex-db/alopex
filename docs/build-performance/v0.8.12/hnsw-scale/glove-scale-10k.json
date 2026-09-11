@@ -51,15 +51,15 @@
   "limits": [
     {
       "dataset_size": 50000,
-      "reason": "configured max_n=10000 for the hosted runner"
+      "reason": "this artifact intentionally scopes the comparable run to N=10000; larger N has no result in this artifact"
     },
     {
       "dataset_size": 200000,
-      "reason": "configured max_n=10000 for the hosted runner"
+      "reason": "this artifact intentionally scopes the comparable run to N=10000; larger N has no result in this artifact"
     },
     {
       "dataset_size": 1000000,
-      "reason": "configured max_n=10000 for the hosted runner"
+      "reason": "this artifact intentionally scopes the comparable run to N=10000; larger N has no result in this artifact"
     }
   ],
   "max_n": 10000,
