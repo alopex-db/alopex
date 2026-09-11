@@ -20,6 +20,7 @@ from typing import Callable
 DATASET_SIZE = 9171
 DIMENSION = 128
 QUERY_COUNT = 10_000
+HYBRID_QUERY_COUNT = 200
 SEED = 42
 WARMUP_SECONDS = 2.0
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
@@ -558,8 +559,9 @@ def investigate_recall_contract(
     base_predictions = [
         base_alopex.search(query, 10, DATASET_SIZE) for query in queries
     ]
+    self_match_ef_search = min(len(vectors), max(EF_SEARCH_VALUES))
     self_matches = sum(
-        base_alopex.search(vector, 1, len(vectors)) == [index]
+        base_alopex.search(vector, 1, self_match_ef_search) == [index]
         for index, vector in enumerate(vectors)
     )
     configurations = []
@@ -593,6 +595,7 @@ def investigate_recall_contract(
         "input_count": len(vectors),
         "index_count_matches_input": base_alopex.node_count == len(vectors),
         "self_match_rate": self_matches / len(vectors),
+        "self_match_ef_search": self_match_ef_search,
         "ef_construction_and_m": configurations,
         "exact_metric_agreement": exact_metric_agreement(vectors),
         "minimal_reproduction": mismatch_reproduction(
@@ -1264,7 +1267,7 @@ def run_benchmark(
         vectors,
         queries,
         duration_seconds=duration_seconds,
-        min_queries=min_queries,
+        min_queries=min(HYBRID_QUERY_COUNT, min_queries),
         run_count=run_count,
     )
     base_summary = summarize_by_engine(runs)
@@ -1292,6 +1295,11 @@ def run_benchmark(
         "fixed_cost_runs": fixed_cost_runs,
         "latency_decomposition": decompose_latency(base_summary, fixed_cost_us),
         "hybrid": summarize_hybrid(hybrid_runs),
+        "hybrid_measurement_contract": {
+            "query_count_minimum": min(HYBRID_QUERY_COUNT, min_queries),
+            "duration_seconds_minimum": duration_seconds,
+            "reason": "hybrid has five selectivities and three end-to-end arms; its bounded query set isolates filter responsibility without duplicating the primary search gate",
+        },
     }
     return runs, metadata, builds, recall_ceiling, diagnostics
 
@@ -1377,6 +1385,9 @@ def write_artifacts(
         "fixed_cost_runs": (diagnostics or {}).get("fixed_cost_runs", []),
         "latency_decomposition": (diagnostics or {}).get("latency_decomposition", []),
         "hybrid": (diagnostics or {}).get("hybrid", {}),
+        "hybrid_measurement_contract": (diagnostics or {}).get(
+            "hybrid_measurement_contract", {}
+        ),
         "scale": scale or {},
         "runs": runs,
         "summary": summary,
