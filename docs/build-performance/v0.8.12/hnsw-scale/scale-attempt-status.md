@@ -29,4 +29,6 @@ CodexはGloVe 10k/50kについて、Alopex・FAISS HNSW・hnswlib・Flat exact�
 
 Codexは、build測定とsearch測定を別トラックとして扱います。buildトラックは空のDBへ投入してindex readyまでを測るため、事前構築DBを使いません。searchトラックはbuild済みAlopexDBディレクトリをfixtureとして保持し、open後のsearchだけを測ります。fixtureには入力SHA、Alopex commit、file format version、HNSW設定、node数、容量、manifest/digestを記録し、fixture準備時間をsearch値へ混ぜません。Alopex 200k buildが未完了のため、200kの正当なAlopexDB fixtureは未作成です。
 
+Codexはfixtureの作成・検証を `scripts/performance/alopex_hnsw_fixture.py prepare|verify` に分離しました。`prepare` は空の出力ディレクトリへ一度だけ構築し、`verify` は検索前のnode数とfixture整合性だけを検証します。
+
 Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しており、200k/1Mは比較結果を確定していません。
