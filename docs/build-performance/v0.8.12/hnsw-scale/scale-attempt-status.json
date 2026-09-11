@@ -50,6 +50,13 @@
     "result_row_emitted": false,
     "reason": "Rust core build-only path did not complete 50,000 inserts within the 600-second per-case budget after the SIMD cosine-dot optimization."
   },
+  "core_50k_attempt_900s": {
+    "status": "incomplete",
+    "budget_seconds": 900,
+    "result_row_emitted": false,
+    "input_sha256": "a88c65b881c5461d7f793f75e20cb63ecf5bf58c3dda4adab16d1b99c2599449",
+    "reason": "A fresh release Rust core build-only process did not complete 50,000 inserts within the 900-second per-case budget; no timing value is accepted."
+  },
   "build_only_attempt": {
     "engines": ["faiss-flat", "faiss-hnsw", "hnswlib"],
     "requested_sizes": [10000, 50000, 200000, 1000000],

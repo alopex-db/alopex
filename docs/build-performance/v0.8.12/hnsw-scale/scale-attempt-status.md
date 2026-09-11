@@ -17,6 +17,8 @@ Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef
 
 Codexは同じRust core build-only経路で50,000件を単独実行しましたが、SIMD修正後も600秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
 
+Codexは入力SHA-256 `a88c65b881c5461d7f793f75e20cb63ecf5bf58c3dda4adab16d1b99c2599449`を固定したfresh release単独ケースを900秒で再実行しましたが、50,000件の完了行は得られませんでした。Codexは600秒試行と900秒試行を別の未完了証跡として保持し、50kのbuild_msを推定・補間しません。
+
 Codexは上記ケースを `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ同一内容で保存しました。
 
 CodexはGloVe 10kについて、Alopex Python APIとFAISS/hnswlib/exactを同一入力・同一query契約で個別測定し、構築と検索を別artifactへ保存しました。Alopexの検索QPSは329.593、recall@10は0.9825（ef_search=128）で、構築は94,149.296 msです。Codexはこの10kセルを受入証跡として採用します。
