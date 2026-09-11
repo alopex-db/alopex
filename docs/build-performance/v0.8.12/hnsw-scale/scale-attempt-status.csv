@@ -1,4 +1,5 @@
 n,status,build_ms,node_count,memory_bytes,budget_seconds,reason
+10000,python_api_complete,94149.296,10000,13594624,1800,"Alopex Python API build and search completed; see glove-scale-10k.json for recall/QPS and separate search rows"
 10000,build_only_complete,49930.979,10000,6651852,300,"Rust core build-only completed after SIMD cosine-dot optimization; search recall/QPS not run"
 50000,incomplete,,,,600,"Rust core build-only did not complete within the per-case budget after SIMD cosine-dot optimization"
 200000,not_attempted,,,,,"larger N is not justified before the bounded path is improved"

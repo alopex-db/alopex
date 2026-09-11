@@ -6,7 +6,7 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 
 | requested N | status | reason |
 |---:|---|---|
-| 10,000 | build-only complete; search scale incomplete | Rust core build-only: 49,930.979 ms; search/recall contract not run |
+| 10,000 | Python API complete; Rust core build-only complete | Python API build/search: see `glove-scale-10k.json`; Rust core build-only: 49,930.979 ms |
 | 50,000 | incomplete | Rust core build-only exceeded 600-second per-case budget; no row emitted |
 | 200,000 | not attempted | larger N is not justified before bounded path exists |
 | 1,000,000 | not attempted | larger N is not justified before bounded path exists |
@@ -19,6 +19,6 @@ Codexは同じRust core build-only経路で50,000件を単独実行しました�
 
 Codexは上記ケースを `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ同一内容で保存しました。
 
-Codexは次に、全体診断を呼び出さず、Alopexのbuild-only経路を上限付きで計測できる最小ハーネスへ切り分けます。
+CodexはGloVe 10kについて、Alopex Python APIとFAISS/hnswlib/exactを同一入力・同一query契約で個別測定し、構築と検索を別artifactへ保存しました。Alopexの検索QPSは329.593、recall@10は0.9825（ef_search=128）で、構築は94,149.296 msです。Codexはこの10kセルを受入証跡として採用します。
 
-Codexは比較エンジン（FAISS flat/HNSW、hnswlib）のbuild-only実行も開始しましたが、複数エンジン・複数Nを同一プロセスで順に処理する経路が20分を超える前に最初の集計行を出力しなかったため中断しました。これは比較エンジンの性能値ではなく、集計責務を分離できていない実行経路の診断です。Codexは部分結果を出力していないため、比較エンジンの値も成功値として採用していません。Codexは次に、AlopexはRust-side build harness、比較エンジンはエンジン×Nごとの個別プロセスへ分離し、各ケースの結果を即時保存して再測定します。
+Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路が最初の集計前に20分を超えたため中断しました。これは比較エンジンの性能値ではなく、集計責務を分離できていない経路の診断です。Codexはその後、10kをエンジン×Nの個別ケースとして完走させ、各ケースの結果を保存しました。残る50k/200k/1Mは別ケースで実行可能性を確認します。
