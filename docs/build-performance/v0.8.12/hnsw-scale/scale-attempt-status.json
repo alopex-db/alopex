@@ -3,6 +3,8 @@
   "artifacts": ["scale-attempt-status.json", "scale-attempt-status.csv", "scale-attempt-status.md", "glove-scale-10k.json", "glove-scale-10k-build.csv", "glove-scale-10k-search.csv", "glove-scale-10k.md"],
   "status": "incomplete",
   "dataset": "glove-100-angular.hdf5",
+  "dataset_source_status": "not_issue_attachment_historical",
+  "dataset_source_reason": "Issue #298 acceptance input is the attached Amazon archive; GloVe is retained only as prior diagnostic history and is not an acceptance input.",
   "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
   "amazon_attachment": {
     "url": "https://github.com/user-attachments/files/31764184/archive.zip",

@@ -1,5 +1,7 @@
 # GloVe scale: 10k
 
+Codexは、このGloVe HDF5がIssue #298の添付データではないため、本artifactを履歴診断として保持し、Issue受入比較から除外します。
+
 Codexは、GloVe `train[:10000]`（100次元）と `test[:200]` を同一入力、スレッド数1、3run中央値、10,000-query条件で測定しました。構築と検索は別責務・別CSVです。
 
 ## Build

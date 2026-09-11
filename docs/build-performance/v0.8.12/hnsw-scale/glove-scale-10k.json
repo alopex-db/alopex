@@ -1,4 +1,6 @@
 {
+  "measurement_status": "historical_not_issue_attachment",
+  "measurement_status_reason": "The GloVe HDF5 used here is not attached to issue #298; these values are retained for diagnosis only and are excluded from issue acceptance.",
   "brute_force_crossover": {
     "alopex-hnsw": null,
     "faiss-hnsw": 10000,
