@@ -6,16 +6,16 @@ Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しました
 
 | requested N | status | reason |
 |---:|---|---|
-| 10,000 | build-only complete; search scale incomplete | Rust core build-only: 88,166.685 ms; search/recall contract not run |
+| 10,000 | build-only complete; search scale incomplete | Rust core build-only: 49,930.979 ms; search/recall contract not run |
 | 50,000 | incomplete | Rust core build-only exceeded 600-second per-case budget; no row emitted |
 | 200,000 | not attempted | larger N is not justified before bounded path exists |
 | 1,000,000 | not attempted | larger N is not justified before bounded path exists |
 
 Rust coreのbuild-only probeでは、GloVe先頭1,000件（100次元、M=16、ef_construction=200）を15,115.205 msで構築し、1,000ノードを確認しました。この値はdebug計測用バイナリのprobeであり、リリース性能値には採用しません。同じcore経路の10,000件は300秒上限まで完了せず、結果行を出力しませんでした。
 
-その後、Codexは同じ入力の10,000件をrelease最適化（計測用にLTO無効）で単独実行し、88,166.685 ms、10,000 nodes、6,651,852 bytesを得ました。この行はbuild-only成果物として採用しますが、Issueの検索recall/QPS契約を満たすscale行ではありません。
+その後、Codexはcosine距離のdot計算を既存SIMD kernelへ切り替え、同じ入力の10,000件をrelease最適化（計測用にLTO無効）で単独実行しました。Codexは49,930.979 ms、10,000 nodes、6,651,852 bytesを得て、修正前88,166.685 msから約43%短縮しました。この行はbuild-only成果物として採用しますが、Issueの検索recall/QPS契約を満たすscale行ではありません。
 
-Codexは同じRust core build-only経路で50,000件を単独実行しましたが、600秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
+Codexは同じRust core build-only経路で50,000件を単独実行しましたが、SIMD修正後も600秒のケース上限まで完了せず、出力行はありませんでした。Codexはこのケースを性能値として採用せず、50k以上を同じ経路で連続実行しません。
 
 Codexは上記ケースを `scale-attempt-status.json`、`scale-attempt-status.csv`、本Markdownへ同一内容で保存しました。
 

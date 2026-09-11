@@ -1,9 +1,11 @@
 {
   "dataset": "glove-100-angular",
+  "dataset_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
   "n": 10000,
   "dimension": 100,
   "query_count": 200,
   "runs": 3,
+  "environment": {"polars": "1.43.2", "faiss": "1.15.0", "hnswlib": "0.8.0", "threads": 1},
   "comparison_scope": "short scoped comparison; not the issue's 10000-query acceptance run",
   "results": [
     {"engine": "polars-exact-scan", "query_ms_200_median": 622.859365, "qps": 321.101, "build_ms": 0.039354, "execution_kernel": "numpy-via-polars-dataframe"},
