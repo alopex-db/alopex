@@ -4,7 +4,7 @@ Codexは、GloVe `train[:10000]`（100次元）と `test[:200]` を同一入力�
 
 | engine | build ms | 200-query ms (median) | qps | classification |
 |---|---:|---:|---:|---|
-| Polars exact scan | 0.039 | 622.859 | 321 | dataframe exact baseline |
+| Polars exact scan | 112.284 | 622.859 | 321 | dataframe exact baseline |
 | FAISS Flat | 4.816 | 1,142.016 | 175 | exact vector index |
 | FAISS HNSW | 480.872 | 31.099 | 6,431 | ANN vector index |
 | hnswlib | 1,881.494 | 32.595 | 6,136 | ANN vector index |
