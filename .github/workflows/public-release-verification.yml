@@ -14,7 +14,7 @@ on:
         type: string
     secrets:
       DOCS_REPO_TOKEN:
-        required: true
+        required: false
   workflow_dispatch:
     inputs:
       version:
@@ -246,7 +246,7 @@ jobs:
   publish:
     name: Publish immutable verification report
     needs: verify
-    if: always()
+    if: always() && needs.verify.result == 'success' && secrets.DOCS_REPO_TOKEN != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -362,7 +362,7 @@ jobs:
   publish-vector-benchmark:
     name: Publish reviewed vector benchmark snapshot
     needs: [verify, publish]
-    if: always() && needs.verify.result == 'success'
+    if: always() && needs.verify.result == 'success' && secrets.DOCS_REPO_TOKEN != ''
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
