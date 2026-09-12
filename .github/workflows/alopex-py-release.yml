@@ -8,6 +8,11 @@ on:
         description: "Core release workflow run that published crates and assets"
         required: true
         type: string
+      source_ref:
+        description: "Immutable Python release tag to build"
+        required: false
+        default: ""
+        type: string
 
 defaults:
   run:
@@ -33,7 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -176,7 +181,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -297,7 +302,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -422,7 +427,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Remove native parser vendor files from sdist staging
         run: |
           set -euo pipefail
@@ -531,7 +536,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.source_ref || github.ref_name }}
           files: dist/**/*
 
   final-release-join:
@@ -547,14 +552,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Resolve exact core and Python workflow identities
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PYTHON_RUN_ID: ${{ github.run_id }}
-          PYTHON_TAG_NAME: ${{ github.ref_name }}
+          PYTHON_TAG_NAME: ${{ inputs.source_ref || github.ref_name }}
           CORE_RUN_ID: ${{ inputs.core_run_id }}
         run: |
           set -euo pipefail
