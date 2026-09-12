@@ -691,7 +691,7 @@ jobs:
   verify-public-release:
     name: Verify public package availability and publish docs report
     needs: [final-release-join]
-    if: ${{ always() && needs.final-release-join.result == 'success' && secrets.DOCS_REPO_TOKEN != '' }}
+    if: ${{ always() && needs.final-release-join.result == 'success' }}
     permissions:
       contents: read
       issues: write
