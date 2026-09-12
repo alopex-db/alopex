@@ -282,7 +282,10 @@ jobs:
           git fetch --force --tags origin
           release_tag="${RELEASE_TAG_NAME:-${GITHUB_REF_NAME}}"
           release_target_sha="${RELEASE_TARGET_SHA:-${GITHUB_SHA}}"
-          test "$(git describe --tags --exact-match HEAD)" = "${release_tag}"
+          # The release commit carries both the core and Python tags.  Select
+          # the requested tag explicitly instead of relying on git describe's
+          # arbitrary choice among multiple exact-match tags.
+          git tag --points-at HEAD | grep -Fxq "${release_tag}"
           test "$(git rev-parse HEAD)" = "${release_target_sha}"
           RELEASE_TAG_NAME="${release_tag}"
           RELEASE_TARGET_SHA="${release_target_sha}"
