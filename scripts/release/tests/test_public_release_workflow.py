@@ -30,7 +30,7 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.json", self.text)
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.md", self.text)
         self.assertIn(
-            'report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
+            'report_path="reports/release-verification/v${version}"',
             self.text,
         )
         self.assertIn('"${REPORT_PATH}.json"', self.text)
@@ -97,15 +97,18 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_publication_preserves_failure_evidence_and_exact_docs_bytes(self) -> None:
         publish = self.text.split("  publish:\n", 1)[1].split(
-            "  notify-scheduled-failure:\n", 1
+            "  publish-vector-benchmark:\n", 1
         )[0]
         self.assertIn("if: always()", publish)
         self.assertIn("report.py validate-report", publish)
         self.assertNotIn("validate-public", publish)
         self.assertNotIn("✅ 全ステップ成功", publish)
-        self.assertIn("repository: alopex-db/docs", publish)
-        self.assertIn("DOCS_REPO_TOKEN", publish)
-        self.assertIn("working-directory: docs-repo", publish)
+        self.assertIn("contents: write", publish)
+        self.assertIn('if: ${{ always() && needs.verify.result != \'cancelled\' }}', publish)
+        self.assertIn('report_path="reports/release-verification/v${version}"', publish)
+        self.assertIn('branch="report/verify-release-v${VERSION}"', publish)
+        self.assertNotIn("DOCS_REPO_TOKEN", publish)
+        self.assertNotIn("repository: alopex-db/docs", publish)
         self.assertIn("cmp -s", self.text)
         self.assertIn("?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", self.text)
         self.assertIn(
@@ -114,19 +117,19 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("git push --force", self.text)
         self.assertEqual(
-            self.text.count("refusing to overwrite immutable report"), 2
+            self.text.count("refusing to overwrite immutable report"), 3
         )
 
     def test_verification_and_publication_have_separate_permissions(self) -> None:
         verify = self.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
         publish = self.text.split("  publish:\n", 1)[1].split(
-            "  notify-scheduled-failure:\n", 1
+            "  publish-vector-benchmark:\n", 1
         )[0]
         self.assertIn("contents: read", verify)
         self.assertNotIn("contents: write", verify)
         self.assertIn("needs: verify", publish)
         self.assertIn("if: always()", publish)
-        self.assertIn("contents: read", publish)
+        self.assertIn("contents: write", publish)
         self.assertIn("actions/download-artifact@v4", publish)
         self.assertIn(
             "name: release-verification-${{ github.run_id }}-"

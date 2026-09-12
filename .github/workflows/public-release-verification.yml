@@ -246,24 +246,16 @@ jobs:
   publish:
     name: Publish immutable verification report
     needs: verify
-    # The docs write token is not configured in this repository; verification
-    # still produces the immutable artifact, while docs publication is held.
-    if: ${{ false }}
+    # Publish both successful and failed terminal verification reports.
+    if: ${{ always() && needs.verify.result != 'cancelled' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     env:
       VERSION: ${{ needs.verify.outputs.version }}
       REPORT_ROOT: release-verification-output
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout public docs repository
-        uses: actions/checkout@v4
-        with:
-          repository: alopex-db/docs
-          token: ${{ secrets.DOCS_REPO_TOKEN }}
-          path: docs-repo
 
       - name: Download reviewed verification result
         uses: actions/download-artifact@v4
@@ -284,7 +276,7 @@ jobs:
           print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
           PY
           )"
-          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          report_path="reports/release-verification/v${version}"
           echo "VERSION=${version}" >> "${GITHUB_ENV}"
           echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
           echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
@@ -298,35 +290,37 @@ jobs:
 
       - name: Publish candidate branch for docs ingestion
         id: publish
-        working-directory: docs-repo
         shell: bash
         run: |
           set -euo pipefail
-          branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          public_base="https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}"
-          if curl -fsSL "${public_base}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-            curl -fsSL "${public_base}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -o "${RUNNER_TEMP}/docs-v${VERSION}.json" && \
-            cmp -s "../${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-            cmp -s "../${REPORT_ROOT}/v${VERSION}.json" "${RUNNER_TEMP}/docs-v${VERSION}.json"; then
+          branch="report/verify-release-v${VERSION}"
+          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if curl -fsSL "${public_url}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+            cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
             echo "The exact report is already present on docs main."
             echo "branch=" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-            echo "publication branch already exists: ${branch}" >&2
-            exit 1
+            git fetch --force origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            existing="$(git show "refs/remotes/origin/${branch}:${REPORT_PATH}.md")"
+            cmp -s "${REPORT_ROOT}/v${VERSION}.md" <(printf '%s' "${existing}") || {
+              echo "refusing to overwrite immutable report: ${branch}" >&2
+              exit 1
+            }
+            echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
           mkdir -p "$(dirname "${REPORT_PATH}")"
-          if [[ -e "${REPORT_PATH}.md" || -e "${REPORT_PATH}.json" ]]; then
+          if [[ -e "${REPORT_PATH}.md" ]]; then
             echo "refusing to overwrite immutable report: ${REPORT_PATH}" >&2
             exit 1
           fi
-          cp "../${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
-          cp "../${REPORT_ROOT}/v${VERSION}.json" "${REPORT_PATH}.json"
+          cp "${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "${branch}"
-          git add "${REPORT_PATH}.md" "${REPORT_PATH}.json"
+          git add "${REPORT_PATH}.md"
           git commit -m "docs(release): retain v${VERSION} verification report"
           git push origin "${branch}"
           echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
@@ -336,16 +330,11 @@ jobs:
         run: |
           set -euo pipefail
           source_markdown="${REPORT_ROOT}/v${VERSION}.md"
-          source_json="${REPORT_ROOT}/v${VERSION}.json"
           for attempt in $(seq 1 60); do
             if curl -fsSL \
               "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
               -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-              curl -fsSL \
-              "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
-              -o "${RUNNER_TEMP}/docs-v${VERSION}.json" && \
-              cmp -s "${source_markdown}" "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
-              cmp -s "${source_json}" "${RUNNER_TEMP}/docs-v${VERSION}.json"; then
+              cmp -s "${source_markdown}" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
               exit 0
             fi
             sleep 30
@@ -355,7 +344,6 @@ jobs:
 
       - name: Cleanup publication branch
         if: always() && steps.publish.outputs.branch != ''
-        working-directory: docs-repo
         env:
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
