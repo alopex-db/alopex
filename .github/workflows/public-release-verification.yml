@@ -246,7 +246,9 @@ jobs:
   publish:
     name: Publish immutable verification report
     needs: verify
-    if: always() && needs.verify.result == 'success' && secrets.DOCS_REPO_TOKEN != ''
+    # The docs write token is not configured in this repository; verification
+    # still produces the immutable artifact, while docs publication is held.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -362,7 +364,7 @@ jobs:
   publish-vector-benchmark:
     name: Publish reviewed vector benchmark snapshot
     needs: [verify, publish]
-    if: always() && needs.verify.result == 'success' && secrets.DOCS_REPO_TOKEN != ''
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
