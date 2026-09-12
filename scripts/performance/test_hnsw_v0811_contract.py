@@ -197,8 +197,33 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         "reopen_latency_ms": 0.2,
                     }
                 ],
+                recall_ceiling=[
+                    {
+                        "engine": "alopex-hnsw",
+                        "ef_search": 512,
+                        "query_count": 200,
+                        "recall_at_10": 0.99,
+                        "tie_aware_recall_at_10": 1.0,
+                    }
+                ],
                 diagnostics={
-                    "recall_investigation": {"conclusion": "boundary tie"},
+                    "recall_investigation": {
+                        "conclusion": "boundary tie",
+                        "index_count": DATASET_SIZE,
+                        "input_count": DATASET_SIZE,
+                        "index_count_matches_input": True,
+                        "self_match_rate": 1.0,
+                        "ef_construction_and_m": [
+                            {
+                                "engine": "alopex-hnsw",
+                                "m": 16,
+                                "ef_construction": 200,
+                                "ef_search": 64,
+                                "recall_at_10": 0.99,
+                                "tie_aware_recall_at_10": 1.0,
+                            }
+                        ],
+                    },
                     "fixed_cost_runs": [{"engine": "alopex-hnsw", "latency_us": 1.0}],
                     "latency_decomposition": [
                         {
@@ -215,7 +240,19 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                                 "latency_p50_us": 3.0,
                             }
                         ],
+                        "summary": [
+                            {
+                                "arm": "alopex-sql-hnsw-postfilter",
+                                "selectivity": 0.01,
+                                "median_latency_p50_us": 3.0,
+                                "median_latency_p95_us": 4.0,
+                                "filtered_top_k_accuracy": 1.0,
+                                "median_overfetch_amplification": 2.0,
+                                "returns_k": True,
+                            }
+                        ],
                         "alopex_advantageous_selectivities": [0.01],
+                        "filter_aware_traversal": False,
                     },
                 },
                 scale={
@@ -224,9 +261,32 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                             "phase": "search",
                             "dataset_size": 10_000,
                             "engine": "alopex-hnsw",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
                             "qps_at_recall_095": 10.0,
+                            "ef_search_at_recall_095": 64,
+                            "recall_at_selected_setting": 0.96,
+                            "curve": [
+                                {
+                                    "engine": "alopex-hnsw",
+                                    "ef_search": 64,
+                                    "median_queries_per_second": 10.0,
+                                    "median_recall_at_10": 0.96,
+                                }
+                            ],
+                        },
+                        {
+                            "dataset_size": 10_000,
+                            "engine": "hnswlib",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
+                            "qps_at_recall_095": 0.0,
+                            "ef_search_at_recall_095": None,
+                            "recall_at_selected_setting": None,
                             "curve": [],
-                        }
+                        },
                     ],
                     "build_results": [
                         {
@@ -250,10 +310,18 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertTrue(
                 (Path(directory) / "hnsw-latency-decomposition.csv").is_file()
             )
+            self.assertTrue((Path(directory) / "hnsw-recall-ceiling.csv").is_file())
+            self.assertTrue(
+                (Path(directory) / "hnsw-recall-configurations.csv").is_file()
+            )
+            self.assertTrue((Path(directory) / "hnsw-builds.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-fixed-cost-runs.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-hybrid.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-hybrid-summary.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-build.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale.csv").is_file())
             self.assertTrue((Path(directory) / "hnsw-scale-build.csv").is_file())
+            self.assertTrue((Path(directory) / "hnsw-scale-curve.csv").is_file())
             payload = json.loads((Path(directory) / "hnsw-diagnostic.json").read_text())
             raw = json.loads(
                 (Path(directory) / "hnsw-diagnostic.raw.json").read_text()
@@ -284,6 +352,15 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(payload["release_version"], "0.8.11")
+            self.assertEqual(raw["dataset"], payload["dataset"])
+            self.assertEqual(raw["provenance"], payload["provenance"])
+            self.assertEqual(raw["recall_ceiling"], payload["recall_ceiling"])
+            self.assertRegex(payload["provenance"]["source_commit"], r"^[0-9a-f]{40}$")
+            self.assertIn("python", payload["provenance"])
+            self.assertIn("platform", payload["provenance"])
+            self.assertTrue(payload["provenance"]["cpu_model"])
+            self.assertIsInstance(payload["provenance"]["cpu_affinity"], list)
+            self.assertIn("alopex", payload["provenance"]["dependencies"])
             markdown = (Path(directory) / "hnsw-diagnostic.md").read_bytes()
             self.assertEqual(markdown.decode(), render_markdown(payload))
             self.assertEqual(
@@ -294,53 +371,87 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertEqual(
                 payload["recall_investigation"]["conclusion"], "boundary tie"
             )
+            report = markdown.decode()
+            self.assertIn("## Recall ceiling", report)
+            self.assertIn("## Fastest settings at recall thresholds", report)
+            self.assertIn("| 0.95 |", report)
+            self.assertIn("| 0.99 |", report)
+            self.assertIn("## Latency decomposition", report)
+            self.assertIn("## Hybrid", report)
+            self.assertIn("## Scale", report)
+            self.assertIn("alopex-sql-hnsw-postfilter", report)
+            self.assertIn("10,000", report)
+            self.assertIn("| 10,000 | hnswlib |", report)
+            self.assertIn("not met", report)
 
-    def test_post_release_workflow_uses_exact_wheel_and_keeps_environment_evidence(
+            write_artifacts(Path(directory), payload["runs"])
+            for stale in (
+                "hnsw-recall-ceiling.csv",
+                "hnsw-recall-configurations.csv",
+                "hnsw-builds.csv",
+                "hnsw-fixed-cost-runs.csv",
+                "hnsw-latency-decomposition.csv",
+                "hnsw-hybrid.csv",
+                "hnsw-hybrid-summary.csv",
+                "hnsw-scale.csv",
+                "hnsw-scale-curve.csv",
+            ):
+                self.assertFalse((Path(directory) / stale).exists())
+
+    def test_extended_verification_owns_hnsw_performance_evidence(
         self,
     ):
         workflow = (
             Path(__file__).resolve().parents[2]
-            / ".github/workflows/post-release-hnsw.yml"
+            / ".github/workflows/parity-performance.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn('default: "v0.8.11"', workflow)
-        self.assertIn('"alopex==${version}"', workflow)
-        self.assertIn("--only-binary=:all:", workflow)
-        self.assertIn("--release-version", workflow)
-        self.assertIn("artifacts-environment.txt", workflow)
+        self.assertIn("issue_number:", workflow)
+        self.assertIn("actions/checkout@v4", workflow)
+        self.assertIn("maturin develop --release", workflow)
         self.assertIn("31764184/archive.zip", workflow)
-        self.assertIn('"faiss-cpu==1.15.0"', workflow)
-        self.assertIn('"hnswlib==0.8.0"', workflow)
-        self.assertIn('"h5py==3.15.1"', workflow)
         self.assertIn("glove-100-angular.hdf5", workflow)
         self.assertIn(
-            "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4", workflow
+            "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+            workflow,
         )
-        self.assertIn("--max-scale-n 1000000", workflow)
+        self.assertIn("faiss-cpu==1.15.0", workflow)
+        self.assertIn("hnswlib==0.8.0", workflow)
+        self.assertIn('--release-version "$RELEASE_VERSION"', workflow)
+        self.assertIn('--glove-dataset "$GLOVE_DATASET"', workflow)
+        self.assertIn("--max-scale-n 50000", workflow)
         self.assertNotIn("--baseline-only", workflow)
+        self.assertIn("environment.txt", workflow)
+        self.assertIn("benchmark-status.json", workflow)
+        self.assertIn("benchmark-status.md", workflow)
+        self.assertIn('"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])', workflow)
+        self.assertIn('"failure_stage": failure or incomplete', workflow)
+        self.assertIn("retain-run-outcome:", workflow)
+        self.assertIn("needs: performance", workflow)
+        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("${{ needs.performance.result }}", workflow)
+        self.assertIn("alopex.parity-performance-run/v1", workflow)
+        self.assertIn(
+            "parity-performance-outcome-${{ github.run_id }}-${{ github.run_attempt }}",
+            workflow,
+        )
+        self.assertIn("retention-days: 90", workflow)
         self.assertIn('OMP_NUM_THREADS: "1"', workflow)
         self.assertIn('RAYON_NUM_THREADS: "1"', workflow)
-        self.assertNotIn("  release:\n", workflow)
-        self.assertIn("report/vector-benchmark-v${VERSION}", workflow)
-        self.assertIn('report="reports/vector-benchmarks/v${VERSION}"', workflow)
-        self.assertIn('"${report}.json"', workflow)
-        self.assertIn('"${report}.md"', workflow)
-        self.assertIn("Create or update benchmark failure issue", workflow)
-        self.assertIn("steps.generate.outcome == 'success'", workflow)
-        self.assertIn("if: needs.diagnostic.outputs.publishable == 'true'", workflow)
+        self.assertIn(
+            "parity-performance-${{ github.run_id }}-${{ github.run_attempt }}",
+            workflow,
+        )
         release_workflow = (
             Path(__file__).resolve().parents[2]
             / ".github/workflows/alopex-py-release.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("post-release-hnsw:", release_workflow)
-        self.assertIn("needs: [final-release-join]", release_workflow)
-        self.assertIn(
-            "uses: ./.github/workflows/post-release-hnsw.yml", release_workflow
+        self.assertNotIn("post-release-hnsw:", release_workflow)
+        self.assertFalse(
+            (
+                Path(__file__).resolve().parents[2]
+                / ".github/workflows/post-release-hnsw.yml"
+            ).exists()
         )
-        parity_workflow = (
-            Path(__file__).resolve().parents[2]
-            / ".github/workflows/parity-performance.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("--baseline-only", parity_workflow)
 
 
 if __name__ == "__main__":

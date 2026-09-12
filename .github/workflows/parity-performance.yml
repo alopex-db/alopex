@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: parity-performance-${{ github.ref }}
+  group: parity-performance-${{ github.sha }}
   cancel-in-progress: true
 
 env:
@@ -34,7 +34,7 @@ jobs:
   performance:
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, linux, x64, alopex-performance]
-    timeout-minutes: 120
+    timeout-minutes: 360
     services:
       postgres:
         image: postgres:16.14
@@ -55,6 +55,7 @@ jobs:
           python-version: "3.11.11"
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Install pinned reference engines
+        id: dependencies
         run: |
           python -m pip install --disable-pip-version-check \
             maturin==1.14.1 numpy==2.4.6 pandas==3.0.5 \
@@ -63,10 +64,12 @@ jobs:
             datafusion==50.0.0 duckdb==1.4.0 pysqlite3-binary==0.5.4 \
             'psycopg[binary]==3.2.10'
       - name: Build release Alopex and pinned Nim parser
+        id: build
         run: |
           bash scripts/build-nim-parser.sh --backend docker
           maturin develop --release -m crates/alopex-py/Cargo.toml
       - name: Verify performance contracts
+        id: contracts
         run: |
           python scripts/validate_v0811_ledgers.py
           python scripts/reference_tests/polars_public_inventory.py \
@@ -76,6 +79,7 @@ jobs:
           python scripts/reference_tests/hnsw_public_inventory.py \
             docs/parity/hnsw-v0.8.11.json
       - name: Run pinned SQL live differential
+        id: differential
         env:
           ALOPEX_REFERENCE_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
         run: |
@@ -86,6 +90,7 @@ jobs:
             --engine postgresql --engine duckdb \
             --output performance-artifacts/sql/advanced-dml-evidence.json
       - name: Download the checksum-pinned HNSW dataset
+        id: hnsw_dataset
         run: |
           curl -fL https://github.com/user-attachments/files/31764184/archive.zip -o "$RUNNER_TEMP/amazon.zip"
           echo "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea  $RUNNER_TEMP/amazon.zip" | sha256sum --check --strict
@@ -94,19 +99,53 @@ jobs:
           dataset="$RUNNER_TEMP/amazon/home/sdf/marketing_sample_for_amazon_com-ecommerce__20200101_20200131__10k_data.csv"
           echo "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291  $dataset" | sha256sum --check --strict
           echo "HNSW_DATASET=$dataset" >> "$GITHUB_ENV"
+      - name: Download the checksum-pinned scale dataset
+        id: scale_dataset
+        run: |
+          dataset="$RUNNER_TEMP/glove-100-angular.hdf5"
+          curl -fL https://ann-benchmarks.com/glove-100-angular.hdf5 -o "$dataset"
+          echo "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4  $dataset" | sha256sum --check --strict
+          echo "GLOVE_DATASET=$dataset" >> "$GITHUB_ENV"
       - name: Measure paired engines
+        id: benchmark
         env:
           SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
           ALOPEX_PERF_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
         run: |
           mkdir -p performance-artifacts/hnsw
+          RELEASE_VERSION="$(python - <<'PY'
+          import tomllib
+          with open("Cargo.toml", "rb") as stream:
+              print(tomllib.load(stream)["workspace"]["package"]["version"])
+          PY
+          )"
+          export RELEASE_VERSION
+          cpu_model="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p')"
+          test -n "$cpu_model"
+          {
+            echo "cpu_model=$cpu_model"
+            echo "benchmark_core=0"
+            taskset -c 0 python -c 'import os; print("benchmark_affinity=" + ",".join(map(str, sorted(os.sched_getaffinity(0)))))'
+            uname -a
+            python --version
+            python -m pip freeze --all
+          } > performance-artifacts/hnsw/environment.txt
           taskset -c 0 python scripts/performance/hnsw_v0811_contract.py \
-            --dataset "$HNSW_DATASET" --output performance-artifacts/hnsw --baseline-only
+            --dataset "$HNSW_DATASET" \
+            --glove-dataset "$GLOVE_DATASET" \
+            --max-scale-n 50000 \
+            --output performance-artifacts/hnsw \
+            --release-version "$RELEASE_VERSION"
+          python scripts/performance/release_hnsw_evidence.py \
+            --root performance-artifacts/hnsw \
+            --version "$RELEASE_VERSION" \
+            --commit "$GITHUB_SHA"
           taskset -c 0 python scripts/performance/parity_v0811_measure.py \
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
       - name: Enforce curated/full performance contracts
+        id: gate
         env:
           SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
         run: |
@@ -114,6 +153,44 @@ jobs:
             --suite "$SUITE" \
             --measurements performance-artifacts/measurements.json \
             --output performance-artifacts/gate.json
+      - name: Record immutable run status
+        if: always()
+        env:
+          DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          CONTRACTS: ${{ steps.contracts.outcome }}
+          DIFFERENTIAL: ${{ steps.differential.outcome }}
+          HNSW_DATASET: ${{ steps.hnsw_dataset.outcome }}
+          SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
+          BENCHMARK: ${{ steps.benchmark.outcome }}
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          mkdir -p performance-artifacts/hnsw
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "gate")
+          stages = {name: os.environ[name.upper()] for name in names}
+          failure = next((name for name in names if stages[name] == "failure"), None)
+          incomplete = next((name for name in names if stages[name] != "success"), None)
+          status = "failure" if failure else "incomplete" if incomplete else "success"
+          payload = {
+              "schema": "alopex.hnsw-diagnostic-run/v1",
+              "source_commit": os.environ["GITHUB_SHA"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "status": status,
+              "failure_stage": failure or incomplete,
+              "stages": stages,
+          }
+          root = Path("performance-artifacts/hnsw")
+          (root / "benchmark-status.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          lines = ["# HNSW benchmark run", "", f"Status: `{status}`", "", f"Source commit: `{payload['source_commit']}`", "", "| stage | outcome |", "|---|---|"]
+          lines.extend(f"| {name} | {stages[name]} |" for name in names)
+          (root / "benchmark-status.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -121,3 +198,55 @@ jobs:
           path: performance-artifacts
           if-no-files-found: error
           retention-days: 30
+
+  retain-run-outcome:
+    name: retain immutable performance run outcome
+    needs: performance
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Record the terminal performance job result
+        env:
+          PERFORMANCE_JOB_RESULT: ${{ needs.performance.result }}
+        run: |
+          mkdir -p performance-outcome
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = os.environ["PERFORMANCE_JOB_RESULT"]
+          status = "success" if result == "success" else "failure" if result == "failure" else "incomplete"
+          payload = {
+              "schema": "alopex.parity-performance-run/v1",
+              "source_commit": os.environ["GITHUB_SHA"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "status": status,
+              "failure_stage": None if status == "success" else "performance_job",
+              "performance_job_result": result,
+          }
+          root = Path("performance-outcome")
+          (root / "outcome.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          lines = [
+              "# Parity performance run outcome",
+              "",
+              f"Status: `{status}`",
+              "",
+              f"Performance job result: `{result}`",
+              "",
+              f"Source commit: `{payload['source_commit']}`",
+              "",
+              f"Run: `{payload['run_id']}` attempt `{payload['run_attempt']}`",
+          ]
+          (root / "outcome.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+      - name: Upload the run outcome independently of the benchmark runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-performance-outcome-${{ github.run_id }}-${{ github.run_attempt }}
+          path: performance-outcome
+          if-no-files-found: error
+          retention-days: 90

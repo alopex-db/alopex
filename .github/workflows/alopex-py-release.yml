@@ -689,24 +689,13 @@ jobs:
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
 
   verify-public-release:
-    name: Verify demos and publish docs report
+    name: Verify public package availability and publish docs report
     needs: [final-release-join]
     if: ${{ always() && needs.final-release-join.result == 'success' }}
     permissions:
-      contents: write
+      contents: read
       issues: write
     uses: ./.github/workflows/public-release-verification.yml
     with:
       version: ${{ github.ref_name }}
-      publish_report: true
-
-  post-release-hnsw:
-    name: Post-release HNSW diagnostic
-    needs: [final-release-join]
-    if: ${{ needs.final-release-join.result == 'success' }}
-    permissions:
-      contents: write
-      issues: write
-    uses: ./.github/workflows/post-release-hnsw.yml
-    with:
-      version: ${{ github.ref_name }}
+    secrets: inherit
