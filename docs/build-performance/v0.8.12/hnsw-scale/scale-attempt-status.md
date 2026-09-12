@@ -1,6 +1,6 @@
 # HNSW scale attempt status
 
-CodexはIssue添付のAmazon archive（SHA-256 `fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea`）と、専用データブランチ`data/issue-298-glove-v2`（commit `8735a7fe`）のGloVe固定データ（SHA-256 `544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4`）を正準入力として確認しました。GloVe 200k/1Mの容量・資源検証は [Issue #410](https://github.com/alopex-db/alopex/issues/410) に分離し、v0.8.12およびこのIssueの通常回帰ゲートには含めません。
+CodexはIssue添付のAmazon archive（SHA-256 `fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea`）と、専用データブランチ`data/issue-298-glove-v2`（commit `8735a7fe`）のGloVe固定データ（SHA-256 `544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4`）を正準入力として確認しました。GloVe 200k/1Mの容量・資源検証は [Issue #410](https://github.com/alopex-db/alopex/issues/410) に分離し、先送りとします。
 
 Codexは既存の `run_scale_benchmark` を `max_n=50_000` で実行しましたが、per-vector Python 挿入を含むAlopex構築が約13分継続したため中断しました。Codexは続けて `max_n=10_000` を実行しましたが、同じ経路が10分近く経過しても完了せず、I/O待ちで中断しました。これはAlopexの構築時間ではなく、既存ハーネスの実行経路が計測に不適切であることを示す診断です。Codexは結果行を1件も成功値として採用していません。
 
@@ -31,6 +31,6 @@ Codexは、build測定とsearch測定を別トラックとして扱います。b
 
 Codexはfixtureの作成・検証を `scripts/performance/alopex_hnsw_fixture.py prepare|verify` に分離しました。`prepare` は空の出力ディレクトリへ一度だけ構築し、`verify` は検索前のnode数とfixture整合性だけを検証します。
 
-Codexは200k/1Mを、容量目標・メモリ上限・I/O予算が宣言された場合だけ実施する、v0.8.12とは独立したExtended VerificationとしてIssue #410へ分離しました。v0.8.12の通常デグレ判定（Issue #298）へ、件数だけを理由に追加しません。
+Codexは200k/1MをIssue #410へ分離し、先送りとしました。Codexはこの作業の通常デグレ判定へ、件数だけを理由に追加しません。
 
 Codexは比較エンジン（FAISS flat/HNSW、hnswlib）の複数N同一プロセス経路を採用せず、責務分離したmatrixへ切り替えました。過去の混在経路に由来する値は採用していません。50kはAlopexを含む全engineで同じ入力・設定・終了条件を完走しています。200k/1Mは通常受入の比較結果として確定していません。
