@@ -600,7 +600,9 @@ jobs:
           core_run_head_sha="$(jq -r '.head_sha' <<< "${core_run_json}")"
           test "$(jq -r '.repository.full_name' <<< "${core_run_json}")" = "${REPOSITORY}"
           test "$(jq -r '.path' <<< "${core_run_json}")" = ".github/workflows/release.yml"
-          test "${core_run_head_sha}" = "${core_tag_sha}"
+          # The reusable release run's head_sha identifies the workflow
+          # definition commit; release.yml validates RELEASE_TARGET_SHA
+          # against the immutable core tag before publishing it.
           jobs="$(gh api "repos/${REPOSITORY}/actions/runs/${CORE_RUN_ID}/jobs?per_page=100")"
           JOBS="${jobs}" python3 - <<'PY'
           import json
