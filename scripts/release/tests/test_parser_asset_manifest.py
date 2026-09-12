@@ -1078,7 +1078,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
         self.assertIn("git rev-parse", self.workflow)
-        self.assertIn("git describe --tags --exact-match", self.workflow)
+        self.assertIn('git tag --points-at HEAD | grep -Fxq "${release_tag}"', self.workflow)
         self.assertIn("release-envelope", self.workflow)
 
     def test_python_release_consumes_public_core_assets_without_nim_rebuild(self) -> None:
