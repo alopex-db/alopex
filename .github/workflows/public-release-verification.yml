@@ -156,7 +156,7 @@ jobs:
               if python3 -m pip install --no-index --no-deps \
                 --target "${install_dir}" --find-links "${readiness_dir}" \
                 "alopex==${VERSION}" 2>&1 | tee -a "${readiness_log}" && \
-                PYTHONPATH="${install_dir}" python3 -c 'import alopex; print(alopex.__version__)' \
+                PYTHONPATH="${install_dir}" python3 -c 'import importlib.metadata as metadata; import alopex; print(metadata.version("alopex"))' \
                   2>&1 | tee -a "${readiness_log}"; then
                 ready=true
                 break
