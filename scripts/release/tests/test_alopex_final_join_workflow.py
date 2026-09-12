@@ -40,13 +40,13 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("core_run_id:", text)
-        self.assertNotIn("source_ref:", text)
+        self.assertIn("source_ref:", text)
         self.assertNotIn("target_sha:", text)
         self.assertNotIn("release_tag:", text)
         self.assertNotIn("repair_forward:", text)
-        self.assertIn("ref: ${{ github.ref }}", text)
+        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", text)
         self.assertIn('PYTHON_HEAD_SHA="$(git rev-parse HEAD)"', text)
-        self.assertIn("PYTHON_TAG_NAME: ${{ github.ref_name }}", text)
+        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.source_ref || github.ref_name }}", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
     def test_python_head_sha_is_exported_from_the_tag(self) -> None:
@@ -139,7 +139,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_github_release_uses_the_python_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  github-release:", maxsplit=1)[1].split("  final-release-join:", maxsplit=1)[0]
-        self.assertIn("tag_name: ${{ github.ref_name }}", block)
+        self.assertIn("tag_name: ${{ inputs.source_ref || github.ref_name }}", block)
 
 
 if __name__ == "__main__":
