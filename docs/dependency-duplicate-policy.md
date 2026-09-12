@@ -4,7 +4,7 @@
 
 > New duplicate crate versions fail CI. Existing duplicate versions may remain only as exact, reasoned exceptions that become errors when stale.
 
-`deny.toml` is the machine-facing source of truth. The current configured graph has 44 duplicate crate families and 59 exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. This baseline is debt to remove, not a permitted count to refill after an exception disappears.
+`deny.toml` is the machine-facing source of truth. The current configured graph has 43 duplicate crate families and 58 exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. This baseline is debt to remove, not a permitted count to refill after an exception disappears.
 
 | Inventory point | Configured graph families | Exact exceptions | Lockfile families | Lockfile packages |
 |---|---:|---:|---:|---:|
