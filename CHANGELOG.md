@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.12] — 2026-09-12
+
+### Added
+
+- Added reproducible HNSW diagnostic artifacts with separated build, search,
+  exact-baseline, and hybrid responsibilities for the fixed 10k/50k scale
+  cases (#298).
+- Reduced unused CLI test features so dependency-duplicate policy and local
+  build measurements remain representative (#407, #408).
+
+### Fixed
+
+- Release workflows now bind publication to immutable commit/tag identity and
+  keep the Python release tag lifecycle independent from the core tag.
+- The release contract and qualification evidence preserve failed or incomplete
+  runs without allowing a later run to overwrite them.
+
 ## [0.8.11] — 2026-09-04
 
 ### Added

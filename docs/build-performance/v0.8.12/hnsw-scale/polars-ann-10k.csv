@@ -1,0 +1,5 @@
+phase,engine,build_ms,execution_kernel
+build,polars-exact-scan,112.284058,numpy-via-polars-dataframe
+build,faiss-flat-exact,4.816135,
+build,faiss-hnsw,480.872178,
+build,hnswlib,1881.494125,

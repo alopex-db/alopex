@@ -2,7 +2,6 @@ name: alopex-py
 
 on:
   push:
-    branches: [main, develop]
     paths:
       - ".github/workflows/alopex-py.yml"
       - ".github/actions/setup-nim-parser-toolchain/**"

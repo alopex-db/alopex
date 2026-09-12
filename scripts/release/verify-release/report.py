@@ -11,17 +11,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "alopex-release-verification/v1"
+SCHEMA = "alopex-release-verification/v2"
 DIAGNOSTIC = re.compile(r"SKIP|ERROR|FAIL|FAILED|失敗", re.IGNORECASE)
 SKIP_CASE = re.compile(r"^\s*SKIP\s+\S", re.IGNORECASE)
 SKIP_DETAIL = re.compile(r"^\s*###\s+.*\(SKIP\)\s*$", re.IGNORECASE)
 SKIP_COUNT = re.compile(r"\bSKIP=(\d+)\b", re.IGNORECASE)
 
 
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def load(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != SCHEMA:
-        raise SystemExit(f"unsupported release verification schema: {payload.get('schema')!r}")
+        raise SystemExit(
+            f"unsupported release verification schema: {payload.get('schema')!r}"
+        )
     return payload
 
 
@@ -45,13 +51,23 @@ def init(args: argparse.Namespace) -> None:
         {
             "schema": SCHEMA,
             "version": args.version,
-            "overall_status": "ok",
-            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "started_at": now(),
+            "completed_at": None,
+            "outcome": "incomplete",
+            "failure_stage": None,
             "environment": {
                 "package_source": "crates.io / PyPI",
                 "rust": args.rust,
                 "nim": args.nim,
                 "python": "3.11",
+            },
+            "identity": {
+                "commit": args.commit,
+                "tag": args.tag,
+                "run_id": args.run_id,
+                "run_attempt": args.run_attempt,
+                "run_url": args.run_url,
+                "responsibility": args.responsibility,
             },
             "steps": [],
         },
@@ -62,46 +78,85 @@ def record(args: argparse.Namespace) -> None:
     payload = load(args.results)
     lines = args.log.read_text(encoding="utf-8", errors="replace").splitlines()
     diagnostics = [line for line in lines if DIAGNOSTIC.search(line)]
+    status = args.status
+    if status == "success" and any(
+        SKIP_CASE.search(line)
+        or SKIP_DETAIL.search(line)
+        or any(int(value) for value in SKIP_COUNT.findall(line))
+        for line in diagnostics
+    ):
+        status = "incomplete"
     tail = lines[-60:]
     excerpt = diagnostics + [line for line in tail if line not in diagnostics]
     payload["steps"].append(
         {
             "name": args.name,
-            "status": args.status,
+            "status": status,
             "description": args.description,
             "log_excerpt": excerpt,
             "diagnostics": diagnostics,
         }
     )
-    if args.status == "fail":
-        payload["overall_status"] = "fail"
+    payload["outcome"] = "incomplete"
+    payload["failure_stage"] = None
+    payload["completed_at"] = None
+    save(args.results, payload)
+
+
+def finalize(args: argparse.Namespace) -> None:
+    payload = load(args.results)
+    steps = payload["steps"]
+    failed = next((step for step in steps if step["status"] == "failure"), None)
+    incomplete = next((step for step in steps if step["status"] == "incomplete"), None)
+    if failed:
+        payload["outcome"] = "failure"
+        payload["failure_stage"] = failed["name"]
+    elif incomplete or not steps:
+        payload["outcome"] = "incomplete"
+        payload["failure_stage"] = (
+            incomplete["name"] if incomplete else "workflow orchestration"
+        )
+    else:
+        payload["outcome"] = "success"
+        payload["failure_stage"] = None
+    payload["completed_at"] = now()
     save(args.results, payload)
 
 
 def render(args: argparse.Namespace) -> None:
     payload = load(args.results)
     version = payload["version"]
-    status = payload["overall_status"]
+    status = payload["outcome"]
+    summaries = {
+        "success": "✅ 全ステップ成功",
+        "failure": "❌ 失敗あり",
+        "incomplete": "⚠️ 未完了",
+    }
     lines = [
         f"# リリース確認レポート: v{version}",
         "",
-        f"> 総合結果: **{'✅ 全ステップ成功' if status == 'ok' else '❌ 失敗あり'}**",
+        f"> 総合結果: **{summaries[status]}**",
         "",
     ]
-    if status == "ok":
+    if status == "success":
         lines.extend(
             [
-                f"v{version} は、crates.io / PyPI に公開されたパッケージを",
-                "そのままインストールした状態で、ライブラリ・組み込み(ファイル)・",
-                "サーバー・クラスタのすべてが同一データに対して同一の結果を返すことを",
-                "確認済みである。",
+                f"v{version} は、PyPIから完全一致wheelを取得し、隔離先への導入と",
+                "最小importが成功している。既知機能・実行経路・性能の正しさは、",
+                "対象commitのDevelopment CI / Extended Verificationが所有する。",
             ]
         )
-    else:
+    elif status == "failure":
         lines.append(f"v{version} の確認中に失敗したステップがある。詳細は下記を参照。")
+    else:
+        lines.append(
+            f"v{version} の確認は完了していない。完了済みの証跡と中断段階を下記に残す。"
+        )
     lines.extend(["", "## ステップ", ""])
     for index, step in enumerate(payload["steps"], start=1):
-        mark = "✅" if step["status"] == "ok" else "❌"
+        mark = {"success": "✅", "failure": "❌", "incomplete": "⚠️"}[
+            step["status"]
+        ]
         lines.extend(
             [
                 f"### {index}. {step['name']} {mark}",
@@ -113,6 +168,7 @@ def render(args: argparse.Namespace) -> None:
         if step["log_excerpt"]:
             lines.extend(["```", *step["log_excerpt"], "```", ""])
     environment = payload["environment"]
+    identity = payload.get("identity", {})
     lines.extend(
         [
             "---",
@@ -122,12 +178,25 @@ def render(args: argparse.Namespace) -> None:
             "| 項目 | 値 |",
             "|---|---|",
             f"| 対象バージョン | v{version} |",
-            f"| 生成日時 (UTC) | {payload['generated_at']} |",
+            f"| 開始日時 (UTC) | {payload['started_at']} |",
+            f"| 終了日時 (UTC) | {payload['completed_at'] or 'incomplete'} |",
             f"| パッケージ取得元 | {environment['package_source']} |",
             "| ソースビルド | なし(公開パッケージのみ使用) |",
             f"| Rust | `{environment['rust']}` |",
             f"| Nim(ビルド専用イメージ) | `{environment['nim']}` |",
             f"| Python | `{environment['python']}` |",
+            "",
+            "## 証跡",
+            "",
+            "| 項目 | 値 |",
+            "|---|---|",
+            f"| Commit | `{identity.get('commit', 'unknown')}` |",
+            f"| Tag | `{identity.get('tag', 'unknown')}` |",
+            f"| Run | `{identity.get('run_id', 'unknown')}` / attempt "
+            f"`{identity.get('run_attempt', 'unknown')}` |",
+            f"| 責務層 | {identity.get('responsibility', 'unknown')} |",
+            f"| 失敗段階 | {payload.get('failure_stage') or 'なし'} |",
+            f"| 実行 | {identity.get('run_url', 'unknown')} |",
             "",
         ]
     )
@@ -137,43 +206,59 @@ def render(args: argparse.Namespace) -> None:
 
 
 def validate_report_payload(payload: dict[str, Any]) -> None:
-    if payload.get("overall_status") not in {"ok", "fail"}:
-        raise SystemExit("release verification report has an invalid overall status")
+    outcomes = {"success", "failure", "incomplete"}
+    if payload.get("outcome") not in outcomes:
+        raise SystemExit("release verification report has an invalid outcome")
+    if not payload.get("started_at") or not payload.get("completed_at"):
+        raise SystemExit("release verification report timing is incomplete")
+    identity = payload.get("identity")
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("run_id"), str)
+        or not identity["run_id"]
+        or not isinstance(identity.get("run_attempt"), int)
+        or identity["run_attempt"] < 1
+    ):
+        raise SystemExit("release verification report run identity is incomplete")
+    for field in ("commit", "tag", "run_url", "responsibility"):
+        if not isinstance(identity.get(field), str) or not identity[field]:
+            raise SystemExit(f"release verification report identity lacks {field}")
     steps = payload.get("steps")
     if not isinstance(steps, list):
         raise SystemExit("release verification report steps are missing")
-    statuses = {step.get("status") for step in steps if isinstance(step, dict)}
-    if any(not isinstance(step, dict) for step in steps) or not statuses <= {"ok", "fail"}:
+    if any(
+        not isinstance(step, dict)
+        or not isinstance(step.get("name"), str)
+        or not step["name"]
+        or step.get("status") not in outcomes
+        for step in steps
+    ):
         raise SystemExit("release verification report contains an invalid step")
-    has_failure = any(step.get("status") == "fail" for step in steps)
-    if has_failure != (payload["overall_status"] == "fail"):
-        raise SystemExit("release verification report status does not match its steps")
+    statuses = {step["status"] for step in steps}
+    expected = (
+        "failure"
+        if "failure" in statuses
+        else "incomplete"
+        if "incomplete" in statuses or not steps
+        else "success"
+    )
+    if payload["outcome"] != expected:
+        raise SystemExit("release verification report outcome does not match its steps")
+    expected_stage = next(
+        (
+            step["name"]
+            for step in steps
+            if step["status"] == expected and expected != "success"
+        ),
+        "workflow orchestration" if not steps else None,
+    )
+    if payload.get("failure_stage") != expected_stage:
+        raise SystemExit("release verification report failure stage does not match its outcome")
 
 
 def validate_report(args: argparse.Namespace) -> None:
     validate_report_payload(load(args.results))
     print("release verification report is complete")
-
-
-def validate_public(args: argparse.Namespace) -> None:
-    payload = load(args.results)
-    validate_report_payload(payload)
-    if payload.get("overall_status") != "ok":
-        raise SystemExit("public report candidate is not successful")
-    if any(step.get("status") != "ok" for step in payload.get("steps", [])):
-        raise SystemExit("public report candidate contains a failed step")
-
-    executed_skips: list[str] = []
-    for step in payload.get("steps", []):
-        for line in step.get("diagnostics", []):
-            counts = [int(value) for value in SKIP_COUNT.findall(line)]
-            if SKIP_CASE.search(line) or SKIP_DETAIL.search(line) or any(counts):
-                executed_skips.append(line)
-    if executed_skips:
-        raise SystemExit(
-            f"A public release report must not contain executed SKIP: {executed_skips}"
-        )
-    print("public release report candidate is complete")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -185,24 +270,32 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--version", required=True)
     initialize.add_argument("--rust", required=True)
     initialize.add_argument("--nim", required=True)
+    initialize.add_argument("--commit", default="unknown")
+    initialize.add_argument("--tag", default="unknown")
+    initialize.add_argument("--run-id", default="unknown")
+    initialize.add_argument("--run-attempt", type=int, default=1)
+    initialize.add_argument("--run-url", default="unknown")
+    initialize.add_argument("--responsibility", default="unknown")
     initialize.set_defaults(func=init)
 
     append = commands.add_parser("record")
     append.add_argument("--results", type=Path, required=True)
     append.add_argument("--name", required=True)
-    append.add_argument("--status", choices=("ok", "fail"), required=True)
+    append.add_argument(
+        "--status", choices=("success", "failure", "incomplete"), required=True
+    )
     append.add_argument("--description", required=True)
     append.add_argument("--log", type=Path, required=True)
     append.set_defaults(func=record)
+
+    complete = commands.add_parser("finalize")
+    complete.add_argument("--results", type=Path, required=True)
+    complete.set_defaults(func=finalize)
 
     markdown = commands.add_parser("render")
     markdown.add_argument("--results", type=Path, required=True)
     markdown.add_argument("--output-dir", type=Path, required=True)
     markdown.set_defaults(func=render)
-
-    validate = commands.add_parser("validate-public")
-    validate.add_argument("--results", type=Path, required=True)
-    validate.set_defaults(func=validate_public)
 
     report = commands.add_parser("validate-report")
     report.add_argument("--results", type=Path, required=True)

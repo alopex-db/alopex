@@ -5,14 +5,12 @@ on:
   schedule:
     - cron: '17 2 * * 1'
   push:
-    branches: [main, develop]
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'
       - 'scripts/parity/**'
       - 'formal/release-report/**'
   pull_request:
-    branches: [main]
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'

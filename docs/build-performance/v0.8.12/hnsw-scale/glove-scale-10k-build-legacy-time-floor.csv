@@ -1,0 +1,5 @@
+phase,engine,dataset_size,build_ms,index_memory_bytes,node_count
+build,alopex-hnsw,10000,94149.296003,13594624,10000
+build,faiss-hnsw,10000,8795.166100,5440442,10000
+build,hnswlib,10000,15985.136735,5486948,10000
+build,flat,10000,3469.824005,4000045,10000

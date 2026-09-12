@@ -1,0 +1,4 @@
+command=python scripts/performance/hnsw_v0811_contract.py --dataset amazon.csv --embedding-cache embedding.npz --output hnsw-diagnostic --min-queries 10000 --runs 3
+commit=ffb39052
+dataset_sha256=ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291
+embedding_cache_key=ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291

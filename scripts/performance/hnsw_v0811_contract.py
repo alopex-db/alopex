@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.metadata
 import json
+import os
+import platform
 import re
 import resource
 import statistics
+import subprocess
 import tempfile
 import time
 from collections import defaultdict
@@ -20,10 +24,54 @@ from typing import Callable
 DATASET_SIZE = 9171
 DIMENSION = 128
 QUERY_COUNT = 10_000
+HYBRID_QUERY_COUNT = 200
 SEED = 42
-WARMUP_SECONDS = 2.0
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
 RECALL_CEILING_VALUES = (512, 1024, 4096, DATASET_SIZE)
+
+# Comparison rows are deliberately phase-specific.  A build duration cannot
+# share a row with query throughput or latency: doing so makes unlike
+# responsibilities look comparable and permits incomplete acceptance data.
+BUILD_COMPARISON_FIELDS = frozenset({"build_ms", "index_memory_bytes", "node_count"})
+SEARCH_COMPARISON_FIELDS = frozenset(
+    {"query_count", "qps", "p50_ms", "p95_ms", "p99_ms", "recall_at_k"}
+)
+
+
+def validate_comparison_row(row: dict[str, object]) -> None:
+    """Reject mixed or incomplete engine comparison measurements."""
+    phase = row.get("phase")
+    if phase not in {"build", "search"}:
+        raise ValueError("comparison row phase must be 'build' or 'search'")
+    fields = set(row)
+    if phase == "build":
+        required = {"build_ms", "index_memory_bytes", "node_count"}
+        forbidden = SEARCH_COMPARISON_FIELDS
+    else:
+        required = {
+            "query_count",
+            "qps",
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "recall_at_k",
+        }
+        forbidden = BUILD_COMPARISON_FIELDS
+    missing = sorted(required - fields)
+    missing.extend(sorted(field for field in required & fields if row[field] is None))
+    mixed = sorted(forbidden & fields)
+    if missing:
+        raise ValueError(f"{phase} comparison row is missing: {', '.join(missing)}")
+    if mixed:
+        raise ValueError(f"{phase} comparison row mixes metrics: {', '.join(mixed)}")
+
+
+def validate_comparison_rows(rows: list[dict[str, object]]) -> None:
+    """Validate every row before it can be used as comparison evidence."""
+    if not rows:
+        raise ValueError("comparison evidence must contain at least one row")
+    for row in rows:
+        validate_comparison_row(row)
 
 
 @dataclass
@@ -43,6 +91,51 @@ class SearchEngine:
 
 def peak_rss_bytes() -> int:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+
+def provenance() -> dict[str, object]:
+    root = Path(__file__).resolve().parents[2]
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dependencies = {}
+    for package in (
+        "alopex",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "faiss-cpu",
+        "hnswlib",
+        "h5py",
+    ):
+        try:
+            dependencies[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[package] = "not installed"
+    cpu_model = ""
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("model name"):
+                cpu_model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    cpu_model = cpu_model or platform.processor() or "unknown"
+    affinity = (
+        sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else []
+    )
+    return {
+        "source_commit": commit,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "cpu_model": cpu_model,
+        "cpu_affinity": affinity,
+        "dependencies": dependencies,
+    }
 
 
 def load_amazon_products(path: Path):
@@ -84,18 +177,55 @@ def load_amazon_products(path: Path):
     return products
 
 
-def build_embeddings(products):
+def build_embeddings(products, *, cache_path: Path | None = None, cache_key: str = ""):
     """Build the reference TF-IDF -> SVD -> L2-normalized 128-d vectors."""
     import numpy as np
     from sklearn.decomposition import TruncatedSVD
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.preprocessing import normalize
 
+    metadata_path = (
+        cache_path.with_suffix(cache_path.suffix + ".json") if cache_path else None
+    )
+    if (
+        cache_path
+        and metadata_path
+        and cache_path.is_file()
+        and metadata_path.is_file()
+    ):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata == {
+            "cache_key": cache_key,
+            "rows": len(products),
+            "dimension": DIMENSION,
+        }:
+            with np.load(cache_path) as cached:
+                return (
+                    np.ascontiguousarray(cached["vectors"]),
+                    float(cached["explained_variance"]),
+                )
+
     tfidf = TfidfVectorizer(max_features=50_000, stop_words="english", min_df=2)
     sparse = tfidf.fit_transform(products["text"])
     svd = TruncatedSVD(n_components=DIMENSION, random_state=SEED)
     vectors = normalize(svd.fit_transform(sparse)).astype(np.float32)
-    return np.ascontiguousarray(vectors), float(svd.explained_variance_ratio_.sum())
+    vectors = np.ascontiguousarray(vectors)
+    explained_variance = float(svd.explained_variance_ratio_.sum())
+    if cache_path and metadata_path:
+        np.savez(cache_path, vectors=vectors, explained_variance=explained_variance)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "cache_key": cache_key,
+                    "rows": len(products),
+                    "dimension": DIMENSION,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return vectors, explained_variance
 
 
 def recall_at_k(predicted, expected) -> float:
@@ -333,7 +463,6 @@ def measure_setting(
     acceptable_truth,
     *,
     ef_search: int,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
     k: int = 10,
@@ -356,9 +485,7 @@ def measure_setting(
         started = time.perf_counter()
         executed = 0
         latencies = []
-        while (
-            executed < min_queries or time.perf_counter() - started < duration_seconds
-        ):
+        for _ in range(min_queries):
             query_started = time.perf_counter_ns()
             engine.search(queries[executed % len(queries)], k, ef_search)
             latencies.append((time.perf_counter_ns() - query_started) / 1000)
@@ -390,7 +517,6 @@ def measure_setting(
                 ],
                 "recall_at_10": recall,
                 "tie_aware_recall_at_10": tie_aware_recall,
-                "build_time_seconds": engine.build_time_seconds,
             }
         )
     return rows
@@ -399,7 +525,6 @@ def measure_setting(
 def measure_call_floor(
     vectors,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> list[dict[str, object]]:
@@ -414,10 +539,7 @@ def measure_call_floor(
             for run in range(1, run_count + 1):
                 started = time.perf_counter()
                 executed = 0
-                while (
-                    executed < min_queries
-                    or time.perf_counter() - started < duration_seconds
-                ):
+                for _ in range(min_queries):
                     engine.search(vectors[executed % 10], 1, 1)
                     executed += 1
                 elapsed = time.perf_counter() - started
@@ -515,8 +637,9 @@ def investigate_recall_contract(
     base_predictions = [
         base_alopex.search(query, 10, DATASET_SIZE) for query in queries
     ]
+    self_match_ef_search = min(len(vectors), max(EF_SEARCH_VALUES))
     self_matches = sum(
-        base_alopex.search(vector, 1, len(vectors)) == [index]
+        base_alopex.search(vector, 1, self_match_ef_search) == [index]
         for index, vector in enumerate(vectors)
     )
     configurations = []
@@ -550,6 +673,7 @@ def investigate_recall_contract(
         "input_count": len(vectors),
         "index_count_matches_input": base_alopex.node_count == len(vectors),
         "self_match_rate": self_matches / len(vectors),
+        "self_match_ef_search": self_match_ef_search,
         "ef_construction_and_m": configurations,
         "exact_metric_agreement": exact_metric_agreement(vectors),
         "minimal_reproduction": mismatch_reproduction(
@@ -821,7 +945,6 @@ def measure_hybrid(
     vectors,
     queries,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> list[dict[str, object]]:
@@ -890,10 +1013,7 @@ def measure_hybrid(
                     latencies = []
                     started = time.perf_counter()
                     executed = 0
-                    while (
-                        executed < min_queries
-                        or time.perf_counter() - started < duration_seconds
-                    ):
+                    for _ in range(min_queries):
                         query_started = time.perf_counter_ns()
                         operation(queries[executed % len(queries)])
                         latencies.append(
@@ -983,7 +1103,6 @@ def run_scale_benchmark(
     dataset: Path,
     *,
     max_n: int,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
 ) -> dict[str, object]:
@@ -993,7 +1112,8 @@ def run_scale_benchmark(
     digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
     if digest != GLOVE_SHA256:
         raise ValueError(f"unexpected glove-100-angular checksum: {digest}")
-    results = []
+    build_results = []
+    search_results = []
     raw_runs = []
     with h5py.File(dataset) as source:
         queries = np.asarray(source["test"][:200], dtype=np.float32)
@@ -1031,7 +1151,6 @@ def run_scale_benchmark(
                                 truth,
                                 acceptable,
                                 ef_search=ef_search,
-                                duration_seconds=duration_seconds,
                                 min_queries=min_queries,
                                 run_count=run_count,
                                 dataset_size=size,
@@ -1049,8 +1168,9 @@ def run_scale_benchmark(
                         key=lambda row: float(row["median_queries_per_second"]),
                         default=None,
                     )
-                    results.append(
+                    build_results.append(
                         {
+                            "phase": "build",
                             "dataset_size": size,
                             "engine": (
                                 "flat"
@@ -1060,6 +1180,18 @@ def run_scale_benchmark(
                             "build_time_seconds": engine.build_time_seconds,
                             "index_size_bytes": engine.index_size_bytes,
                             "peak_rss_bytes": engine.peak_rss_bytes,
+                            "node_count": engine.node_count,
+                        }
+                    )
+                    search_results.append(
+                        {
+                            "phase": "search",
+                            "dataset_size": size,
+                            "engine": (
+                                "flat"
+                                if engine.name == "faiss-flat-exact"
+                                else engine.name
+                            ),
                             "qps_at_recall_095": (
                                 float(fastest["median_queries_per_second"])
                                 if fastest
@@ -1078,7 +1210,7 @@ def run_scale_benchmark(
                     engine.close()
                     del engine
             del vectors
-    analysis = analyze_scale(results, requested_sizes=SCALE_SIZES)
+    analysis = analyze_scale(search_results, requested_sizes=SCALE_SIZES)
     for limit in analysis["limits"]:
         limit["reason"] = (
             f"configured max_n={max_n} for the hosted runner"
@@ -1090,7 +1222,8 @@ def run_scale_benchmark(
         "sha256": digest,
         "requested_sizes": list(SCALE_SIZES),
         "max_n": max_n,
-        "results": results,
+        "results": search_results,
+        "build_results": build_results,
         "runs": raw_runs,
         **analysis,
     }
@@ -1099,10 +1232,10 @@ def run_scale_benchmark(
 def run_benchmark(
     dataset: Path,
     *,
-    duration_seconds: float,
     min_queries: int,
     run_count: int,
     extended: bool = True,
+    embedding_cache: Path | None = None,
 ) -> tuple[
     list[dict[str, object]],
     dict[str, object],
@@ -1117,7 +1250,11 @@ def run_benchmark(
         raise ValueError(
             f"expected {DATASET_SIZE} cleaned products, found {len(products)}"
         )
-    vectors, explained_variance = build_embeddings(products)
+    vectors, explained_variance = build_embeddings(
+        products,
+        cache_path=embedding_cache,
+        cache_key=hashlib.sha256(dataset.read_bytes()).hexdigest(),
+    )
     rng = np.random.default_rng(SEED)
     query_indexes = rng.choice(len(vectors), size=200, replace=False)
     queries = vectors[query_indexes]
@@ -1132,6 +1269,7 @@ def run_benchmark(
         try:
             builds.append(
                 {
+                    "phase": "build",
                     "engine": engine.name,
                     "build_time_seconds": engine.build_time_seconds,
                     "index_size_bytes": engine.index_size_bytes,
@@ -1155,7 +1293,6 @@ def run_benchmark(
                         truth,
                         acceptable_truth,
                         ef_search=ef_search,
-                        duration_seconds=duration_seconds,
                         min_queries=min_queries,
                         run_count=run_count,
                     )
@@ -1187,7 +1324,6 @@ def run_benchmark(
         return runs, metadata, builds, recall_ceiling, {}
     fixed_cost_runs = measure_call_floor(
         vectors,
-        duration_seconds=duration_seconds,
         min_queries=min_queries,
         run_count=run_count,
     )
@@ -1204,8 +1340,7 @@ def run_benchmark(
     hybrid_runs = measure_hybrid(
         vectors,
         queries,
-        duration_seconds=duration_seconds,
-        min_queries=min_queries,
+        min_queries=min(HYBRID_QUERY_COUNT, min_queries),
         run_count=run_count,
     )
     base_summary = summarize_by_engine(runs)
@@ -1233,6 +1368,11 @@ def run_benchmark(
         "fixed_cost_runs": fixed_cost_runs,
         "latency_decomposition": decompose_latency(base_summary, fixed_cost_us),
         "hybrid": summarize_hybrid(hybrid_runs),
+        "hybrid_measurement_contract": {
+            "query_count_minimum": min(HYBRID_QUERY_COUNT, min_queries),
+            "termination": "fixed query count and run count",
+            "reason": "hybrid has five selectivities and three end-to-end arms; its bounded query set isolates filter responsibility without duplicating the primary search gate",
+        },
     }
     return runs, metadata, builds, recall_ceiling, diagnostics
 
@@ -1249,19 +1389,122 @@ def render_markdown(payload: dict[str, object]) -> str:
         "{median_queries_per_second:.1f} | {median_latency_us:.1f} |".format(**row)
         for row in summary
     )
+    threshold_table = [
+        "| recall threshold | engine | ef_search | recall@10 | QPS | us/query |",
+        "|---:|---|---:|---:|---:|---:|",
+    ]
+    best = payload["best_at_recall"]
+    engines = sorted({str(row["engine"]) for row in summary})
+    for threshold in ("0.95", "0.99"):
+        winners = best.get(threshold, {})
+        for engine in engines:
+            row = winners.get(engine)
+            if row is None:
+                threshold_table.append(
+                    f"| {threshold} | {engine} | not met | not met | not met | not met |"
+                )
+            else:
+                threshold_table.append(
+                    f"| {threshold} | {engine} | {row['ef_search']} | "
+                    f"{float(row['median_recall_at_10']):.4f} | "
+                    f"{float(row['median_queries_per_second']):.1f} | "
+                    f"{float(row['median_latency_us']):.1f} |"
+                )
     recall = payload["recall_investigation"]
     hybrid = payload["hybrid"]
     scale = payload["scale"]
+    recall_table = [
+        "| engine | ef_search | recall@10 | tie-aware recall@10 |",
+        "|---|---:|---:|---:|",
+    ]
+    recall_table.extend(
+        f"| {row['engine']} | {row['ef_search']} | {float(row['recall_at_10']):.4f} | "
+        f"{float(row['tie_aware_recall_at_10']):.4f} |"
+        for row in payload["recall_ceiling"]
+    )
+    configuration_table = [
+        "| M | ef_construction | ef_search | recall@10 | tie-aware recall@10 |",
+        "|---:|---:|---:|---:|---:|",
+    ]
+    configuration_table.extend(
+        f"| {row['m']} | {row['ef_construction']} | {row['ef_search']} | "
+        f"{float(row['recall_at_10']):.4f} | "
+        f"{float(row['tie_aware_recall_at_10']):.4f} |"
+        for row in recall.get("ef_construction_and_m", [])
+    )
+    latency_table = [
+        "| engine | ef_search | actual us | fixed us | search us | slope us/ef |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    latency_table.extend(
+        f"| {row['engine']} | {row['ef_search']} | "
+        f"{float(row['actual_latency_us']):.1f} | "
+        f"{float(row.get('fixed_lower_bound_us', 0)):.1f} | "
+        f"{float(row.get('exploration_residual_us', 0)):.1f} | "
+        f"{float(row.get('slope_us_per_ef', 0)):.3f} |"
+        for row in payload["latency_decomposition"]
+    )
+    hybrid_table = [
+        "| arm | selectivity | p50 us | p95 us | top-k accuracy | over-fetch | returns k |",
+        "|---|---:|---:|---:|---:|---:|:---:|",
+    ]
+    hybrid_table.extend(
+        f"| {row['arm']} | {float(row['selectivity']):.1%} | "
+        f"{float(row['median_latency_p50_us']):.1f} | "
+        f"{float(row['median_latency_p95_us']):.1f} | "
+        f"{float(row['filtered_top_k_accuracy']):.4f} | "
+        f"{float(row['median_overfetch_amplification']):.1f}x | "
+        f"{'yes' if row['returns_k'] else 'no'} |"
+        for row in hybrid.get("summary", [])
+    )
+    scale_table = [
+        "| N | engine | build s | index bytes | peak RSS bytes | QPS @ recall>=0.95 | ef_search | recall |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    scale_table.extend(
+        f"| {int(row['dataset_size']):,} | {row['engine']} | "
+        f"{float(row['build_time_seconds']):.2f} | {int(row['index_size_bytes'])} | "
+        f"{int(row['peak_rss_bytes'])} | {float(row['qps_at_recall_095']):.1f} | "
+        f"{row.get('ef_search_at_recall_095') or 'not met'} | "
+        + (
+            f"{float(row['recall_at_selected_setting']):.4f} |"
+            if row.get("recall_at_selected_setting") is not None
+            else "not met |"
+        )
+        for row in scale.get("results", [])
+    )
+    run = payload["provenance"]
     return (
         "# HNSW diagnostic\n\n"
         f"Release: `{payload.get('release_version', 'local')}`. Dataset: `{DATASET_SIZE} x "
-        f"{DIMENSION}`; minimum queries/run: `{QUERY_COUNT}`; seed: `{SEED}`.\n\n"
+        f"{DIMENSION}`; minimum queries/run: `{QUERY_COUNT}`; seed: `{SEED}`. "
+        f"Source commit: `{run['source_commit']}`; Python: `{run['python']}`; "
+        f"platform: `{run['platform']}`; CPU: `{run['cpu_model']}`; "
+        f"CPU affinity: `{json.dumps(run['cpu_affinity'])}`. Dataset SHA-256: "
+        f"`{payload['dataset'].get('source_sha256', 'not recorded')}`. Dependencies: "
+        f"`{json.dumps(run['dependencies'], sort_keys=True)}`.\n\n"
         + "\n".join(table)
-        + "\n\n## Recall ceiling conclusion\n\n"
+        + "\n\n## Fastest settings at recall thresholds\n\n"
+        + "\n".join(threshold_table)
+        + "\n\n## Recall ceiling\n\n"
+        + "\n".join(recall_table)
+        + "\n\nConclusion: "
         + str(recall.get("conclusion", "not measured"))
-        + "\n\n## Hybrid\n\nAlopex advantageous selectivities: `"
+        + f". Index/input count: `{recall.get('index_count', 'not measured')}/"
+        f"{recall.get('input_count', 'not measured')}`; self-match rate: "
+        f"`{recall.get('self_match_rate', 'not measured')}`.\n\n"
+        + "\n".join(configuration_table)
+        + "\n\n## Latency decomposition\n\n"
+        + "\n".join(latency_table)
+        + "\n\n## Hybrid\n\n"
+        + "\n".join(hybrid_table)
+        + "\n\nAlopex advantageous selectivities: `"
         + json.dumps(hybrid.get("alopex_advantageous_selectivities", []))
-        + "`. Filter-aware traversal: `false`.\n\n## Scale\n\n"
+        + "`. Filter-aware traversal: `"
+        + str(hybrid.get("filter_aware_traversal", False)).lower()
+        + "`.\n\n## Scale\n\n"
+        + "\n".join(scale_table)
+        + "\n\n"
         + "Brute-force crossovers: `"
         + json.dumps(scale.get("brute_force_crossover", {}), sort_keys=True)
         + "`. Limits: `"
@@ -1283,14 +1526,14 @@ def write_artifacts(
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
     summary = summarize_by_engine(runs)
+    run_provenance = provenance()
     payload = {
         "schema": "alopex.hnsw-diagnostic/v3",
         "contract": {
             "dataset_size": DATASET_SIZE,
             "dimension": DIMENSION,
             "warmup": "one complete query cycle per engine/setting",
-            "min_duration_seconds": WARMUP_SECONDS,
-            "min_queries": QUERY_COUNT,
+            "query_count_per_run": QUERY_COUNT,
             "runs": 3,
             "metrics": [
                 "recall_at_10",
@@ -1301,6 +1544,8 @@ def write_artifacts(
                 "native_search_latency_us",
                 "python_binding_residual_us",
                 "queries_per_second",
+            ],
+            "build_metrics": [
                 "build_time_seconds",
                 "index_size_bytes",
                 "peak_rss_bytes",
@@ -1310,12 +1555,16 @@ def write_artifacts(
             ],
         },
         "dataset": dataset or {},
+        "provenance": run_provenance,
         "builds": builds or [],
         "recall_ceiling": recall_ceiling or [],
         "recall_investigation": (diagnostics or {}).get("recall_investigation", {}),
         "fixed_cost_runs": (diagnostics or {}).get("fixed_cost_runs", []),
         "latency_decomposition": (diagnostics or {}).get("latency_decomposition", []),
         "hybrid": (diagnostics or {}).get("hybrid", {}),
+        "hybrid_measurement_contract": (diagnostics or {}).get(
+            "hybrid_measurement_contract", {}
+        ),
         "scale": scale or {},
         "runs": runs,
         "summary": summary,
@@ -1328,7 +1577,12 @@ def write_artifacts(
         payload["release_version"] = release_version
     raw = {
         "schema": "alopex.hnsw-diagnostic-raw/v3",
+        "dataset": payload["dataset"],
+        "provenance": run_provenance,
+        "builds": payload["builds"],
         "runs": runs,
+        "recall_ceiling": payload["recall_ceiling"],
+        "recall_investigation": payload["recall_investigation"],
         "fixed_cost_runs": payload["fixed_cost_runs"],
         "hybrid_runs": payload["hybrid"].get("runs", []),
         "scale_runs": payload["scale"].get("runs", []),
@@ -1343,15 +1597,33 @@ def write_artifacts(
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(runs)
+    scale_curve = [
+        {"dataset_size": result["dataset_size"], **point}
+        for result in payload["scale"].get("results", [])
+        for point in result.get("curve", [])
+    ]
     for filename, rows in (
+        ("hnsw-builds.csv", payload["builds"]),
+        ("hnsw-recall-ceiling.csv", payload["recall_ceiling"]),
+        (
+            "hnsw-recall-configurations.csv",
+            payload["recall_investigation"].get("ef_construction_and_m", []),
+        ),
+        ("hnsw-fixed-cost-runs.csv", payload["fixed_cost_runs"]),
         ("hnsw-latency-decomposition.csv", payload["latency_decomposition"]),
         ("hnsw-hybrid.csv", payload["hybrid"].get("runs", [])),
+        ("hnsw-build.csv", payload["builds"]),
+        ("hnsw-scale-build.csv", payload["scale"].get("build_results", [])),
+        ("hnsw-hybrid-summary.csv", payload["hybrid"].get("summary", [])),
         ("hnsw-scale.csv", payload["scale"].get("results", [])),
+        ("hnsw-scale-curve.csv", scale_curve),
     ):
+        path = output / filename
         if not rows:
+            path.unlink(missing_ok=True)
             continue
         columns = sorted({key for row in rows for key in row if key != "curve"})
-        with (output / filename).open("w", newline="", encoding="utf-8") as stream:
+        with path.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
@@ -1367,32 +1639,29 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--duration-seconds", type=float, default=WARMUP_SECONDS)
     parser.add_argument("--min-queries", type=int, default=QUERY_COUNT)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--release-version")
     parser.add_argument("--glove-dataset", type=Path)
     parser.add_argument("--max-scale-n", type=int, default=1_000_000)
     parser.add_argument("--baseline-only", action="store_true")
+    parser.add_argument("--embedding-cache", type=Path)
     args = parser.parse_args()
-    if args.duration_seconds < WARMUP_SECONDS:
-        parser.error("duration must be at least 2 seconds")
     if args.min_queries < QUERY_COUNT:
         parser.error("min-queries must be at least 10000")
     if args.runs != 3:
         parser.error("runs must be exactly 3")
     benchmark_runs, dataset, builds, recall_ceiling, diagnostics = run_benchmark(
         args.dataset,
-        duration_seconds=args.duration_seconds,
         min_queries=args.min_queries,
         run_count=args.runs,
         extended=not args.baseline_only,
+        embedding_cache=args.embedding_cache,
     )
     scale = (
         run_scale_benchmark(
             args.glove_dataset,
             max_n=args.max_scale_n,
-            duration_seconds=args.duration_seconds,
             min_queries=args.min_queries,
             run_count=args.runs,
         )

@@ -42,6 +42,15 @@ TARGET="$(git -C "${TEMP_ROOT}/repo" rev-parse HEAD)"
 
 assert_success run_safe_tag v0.8.4 "${TARGET}"
 
+git -C "${TEMP_ROOT}/repo" switch -c feature/candidate >/dev/null
+assert_success run_safe_tag v0.8.12-rc.1 "${TARGET}"
+printf 'later\n' >>"${TEMP_ROOT}/repo/file"
+git -C "${TEMP_ROOT}/repo" add file
+git -C "${TEMP_ROOT}/repo" commit -m later >/dev/null
+assert_success run_safe_tag v0.8.12-rc.2 "${TARGET}"
+git -C "${TEMP_ROOT}/repo" switch --detach >/dev/null
+assert_success run_safe_tag v0.8.12-rc.3 "${TARGET}"
+
 assert_fail run_safe_tag v0.8.4
 assert_fail run_safe_tag v0.8.4 "$(printf '0%.0s' {1..40})"
 
