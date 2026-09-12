@@ -196,7 +196,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn("dispatch-python-release:", rust)
         self.assertIn('gh run watch "${run_id}" --exit-status', rust)
-        self.assertIn("verify-public-release:", python)
+        self.assertNotIn("verify-public-release:", python)
         self.assertNotIn("publish_report:", python)
         self.assertIn("verify_python_vector_api.py", python)
 
@@ -211,7 +211,7 @@ class ReleaseContractTests(unittest.TestCase):
         python_release = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Verify public package availability and publish docs report", python_release)
+        self.assertNotIn("Verify public package availability and publish docs report", python_release)
         self.assertNotIn("Verify demos and publish docs report", python_release)
         self.assertNotIn("post-release-hnsw:", python_release)
         for moved_check in (
@@ -316,15 +316,9 @@ class ReleaseContractTests(unittest.TestCase):
                 "    steps:", maxsplit=1
             )[0]
             self.assertNotIn("needs:", header)
-        join = workflow.split("  final-release-join:", maxsplit=1)[1].split(
-            "  verify-public-release:", maxsplit=1
-        )[0]
+        join = workflow.split("  final-release-join:", maxsplit=1)[1]
         self.assertIn("needs: [publish-pypi, github-release]", join)
         self.assertIn('git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}"', join)
-        public = workflow.split("  verify-public-release:", maxsplit=1)[1]
-        self.assertIn(
-            "always() && needs.final-release-join.result == 'success'", public
-        )
 
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")

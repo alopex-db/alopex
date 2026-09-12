@@ -687,15 +687,3 @@ jobs:
           (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
           PY
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
-
-  verify-public-release:
-    name: Verify public package availability and publish docs report
-    needs: [final-release-join]
-    if: ${{ always() && needs.final-release-join.result == 'success' }}
-    permissions:
-      contents: read
-      issues: write
-    uses: ./.github/workflows/public-release-verification.yml
-    with:
-      version: ${{ github.ref_name }}
-    secrets: inherit

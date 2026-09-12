@@ -85,13 +85,9 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("push:", trigger)
         self.assertIn("core release dispatches", trigger)
 
-    def test_public_verifier_uses_the_python_tag(self) -> None:
+    def test_public_verifier_is_detached_from_python_publish(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  verify-public-release:", maxsplit=1)[1]
-        self.assertIn(
-            "version: ${{ github.ref_name }}",
-            block,
-        )
+        self.assertNotIn("verify-public-release:", text)
 
     def test_sidecars_are_written_with_platform_stable_bytes(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
