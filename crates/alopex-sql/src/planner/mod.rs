@@ -5892,7 +5892,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     let column_index = table
                         .get_column_index(&assignment.column)
                         .expect("resolved column");
-                    let value = self.type_checker.infer_type(&assignment.value, table)?;
+                    let value = self.type_check_on_conflict_value(&assignment.value, table)?;
                     self.validate_type_assignment(
                         &value,
                         &column_meta.data_type,
@@ -5923,6 +5923,31 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             constraint: conflict.constraint.clone(),
             action,
         }))
+    }
+
+    fn type_check_on_conflict_value(
+        &self,
+        expr: &Expr,
+        table: &TableMetadata,
+    ) -> Result<TypedExpr, PlannerError> {
+        if let ExprKind::ColumnRef {
+            table: Some(qualifier),
+            column,
+        } = &expr.kind
+            && qualifier.eq_ignore_ascii_case("excluded")
+        {
+            let column_index = table
+                .get_column_index(column)
+                .ok_or_else(|| PlannerError::column_not_found(column, "excluded", expr.span))?;
+            return Ok(TypedExpr::column_ref(
+                "excluded".to_string(),
+                column.clone(),
+                table.column_count() + column_index,
+                table.columns[column_index].data_type.clone(),
+                expr.span,
+            ));
+        }
+        self.type_checker.infer_type(expr, table)
     }
 
     fn finish_insert_query(

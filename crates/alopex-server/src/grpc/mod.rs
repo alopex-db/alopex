@@ -647,6 +647,37 @@ impl AlopexService for AlopexServiceImpl {
         Ok(Response::new(proto::VectorUpsertResponse { success: true }))
     }
 
+    async fn vector_upsert_batch(
+        &self,
+        request: Request<proto::VectorUpsertBatchRequest>,
+    ) -> std::result::Result<Response<proto::VectorUpsertBatchResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let upsert_request = crate::http::vector::VectorUpsertBatchRequest {
+            table: req.table,
+            vectors: req
+                .vectors
+                .into_iter()
+                .map(|item| crate::http::vector::VectorUpsertBatchItem {
+                    id: item.id,
+                    vector: item.vector,
+                })
+                .collect(),
+            column: if req.column.is_empty() {
+                None
+            } else {
+                Some(req.column)
+            },
+        };
+        crate::http::vector::upsert_batch_impl(self.state.clone(), upsert_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorUpsertBatchResponse {
+            success: true,
+        }))
+    }
+
     async fn vector_delete(
         &self,
         request: Request<proto::VectorDeleteRequest>,
