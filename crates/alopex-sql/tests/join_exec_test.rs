@@ -256,6 +256,18 @@ fn hash_and_nested_loop_joins_keep_null_keys_unmatched() {
         hashed[0].values,
         vec![SqlValue::Integer(7), SqlValue::Integer(7)]
     );
+
+    let left_join = hash_join(&left, &right, 0, 0, JoinType::Left).unwrap();
+    assert_eq!(
+        left_join
+            .iter()
+            .map(|row| row.values.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![SqlValue::Null, SqlValue::Null],
+            vec![SqlValue::Integer(7), SqlValue::Integer(7)],
+        ]
+    );
 }
 
 #[test]
