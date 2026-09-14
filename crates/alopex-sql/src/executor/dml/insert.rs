@@ -9,6 +9,7 @@ use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::aggregate::encode_group_key;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
@@ -16,6 +17,7 @@ use crate::planner::type_checker::TypeChecker;
 use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
+use std::collections::HashSet;
 
 /// Execute INSERT statements.
 #[allow(dead_code)]
@@ -205,6 +207,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     conflict: Option<&OnConflictPlan>,
     returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
+    if let Some(plan) = conflict {
+        reject_duplicate_conflict_keys(table, plan, &rows)?;
+    }
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     for mut row in rows {
@@ -228,7 +233,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
                         if !predicate_matches(selection, &old_row)? {
                             continue;
                         }
-                        let ctx = EvalContext::new(&old_row);
+                        let mut conflict_row = old_row.clone();
+                        conflict_row.extend_from_slice(&row);
+                        let ctx = EvalContext::new(&conflict_row);
                         let mut new_row = old_row.clone();
                         for assignment in assignments {
                             let value = evaluate(&assignment.value, &ctx)?;
@@ -325,6 +332,55 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     } else {
         Ok(ExecutionResult::RowsAffected(staged.len() as u64))
     }
+}
+
+fn reject_duplicate_conflict_keys(
+    table: &TableMetadata,
+    plan: &OnConflictPlan,
+    rows: &[Vec<SqlValue>],
+) -> Result<()> {
+    let columns = if plan.columns.is_empty() {
+        table.primary_key.clone().unwrap_or_default()
+    } else {
+        plan.columns.clone()
+    };
+    let indices = columns
+        .iter()
+        .filter_map(|column| table.get_column_index(column))
+        .collect::<Vec<_>>();
+    if columns.is_empty() || indices.len() != columns.len() {
+        return Ok(());
+    }
+
+    let mut seen = HashSet::with_capacity(rows.len());
+    for row in rows {
+        let values = indices
+            .iter()
+            .map(|&index| row[index].clone())
+            .collect::<Vec<_>>();
+        if values.iter().any(SqlValue::is_null) {
+            continue;
+        }
+        if !seen.insert(encode_group_key(&values)?) {
+            let violation = if table.primary_key.as_ref() == Some(&columns) {
+                ConstraintViolation::PrimaryKey {
+                    columns,
+                    value: None,
+                }
+            } else {
+                ConstraintViolation::Unique {
+                    index_name: plan
+                        .constraint
+                        .clone()
+                        .unwrap_or_else(|| "ON CONFLICT".to_string()),
+                    columns,
+                    value: None,
+                }
+            };
+            return Err(violation.into());
+        }
+    }
+    Ok(())
 }
 
 fn find_conflict<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
