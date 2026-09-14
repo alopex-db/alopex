@@ -522,17 +522,21 @@ where
                 table,
                 columns,
                 values,
-                ..
+                conflict,
+                returning,
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_insert(txn, &*guard, &table, columns, values)?
+                dml::execute_insert_with_plan(
+                    txn, &*guard, &table, columns, values, conflict, returning,
+                )?
             }
             LogicalPlan::InsertSelect {
                 table,
                 columns,
                 source,
-                ..
+                conflict,
+                returning,
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
@@ -543,7 +547,15 @@ where
                         reason: "SELECT source did not return query rows".into(),
                     });
                 };
-                dml::execute_insert_rows(txn, &*guard, &table, columns, result.rows)?
+                dml::execute_insert_rows_with_plan(
+                    txn,
+                    &*guard,
+                    &table,
+                    columns,
+                    result.rows,
+                    conflict,
+                    returning,
+                )?
             }
             LogicalPlan::Update {
                 table,

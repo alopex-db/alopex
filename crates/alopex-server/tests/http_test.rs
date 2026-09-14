@@ -374,6 +374,22 @@ async fn http_sql_vector_session_flow() {
     let (status, _, _) = send_json(
         router.clone(),
         Method::POST,
+        "/vector/upsert-batch",
+        json!({
+            "table": "items",
+            "vectors": [
+                { "id": 1, "vector": [1.0, 0.0] },
+                { "id": 2, "vector": [0.0, 1.0] }
+            ]
+        }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
         "/vector/upsert",
         json!({
             "table": "items",
@@ -390,7 +406,7 @@ async fn http_sql_vector_session_flow() {
         Method::POST,
         "/sql",
         json!({
-            "sql": "INSERT INTO items (id, embedding) VALUES (2, [1.0, 0.0]), (3, [0.5, 0.0]);"
+            "sql": "INSERT INTO items (id, embedding) VALUES (3, [1.0, 0.0]), (4, [0.5, 0.0]);"
         }),
         &[],
     )
@@ -430,7 +446,7 @@ async fn http_sql_vector_session_flow() {
         Method::POST,
         "/sql",
         json!({
-            "sql": "INSERT INTO items (id, embedding) VALUES (4, [0.2, 0.0]);",
+            "sql": "INSERT INTO items (id, embedding) VALUES (5, [0.2, 0.0]);",
             "session_id": session_id
         }),
         &[],
