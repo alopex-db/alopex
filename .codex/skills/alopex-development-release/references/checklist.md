@@ -23,6 +23,9 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 ## Checkpoint 1 — implementation and review
 
 - [ ] Every target issue has implementation, regression tests, and an issue comment.
+- [ ] Each issue-owned change is committed with the issue number in the commit subject/body, pushed to the remote branch, and visible from the remote PR before the issue comment is written.
+- [ ] The issue comment links the pushed commit/PR permalink and the actual test result; a local-only SHA or comment-only claim is not accepted as work history.
+- [ ] Do not post a completion comment before commit/push; if a premature comment exists, add a superseding correction that links the public commit/PR and leave the issue open until the correction is verified.
 - [ ] Push the exact candidate SHA to a pull request.
 - [ ] Require all required CI, coverage, and target-version implementation-surface checks on that SHA.
 - [ ] On failure, keep the tracker open, create or reopen the owning implementation issue, fix it, and rerun focused, full, and remote checks.
@@ -45,6 +48,8 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 ## Checkpoint 4 — public verification and close
 
 - [ ] Record tag SHAs, workflow conclusions, registry evidence, and public verifier evidence.
+- [ ] Audit every closed target issue: confirm its linked commit is public, merged as required, present in the target tag, and independently verified against the released artifact or public documentation.
+- [ ] Reopen any issue whose implementation or evidence exists only locally, only in an issue comment, only on an unmerged branch, or outside the target tag; retain its branch/worktree until the owning change is pushed and reviewed.
 - [ ] Verify worktree/branch state, generated-artifact cleanup, and the 50 GiB limit.
 - [ ] Record remaining post-release work in separate issues.
 - [ ] Close the release tracker only after every preceding item has evidence.
