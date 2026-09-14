@@ -105,7 +105,7 @@ fn btree_index_answers_equality_and_range_filters() {
             Projection::All(vec!["id".into(), "score".into()]),
         )
     };
-    let query_rows = |plan| match executor.execute(plan).unwrap() {
+    let mut query_rows = |plan| match executor.execute(plan).unwrap() {
         ExecutionResult::Query(query) => query.rows,
         other => panic!("unexpected result {other:?}"),
     };
