@@ -277,6 +277,24 @@ async fn grpc_sql_vector_transaction_flow() {
         .await
         .expect("vector upsert");
 
+    client
+        .vector_upsert_batch(grpc::proto::VectorUpsertBatchRequest {
+            table: "items".to_string(),
+            vectors: vec![
+                grpc::proto::VectorUpsertBatchItem {
+                    id: 2,
+                    vector: vec![0.0, 1.0],
+                },
+                grpc::proto::VectorUpsertBatchItem {
+                    id: 3,
+                    vector: vec![0.5, 0.0],
+                },
+            ],
+            column: String::new(),
+        })
+        .await
+        .expect("vector upsert batch");
+
     let search = client
         .vector_search(grpc::proto::VectorSearchRequest {
             table: "items".to_string(),
@@ -297,7 +315,7 @@ async fn grpc_sql_vector_transaction_flow() {
         .into_inner();
     client
         .execute_dml(grpc::proto::DmlRequest {
-            sql: "INSERT INTO items (id, embedding) VALUES (3, [0.2, 0.0]);".to_string(),
+            sql: "INSERT INTO items (id, embedding) VALUES (4, [0.2, 0.0]);".to_string(),
             session_id: txn.session_id.clone(),
         })
         .await
@@ -314,7 +332,7 @@ async fn grpc_sql_vector_transaction_flow() {
         .into_inner();
     client
         .execute_dml(grpc::proto::DmlRequest {
-            sql: "INSERT INTO items (id, embedding) VALUES (4, [0.4, 0.0]);".to_string(),
+            sql: "INSERT INTO items (id, embedding) VALUES (5, [0.4, 0.0]);".to_string(),
             session_id: rollback_txn.session_id.clone(),
         })
         .await
@@ -340,7 +358,7 @@ async fn grpc_sql_vector_transaction_flow() {
             ids.push(extract_int(value).expect("int"));
         }
     }
-    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(ids, vec![1, 2, 3, 4]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

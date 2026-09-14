@@ -69,6 +69,21 @@ message VectorUpsertResponse {
   bool success = 1;
 }
 
+message VectorUpsertBatchItem {
+  uint64 id = 1;
+  repeated float vector = 2;
+}
+
+message VectorUpsertBatchRequest {
+  string table = 1;
+  repeated VectorUpsertBatchItem vectors = 2;
+  string column = 3;
+}
+
+message VectorUpsertBatchResponse {
+  bool success = 1;
+}
+
 message VectorDeleteRequest {
   string table = 1;
   uint64 id = 2;
@@ -251,6 +266,7 @@ service AlopexService {
   rpc RollbackTransaction(TransactionHandle) returns (RollbackResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
   rpc VectorUpsert(VectorUpsertRequest) returns (VectorUpsertResponse);
+  rpc VectorUpsertBatch(VectorUpsertBatchRequest) returns (VectorUpsertBatchResponse);
   rpc VectorDelete(VectorDeleteRequest) returns (VectorDeleteResponse);
   rpc VectorIndexCreate(VectorIndexCreateRequest) returns (VectorIndexResponse);
   rpc VectorIndexUpdate(VectorIndexUpdateRequest) returns (VectorIndexResponse);

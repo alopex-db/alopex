@@ -34,6 +34,19 @@ pub struct VectorUpsertRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct VectorUpsertBatchRequest {
+    pub table: String,
+    pub vectors: Vec<VectorUpsertBatchItem>,
+    pub column: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VectorUpsertBatchItem {
+    pub id: u64,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct VectorDeleteRequest {
     pub table: String,
     pub id: u64,
@@ -118,6 +131,17 @@ pub async fn upsert(
     Json(request): Json<VectorUpsertRequest>,
 ) -> Response {
     match upsert_impl(state.clone(), request).await {
+        Ok(resp) => json_response(resp, state.config.max_response_size, &ctx),
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
+pub async fn upsert_batch(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<VectorUpsertBatchRequest>,
+) -> Response {
+    match upsert_batch_impl(state.clone(), request).await {
         Ok(resp) => json_response(resp, state.config.max_response_size, &ctx),
         Err(err) => error_response(err, &ctx),
     }
@@ -285,8 +309,32 @@ pub(crate) async fn upsert_impl(
     state: Arc<ServerState>,
     request: VectorUpsertRequest,
 ) -> Result<VectorUpsertResponse> {
+    upsert_batch_impl(
+        state,
+        VectorUpsertBatchRequest {
+            table: request.table,
+            vectors: vec![VectorUpsertBatchItem {
+                id: request.id,
+                vector: request.vector,
+            }],
+            column: request.column,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn upsert_batch_impl(
+    state: Arc<ServerState>,
+    request: VectorUpsertBatchRequest,
+) -> Result<VectorUpsertResponse> {
     let start = Instant::now();
     state.lifecycle_state.check_write_allowed()?;
+    if request.vectors.is_empty() {
+        state.metrics.record_query(start.elapsed(), false);
+        return Err(ServerError::BadRequest(
+            "vector upsert batch must not be empty".into(),
+        ));
+    }
     let (table_meta, vector_col, _) =
         match resolve_vector_table(&state, &request.table, request.column.as_deref()) {
             Ok(values) => values,
@@ -314,22 +362,21 @@ pub(crate) async fn upsert_impl(
         }
     };
 
-    let vector_literal = format_vector_literal(&request.vector);
+    let values = request
+        .vectors
+        .iter()
+        .map(|item| format!("({}, {})", item.id, format_vector_literal(&item.vector)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let insert_sql = format!(
-        "INSERT INTO {} ({}, {}) VALUES ({}, {})",
+        "INSERT INTO {} ({}, {}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {} = EXCLUDED.{}",
         quote_ident(&table_meta.name),
         quote_ident(&pk_name),
         quote_ident(&vector_col),
-        request.id,
-        vector_literal
-    );
-    let update_sql = format!(
-        "UPDATE {} SET {} = {} WHERE {} = {}",
-        quote_ident(&table_meta.name),
-        quote_ident(&vector_col),
-        vector_literal,
+        values,
         quote_ident(&pk_name),
-        request.id
+        quote_ident(&vector_col),
+        quote_ident(&vector_col),
     );
 
     let mut txn = match state.begin_sql_txn().await {
@@ -353,24 +400,7 @@ pub(crate) async fn upsert_impl(
         }
     };
 
-    let exec_result = match exec_result {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            if is_unique_violation(&err) {
-                match tokio::time::timeout(
-                    state.config.query_timeout,
-                    txn.async_execute(&update_sql),
-                )
-                .await
-                {
-                    Ok(result) => result.map_err(|err| ServerError::Sql(err.into())),
-                    Err(_) => Err(ServerError::Timeout("query timeout".into())),
-                }
-            } else {
-                Err(ServerError::Sql(err.into()))
-            }
-        }
-    };
+    let exec_result = exec_result.map_err(|err| ServerError::Sql(err.into()));
 
     let exec_result = match exec_result {
         Ok(result) => result,
@@ -756,17 +786,6 @@ fn metric_to_string(metric: alopex_sql::ast::ddl::VectorMetric) -> &'static str 
 
 fn quote_ident(ident: &str) -> String {
     ident.to_string()
-}
-
-fn is_unique_violation(err: &alopex_sql::executor::ExecutorError) -> bool {
-    use alopex_sql::executor::ConstraintViolation;
-    use alopex_sql::executor::ExecutorError;
-
-    matches!(
-        err,
-        ExecutorError::ConstraintViolation(ConstraintViolation::PrimaryKey { .. })
-            | ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
-    )
 }
 
 fn default_k() -> usize {

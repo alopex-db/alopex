@@ -99,6 +99,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/api/sql/query", axum::routing::post(sql::handle))
         .route("/vector/search", axum::routing::post(vector::search))
         .route("/vector/upsert", axum::routing::post(vector::upsert))
+        .route(
+            "/vector/upsert-batch",
+            axum::routing::post(vector::upsert_batch),
+        )
         .route("/vector/delete", axum::routing::post(vector::delete))
         .route(
             "/vector/index/create",
