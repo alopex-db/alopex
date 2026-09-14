@@ -36,6 +36,9 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 - [ ] Merge the approved pull request and record the exact main SHA.
 - [ ] Require all required CI checks on that exact main SHA.
 - [ ] Run candidate verification, formatting, clippy, release checks, and `safe-tag.sh`.
+- [ ] Before merging, run the release acceptance suite only from the exact pushed `release/<version>` branch head; record the branch name and full SHA in the evidence.
+- [ ] Build/install the candidate used by release acceptance from that release-branch SHA; reject main-only, feature-branch, local-only, stale-tag, failed, or missing acceptance evidence.
+- [ ] Verify the merged `main` SHA is the same commit that passed release-branch acceptance; if it differs, rerun acceptance for the new release-branch head before publication.
 - [ ] Confirm that the target tags and registry versions do not already exist.
 - [ ] Confirm explicit user authorization before creating or publishing a tag.
 
@@ -49,6 +52,7 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 ## Checkpoint 4 — public verification and close
 
 - [ ] Record tag SHAs, workflow conclusions, registry evidence, and public verifier evidence.
+- [ ] Confirm release-branch-only acceptance passed for the exact branch SHA that was approved for publication.
 - [ ] Audit every closed target issue: confirm its linked commit is public, merged as required, present in the target tag, and independently verified against the released artifact or public documentation.
 - [ ] Reopen any issue whose implementation or evidence exists only locally, only in an issue comment, only on an unmerged branch, or outside the target tag; retain its branch/worktree until the owning change is pushed and reviewed.
 - [ ] Verify worktree/branch state, generated-artifact cleanup, and the 50 GiB limit.
