@@ -19,7 +19,8 @@ correctness.
 | behavior, execution path, fast resource/performance policy | Development CI | change the commit |
 | broad compatibility, stress, durability, statistical performance | Extended Verification | change the commit or versioned policy |
 | archive/package/install/manifest/digest qualification | RC Qualification | create a new immutable RC after a fix |
-| publication or public reachability | Stable Delivery | retry or repair-forward the same stable release |
+| failed or cancelled publication before any public artifact exists | Stable Delivery | cancel active workflows, verify no public artifact exists, delete every unpublished release tag immediately, then return to corrected-main tagging |
+| publication or public reachability after any public artifact exists | Stable Delivery | retry or repair-forward the same stable release |
 
 ## Workflow job inventory
 
@@ -116,7 +117,11 @@ contract test then requires their new workflow-qualified names.
   new RC number.
 - A stable tag is not created until an approved RC manifest exists for the same
   peeled SHA.
-- Stable partial publication uses repair-forward only. No source rebuild or
-  qualification rerun may replace already-published bytes.
+- Before any public artifact exists, a failed or cancelled tag-triggered
+  workflow requires cancelling active workflows, verifying the absence of public
+  artifacts, and deleting every unpublished release tag immediately.
+- After any public artifact exists, stable partial publication uses
+  repair-forward only. No source rebuild or qualification rerun may replace
+  already-published bytes.
 - Candidate views can be regenerated from `candidate-manifest.json`; Markdown is
   never an input.

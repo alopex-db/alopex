@@ -38,9 +38,10 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 
 ## Checkpoint 3 — publication
 
-- [ ] Create and push annotated Rust and Python tags at their separately recorded, CI-approved main SHAs; require the Python SHA to descend from the Core SHA and retain the same version.
+- [ ] Create and push the annotated Rust tag at its recorded, CI-approved main SHA; let `prepare-python-release.sh` create the independent Python tag from the separately recorded descendant SHA with the same version.
 - [ ] Record both workflow URLs and require every publish job to succeed.
 - [ ] Verify GitHub Release assets, all crates.io packages, and PyPI wheels/sdist independently.
+- [ ] If publication fails or is cancelled before any public artifact exists, cancel active workflows, independently verify that no public artifact exists, delete every unpublished release tag immediately, record the rollback, then return to the corrected-main tagging step.
 
 ## Checkpoint 4 — public verification and close
 
