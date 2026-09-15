@@ -63,14 +63,17 @@ Alopex extends standard SQL with vector operations.
 ```sql
 -- Create a table with mixed data types (Structured + Vector)
 CREATE TABLE knowledge_chunks (
-    id UUID PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     content TEXT,
-    embedding VECTOR(1536), -- OpenAI compatible
+    embedding VECTOR(3),
     created_at TIMESTAMP
 );
 
+INSERT INTO knowledge_chunks VALUES
+    (1, 'AlopexDB', [0.1, 0.5, 0.2], TIMESTAMP '2024-02-01 00:00:00');
+
 -- Hybrid Search: SQL Filter + ANN Search
-SELECT content, vector_similarity(embedding, [0.1, 0.5, ...], 'cosine') as score
+SELECT content, vector_similarity(embedding, [0.1, 0.5, 0.2], 'cosine') AS score
 FROM knowledge_chunks
 WHERE created_at > TIMESTAMP '2024-01-01 00:00:00'
 ORDER BY score DESC

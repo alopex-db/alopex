@@ -163,6 +163,15 @@ jobs:
           python scripts/performance/release_ingestion_evidence.py \
             --root "$root" \
             --source-commit "$GITHUB_SHA"
+      - name: Measure B-tree access path
+        id: btree
+        run: |
+          mkdir -p performance-artifacts/btree
+          taskset -c 0 env \
+            ALOPEX_BTREE_MEASUREMENT_SOURCE_COMMIT="$GITHUB_SHA" \
+            ALOPEX_BTREE_MEASUREMENT_OUTPUT=performance-artifacts/btree/btree.json \
+            cargo test -p alopex-sql --features lane_ci --test executor_integration \
+              btree_access_path_measurement -- --ignored --exact --test-threads=1
       - name: Enforce curated/full performance contracts
         id: gate
         env:
@@ -183,6 +192,7 @@ jobs:
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
           INGESTION: ${{ steps.ingestion.outcome }}
+          BTREE: ${{ steps.btree.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -191,7 +201,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "ingestion", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "ingestion", "btree", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)
