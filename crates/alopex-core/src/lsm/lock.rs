@@ -73,7 +73,7 @@ const LOCK_FILE_SUFFIX: &str = ".lock";
 #[derive(Debug)]
 pub(crate) struct DirectoryLock {
     /// The lock file path observed by unit tests.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     path: Option<PathBuf>,
     /// The locked handle.
     ///
@@ -93,7 +93,7 @@ impl DirectoryLock {
     #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn disabled() -> Self {
         Self {
-            #[cfg(test)]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             path: None,
             #[cfg(not(target_arch = "wasm32"))]
             _file: None,
@@ -103,7 +103,7 @@ impl DirectoryLock {
     }
 
     /// The lock file backing this lock, if one is held.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -207,7 +207,7 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
     let _ = write_holder(&file);
 
     Ok(DirectoryLock {
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         path: Some(lock_path.to_path_buf()),
         _file: Some(file),
     })
