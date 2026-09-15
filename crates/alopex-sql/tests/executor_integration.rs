@@ -5,7 +5,7 @@ use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::planner::logical_plan::LogicalPlan;
 use alopex_sql::planner::typed_expr::{Projection, TypedAssignment, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
-use alopex_sql::{Catalog, Compression, StorageType};
+use alopex_sql::{Catalog, Compression, ExplainFormat, StorageType};
 use std::sync::{Arc, RwLock};
 
 fn create_executor() -> (
@@ -127,6 +127,111 @@ fn btree_index_answers_equality_and_range_filters() {
             vec![SqlValue::Integer(3), SqlValue::Integer(30)],
         ]
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explain_reports_the_selected_btree_access_path() {
+    use alopex_sql::ast::ddl::IndexMethod;
+
+    let (mut executor, _catalog) = create_executor();
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "items",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer)
+                        .with_primary_key(true)
+                        .with_not_null(true),
+                    ColumnMetadata::new("score", ResolvedType::Integer),
+                ],
+            )
+            .with_primary_key(vec!["id".into()]),
+            if_not_exists: false,
+            with_options: vec![],
+        })
+        .unwrap();
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["id".into(), "score".into()],
+            values: vec![vec![number(1), number(10)], vec![number(2), number(20)]],
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    executor
+        .execute(LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "idx_items_score",
+                "items",
+                vec!["score".into()],
+            )
+            .with_method(IndexMethod::BTree),
+            if_not_exists: false,
+        })
+        .unwrap();
+
+    let predicate = TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(TypedExpr {
+                kind: TypedExprKind::ColumnRef {
+                    table: "items".into(),
+                    column: "score".into(),
+                    column_index: 1,
+                },
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            }),
+            op: alopex_sql::ast::expr::BinaryOp::Eq,
+            right: Box::new(number(20)),
+        },
+        resolved_type: ResolvedType::Boolean,
+        span: Span::default(),
+    };
+    let input = LogicalPlan::filter(
+        LogicalPlan::scan("items".into(), Projection::All(vec!["id".into()])),
+        predicate,
+    );
+    let result = executor
+        .execute(LogicalPlan::Explain {
+            analyze: false,
+            format: ExplainFormat::Text,
+            input: Box::new(input.clone()),
+        })
+        .unwrap();
+    let ExecutionResult::Query(result) = result else {
+        panic!("EXPLAIN must return a query result");
+    };
+    let plan = match &result.rows[0][0] {
+        alopex_sql::storage::SqlValue::Text(plan) => plan,
+        value => panic!("unexpected EXPLAIN value {value:?}"),
+    };
+    assert!(plan.contains("IndexScan index=idx_items_score"), "{plan}");
+
+    let result = executor
+        .execute(LogicalPlan::Explain {
+            analyze: false,
+            format: ExplainFormat::Json,
+            input: Box::new(input),
+        })
+        .unwrap();
+    let ExecutionResult::Query(result) = result else {
+        panic!("EXPLAIN (FORMAT JSON) must return a query result");
+    };
+    let plan = match &result.rows[0][0] {
+        alopex_sql::storage::SqlValue::Text(plan) => plan,
+        value => panic!("unexpected EXPLAIN JSON value {value:?}"),
+    };
+    assert!(plan.contains("\"node\":\"IndexScan\""), "{plan}");
+    assert!(plan.contains("\"index\":\"idx_items_score\""), "{plan}");
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
