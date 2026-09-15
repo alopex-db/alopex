@@ -15,7 +15,9 @@ use crate::ast::Statement;
 use crate::catalog::{Catalog, TableMetadata};
 use crate::dialect::AlopexDialect;
 use crate::executor::memory::MemoryPolicy;
-use crate::executor::{ExecutionResult, ExecutorError, Result as ExecResult, Row, ddl, dml, query};
+use crate::executor::{
+    ExecutionResult, ExecutorError, Result as ExecResult, Row, bulk, copy_format, ddl, dml, query,
+};
 use crate::parser::Parser;
 use crate::planner::{LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing};
 use crate::storage::bridge::HnswTxnEntry;
@@ -47,6 +49,7 @@ where
     mode: TxnMode,
     catalog: Option<Arc<RwLock<dyn Catalog + Send + Sync>>>,
     memory_policy: Option<MemoryPolicy>,
+    copy_security: bulk::CopySecurityConfig,
     _marker: PhantomData<&'txn ()>,
 }
 
@@ -61,6 +64,7 @@ where
             mode,
             catalog: None,
             memory_policy: None,
+            copy_security: bulk::CopySecurityConfig::default(),
             _marker: PhantomData,
         }
     }
@@ -79,6 +83,11 @@ where
     /// Attach a memory policy for query execution.
     pub fn set_memory_policy(&mut self, policy: Option<MemoryPolicy>) {
         self.memory_policy = policy;
+    }
+
+    /// Restrict file paths used by COPY statements.
+    pub fn set_copy_security(&mut self, config: bulk::CopySecurityConfig) {
+        self.copy_security = config;
     }
 
     /// Attach a memory policy and return the updated bridge.
@@ -338,6 +347,7 @@ where
         let state = Arc::clone(&self.state);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
+        let copy_security = self.copy_security.clone();
         Box::pin(async move {
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
@@ -353,7 +363,13 @@ where
             let join = tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
                     BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                let result = execute_sql_blocking_multi(&mut blocking_txn, &catalog, &sql, mode);
+                let result = execute_sql_blocking_multi(
+                    &mut blocking_txn,
+                    &catalog,
+                    &sql,
+                    mode,
+                    &copy_security,
+                );
                 let (txn, hnsw) = blocking_txn.into_parts();
                 (result, txn, hnsw)
             });
@@ -464,6 +480,7 @@ fn execute_sql_blocking_multi<T>(
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     mode: TxnMode,
+    copy_security: &bulk::CopySecurityConfig,
 ) -> ExecResult<Vec<ExecutionResult>>
 where
     T: for<'a> AsyncKVTransaction<'a>,
@@ -582,10 +599,91 @@ where
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_merge(txn, &*guard, &target, &source, on, clauses)?
             }
-            LogicalPlan::Copy { .. } => {
-                return Err(ExecutorError::UnsupportedOperation(
-                    "COPY is not available through the async executor".into(),
-                ));
+            LogicalPlan::Copy {
+                query: Some(_),
+                direction: crate::ast::CopyDirection::From,
+                ..
+            } => {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "COPY FROM".into(),
+                    reason: "COPY FROM requires a table source and file input".into(),
+                });
+            }
+            LogicalPlan::Copy {
+                query: Some(query),
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                ..
+            } => {
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                let guard = catalog.read().expect("catalog lock poisoned");
+                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *query)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "COPY TO".into(),
+                        reason: "query source did not return rows".into(),
+                    });
+                };
+                bulk::execute_copy_query_to(
+                    &result,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    copy_security,
+                )?
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::To,
+                query: None,
+            } => {
+                let guard = catalog.read().expect("catalog lock poisoned");
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                bulk::execute_copy_to(
+                    txn,
+                    &*guard,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    copy_security,
+                )?
+            }
+            LogicalPlan::Copy {
+                table,
+                path,
+                options,
+                direction: crate::ast::CopyDirection::From,
+                query: None,
+                ..
+            } => {
+                ensure_write(mode, op_name)?;
+                let guard = catalog.read().expect("catalog lock poisoned");
+                let header = options.iter().any(|option| {
+                    option.name.eq_ignore_ascii_case("header")
+                        && option.value.eq_ignore_ascii_case("true")
+                });
+                let format = copy_format(&path, &options)?;
+                bulk::execute_copy(
+                    txn,
+                    &*guard,
+                    &table,
+                    &path,
+                    format,
+                    bulk::CopyOptions { header },
+                    copy_security,
+                )?
             }
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");
