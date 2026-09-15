@@ -20,6 +20,7 @@ const PARTITION_BATCHES: usize = 16;
 const PARTITION_ROWS_PER_BATCH: usize = 257;
 const PARTITION_SIZE: usize = 64;
 const PARTITION_SCAN_REPEATS: usize = 64;
+const DATAFRAME_WORKLOAD_REPEATS: usize = 8;
 
 fn within_stability_gate(comparison: &V06Comparison) -> bool {
     comparison.degradation_ratio <= STABILITY_GATE_RATIO
@@ -130,8 +131,11 @@ fn run_partition_scan_workload() -> Result<()> {
 }
 
 fn run_dataframe_workload() -> Result<()> {
-    run_cast_workload()?;
-    run_partition_scan_workload()
+    for _ in 0..DATAFRAME_WORKLOAD_REPEATS {
+        run_cast_workload()?;
+        run_partition_scan_workload()?;
+    }
+    Ok(())
 }
 
 fn paired_medians() -> Result<(Duration, Duration)> {
