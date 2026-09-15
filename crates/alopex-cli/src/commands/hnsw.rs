@@ -22,7 +22,7 @@ use crate::tui::renderer::render_output;
 /// Default M parameter (max connections per node)
 const DEFAULT_M: usize = 16;
 /// Default ef_construction parameter
-const DEFAULT_EF_CONSTRUCTION: usize = 200;
+const DEFAULT_EF_CONSTRUCTION: usize = 100;
 
 #[derive(Debug, Serialize)]
 struct RemoteHnswCreateRequest {

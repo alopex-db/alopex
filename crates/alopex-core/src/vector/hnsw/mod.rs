@@ -167,18 +167,37 @@ impl HnswIndex {
         metadata: &[u8],
         state: &mut HnswTransactionState,
     ) -> Result<()> {
+        self.upsert_staged_batch([(key, vector, metadata)], state)
+    }
+
+    /// トランザクション内で複数ベクトルを upsert する（変更をステージング）。
+    ///
+    /// バッチ全体を一度のロックと統計更新で処理する。
+    pub fn upsert_staged_batch<'a, I>(
+        &mut self,
+        entries: I,
+        state: &mut HnswTransactionState,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = (&'a [u8], &'a [f32], &'a [u8])>,
+    {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
-        state.ensure_snapshot(&graph);
-
-        let existed = graph.find_node_id(key).is_some();
-        let node_id = graph.upsert(key, vector, metadata)?;
-        if existed {
-            state.record_upsert(node_id, false, None);
-        } else {
-            state.record_upsert(node_id, true, None);
+        let mut changed = false;
+        for (key, vector, metadata) in entries {
+            state.ensure_snapshot(&graph);
+            let existed = graph.find_node_id(key).is_some();
+            let node_id = graph.upsert(key, vector, metadata)?;
+            if existed {
+                state.record_upsert(node_id, false, None);
+            } else {
+                state.record_upsert(node_id, true, None);
+            }
+            changed = true;
         }
-        self.stats_cache = Self::compute_stats(&graph);
+        if changed {
+            self.stats_cache = Self::compute_stats(&graph);
+        }
         Ok(())
     }
 

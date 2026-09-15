@@ -209,7 +209,7 @@ impl Default for PyHnswConfig {
         Self {
             dim: 0,
             m: 16,
-            ef_construction: 200,
+            ef_construction: 100,
             metric: PyMetric::default(),
         }
     }
@@ -229,7 +229,7 @@ impl From<PyHnswConfig> for alopex_core::HnswConfig {
 #[pymethods]
 impl PyHnswConfig {
     #[new]
-    #[pyo3(signature = (dim, m = 16, ef_construction = 200, metric = None))]
+    #[pyo3(signature = (dim, m = 16, ef_construction = 100, metric = None))]
     fn new(dim: usize, m: usize, ef_construction: usize, metric: Option<PyMetric>) -> Self {
         Self {
             dim,
