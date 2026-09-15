@@ -1,4 +1,6 @@
+use std::fs;
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use alopex_cluster::{
@@ -39,6 +41,21 @@ async fn build_state(auth_mode: AuthMode) -> (Arc<ServerState>, tempfile::TempDi
     };
     let server = Server::new(config).expect("server");
     (server.state, temp)
+}
+
+async fn build_state_with_copy_dir() -> (Arc<ServerState>, tempfile::TempDir, PathBuf) {
+    let temp = tempdir().expect("tempdir");
+    let copy_dir = temp.path().join("copy");
+    fs::create_dir(&copy_dir).expect("copy directory");
+    let config = ServerConfig {
+        data_dir: temp.path().to_path_buf(),
+        copy_allowed_dirs: vec![copy_dir.clone()],
+        auth_mode: AuthMode::None,
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(config).expect("server");
+    (server.state, temp, copy_dir)
 }
 
 async fn build_cluster_aware_state_with_auth(
@@ -359,6 +376,36 @@ async fn grpc_sql_vector_transaction_flow() {
         }
     }
     assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_sql_copy_uses_the_same_configured_directory() {
+    let (state, _temp, copy_dir) = build_state_with_copy_dir().await;
+    let fixture = copy_dir.join("items.csv");
+    fs::write(&fixture, "id,embedding\n1,\"[1.0,0.0]\"\n2,\"[0.0,1.0]\"\n").expect("CSV fixture");
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));".to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("DDL");
+    let response = client
+        .execute_dml(grpc::proto::DmlRequest {
+            sql: format!(
+                "COPY items (id, embedding) FROM '{}' WITH (FORMAT CSV, HEADER TRUE);",
+                fixture.display()
+            ),
+            session_id: String::new(),
+        })
+        .await
+        .expect("COPY")
+        .into_inner();
+    assert_eq!(response.affected_rows, 2);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
