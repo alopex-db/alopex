@@ -47,6 +47,18 @@ impl<'a, 'txn, T: KVTransaction<'txn>> IndexStorage<'a, 'txn, T> {
         Ok(())
     }
 
+    /// Insert an entry after the caller has validated the unique key set.
+    pub(crate) fn insert_prevalidated_unique(
+        &mut self,
+        row: &[SqlValue],
+        row_id: u64,
+    ) -> Result<()> {
+        let values = self.extract_values(row)?;
+        let key = self.build_key(&values, row_id)?;
+        self.txn.put(key, Vec::new())?;
+        Ok(())
+    }
+
     /// Delete an index entry associated with the provided row values and RowID.
     pub fn delete(&mut self, row: &[SqlValue], row_id: u64) -> Result<()> {
         let values = self.extract_values(row)?;

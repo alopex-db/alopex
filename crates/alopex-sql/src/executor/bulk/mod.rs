@@ -31,6 +31,7 @@ use crate::catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
 };
 use crate::columnar::statistics::compute_row_group_statistics;
+use crate::executor::dml::populate_indexes;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
@@ -824,7 +825,7 @@ fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         }
     }
 
-    populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_indexes(txn, table, &btree_indexes, &staged)?;
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
@@ -1601,54 +1602,6 @@ fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError 
     }
 }
 
-fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
-    match err {
-        StorageError::UniqueViolation { .. } => {
-            if index.name.starts_with("__pk_") {
-                ExecutorError::ConstraintViolation(
-                    crate::executor::ConstraintViolation::PrimaryKey {
-                        columns: index.columns.clone(),
-                        value: None,
-                    },
-                )
-            } else {
-                ExecutorError::ConstraintViolation(crate::executor::ConstraintViolation::Unique {
-                    index_name: index.name.clone(),
-                    columns: index.columns.clone(),
-                    value: None,
-                })
-            }
-        }
-        StorageError::NullConstraintViolation { column } => {
-            ExecutorError::ConstraintViolation(crate::executor::ConstraintViolation::NotNull {
-                column,
-            })
-        }
-        StorageError::TransactionConflict => ExecutorError::TransactionConflict,
-        other => ExecutorError::Storage(other),
-    }
-}
-
-fn populate_indexes<'txn, S: KVStore + 'txn>(
-    txn: &mut impl SqlTxn<'txn, S>,
-    indexes: &[IndexMetadata],
-    rows: &[(u64, Vec<SqlValue>)],
-) -> Result<()> {
-    for index in indexes {
-        let mut storage =
-            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
-        for (row_id, row) in rows {
-            if should_skip_unique_index_for_null(index, row) {
-                continue;
-            }
-            storage
-                .insert(row, *row_id)
-                .map_err(|e| map_index_error(index, e))?;
-        }
-    }
-    Ok(())
-}
-
 fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
@@ -1659,14 +1612,6 @@ fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
         HnswBridge::on_insert_batch(txn, table, index, rows)?;
     }
     Ok(())
-}
-
-fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) -> bool {
-    index.unique
-        && index
-            .column_indices
-            .iter()
-            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 #[cfg(test)]

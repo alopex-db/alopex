@@ -420,6 +420,17 @@ async fn http_sql_vector_session_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({
+            "sql": "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;"
+        }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let (status, _, body) = send_json(
         router.clone(),
         Method::POST,
@@ -437,6 +448,20 @@ async fn http_sql_vector_session_flow() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&body).expect("batch response")["affected_rows"],
+        2
+    );
+
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/vector/search",
+        json!({ "table": "items", "vector": [0.0, 1.0], "k": 1 }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).expect("batch index search")["results"][0]["id"],
         2
     );
 
@@ -654,10 +679,7 @@ async fn http_ingestion_measurement() {
     async fn run(operation: &str, rows: usize) -> Duration {
         let (state, _temp, copy_dir) = build_state_with_copy_dir().await;
         let router = http::router(state);
-        for sql in [
-            "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));",
-            "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
-        ] {
+        for sql in ["CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));"] {
             let (status, _, body) = send_json(
                 router.clone(),
                 Method::POST,
