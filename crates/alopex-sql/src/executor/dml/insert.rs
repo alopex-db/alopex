@@ -382,6 +382,11 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
+    // Validate before staging table rows. For the LSM backend, validating after
+    // staging would clone the whole in-flight batch just to inspect it again.
+    let insert_values = insert_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    validate_unique_indexes_before_insert(txn, table, &btree_indexes, &insert_values)?;
+
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(insert_rows.len());
 
     // Insert into table using a single handle; stage for index population.
@@ -399,7 +404,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     }
 
     // Populate indexes using one handle per index for the whole batch.
-    populate_indexes(txn, table, &btree_indexes, &staged)?;
+    populate_prevalidated_indexes(txn, &btree_indexes, &staged)?;
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
@@ -715,11 +720,22 @@ pub(crate) fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
+    for index in indexes
+        .iter()
+        .filter(|index| index.unique && rows.len() > 1)
+    {
+        validate_unique_index_batch(txn, table, index, rows)?;
+    }
+    populate_prevalidated_indexes(txn, indexes, rows)
+}
+
+fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    indexes: &[IndexMetadata],
+    rows: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
     for index in indexes {
         let batch_validated = index.unique && rows.len() > 1;
-        if batch_validated {
-            validate_unique_index_batch(txn, table, index, rows)?;
-        }
         let mut storage =
             txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
         for (row_id, row) in rows {
@@ -740,6 +756,41 @@ pub(crate) fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     Ok(())
 }
 
+fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    table: &TableMetadata,
+    indexes: &[IndexMetadata],
+    rows: &[&[SqlValue]],
+) -> Result<()> {
+    for index in indexes
+        .iter()
+        .filter(|index| index.unique && rows.len() > 1)
+    {
+        let mut keys = HashSet::with_capacity(rows.len());
+        let mut storage = txn.table_storage(table);
+        let mut existing = storage.range_scan(0, u64::MAX)?;
+        while let Some(row) = existing.next() {
+            let (_, row) = row?;
+            if !should_skip_unique_index_for_null(index, &row) {
+                keys.insert(unique_index_key(index, &row)?);
+            }
+        }
+        for row in rows {
+            if !should_skip_unique_index_for_null(index, row)
+                && !keys.insert(unique_index_key(index, row)?)
+            {
+                return Err(map_index_error(
+                    index,
+                    StorageError::UniqueViolation {
+                        index_id: index.index_id,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_unique_index_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     table: &TableMetadata,
@@ -750,7 +801,11 @@ fn validate_unique_index_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         .iter()
         .map(|(row_id, _)| *row_id)
         .collect::<HashSet<_>>();
-    let mut keys = HashSet::with_capacity(rows.len());
+    let values = rows
+        .iter()
+        .map(|(_, row)| row.as_slice())
+        .collect::<Vec<_>>();
+    let mut keys = HashSet::with_capacity(values.len());
     let mut storage = txn.table_storage(table);
     let mut existing = storage.range_scan(0, u64::MAX)?;
     while let Some(row) = existing.next() {
@@ -759,7 +814,7 @@ fn validate_unique_index_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
             keys.insert(unique_index_key(index, &row)?);
         }
     }
-    for (_, row) in rows {
+    for row in values {
         if !should_skip_unique_index_for_null(index, row)
             && !keys.insert(unique_index_key(index, row)?)
         {
