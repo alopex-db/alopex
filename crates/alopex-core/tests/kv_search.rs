@@ -2,6 +2,7 @@ use alopex_core::kv::memory::MemoryKV;
 use alopex_core::kv::{
     KVStore, KVTransaction, KeyPattern, KeySearchCancellation, KeySearchRequest,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::lsm::LsmKV;
 use alopex_core::types::TxnMode;
 
@@ -163,6 +164,7 @@ fn literal_wildcards_and_scan_budget_are_explicit() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn lsm_uses_the_same_byte_search_contract() {
     let directory = tempfile::tempdir().unwrap();
     let store = LsmKV::open(directory.path()).unwrap();
@@ -200,6 +202,7 @@ fn lsm_uses_the_same_byte_search_contract() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn lsm_tombstones_consume_the_scan_budget() {
     let directory = tempfile::tempdir().unwrap();
     let store = LsmKV::open(directory.path()).unwrap();
