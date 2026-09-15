@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +29,21 @@ async fn build_state(
     };
     let server = Server::new(config).expect("server");
     (server.state, temp)
+}
+
+async fn build_state_with_copy_dir() -> (Arc<ServerState>, tempfile::TempDir, PathBuf) {
+    let temp = tempdir().expect("tempdir");
+    let copy_dir = temp.path().join("copy");
+    fs::create_dir(&copy_dir).expect("copy directory");
+    let config = ServerConfig {
+        data_dir: temp.path().to_path_buf(),
+        copy_allowed_dirs: vec![copy_dir.clone()],
+        auth_mode: AuthMode::None,
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(config).expect("server");
+    (server.state, temp, copy_dir)
 }
 
 async fn build_cluster_aware_state(
@@ -291,6 +308,7 @@ async fn admin_cluster_join_leave_returns_status_schema_after_transition() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
     let value: Value = serde_json::from_slice(&body).expect("join json");
     assert_eq!(value["action"].as_str(), Some("join"));
     assert_eq!(value["cluster"]["schema_version"].as_u64(), Some(1));
@@ -489,6 +507,116 @@ async fn http_sql_vector_session_flow() {
     }
     assert!(done);
     assert!(rows.len() >= 3);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn http_sql_copy_uses_configured_directory_and_is_atomic() {
+    let (state, temp, copy_dir) = build_state_with_copy_dir().await;
+    let router = http::router(state);
+    let valid = copy_dir.join("items.csv");
+    let invalid = copy_dir.join("invalid.csv");
+    let outside = temp.path().join("outside.csv");
+    fs::write(&valid, "id,embedding\n1,\"[1.0,0.0]\"\n2,\"[0.0,1.0]\"\n").expect("valid CSV");
+    fs::write(&invalid, "id,embedding\n3,\"[1.0,0.0]\"\n4,\"[1.0]\"\n").expect("invalid CSV");
+    fs::write(&outside, "id,embedding\n5,\"[1.0,0.0]\"\n").expect("outside CSV");
+
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));" }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;" }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let copy_sql = |path: &std::path::Path| {
+        format!(
+            "COPY items (id, embedding) FROM '{}' WITH (FORMAT CSV, HEADER TRUE);",
+            path.display()
+        )
+    };
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": copy_sql(&valid) }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response: Value = serde_json::from_slice(&body).expect("COPY response");
+    assert_eq!(response["affected_rows"], 2, "{response}");
+
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": copy_sql(&invalid) }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": copy_sql(&outside) }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    #[cfg(unix)]
+    {
+        let linked = copy_dir.join("linked.csv");
+        std::os::unix::fs::symlink(&valid, &linked).expect("symlink");
+        let (status, _, _) = send_json(
+            router.clone(),
+            Method::POST,
+            "/sql",
+            json!({ "sql": copy_sql(&linked) }),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/vector/search",
+        json!({ "table": "items", "vector": [0.9, 0.1], "k": 1 }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response: Value = serde_json::from_slice(&body).expect("search response");
+    assert_eq!(response["results"].as_array().unwrap().len(), 1);
+
+    let (status, _, body) = send_json(
+        router,
+        Method::POST,
+        "/sql",
+        json!({ "sql": "SELECT id FROM items ORDER BY id;" }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response: Value = serde_json::from_slice(&body).expect("query response");
+    assert_eq!(response["rows"].as_array().unwrap().len(), 2);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

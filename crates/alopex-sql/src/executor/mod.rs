@@ -1321,7 +1321,10 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
     }
 }
 
-fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> Result<bulk::FileFormat> {
+pub(crate) fn copy_format(
+    path: &str,
+    options: &[crate::ast::dml::CopyOption],
+) -> Result<bulk::FileFormat> {
     let Some(format) = options
         .iter()
         .find(|option| option.name.eq_ignore_ascii_case("format"))
