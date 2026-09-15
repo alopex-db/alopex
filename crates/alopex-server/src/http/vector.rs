@@ -105,6 +105,12 @@ pub struct VectorUpsertResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct VectorUpsertBatchResponse {
+    pub success: bool,
+    pub affected_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct VectorDeleteResponse {
     pub success: bool,
 }
@@ -321,13 +327,17 @@ pub(crate) async fn upsert_impl(
         },
     )
     .await
+    .map(|response| VectorUpsertResponse {
+        success: response.success,
+    })
 }
 
 pub(crate) async fn upsert_batch_impl(
     state: Arc<ServerState>,
     request: VectorUpsertBatchRequest,
-) -> Result<VectorUpsertResponse> {
+) -> Result<VectorUpsertBatchResponse> {
     let start = Instant::now();
+    let affected_rows = request.vectors.len();
     state.lifecycle_state.check_write_allowed()?;
     if request.vectors.is_empty() {
         state.metrics.record_query(start.elapsed(), false);
@@ -361,23 +371,11 @@ pub(crate) async fn upsert_batch_impl(
             ));
         }
     };
-
     let values = request
         .vectors
         .iter()
-        .map(|item| format!("({}, {})", item.id, format_vector_literal(&item.vector)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let insert_sql = format!(
-        "INSERT INTO {} ({}, {}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {} = EXCLUDED.{}",
-        quote_ident(&table_meta.name),
-        quote_ident(&pk_name),
-        quote_ident(&vector_col),
-        values,
-        quote_ident(&pk_name),
-        quote_ident(&vector_col),
-        quote_ident(&vector_col),
-    );
+        .map(|item| (item.id, item.vector.clone()))
+        .collect::<Vec<_>>();
 
     let mut txn = match state.begin_sql_txn().await {
         Ok(txn) => txn,
@@ -388,7 +386,7 @@ pub(crate) async fn upsert_batch_impl(
     };
     let exec_result = match tokio::time::timeout(
         state.config.query_timeout,
-        txn.async_execute(&insert_sql),
+        txn.async_vector_upsert(table_meta.name.clone(), pk_name, vector_col, values),
     )
     .await
     {
@@ -399,9 +397,7 @@ pub(crate) async fn upsert_batch_impl(
             return Err(ServerError::Timeout("query timeout".into()));
         }
     };
-
     let exec_result = exec_result.map_err(|err| ServerError::Sql(err.into()));
-
     let exec_result = match exec_result {
         Ok(result) => result,
         Err(err) => {
@@ -418,9 +414,10 @@ pub(crate) async fn upsert_batch_impl(
 
     let response = match exec_result {
         alopex_sql::executor::ExecutionResult::Success
-        | alopex_sql::executor::ExecutionResult::RowsAffected(_) => {
-            Ok(VectorUpsertResponse { success: true })
-        }
+        | alopex_sql::executor::ExecutionResult::RowsAffected(_) => Ok(VectorUpsertBatchResponse {
+            success: true,
+            affected_rows,
+        }),
         _ => {
             state.metrics.record_query(start.elapsed(), false);
             Err(ServerError::BadRequest(

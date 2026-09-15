@@ -1,0 +1,25 @@
+{
+  "schema": "alopex.reference-inventory/v1",
+  "api": "HTTP.POST./sql;gRPC.ExecuteDml:COPY FROM CSV/PARQUET",
+  "reference": {
+    "project": "duckdb/duckdb",
+    "commit": "b8a06e4a22672e254cd0baa68a3dbed2eb51c56e",
+    "license": "MIT",
+    "implementation": "src/planner/binder/statement/bind_copy.cpp#BindCopyFrom",
+    "test": [
+      "test/sql/copy/csv/auto/test_auto_lineitem.test",
+      "test/sql/copy/parquet/writer/test_copy_overwrite_parquet.test"
+    ]
+  },
+  "relationship": "extended",
+  "extension": {
+    "base_contract": "COPY FROM binds source columns to the target table and executes one insert plan that returns a row count.",
+    "difference": "Alopex accepts only configured local paths and maps Arrow FixedSizeList<Float32> to a matching VECTOR column.",
+    "reason": "Issue #412 limits the first public server surface to local files and requires vector ingestion."
+  },
+  "evidence": [
+    "crates/alopex-sql/src/executor/bulk/parquet.rs#fixed_size_float_list_maps_to_vector",
+    "crates/alopex-server/tests/http_test.rs#http_sql_copy_parquet_vector_is_transactional",
+    "crates/alopex-server/tests/grpc_test.rs#grpc_sql_copy_uses_the_same_configured_directory"
+  ]
+}

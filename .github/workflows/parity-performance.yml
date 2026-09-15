@@ -144,6 +144,25 @@ jobs:
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
+      - name: Measure structured vector ingestion
+        id: ingestion
+        run: |
+          root="performance-artifacts/ingestion"
+          mkdir -p "$root/raw"
+          for operation in single batch csv parquet; do
+            for rows in 10000 50000; do
+              taskset -c 0 env \
+                ALOPEX_INGESTION_OPERATION="$operation" \
+                ALOPEX_INGESTION_ROWS="$rows" \
+                ALOPEX_INGESTION_SOURCE_COMMIT="$GITHUB_SHA" \
+                ALOPEX_INGESTION_OUTPUT="$root/raw/$operation-$rows.json" \
+                cargo test -p alopex-server --features lane_ci --test http_test \
+                  http_ingestion_measurement -- --ignored --exact --test-threads=1
+            done
+          done
+          python scripts/performance/release_ingestion_evidence.py \
+            --root "$root" \
+            --source-commit "$GITHUB_SHA"
       - name: Enforce curated/full performance contracts
         id: gate
         env:
@@ -163,6 +182,7 @@ jobs:
           HNSW_DATASET: ${{ steps.hnsw_dataset.outcome }}
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
+          INGESTION: ${{ steps.ingestion.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -171,7 +191,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "ingestion", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)

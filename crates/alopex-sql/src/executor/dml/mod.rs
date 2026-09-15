@@ -15,6 +15,7 @@ pub(crate) use insert::{evaluate_default, normalize_assignment_value};
 #[allow(unused_imports)]
 pub use insert::{
     execute_insert, execute_insert_rows, execute_insert_rows_with_plan, execute_insert_with_plan,
+    execute_vector_upsert_rows,
 };
 pub use merge::execute_merge;
 #[allow(unused_imports)]

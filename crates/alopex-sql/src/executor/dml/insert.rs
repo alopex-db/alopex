@@ -4,6 +4,7 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::ast::expr::Expr;
+use crate::ast::span::Span;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
@@ -14,8 +15,7 @@ use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
 use crate::planner::type_checker::TypeChecker;
-use crate::planner::typed_expr::Projection;
-use crate::planner::typed_expr::TypedExpr;
+use crate::planner::typed_expr::{Projection, TypedAssignment, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 use std::collections::HashSet;
 
@@ -160,6 +160,93 @@ pub fn execute_insert_rows_with_plan<
         rows,
         conflict.as_ref(),
         returning,
+    )
+}
+
+/// Upsert vector values received from a structured API request.
+///
+/// This shares the SQL INSERT/ON CONFLICT executor so constraints and secondary
+/// indexes remain transactional, without serializing request values as SQL.
+#[allow(dead_code)]
+pub fn execute_vector_upsert_rows<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    primary_key: &str,
+    vector_column: &str,
+    values: Vec<(u64, Vec<f32>)>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let primary_key_index = table
+        .get_column_index(primary_key)
+        .ok_or_else(|| ExecutorError::ColumnNotFound(primary_key.to_string()))?;
+    let vector_column_index = table
+        .get_column_index(vector_column)
+        .ok_or_else(|| ExecutorError::ColumnNotFound(vector_column.to_string()))?;
+    let columns = vec![primary_key.to_string(), vector_column.to_string()];
+    validate_columns(&table, &columns)?;
+    let context = EvalContext::new(&[]);
+    let rows = values
+        .into_iter()
+        .map(|(id, vector)| {
+            let id = i64::try_from(id).map_err(|_| ExecutorError::InvalidOperation {
+                operation: "vector upsert".into(),
+                reason: "primary key exceeds signed 64-bit range".into(),
+            })?;
+            build_row_from_values(
+                catalog,
+                &table,
+                &columns,
+                vec![SqlValue::BigInt(id), SqlValue::Vector(vector)],
+                &context,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let conflict = OnConflictPlan {
+        columns: vec![primary_key.to_string()],
+        constraint: None,
+        action: OnConflictActionPlan::DoUpdate {
+            assignments: vec![TypedAssignment::new(
+                vector_column.to_string(),
+                vector_column_index,
+                TypedExpr::column_ref(
+                    "excluded".to_string(),
+                    vector_column.to_string(),
+                    table.column_count() + vector_column_index,
+                    table.columns[vector_column_index].data_type.clone(),
+                    Span::default(),
+                ),
+            )],
+            selection: None,
+        },
+    };
+    let is_primary_key = table
+        .primary_key
+        .as_ref()
+        .is_some_and(|keys| keys.first().is_some_and(|key| key == primary_key))
+        || table.columns[primary_key_index].primary_key;
+    if !is_primary_key {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "vector upsert".into(),
+            reason: "configured primary key column is not a primary key".into(),
+        });
+    }
+    insert_rows(
+        txn,
+        catalog,
+        &table,
+        table_name,
+        rows,
+        Some(&conflict),
+        None,
     )
 }
 

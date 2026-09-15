@@ -1674,13 +1674,15 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::ddl::VectorMetric;
     use crate::catalog::{ColumnMetadata, MemoryCatalog, StorageType};
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
     use ::parquet::arrow::ArrowWriter;
     use alopex_core::kv::memory::MemoryKV;
-    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_array::types::Float32Type;
+    use arrow_array::{Array, FixedSizeListArray, Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use std::fs::File;
     use std::io::Write;
@@ -1712,6 +1714,44 @@ mod tests {
         let mut txn = bridge.begin_write().unwrap();
         execute_create_table(&mut txn, catalog, table, vec![], false).unwrap();
         txn.commit().unwrap();
+    }
+
+    fn create_vector_table(bridge: &TxnBridge<MemoryKV>, catalog: &mut MemoryCatalog) {
+        let table = TableMetadata::new(
+            "items",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new(
+                    "embedding",
+                    ResolvedType::Vector {
+                        dimension: 2,
+                        metric: VectorMetric::L2,
+                    },
+                ),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn write_vector_parquet(path: &Path, rows: &[(i32, [f32; 2])]) {
+        let ids = Int32Array::from(rows.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            rows.iter().map(|(_, vector)| Some(vector.map(Some))),
+            2,
+        );
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("embedding", embeddings.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ids), Arc::new(embeddings)])
+            .unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 
     #[test]
@@ -1876,6 +1916,61 @@ mod tests {
         let rows: Vec<_> = storage.scan().unwrap().map(|r| r.unwrap().1).collect();
         assert_eq!(rows.len(), 2);
         assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("user0".into())]));
+    }
+
+    #[test]
+    fn execute_copy_parquet_vector_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid.parquet");
+        let duplicate = dir.path().join("duplicate.parquet");
+        write_vector_parquet(&valid, &[(1, [1.0, 0.0]), (2, [0.0, 1.0])]);
+        write_vector_parquet(&duplicate, &[(3, [1.0, 0.0]), (3, [0.0, 1.0])]);
+
+        let (bridge, mut catalog) = bridge();
+        create_vector_table(&bridge, &mut catalog);
+
+        let mut txn = bridge.begin_write().unwrap();
+        let result = execute_copy(
+            &mut txn,
+            &catalog,
+            "items",
+            valid.to_str().unwrap(),
+            FileFormat::Parquet,
+            CopyOptions::default(),
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(result, ExecutionResult::RowsAffected(2));
+
+        let table = catalog.get_table("items").unwrap().clone();
+        let mut read_txn = bridge.begin_read().unwrap();
+        let mut storage = read_txn.table_storage(&table);
+        let rows: Vec<_> = storage.scan().unwrap().map(|row| row.unwrap().1).collect();
+        assert!(rows.contains(&vec![
+            SqlValue::Integer(1),
+            SqlValue::Vector(vec![1.0, 0.0])
+        ]));
+
+        let mut txn = bridge.begin_write().unwrap();
+        assert!(
+            execute_copy(
+                &mut txn,
+                &catalog,
+                "items",
+                duplicate.to_str().unwrap(),
+                FileFormat::Parquet,
+                CopyOptions::default(),
+                &CopySecurityConfig::default(),
+            )
+            .is_err()
+        );
+        txn.rollback().unwrap();
+
+        let mut read_txn = bridge.begin_read().unwrap();
+        let mut storage = read_txn.table_storage(&table);
+        let rows: Vec<_> = storage.scan().unwrap().map(|row| row.unwrap().1).collect();
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
