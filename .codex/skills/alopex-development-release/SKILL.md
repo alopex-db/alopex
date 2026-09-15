@@ -76,6 +76,8 @@ Call `mcp__spec_workflow__spec_workflow_guide` first whenever a user requests a 
 9. Verify publication independently: GitHub Release and asset names, exact tag-to-commit SHA, every crates.io package in dependency order, and PyPI wheels/sdist plus Python GitHub Release. Use public registry/index evidence when API polling is rate-limited.
 10. Audit issue history before closing any issue or the release tracker. For each issue, verify the issue-linked implementation commit is pushed and publicly visible, the PR is merged when merge is required, and the target tag contains the change. Comment the commit/PR permalink and evidence only after those checks. Keep the issue open (and retain its branch/worktree) when the change is local-only, unpushed, unmerged, or absent from the target tag. Close the release tracker only after release-branch-only acceptance, this audit, public verification, worktree/branch/remote checks, generated-artifact cleanup, and the cache-budget check. Finish with a Japanese handoff listing completed and uncompleted work, workflow URLs, SHAs, registry evidence, and any known follow-up.
 
+Close the release tracker only after public verification.
+
 ## Failure and recovery
 
 - Treat a release-gate failure as a blocker even when another independent package workflow succeeds.
