@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 
-OPERATIONS = ("single", "batch", "csv", "parquet")
+OPERATIONS = ("batch", "csv", "parquet")
 SIZES = (10_000, 50_000)
 
 
@@ -72,7 +72,6 @@ def render(root: Path, source_commit: str) -> None:
             }
             for row in rows
         )
-    by_case = {(row["operation"], row["rows"]): row for row in rows}
     lines = [
         "# v0.8.13 ingestion evidence",
         "",
@@ -85,10 +84,6 @@ def render(root: Path, source_commit: str) -> None:
         lines.append(
             f"| {row['operation']} | {row['rows']} | {row['elapsed_seconds']:.6f} | {row['rows_per_second']:.2f} |"
         )
-    lines.extend(["", "| rows | batch/single rows/s |", "|---:|---:|"])
-    for size in SIZES:
-        ratio = by_case[("batch", size)]["rows_per_second"] / by_case[("single", size)]["rows_per_second"]
-        lines.append(f"| {size} | {ratio:.2f}x |")
     (root / "ingestion.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

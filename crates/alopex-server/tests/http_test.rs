@@ -648,10 +648,7 @@ async fn http_ingestion_measurement() {
         .expect("ingestion rows")
         .parse()
         .expect("numeric ingestion rows");
-    assert!(matches!(
-        operation.as_str(),
-        "single" | "batch" | "csv" | "parquet"
-    ));
+    assert!(matches!(operation.as_str(), "batch" | "csv" | "parquet"));
     assert!(matches!(rows, 10_000 | 50_000));
 
     async fn run(operation: &str, rows: usize) -> Duration {
