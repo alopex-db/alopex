@@ -610,6 +610,14 @@ run_step "v${ALOPEX_VERSION} v0.8.11 SQL mutation contracts" \
     "PyPI公開版で、CHECK/FK、RETURNING/ON CONFLICT、SEQUENCE/CURRVAL、CSV COPY round-trip、未知FORMAT拒否、information_schema introspectionを自己検証する。" \
     -- run_in_container python3 scripts/demo/v0811/demo_sql_mutations.py
 
+run_step "v${ALOPEX_VERSION} v0.8.11 SQL surfaces not covered above (demo_sql_v0811_surfaces.py)" \
+    "PyPI公開版で、SHOW/DESC/information_schema.columns、? 位置パラメータと EXPLAIN (FORMAT JSON) のパラメータ秘匿、動的 VIEW が作成後の変更を反映すること、ALTER TABLE ADD COLUMN の既存行への DEFAULT 反映と RENAME COLUMN、TRUNCATE 後もテーブルが使えること、MERGE の一致更新・不一致挿入を自己検証する。" \
+    -- run_in_container python3 scripts/demo/v0811/demo_sql_v0811_surfaces.py
+
+run_step "v${ALOPEX_VERSION} SQL correctness contracts (demo_sql_v0813.py)" \
+    "PyPI公開版で、v0.8.13で追加された機能のうち文法追加を伴わないものを自己検証する: 複数行 upsert の EXCLUDED 反映と同一バッチ内重複IDの原子的拒否(#411)、CSV vector ingestion の COPY が全行成功または全行ロールバックすること(#412)、CREATE INDEX 後の EXPLAIN が IndexScan アクセスパスを選ぶこと(#425)、INNER/LEFT JOIN で NULL=NULL が一致しないこと(#424)。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py
+
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \
     -- run_in_container python3 scripts/demo/v074/demo_api_surfaces.py

@@ -173,6 +173,29 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("publish_report:", python)
         self.assertIn("verify_python_vector_api.py", python)
 
+    def test_testpypi_gate_runs_a_functional_demo_not_only_import(self) -> None:
+        python = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        gate = python.split("  verify-testpypi:", maxsplit=1)[1].split(
+            "\n  publish-pypi:", maxsplit=1
+        )[0]
+
+        self.assertIn("actions/checkout@v4", gate)
+        self.assertIn("Database import OK", gate)
+        # An import smoke test alone is not release acceptance (issue #395:
+        # v0.8.11's HNSW benchmark failed only after PyPI publication because
+        # nothing ran a functional scenario first). publish-pypi must depend
+        # on a job that actually executes the baseline demo and every SQL
+        # surface demo added since v0.8.11.
+        for demo in (
+            "scripts/demo/v08/demo_sql_v08.py",
+            "scripts/demo/v0811/demo_sql_mutations.py",
+            "scripts/demo/v0811/demo_sql_v0811_surfaces.py",
+            "scripts/demo/v0813/demo_sql_v0813.py",
+        ):
+            self.assertIn(f"python3 {demo}", gate)
+
     def test_release_procedure_keeps_known_functionality_before_delivery(self) -> None:
         procedure = (ROOT / "docs/release-v0.8-support.md").read_text(
             encoding="utf-8"
@@ -190,13 +213,23 @@ class ReleaseContractTests(unittest.TestCase):
         for moved_check in (
             "demo_cluster.py / demo_routing.py",
             "demo_dataframe_p3.py / demo_api_surfaces.py",
-            "demo_sql_v074.sh / demo_sql_v08.py / demo_sql_mutations.py",
+            "demo_sql_v074.sh",
+            "demo_sql_mutations.py",
             "demo_vector_api.py / demo_embedded_v08.sh",
             "hnsw_v0811_contract.py",
         ):
             self.assertIn(moved_check, procedure)
-        self.assertIn("Development CI (`v08-release-gate`)", procedure)
         self.assertIn("Extended Verification (`parity-performance.yml`)", procedure)
+        # `v08-release-gate` never executes any scripts/demo/* file (it only
+        # runs type_capability_gate.py, cargo test, and pytest); the doc must
+        # say so honestly instead of claiming Development CI ownership of
+        # checks it does not run, and must name the real mandatory pre-tag
+        # rehearsal and the demos that verify-testpypi now enforces.
+        self.assertNotIn("Development CI (`v08-release-gate`)", procedure)
+        self.assertIn("Mandatory pre-tag rehearsal", procedure)
+        self.assertIn("`alopex-py-release.yml:verify-testpypi`", procedure)
+        self.assertIn("demo_sql_v0813.py", procedure)
+        self.assertIn("demo_sql_v0811_surfaces.py", procedure)
 
     def test_python_wheel_smoke_uses_search_stats_public_fields(self) -> None:
         smoke = (ROOT / "scripts/release/verify_python_vector_api.py").read_text(
@@ -262,6 +295,30 @@ class ReleaseContractTests(unittest.TestCase):
 
         self.assertIn("if completed != 81:", demo)
         self.assertIn("81 checks passed", demo)
+
+    def test_v0813_demo_is_mandatory_and_its_check_count_matches(self) -> None:
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        demo = (ROOT / "scripts/demo/v0813/demo_sql_v0813.py").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/demo/v0813/demo_sql_v0813.py", run)
+        # v0.8.13 adds no new Nim SQL grammar; every scenario here is a
+        # planning/execution behavior on existing syntax, one per issue.
+        for issue_marker in ("#411", "#412", "#425", "#424"):
+            self.assertIn(issue_marker, demo)
+        self.assertIn("if CHECKS != 12:", demo)
+        self.assertIn("12 checks passed", demo)
+
+    def test_v0811_surfaces_demo_is_mandatory_and_its_check_count_matches(self) -> None:
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        demo = (
+            ROOT / "scripts/demo/v0811/demo_sql_v0811_surfaces.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("scripts/demo/v0811/demo_sql_v0811_surfaces.py", run)
+        for surface_marker in ("SHOW TABLES", "EXPLAIN (FORMAT JSON)", "CREATE VIEW", "MERGE INTO", "TRUNCATE TABLE"):
+            self.assertIn(surface_marker, demo)
+        self.assertIn("if CHECKS != 14:", demo)
+        self.assertIn("14 checks passed", demo)
 
     def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
