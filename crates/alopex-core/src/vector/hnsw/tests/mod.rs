@@ -121,31 +121,71 @@ fn staged_existing_batch_retains_recall_after_repeated_updates() {
             .expect("existing vectors are updated in one batch");
     }
 
-    let mut correct = 0;
-    for (expected_key, vector) in keys.iter().zip(&updated_vectors) {
-        let query = [vector[0] + 0.001, vector[1] - 0.001];
-        let expected = keys
-            .iter()
-            .zip(&updated_vectors)
-            .min_by(|(_, left), (_, right)| {
-                let left_distance = (query[0] - left[0]).powi(2) + (query[1] - left[1]).powi(2);
-                let right_distance = (query[0] - right[0]).powi(2) + (query[1] - right[1]).powi(2);
-                left_distance.total_cmp(&right_distance)
-            })
-            .map(|(key, _)| key)
-            .expect("non-empty dataset");
-        assert_eq!(
-            expected, expected_key,
-            "query must have a unique nearest key"
-        );
-
-        let (results, _) = index
-            .search(&query, 1, Some(COUNT))
-            .expect("search succeeds");
-        correct += usize::from(results[0].key == *expected);
+    let graph = index.graph.read().expect("graph lock is available");
+    for (node_id, node) in graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| node.as_ref().map(|node| (id as u32, node)))
+    {
+        for neighbors in &node.neighbors {
+            let unique = neighbors
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(unique.len(), neighbors.len(), "neighbor links are unique");
+            assert!(neighbors.iter().all(|&neighbor| {
+                neighbor != node_id
+                    && graph
+                        .nodes
+                        .get(neighbor as usize)
+                        .is_some_and(Option::is_some)
+            }));
+        }
     }
+    drop(graph);
+
+    let queries = keys
+        .iter()
+        .zip(&updated_vectors)
+        .map(|(expected_key, vector)| {
+            let query = [vector[0] + 0.001, vector[1] - 0.001];
+            let expected = keys
+                .iter()
+                .zip(&updated_vectors)
+                .min_by(|(_, left), (_, right)| {
+                    let left_distance = (query[0] - left[0]).powi(2) + (query[1] - left[1]).powi(2);
+                    let right_distance =
+                        (query[0] - right[0]).powi(2) + (query[1] - right[1]).powi(2);
+                    left_distance.total_cmp(&right_distance)
+                })
+                .map(|(key, _)| key)
+                .expect("non-empty dataset");
+            assert_eq!(
+                expected, expected_key,
+                "query must have a unique nearest key"
+            );
+            (query, expected.to_vec())
+        })
+        .collect::<Vec<_>>();
+    let recalls = [1, 16, 32, 64, COUNT].map(|ef| {
+        let correct = queries
+            .iter()
+            .filter(|(query, expected)| {
+                index
+                    .search(query, 1, Some(ef))
+                    .expect("search succeeds")
+                    .0
+                    .first()
+                    .is_some_and(|result| result.key == *expected)
+            })
+            .count();
+        (ef, correct)
+    });
     assert!(
-        correct as f32 / COUNT as f32 >= 0.99,
-        "recall@1 after updates is {correct}/{COUNT}"
+        recalls
+            .iter()
+            .any(|(_, correct)| *correct as f32 / COUNT as f32 >= 0.99),
+        "recall@1 after updates is below 0.99 for every ef: {recalls:?}"
     );
 }
