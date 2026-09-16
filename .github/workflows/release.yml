@@ -53,8 +53,8 @@ jobs:
           [[ "$(git cat-file -t "${RELEASE_TAG_NAME}")" == "tag" ]]
           test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
-          git fetch origin main
-          git merge-base --is-ancestor "${RELEASE_TARGET_SHA}" origin/main
+          # The release candidate is selected by its immutable tag.  It may
+          # originate from a maintained release branch rather than main.
           approved=false
           for attempt in $(seq 1 30); do
             if gh run list --workflow ci.yml --commit "${RELEASE_TARGET_SHA}" \
