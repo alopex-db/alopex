@@ -46,6 +46,18 @@ v2.0 Release Goal / Acceptance
 
 v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存関係を分離できる範囲で並行して進められます。v1.6 は分散・クラスタ統合の受け皿として、各バックエンドとランタイム形態の検証結果を統合します。
 
+> **Note (2026-09-16)**: v1.3-Distributed-Coordination に割り当てられていた
+> #187・#200 とその配下13 issue（#225〜#228、#269〜#275。gRPC/embedded/
+> CLI/Python 横断の transaction・freshness・commit barrier・post-commit
+> visibility 契約）は、`docs/cluster-aware-foundation.md` が v0.9 hook として
+> 明記していた「distributed transaction coordination」と同一のエピックだった
+> ため、milestone を v0.9.0 へ付け替えた。v1.3-Distributed-Coordination
+> milestone は現在 issue 0 件である。下表の対象 Issue 列と依存図（v1.2 →
+> v1.3 → v1.4/v1.5）はこの移動を反映しておらず、v1.3 フェーズに v1.x
+> ストレージ固有の分散協調契約（epoch・manifest・chirps バックエンド境界）
+> として別途 issue が必要かどうかは未決定のまま残っている。正本は GitHub
+> milestones であり、本セクションの更新はこの note の範囲に留める。
+
 ## マイルストーン別の計画
 
 | 段階 | マイルストーン | 目的 | 対象 Issue |
