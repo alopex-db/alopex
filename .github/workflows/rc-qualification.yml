@@ -1,6 +1,9 @@
 name: RC Qualification
 
 on:
+  push:
+    branches:
+      - 'release/**'
   workflow_dispatch:
     inputs:
       candidate_ref:
@@ -31,10 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_ref }}
+          ref: ${{ inputs.candidate_ref || github.ref }}
       - name: Verify candidate identity
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha || github.sha }}"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -66,10 +69,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.candidate_ref }}
+          ref: ${{ inputs.candidate_ref || github.ref }}
       - name: Verify candidate identity
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha || github.sha }}"
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: actions/download-artifact@v4
         with:
@@ -94,7 +97,7 @@ jobs:
           set -euo pipefail
           stage="${RUNNER_TEMP}/alopex-rc-source"
           mkdir -p "${stage}"
-          git archive --format=tar "${{ inputs.candidate_sha }}" | tar -xf - -C "${stage}"
+          git archive --format=tar "${{ inputs.candidate_sha || github.sha }}" | tar -xf - -C "${stage}"
           python "${stage}/scripts/release/stage_parser_assets.py" \
             --manifest artifacts/parser-vendor-manifest.json --asset-dir artifacts \
             --vendor-dir "${stage}/crates/alopex-sql/nim-sql-parser/vendor"
@@ -109,7 +112,7 @@ jobs:
               --allow-dirty --no-verify
       - uses: actions/upload-artifact@v4
         with:
-          name: rc-parser-package-${{ inputs.candidate_sha }}
+          name: rc-parser-package-${{ inputs.candidate_sha || github.sha }}
           path: |
             artifacts/parser-vendor-manifest.json
             ${{ runner.temp }}/alopex-rc-package-target/package/*.crate
