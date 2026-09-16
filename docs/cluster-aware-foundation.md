@@ -127,6 +127,10 @@ v0.9 hooks:
 - Add distributed transaction coordination over the stable routing target model.
 - Connect Changefeed integration to the stable cluster status and placement
   model.
+- Extend server authentication (`crates/alopex-server/src/auth.rs`) from the
+  current `AuthMode::None`/single static `Dev` API key into multi-user
+  credential authentication and RBAC authorization, consistent across HTTP,
+  gRPC, CLI, and Python (issue #438).
 
 ## Explicitly Not Included
 

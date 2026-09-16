@@ -115,6 +115,8 @@ Migration contract:
   Raft DDL を接続する。
 - v0.9 は v0.7 の logical shard/range model と routing target contract に
   Multi-Raft、distributed transaction、Changefeed を接続する。
+- v0.9 は、現行の `AuthMode::None`/固定 `Dev` API key（1本）しかない server
+  認証を、複数ユーザー資格情報認証と RBAC 認可へ拡張する（issue #438）。
 
 Out of scope for v0.7.0:
 
