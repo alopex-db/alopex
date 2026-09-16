@@ -880,7 +880,7 @@ fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         }
     }
     let row_values = rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    validate_unique_indexes_before_insert(txn, table, &btree_indexes, &row_values)?;
+    validate_unique_indexes_before_insert(txn, &btree_indexes, &row_values)?;
 
     let mut staged = Vec::with_capacity(rows.len());
     {

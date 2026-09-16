@@ -59,6 +59,18 @@ impl<'a, 'txn, T: KVTransaction<'txn>> IndexStorage<'a, 'txn, T> {
         Ok(())
     }
 
+    /// Validate that no existing entry has this unique value and return its exact index key.
+    pub(crate) fn validate_unique_row(&mut self, row: &[SqlValue]) -> Result<Vec<u8>> {
+        let values = self.extract_values(row)?;
+        let prefix = self.value_prefix(&values)?;
+        if self.txn.scan_prefix(&prefix)?.next().is_some() {
+            return Err(StorageError::UniqueViolation {
+                index_id: self.index_id,
+            });
+        }
+        Ok(prefix)
+    }
+
     /// Delete an index entry associated with the provided row values and RowID.
     pub fn delete(&mut self, row: &[SqlValue], row_id: u64) -> Result<()> {
         let values = self.extract_values(row)?;

@@ -389,10 +389,10 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
-    // Validate before staging table rows. For the LSM backend, validating after
-    // staging would clone the whole in-flight batch just to inspect it again.
+    // Validate through the index before staging table rows, preserving atomic
+    // failure without scanning the whole table.
     let insert_values = insert_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    validate_unique_indexes_before_insert(txn, table, &btree_indexes, &insert_values)?;
+    validate_unique_indexes_before_insert(txn, &btree_indexes, &insert_values)?;
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(insert_rows.len());
 
@@ -798,7 +798,6 @@ pub(crate) fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'
 
 pub(crate) fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
-    table: &TableMetadata,
     indexes: &[IndexMetadata],
     rows: &[&[SqlValue]],
 ) -> Result<()> {
@@ -807,18 +806,16 @@ pub(crate) fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: 
         .filter(|index| index.unique && rows.len() > 1)
     {
         let mut keys = HashSet::with_capacity(rows.len());
-        let mut storage = txn.table_storage(table);
-        let mut existing = storage.range_scan(0, u64::MAX)?;
-        while let Some(row) = existing.next() {
-            let (_, row) = row?;
-            if !should_skip_unique_index_for_null(index, &row) {
-                keys.insert(unique_index_key(index, &row)?);
-            }
-        }
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
         for row in rows {
-            if !should_skip_unique_index_for_null(index, row)
-                && !keys.insert(unique_index_key(index, row)?)
-            {
+            if should_skip_unique_index_for_null(index, row) {
+                continue;
+            }
+            let key = storage
+                .validate_unique_row(row)
+                .map_err(|e| map_index_error(index, e))?;
+            if !keys.insert(key) {
                 return Err(map_index_error(
                     index,
                     StorageError::UniqueViolation {
@@ -829,16 +826,6 @@ pub(crate) fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: 
         }
     }
     Ok(())
-}
-
-fn unique_index_key(index: &IndexMetadata, row: &[SqlValue]) -> Result<Vec<u8>> {
-    encode_group_key(
-        &index
-            .column_indices
-            .iter()
-            .map(|&column| row[column].clone())
-            .collect::<Vec<_>>(),
-    )
 }
 
 fn populate_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
@@ -858,6 +845,7 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::executor::ddl::create_index::execute_create_index;
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::typed_expr::TypedExprKind;
     use crate::planner::types::ResolvedType;
@@ -997,5 +985,93 @@ mod tests {
             ExecutorError::ConstraintViolation(ConstraintViolation::PrimaryKey { .. })
         ));
         txn.rollback().unwrap();
+    }
+
+    #[test]
+    fn batch_insert_secondary_unique_violation_is_atomic() {
+        let (bridge, mut catalog) = bridge();
+        let table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text).with_not_null(true),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+
+        let mut ddl_txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut ddl_txn, &mut catalog, table, vec![], false).unwrap();
+        ddl_txn.commit().unwrap();
+        let stored_table = catalog.get_table("users").unwrap().clone();
+
+        let mut index_txn = bridge.begin_write().unwrap();
+        execute_create_index(
+            &mut index_txn,
+            &mut catalog,
+            IndexMetadata::new(0, "idx_users_name", "users", vec!["name".into()])
+                .with_column_indices(vec![1])
+                .with_unique(true),
+            false,
+        )
+        .unwrap();
+        index_txn.commit().unwrap();
+
+        let mut seed_txn = bridge.begin_write().unwrap();
+        execute_insert_rows(
+            &mut seed_txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]],
+        )
+        .unwrap();
+        seed_txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let err = execute_insert_rows(
+            &mut txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::Text("bob".into())],
+                vec![SqlValue::Integer(3), SqlValue::Text("alice".into())],
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+        ));
+
+        {
+            let mut storage = txn.table_storage(&stored_table);
+            assert!(storage.get(2).unwrap().is_none());
+            assert!(storage.get(3).unwrap().is_none());
+        }
+        txn.rollback().unwrap();
+
+        let mut duplicate_txn = bridge.begin_write().unwrap();
+        let err = execute_insert_rows(
+            &mut duplicate_txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::Text("bob".into())],
+                vec![SqlValue::Integer(3), SqlValue::Text("bob".into())],
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+        ));
+        {
+            let mut storage = duplicate_txn.table_storage(&stored_table);
+            assert!(storage.get(2).unwrap().is_none());
+            assert!(storage.get(3).unwrap().is_none());
+        }
+        duplicate_txn.rollback().unwrap();
     }
 }
