@@ -7,7 +7,7 @@
 	act-compat-wasm-none act-compat-wasm-snappy \
 	act-cli act-cli-check act-cli-functional act-cli-streaming act-cli-signal act-cli-s3 \
 	act-py act-py-rust-check act-py-test-numpy act-py-test-no-numpy act-py-polars-020 \
-	act-py-polars-latest act-py-typecheck act-py-benchmarks
+	act-py-polars-latest act-py-typecheck
 
 ACT ?= act
 PYTHON ?= python3.11
@@ -102,7 +102,7 @@ act-cli-s3:
 	$(ACT) -W .github/workflows/alopex-cli.yml -j s3-compatibility-test $(ACT_COMMON_FLAGS)
 	$(ACT_CLEAN_VOLUMES)
 
-act-py: act-py-rust-check act-py-test-numpy act-py-test-no-numpy act-py-polars-020 act-py-polars-latest act-py-typecheck act-py-benchmarks
+act-py: act-py-rust-check act-py-test-numpy act-py-test-no-numpy act-py-polars-020 act-py-polars-latest act-py-typecheck
 
 act-py-rust-check:
 	$(ACT) -W .github/workflows/alopex-py.yml -j rust-check $(ACT_PY_FLAGS)
@@ -126,8 +126,4 @@ act-py-polars-latest:
 
 act-py-typecheck:
 	$(ACT) -W .github/workflows/alopex-py.yml -j typecheck $(ACT_PY_FLAGS)
-	$(ACT_CLEAN_VOLUMES)
-
-act-py-benchmarks:
-	$(ACT) -W .github/workflows/alopex-py.yml -j benchmarks $(ACT_PY_FLAGS)
 	$(ACT_CLEAN_VOLUMES)
