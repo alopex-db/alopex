@@ -589,17 +589,19 @@ async fn http_vector_upsert_batch_rejects_duplicate_ids_atomically() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    let vectors = (0..=10_000)
+        .map(|id| {
+            json!({
+                "id": if id == 10_000 { 1 } else { id + 1 },
+                "vector": [id % 97, (id + 1) % 97],
+            })
+        })
+        .collect::<Vec<_>>();
     let (status, _, _) = send_json(
         router.clone(),
         Method::POST,
         "/vector/upsert-batch",
-        json!({
-            "table": "items",
-            "vectors": [
-                { "id": 1, "vector": [1.0, 0.0] },
-                { "id": 1, "vector": [0.0, 1.0] }
-            ]
-        }),
+        json!({ "table": "items", "vectors": vectors }),
         &[],
     )
     .await;

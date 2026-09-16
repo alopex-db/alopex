@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -109,6 +109,8 @@ pub struct VectorUpsertBatchResponse {
     pub success: bool,
     pub affected_rows: usize,
 }
+
+const VECTOR_UPSERT_CHUNK_SIZE: usize = 10_000;
 
 #[derive(Debug, Serialize)]
 pub struct VectorDeleteResponse {
@@ -371,11 +373,17 @@ pub(crate) async fn upsert_batch_impl(
             ));
         }
     };
-    let values = request
-        .vectors
-        .iter()
-        .map(|item| (item.id, item.vector.clone()))
-        .collect::<Vec<_>>();
+    let mut seen_ids = HashSet::with_capacity(affected_rows);
+    let mut values = Vec::with_capacity(affected_rows);
+    for item in request.vectors {
+        if !seen_ids.insert(item.id) {
+            state.metrics.record_query(start.elapsed(), false);
+            return Err(ServerError::BadRequest(
+                "vector upsert batch contains duplicate ids".into(),
+            ));
+        }
+        values.push((item.id, item.vector));
+    }
 
     let mut txn = match state.begin_sql_txn().await {
         Ok(txn) => txn,
@@ -384,47 +392,48 @@ pub(crate) async fn upsert_batch_impl(
             return Err(err);
         }
     };
-    let exec_result = match tokio::time::timeout(
-        state.config.query_timeout,
-        txn.async_vector_upsert(table_meta.name.clone(), pk_name, vector_col, values),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = txn.async_rollback().await;
-            state.metrics.record_query(start.elapsed(), false);
-            return Err(ServerError::Timeout("query timeout".into()));
+    for chunk in values.chunks(VECTOR_UPSERT_CHUNK_SIZE) {
+        let exec_result = match tokio::time::timeout(
+            state.config.query_timeout,
+            txn.async_vector_upsert(
+                table_meta.name.clone(),
+                pk_name.clone(),
+                vector_col.clone(),
+                chunk.to_vec(),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|err| ServerError::Sql(err.into())),
+            Err(_) => Err(ServerError::Timeout("query timeout".into())),
+        };
+        match exec_result {
+            Ok(alopex_sql::executor::ExecutionResult::Success)
+            | Ok(alopex_sql::executor::ExecutionResult::RowsAffected(_)) => {}
+            Ok(_) => {
+                let _ = txn.async_rollback().await;
+                state.metrics.record_query(start.elapsed(), false);
+                return Err(ServerError::BadRequest(
+                    "vector upsert returned unexpected result".into(),
+                ));
+            }
+            Err(err) => {
+                let _ = txn.async_rollback().await;
+                state.metrics.record_query(start.elapsed(), false);
+                return Err(err);
+            }
         }
-    };
-    let exec_result = exec_result.map_err(|err| ServerError::Sql(err.into()));
-    let exec_result = match exec_result {
-        Ok(result) => result,
-        Err(err) => {
-            let _ = txn.async_rollback().await;
-            state.metrics.record_query(start.elapsed(), false);
-            return Err(err);
-        }
-    };
+    }
 
     if let Err(err) = txn.async_commit().await {
         state.metrics.record_query(start.elapsed(), false);
         return Err(ServerError::Sql(err.into()));
     }
 
-    let response = match exec_result {
-        alopex_sql::executor::ExecutionResult::Success
-        | alopex_sql::executor::ExecutionResult::RowsAffected(_) => Ok(VectorUpsertBatchResponse {
-            success: true,
-            affected_rows,
-        }),
-        _ => {
-            state.metrics.record_query(start.elapsed(), false);
-            Err(ServerError::BadRequest(
-                "vector upsert returned unexpected result".into(),
-            ))
-        }
-    }?;
+    let response = VectorUpsertBatchResponse {
+        success: true,
+        affected_rows,
+    };
 
     state.metrics.record_query(start.elapsed(), true);
     Ok(response)
