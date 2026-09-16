@@ -149,7 +149,7 @@ jobs:
         run: |
           root="performance-artifacts/ingestion"
           mkdir -p "$root/raw"
-          for operation in single batch csv parquet; do
+          for operation in single batch batch_existing csv parquet; do
             for rows in 10000 50000; do
               taskset -c 0 env \
                 ALOPEX_INGESTION_OPERATION="$operation" \

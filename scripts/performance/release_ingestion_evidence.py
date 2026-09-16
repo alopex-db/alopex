@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 
-OPERATIONS = ("single", "batch", "csv", "parquet")
+OPERATIONS = ("single", "batch", "batch_existing", "csv", "parquet")
 SIZES = (10_000, 50_000)
 
 

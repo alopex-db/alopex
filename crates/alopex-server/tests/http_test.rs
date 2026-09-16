@@ -675,7 +675,7 @@ async fn http_ingestion_measurement() {
         .expect("numeric ingestion rows");
     assert!(matches!(
         operation.as_str(),
-        "single" | "batch" | "csv" | "parquet"
+        "single" | "batch" | "batch_existing" | "csv" | "parquet"
     ));
     assert!(matches!(rows, 10_000 | 50_000));
 
@@ -710,6 +710,20 @@ async fn http_ingestion_measurement() {
             }
             _ => None,
         };
+        if operation == "batch_existing" {
+            let vectors = (1..=rows)
+                .map(|id| json!({ "id": id, "vector": [id % 97, (id + 1) % 97] }))
+                .collect::<Vec<_>>();
+            let (status, _, body) = send_json(
+                router.clone(),
+                Method::POST,
+                "/vector/upsert-batch",
+                json!({ "table": "items", "vectors": vectors }),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        }
         let started = Instant::now();
         match operation {
             "single" => {
@@ -725,9 +739,9 @@ async fn http_ingestion_measurement() {
                     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
                 }
             }
-            "batch" => {
+            "batch" | "batch_existing" => {
                 let vectors = (1..=rows)
-                    .map(|id| json!({ "id": id, "vector": [id % 97, (id + 1) % 97] }))
+                    .map(|id| json!({ "id": id, "vector": [(id + 1) % 97, (id + 2) % 97] }))
                     .collect::<Vec<_>>();
                 let (status, _, body) = send_json(
                     router,

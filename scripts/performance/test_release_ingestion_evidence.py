@@ -20,7 +20,13 @@ SPEC.loader.exec_module(evidence)
 def write_raw(root: Path, *, bad_rate: bool = False) -> None:
     raw = root / "raw"
     raw.mkdir(parents=True)
-    for operation, rate in {"single": 100.0, "batch": 300.0, "csv": 200.0, "parquet": 250.0}.items():
+    for operation, rate in {
+        "single": 100.0,
+        "batch": 300.0,
+        "batch_existing": 250.0,
+        "csv": 200.0,
+        "parquet": 250.0,
+    }.items():
         for rows in evidence.SIZES:
             payload = {
                 "schema": "alopex.ingestion-measurement/v1",
