@@ -563,13 +563,12 @@ fn load_conflicts_from_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     {
         let mut storage =
             txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
-        for (key, values) in &lookups {
-            let row_ids = if values.len() == 1 {
-                storage.lookup(&values[0])?
-            } else {
-                storage.lookup_composite(values)?
-            };
-            matched_rows.extend(row_ids.into_iter().map(|row_id| (key.clone(), row_id)));
+        let values = lookups
+            .iter()
+            .map(|(_, values)| values.clone())
+            .collect::<Vec<_>>();
+        for (position, row_id) in storage.lookup_many(&values)? {
+            matched_rows.push((lookups[position].0.clone(), row_id));
         }
     }
 
