@@ -620,6 +620,17 @@
     },
     {
       "surface": "Rust",
+      "api": "Rust.HnswIndex.upsert_staged_batch",
+      "claim": "upsert reconnect",
+      "status": "known-performance-divergence",
+      "reference": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d:python_bindings/bindings.cpp",
+      "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_deleted_node_reactivation_reconnects_at_new_position",
+      "issue": 301,
+      "performance_contract": "hnsw-pareto-v1",
+      "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Rust",
       "api": "Rust.HnswSearchResult",
       "claim": "HnswSearchResult",
       "status": "known-performance-divergence",

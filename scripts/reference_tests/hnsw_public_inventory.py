@@ -107,6 +107,7 @@ def claim_for(row: dict[str, object]) -> str:
         "save": "HnswIndex.load/save",
         "upsert": "HnswIndex.upsert",
         "upsert_staged": "upsert reconnect",
+        "upsert_staged_batch": "upsert reconnect",
         "search": "cosine distance",
         "delete": "HnswIndex.delete",
         "delete_staged": "HnswIndex staged commit/rollback",
@@ -190,8 +191,8 @@ def inventory() -> list[dict[str, object]]:
     sql_contracts = {
         "SQL.CREATE_INDEX_USING_HNSW": "create_index",
         "SQL.DROP_INDEX_USING_HNSW": "drop_index",
-        "SQL.HNSW_INSERT_SYNC": "on_insert",
-        "SQL.HNSW_UPDATE_SYNC": "on_update",
+        "SQL.HNSW_INSERT_SYNC": "on_insert_batch",
+        "SQL.HNSW_UPDATE_SYNC": "on_update_batch",
         "SQL.HNSW_DELETE_SYNC": "on_delete",
         "SQL.HNSW_KNN_SEARCH": "search_knn",
     }
