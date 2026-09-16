@@ -31,7 +31,7 @@ use crate::catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
 };
 use crate::columnar::statistics::compute_row_group_statistics;
-use crate::executor::dml::populate_indexes;
+use crate::executor::dml::{populate_prevalidated_indexes, validate_unique_indexes_before_insert};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
@@ -802,30 +802,37 @@ fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
-    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::new();
+    let mut rows = Vec::new();
+    while let Some(batch) = reader.next_batch(1024)? {
+        for row in batch {
+            if row.len() != table.column_count() {
+                return Err(ExecutorError::BulkLoad(format!(
+                    "row has {} columns, expected {}",
+                    row.len(),
+                    table.column_count()
+                )));
+            }
+            rows.push(row);
+        }
+    }
+    let row_values = rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    validate_unique_indexes_before_insert(txn, table, &btree_indexes, &row_values)?;
+
+    let mut staged = Vec::with_capacity(rows.len());
     {
         let mut storage = txn.table_storage(table);
-        while let Some(batch) = reader.next_batch(1024)? {
-            for row in batch {
-                if row.len() != table.column_count() {
-                    return Err(ExecutorError::BulkLoad(format!(
-                        "row has {} columns, expected {}",
-                        row.len(),
-                        table.column_count()
-                    )));
-                }
-                let row_id = storage
-                    .next_row_id()
-                    .map_err(|e| map_storage_error(table, e))?;
-                storage
-                    .insert(row_id, &row)
-                    .map_err(|e| map_storage_error(table, e))?;
-                staged.push((row_id, row));
-            }
+        for row in rows {
+            let row_id = storage
+                .next_row_id()
+                .map_err(|e| map_storage_error(table, e))?;
+            storage
+                .insert(row_id, &row)
+                .map_err(|e| map_storage_error(table, e))?;
+            staged.push((row_id, row));
         }
     }
 
-    populate_indexes(txn, table, &btree_indexes, &staged)?;
+    populate_prevalidated_indexes(txn, &btree_indexes, &staged)?;
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 

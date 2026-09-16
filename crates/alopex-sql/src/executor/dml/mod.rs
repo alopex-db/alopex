@@ -11,7 +11,10 @@ mod update;
 
 #[allow(unused_imports)]
 pub use delete::{execute_delete, execute_delete_with_returning};
-pub(crate) use insert::{evaluate_default, normalize_assignment_value, populate_indexes};
+pub(crate) use insert::{
+    evaluate_default, normalize_assignment_value, populate_prevalidated_indexes,
+    validate_unique_indexes_before_insert,
+};
 #[allow(unused_imports)]
 pub use insert::{
     execute_insert, execute_insert_rows, execute_insert_rows_with_plan, execute_insert_with_plan,

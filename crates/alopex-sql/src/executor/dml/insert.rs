@@ -769,22 +769,7 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-pub(crate) fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
-    txn: &mut T,
-    table: &TableMetadata,
-    indexes: &[IndexMetadata],
-    rows: &[(u64, Vec<SqlValue>)],
-) -> Result<()> {
-    for index in indexes
-        .iter()
-        .filter(|index| index.unique && rows.len() > 1)
-    {
-        validate_unique_index_batch(txn, table, index, rows)?;
-    }
-    populate_prevalidated_indexes(txn, indexes, rows)
-}
-
-fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+pub(crate) fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
@@ -811,7 +796,7 @@ fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     Ok(())
 }
 
-fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+pub(crate) fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     table: &TableMetadata,
     indexes: &[IndexMetadata],
@@ -841,44 +826,6 @@ fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn
                     },
                 ));
             }
-        }
-    }
-    Ok(())
-}
-
-fn validate_unique_index_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
-    txn: &mut T,
-    table: &TableMetadata,
-    index: &IndexMetadata,
-    rows: &[(u64, Vec<SqlValue>)],
-) -> Result<()> {
-    let staged_ids = rows
-        .iter()
-        .map(|(row_id, _)| *row_id)
-        .collect::<HashSet<_>>();
-    let values = rows
-        .iter()
-        .map(|(_, row)| row.as_slice())
-        .collect::<Vec<_>>();
-    let mut keys = HashSet::with_capacity(values.len());
-    let mut storage = txn.table_storage(table);
-    let mut existing = storage.range_scan(0, u64::MAX)?;
-    while let Some(row) = existing.next() {
-        let (row_id, row) = row?;
-        if !staged_ids.contains(&row_id) && !should_skip_unique_index_for_null(index, &row) {
-            keys.insert(unique_index_key(index, &row)?);
-        }
-    }
-    for row in values {
-        if !should_skip_unique_index_for_null(index, row)
-            && !keys.insert(unique_index_key(index, row)?)
-        {
-            return Err(map_index_error(
-                index,
-                StorageError::UniqueViolation {
-                    index_id: index.index_id,
-                },
-            ));
         }
     }
     Ok(())
