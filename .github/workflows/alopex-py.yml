@@ -10,6 +10,8 @@ on:
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
       - "crates/alopex-sql/**"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       # The server client's e2e lane asserts the HTTP wire contract, so a
       # change on the server side has to re-run it.
       - "crates/alopex-server/**"
@@ -23,6 +25,8 @@ on:
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
       - "crates/alopex-sql/**"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       # The server client's e2e lane asserts the HTTP wire contract, so a
       # change on the server side has to re-run it.
       - "crates/alopex-server/**"
