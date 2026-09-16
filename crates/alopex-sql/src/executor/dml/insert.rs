@@ -300,9 +300,16 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         reject_duplicate_conflict_keys(table, plan, &rows)?;
     }
     let conflict_indices = conflict.and_then(|plan| conflict_column_indices(table, plan));
+    let conflict_index = conflict_indices.as_ref().and_then(|indices| {
+        catalog
+            .get_indexes_for_table(table_name)
+            .into_iter()
+            .find(|index| index.unique && index.column_indices == *indices)
+            .cloned()
+    });
     let conflicts = conflict_indices
         .as_ref()
-        .map(|indices| load_conflicts(txn, table, indices))
+        .map(|indices| load_conflicts(txn, table, indices, &rows, conflict_index.as_ref()))
         .transpose()?;
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
@@ -518,13 +525,59 @@ fn load_conflicts<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     table: &TableMetadata,
     indices: &[usize],
+    rows: &[Vec<SqlValue>],
+    conflict_index: Option<&IndexMetadata>,
 ) -> Result<ConflictRows> {
+    if let Some(index) = conflict_index {
+        return load_conflicts_from_index(txn, table, indices, rows, index);
+    }
     let mut conflicts = HashMap::new();
     let mut storage = txn.table_storage(table);
     let mut iter = storage.range_scan(0, u64::MAX)?;
     while let Some(item) = iter.next() {
         let (row_id, existing) = item?;
         if let Some(key) = conflict_key(&existing, indices)? {
+            conflicts.entry(key).or_insert((row_id, existing));
+        }
+    }
+    Ok(conflicts)
+}
+
+fn load_conflicts_from_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    table: &TableMetadata,
+    indices: &[usize],
+    rows: &[Vec<SqlValue>],
+    index: &IndexMetadata,
+) -> Result<ConflictRows> {
+    let mut lookups = Vec::new();
+    for row in rows {
+        if let Some(key) = conflict_key(row, indices)? {
+            let values: Vec<SqlValue> = indices.iter().map(|&index| row[index].clone()).collect();
+            lookups.push((key, values));
+        }
+    }
+
+    let mut matched_rows = Vec::new();
+    {
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        for (key, values) in &lookups {
+            let row_ids = if values.len() == 1 {
+                storage.lookup(&values[0])?
+            } else {
+                storage.lookup_composite(values)?
+            };
+            matched_rows.extend(row_ids.into_iter().map(|row_id| (key.clone(), row_id)));
+        }
+    }
+
+    let mut conflicts = HashMap::new();
+    let mut storage = txn.table_storage(table);
+    for (key, row_id) in matched_rows {
+        if let Some(existing) = storage.get(row_id)?
+            && conflict_key(&existing, indices)? == Some(key.clone())
+        {
             conflicts.entry(key).or_insert((row_id, existing));
         }
     }
