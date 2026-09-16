@@ -62,7 +62,7 @@ jobs:
           if-no-files-found: error
 
   package:
-    name: Strict staged source and crate package
+    name: Strict staged source and crate contents
     needs: parser-assets
     runs-on: ubuntu-latest
     steps:
@@ -91,7 +91,7 @@ jobs:
             "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest.json
           python scripts/release/parser_asset_manifest.py verify-manifest \
             --manifest artifacts/parser-vendor-manifest.json --asset-dir artifacts
-      - name: Build strict staged source and package alopex-sql
+      - name: Build strict staged source and enumerate alopex-sql crate contents
         shell: bash
         run: |
           set -euo pipefail
@@ -107,13 +107,15 @@ jobs:
             --build-support "${stage}/crates/alopex-sql/build_support.rs"
           env -u ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD -u NIM_SQL_PARSER_LIB_DIR \
             cargo build --manifest-path "${stage}/Cargo.toml" -p alopex-sql
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/alopex-rc-package-target" \
-            cargo package --manifest-path "${stage}/Cargo.toml" -p alopex-sql \
-              --allow-dirty --no-verify
+          cargo package --manifest-path "${stage}/Cargo.toml" -p alopex-sql \
+            --allow-dirty --list > "${RUNNER_TEMP}/alopex-sql-package-files.txt"
+          grep -Fx 'nim-sql-parser/vendor/parser-vendor-manifest.json' \
+            "${RUNNER_TEMP}/alopex-sql-package-files.txt"
+          test "$(grep -Ec '^nim-sql-parser/vendor/[^/]+/(libalopex_sql_parser\.(so|dylib)|alopex_sql_parser\.dll)$' "${RUNNER_TEMP}/alopex-sql-package-files.txt")" -eq 4
       - uses: actions/upload-artifact@v4
         with:
           name: rc-parser-package-${{ inputs.candidate_sha || github.sha }}
           path: |
             artifacts/parser-vendor-manifest.json
-            ${{ runner.temp }}/alopex-rc-package-target/package/*.crate
+            ${{ runner.temp }}/alopex-sql-package-files.txt
           if-no-files-found: error

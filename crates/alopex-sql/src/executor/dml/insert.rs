@@ -528,9 +528,7 @@ fn load_conflicts<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     rows: &[Vec<SqlValue>],
     conflict_index: Option<&IndexMetadata>,
 ) -> Result<ConflictRows> {
-    if rows.len() == 1
-        && let Some(index) = conflict_index
-    {
+    if let Some(index) = conflict_index {
         return load_conflicts_from_index(txn, table, indices, rows, index);
     }
     let mut conflicts = HashMap::new();
