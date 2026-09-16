@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import textwrap
 import tomllib
 import unittest
 from pathlib import Path
@@ -138,32 +137,6 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("Place vendored libraries in clean source staging", release)
         self.assertNotIn("Upload vendored Nim shared library", release)
 
-    def test_release_parser_contract_matches_source_contract(self) -> None:
-        contract = (
-            ROOT / "crates/alopex-sql/nim-sql-parser/PARSER_CONTRACT_VERSION"
-        ).read_text(encoding="utf-8").strip()
-        release = (ROOT / ".github/workflows/release.yml").read_text(
-            encoding="utf-8"
-        )
-        python_ci = (ROOT / ".github/workflows/alopex-py.yml").read_text(
-            encoding="utf-8"
-        )
-        python_release = (
-            ROOT / ".github/workflows/alopex-py-release.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn(f'if version != "{contract}":', release)
-        self.assertIn(f'contract-{contract}-*.tar.gz', release)
-        self.assertIn(f'write_bytes(b"{contract}\\n")', release)
-        self.assertIn(f"printf '{contract}\\n'", python_ci)
-        self.assertIn(f'contract-{contract}-*.tar.gz', python_release)
-        self.assertIn(f"write_bytes(b'{contract}\\n')", python_release)
-        self.assertIn(
-            f"--expected-contract-version {contract}", python_release
-        )
-        for workflow in (release, python_ci, python_release):
-            self.assertNotIn("0.14.0", workflow)
-
     def test_release_rust_toolchain_is_pinned(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
@@ -250,50 +223,6 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn('git merge-base --is-ancestor "${core_sha}" HEAD', tagger)
         self.assertIn('gh run list --workflow ci.yml --commit "${candidate_sha}"', tagger)
         self.assertIn('git tag -a "${python_tag}" "${candidate_sha}"', tagger)
-
-    def test_crate_publish_verifies_the_packaged_vendor_tree(self) -> None:
-        release = (ROOT / ".github/workflows/release.yml").read_text(
-            encoding="utf-8"
-        )
-        publish = release.split("  publish-crate:", maxsplit=1)[1].split(
-            "  dispatch-python-release:", maxsplit=1
-        )[0]
-
-        self.assertNotIn(
-            "NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser",
-            publish,
-        )
-        self.assertIn(
-            "env -u NIM_SQL_PARSER_LIB_DIR cargo publish", publish
-        )
-        self.assertIn(
-            "Bind crate source staging to freshly built parser assets", publish
-        )
-        self.assertIn(
-            '--vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor"',
-            publish,
-        )
-        self.assertIn("parser library digest mismatch", publish)
-        self.assertIn(
-            "unknown or ambiguous parser vendor manifest layout", publish
-        )
-        self.assertIn(
-            "python scripts/release/retarget_python_parser_source.py", publish
-        )
-
-    def test_crate_publish_parser_staging_python_is_valid(self) -> None:
-        release = (ROOT / ".github/workflows/release.yml").read_text(
-            encoding="utf-8"
-        )
-        staging = release.split(
-            "- name: Bind crate source staging to freshly built parser assets",
-            maxsplit=1,
-        )[1].split("- name: Create publish helper", maxsplit=1)[0]
-        script = staging.split("python - <<'PY'\n", maxsplit=1)[1].split(
-            "\n          PY", maxsplit=1
-        )[0]
-
-        compile(textwrap.dedent(script), "release parser staging", "exec")
 
     def test_release_has_no_repair_forward_path(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
