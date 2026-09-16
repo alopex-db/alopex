@@ -191,10 +191,6 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
 
-      - name: Verify release workflow contract
-        shell: bash
-        run: bash scripts/release/v07_gate.sh --workflow-contract-only
-
       - name: Verify peeled release tag
         shell: bash
         run: |

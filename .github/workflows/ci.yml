@@ -122,10 +122,10 @@ jobs:
         include:
           # Stable Linux is owned by v08-release-gate. Windows PR compilation
           # stays in the build matrix; full tests run in scheduled compatibility.
+          # Only the macOS stable lane remains here: the release ships macOS
+          # binaries, while a beta toolchain is never a release input.
           - os: macos-latest
             rust: stable
-          - os: ubuntu-latest
-            rust: beta
     steps:
       - name: Free disk space (Ubuntu)
         if: runner.os == 'Linux'
@@ -226,17 +226,6 @@ jobs:
             --output "artifacts/build-metrics/compatibility-${RUNNER_OS}-${{ matrix.rust }}.json" \
             --target-dir "${GITHUB_WORKSPACE}/target" \
             -- cargo test --workspace --features lane_ci --timings
-
-      - name: Install nextest for isolated alopex-py tests
-        if: runner.os == 'Linux'
-        uses: taiki-e/install-action@nextest
-
-      - name: Run alopex-py tests in isolated processes
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo nextest run -p alopex-py --features lane_ci --no-fail-fast
 
       - name: Upload compatibility build metrics
         if: always()

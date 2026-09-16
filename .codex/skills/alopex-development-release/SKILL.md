@@ -18,6 +18,7 @@ Use this skill for an end-to-end Alopex version. Keep requirements, design, impl
 - Preserve user work. Isolate release work in a dedicated worktree/branch and never reset or delete broad paths.
 - Use newly created approval IDs and the actual project root when submitting spec-workflow requests. Do not infer approval from stale dashboard entries or old approval files.
 - Treat phase coverage as a release-blocking completeness contract: every roadmap item and inherited public surface must belong to exactly one broad phase, have explicit requirements, and be traced through design, tasks, tests, and release evidence. Never replace missing phase coverage with a later audit.
+- Apply [the CI and test policy](../../../docs/ci-test-policy.md) to every new test, lane, or workflow job: one owner per execution signature, deterministic PR CI only, performance as advisory or issue-owned dispatch, no gate named after a past release, no test that nothing runs, and a documented delete condition for every addition.
 - Apply [the reference compatibility development policy](../../../docs/reference-compatibility-development-policy.md) to every API or behavior that claims compatibility, parity, conformance, or a reference-project basis. Pin the reference implementation and upstream test before implementation, require machine-readable test provenance, and record Alopex extensions or divergences in the fixture. Handwritten expectations alone are not conformance evidence.
 
 ## Development workflow

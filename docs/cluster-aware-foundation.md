@@ -68,13 +68,13 @@ The v0.7.0 compatibility contract is:
 - DataFrame P3 namespace additions are additive and do not alter existing
   default columns unless the caller writes into the same output column.
 
-Release-gate coverage:
+Release-gate coverage (all of it runs in the regular `lane_ci` workspace suite
+on every pull request; there is no separate v0.7 gate):
 
-- `scripts/release/v07_gate.sh` runs the v0.6 baseline gate.
 - Embedded compatibility is covered by
-  `cargo test -p alopex-embedded --test v07_compatibility --all-features --locked`.
+  `cargo test -p alopex-embedded --test v07_compatibility --features lane_ci`.
 - Server compatibility is covered by
-  `cargo test -p alopex-server --test v07_compatibility --all-features --locked`.
+  `cargo test -p alopex-server --test v07_compatibility --features lane_ci`.
 - Python compatibility is covered by
   `crates/alopex-py/tests/test_compatibility_contract.py`.
 - DataFrame P3 is covered by Rust and Python namespace tests.
@@ -147,7 +147,7 @@ or operational docs.
 
 Before tagging `v0.7.0`:
 
-- Run `bash scripts/release/v07_gate.sh`.
+- Require the full CI run (including `v08-release-gate`) on the candidate SHA.
 - Confirm release notes include stable behavior, migration contracts, and
   v0.8/v0.9 follow-on hooks.
 - Merge the release branch into `main`.

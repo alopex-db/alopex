@@ -8,12 +8,12 @@
 | --- | --- | --- | --- |
 | smoke | `lane_smoke` | 最小の動作確認 | PR / ローカル |
 | ci | `lane_ci` | 標準CIカバレッジ | PR / main |
-| nightly | `lane_nightly` | 長めのストレスシナリオ | nightly |
+| nightly | `lane_nightly` | 長めのストレスシナリオ | weekly / dispatch |
 | weekly | `lane_weekly` | 非常に重い/長時間 | weekly |
-| soak | `lane_soak` | 長時間バーンイン/資源監視 | nightly / weekly |
-| perf | `lane_perf` | 性能ベースライン/回帰検知 | nightly |
-| fuzz | `lane_fuzz` | 長時間ファズ（24h） | nightly / weekly |
-| sanitizer | `lane_sanitizer` | TSAN/ASAN/LSAN/MSAN | nightly / weekly（schedule/dispatch） |
+| soak | `lane_soak` | 長時間バーンイン/資源監視 | weekly / dispatch |
+| perf | `lane_perf` | 性能ベースライン/回帰検知 | weekly / dispatch |
+| fuzz | `lane_fuzz` | 長時間ファズ（24h） | weekly / dispatch |
+| sanitizer | `lane_sanitizer` | TSAN/ASAN/LSAN/MSAN | weekly / dispatch |
 
 ## レーン選択規則
 
@@ -115,13 +115,13 @@ Sanitizer レーン:
 
 起動トリガー:
 
-- `pull_request`: 短時間の `stress-tests` のみ
 - `workflow_dispatch`: sanitizer/fuzz/perf を含むすべての対象レーン
-- `schedule`: cron の定期実行（毎日 + 毎週）
+- `schedule`: 週次 cron（日曜 02:00 UTC）。`lane_ci` のストレステストは PR CI の
+  workspace テストでも実行されるため、日次実行は行わない
 
 ジョブ対応:
 
-- `stress-tests`（短時間）: PR / schedule / dispatch で実行
+- `stress-tests`（短時間、`test-hooks` 有効）: schedule / dispatch で実行
 - `sanitizer-lane`: schedule / dispatch のみ
 - `fuzz-lane`: schedule / dispatch のみ（各ターゲット 24h）
 - `perf-lane`: schedule / dispatch のみ（ベースライン比較）
