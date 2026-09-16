@@ -123,56 +123,6 @@ Out of scope for v0.7.0:
 - distributed transactions
 - alopex-py Client / Transaction / ConnectionPool API
 
-### v0.7.0 Taggable Readiness
-
-以下を満たすまで `v0.7.0` tag を作成しない。
-
-```bash
-bash scripts/release/v07_gate.sh
-```
-
-`scripts/release/v07_gate.sh` は以下を集約する。
-
-- v0.6 baseline release gate
-- workspace fmt / clippy
-- `alopex-cluster` cluster metadata / router / simulated harness tests
-- Embedded and Server v0.6 compatibility regressions
-- Server routing and cluster status cross-surface tests
-- CLI cluster status fixture projection
-- DataFrame P3 tests
-- alopex-py Rust tests and Python pytest surface checks
-- release workflow contract checks
-- release CLI binary smoke build
-
-ローカルで workflow wiring だけを確認する場合:
-
-```bash
-bash scripts/release/v07_gate.sh --workflow-contract-only
-```
-
-### v0.7.0 Release Completion
-
-Taggable Readiness を満たした後、以下を完了した時点で v0.7.0 release を完了と
-する。
-
-1. release branch から `main` への PR が merge 済みである。
-2. `main` の merged commit に annotated tag `v0.7.0` を作成し push 済みである。
-3. GitHub Actions の release workflow が成功している。
-4. GitHub Release に以下の CLI artifacts が存在する。
-   - `alopex-linux-x86_64`
-   - `alopex-macos-x86_64`
-   - `alopex-macos-aarch64`
-   - `alopex-windows-x86_64.exe`
-5. release 後の branch cleanup を実行した、または保持理由を `CHANGELOG.md`、
-   release PR、または release note に記録した。
-
-Branch cleanup record の最小記録項目:
-
-- release branch 名
-- 削除したか、保持したか
-- 保持した場合の理由と owner
-- hotfix branch が残る場合は branch 名と終了条件
-
 ### 自動化される処理
 
 タグをプッシュすると、GitHub Actions が以下を自動実行します：
@@ -350,6 +300,7 @@ git push origin v0.4.0
 
 - [GitHub Actions ワークフロー](.github/workflows/release.yml)
 - [CI ワークフロー](.github/workflows/ci.yml)
+- [CI・テスト方針](docs/ci-test-policy.md)
 - [Pre-commit フック設定](scripts/setup-hooks.sh)
 - [v0.7 Cluster-aware Foundation](docs/cluster-aware-foundation.md)
 

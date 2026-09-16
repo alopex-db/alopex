@@ -30,7 +30,7 @@ and advisory issue creation. Rendered Markdown never becomes machine input.
 | Path | Current role | Target role | Action | Delete when | Proof |
 |---|---|---|---|---|---|
 | `crates/alopex-py/tests/benchmarks/test_performance.py` | Measures three overheads and checks correctness | Emit numeric benchmark/xUnit properties; keep correctness assertions | shrink | Old compound strings and `min()` aggregation are absent | Targeted pytest plus JSON inspection |
-| `.github/workflows/alopex-py.yml` | Runs all benchmarks in ordinary CI | Retain an advisory artifact job outside `ci-success`; run the three correctness assertions in the required Polars lane | shrink | Performance values are absent from assertions | Harness contract and Polars tests |
+| `.github/workflows/alopex-py.yml` | Runs all benchmarks in ordinary CI | No benchmark job; run the three correctness assertions in the required Polars lane | delete | done: `alopex-performance.yml` is the only measurement owner | Harness contract and Polars tests |
 | `.github/workflows/alopex-performance.yml` | Not previously present | Trusted, serialized measurement composition root | replace | A successor persists the same schema and reports | Manual workflow run |
 | `scripts/performance/alopex_py_metrics.py` | Not previously present | Normalize, compare, retain, and render canonical data | replace | A versioned migration covers all history | Unit and replay tests |
 | `performance-history/history.json` | Ephemeral Actions artifact only | Canonical, idempotent history | move | A migrated store is verified before branch removal | Rerun the same commit and inspect one record |
@@ -40,9 +40,11 @@ and advisory issue creation. Rendered Markdown never becomes machine input.
 ## Measurement profile
 
 The dedicated workflow runs on one `ubuntu-24.04` GitHub-hosted runner and is
-globally serialized by the `alopex-performance-history` concurrency group. The
-queue retains up to 100 pending runs so rapid pushes do not silently replace an
-older pending measurement. The workload is pinned to one CPU with `taskset`, and
+globally serialized by the `alopex-performance-history` concurrency group. It
+measures on the twice-weekly schedule, on release tags, and on manual dispatch;
+it is not triggered by every push to `main`. The queue retains up to 100
+pending runs so overlapping triggers do not silently replace an older pending
+measurement. The workload is pinned to one CPU with `taskset`, and
 common numerical-library thread pools are limited to one thread. Python, Rust,
 the Python dependencies, Nim, and the Nim packages are pinned. These settings
 are mirrored in `scripts/performance/profile-v1.json`, checked against the
@@ -73,7 +75,7 @@ Each successful run produces:
 - `comparison.json`: distribution comparison and notification decision;
 - `report.md`: human-facing advisory summary.
 
-Trusted `main`, scheduled, manual-on-main, `v*`, and `alopex-py-v*` runs update
+Trusted scheduled, manual-on-main, `v*`, and `alopex-py-v*` runs update
 the `performance-history` branch. A record is keyed by commit, environment
 fingerprint, and workload signature, so rerunning the same source is idempotent.
 The latest 50 records per comparable series are retained.

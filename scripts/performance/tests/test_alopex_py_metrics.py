@@ -537,18 +537,17 @@ def test_dedicated_workflow_is_serial_advisory_and_uses_pinned_inputs():
     assert "          import re\n" in evidence_step
 
 
-def test_regular_python_ci_does_not_gate_on_benchmark_job():
+def test_regular_python_ci_has_no_benchmark_job():
     repository_root = Path(__file__).resolve().parents[3]
     workflow = (repository_root / ".github/workflows/alopex-py.yml").read_text(
         encoding="utf-8"
     )
 
-    assert "needs: [rust-check, test, polars-test, typecheck]" in workflow
+    # alopex-performance.yml is the only measurement owner; regular Python CI
+    # must not carry a per-push benchmark job, even an advisory one.
+    assert "  benchmarks:\n" not in workflow
     assert "needs.benchmarks.result" not in workflow
-    benchmark_job = workflow.split("  benchmarks:\n", 1)[1].split(
-        "  ci-success:\n", 1
-    )[0]
-    assert "continue-on-error: true" in benchmark_job
+    assert "--benchmark-only" not in workflow
     polars_job = workflow.split("  polars-test:\n", 1)[1].split(
         "  typecheck:\n", 1
     )[0]

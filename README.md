@@ -193,6 +193,7 @@ We welcome contributions from engineers interested in Rust, Distributed Systems,
 
 Compatibility-sensitive development must follow the
 [reference compatibility development policy](docs/reference-compatibility-development-policy.md).
+New tests and CI jobs must follow the [CI and test policy](docs/ci-test-policy.md).
 
 -----
 
