@@ -58,13 +58,47 @@ pub struct CopyOptions {
     pub header: bool,
 }
 
+/// ファイルパスを使う COPY の権限。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CopyFilePolicy {
+    /// ファイルシステムを使う COPY を拒否する。
+    #[default]
+    Denied,
+    /// 指定されたベースディレクトリ配下だけを許可する。
+    Restricted(Vec<PathBuf>),
+    /// 明示的に信頼されたローカルプロセスだけが使う無制限アクセス。
+    Unrestricted,
+}
+
 /// COPY セキュリティ設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopySecurityConfig {
-    /// 許可するベースディレクトリ一覧（None なら無制限）。
-    pub allowed_base_dirs: Option<Vec<PathBuf>>,
+    /// ファイルシステムを使う COPY の権限。
+    pub file_policy: CopyFilePolicy,
     /// シンボリックリンクを許可するか。
     pub allow_symlinks: bool,
+    /// プロセスの標準入出力を COPY の転送先として許可するか。
+    pub allow_stdio: bool,
+}
+
+impl CopySecurityConfig {
+    /// ローカル埋め込み実行用の明示的な権限。
+    pub fn trusted_local() -> Self {
+        Self {
+            file_policy: CopyFilePolicy::Unrestricted,
+            allow_symlinks: false,
+            allow_stdio: true,
+        }
+    }
+
+    /// 指定ディレクトリに限定したファイル COPY 権限。
+    pub fn restricted(allowed_base_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            file_policy: CopyFilePolicy::Restricted(allowed_base_dirs),
+            allow_symlinks: false,
+            allow_stdio: false,
+        }
+    }
 }
 
 /// 入力スキーマのフィールド。
@@ -117,7 +151,9 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
 
-    if file_path != "-" {
+    if file_path == "-" {
+        validate_stdio(config)?;
+    } else {
         validate_file_path(file_path, config)?;
     }
 
@@ -243,6 +279,7 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
     if file_path == "-" {
+        validate_stdio(config)?;
         if format != FileFormat::Csv {
             return Err(ExecutorError::UnsupportedFormat(
                 "COPY TO STDOUT currently supports CSV only".into(),
@@ -339,6 +376,7 @@ pub fn execute_copy_query_to(
     config: &CopySecurityConfig,
 ) -> Result<ExecutionResult> {
     if file_path == "-" {
+        validate_stdio(config)?;
         if format == FileFormat::Parquet {
             return Err(ExecutorError::UnsupportedFormat(
                 "COPY TO STDOUT currently supports CSV only".into(),
@@ -625,7 +663,12 @@ fn is_copy_temp_file_name(file_name: &str, output_name: &str) -> bool {
 
 fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
-    if path.exists() && !config.allow_symlinks && path.is_symlink() {
+    reject_denied_file_policy(file_path, config)?;
+    if !config.allow_symlinks
+        && fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    {
         return Err(ExecutorError::PathValidationFailed {
             path: file_path.into(),
             reason: "symbolic links not allowed".into(),
@@ -639,7 +682,7 @@ fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<
                 path: file_path.into(),
                 reason: error.to_string(),
             })?;
-    if let Some(base_dirs) = &config.allowed_base_dirs
+    if let CopyFilePolicy::Restricted(base_dirs) = &config.file_policy
         && !base_dirs
             .iter()
             .any(|base| canonical_parent.starts_with(base))
@@ -682,6 +725,7 @@ fn csv_value(value: &SqlValue) -> String {
 /// パスセキュリティ検証。
 pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
+    reject_denied_file_policy(file_path, config)?;
 
     // 先に存在確認を行い、設計どおり FileNotFound を優先する。
     if !path.exists() {
@@ -695,7 +739,7 @@ pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Resul
             reason: format!("failed to canonicalize: {e}"),
         })?;
 
-    if let Some(base_dirs) = &config.allowed_base_dirs {
+    if let CopyFilePolicy::Restricted(base_dirs) = &config.file_policy {
         let allowed = base_dirs.iter().any(|base| canonical.starts_with(base));
         if !allowed {
             return Err(ExecutorError::PathValidationFailed {
@@ -735,6 +779,26 @@ pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Resul
         }
     }
 
+    Ok(())
+}
+
+fn reject_denied_file_policy(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
+    if config.file_policy == CopyFilePolicy::Denied {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "file COPY is not allowed".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_stdio(config: &CopySecurityConfig) -> Result<()> {
+    if !config.allow_stdio {
+        return Err(ExecutorError::PathValidationFailed {
+            path: "-".into(),
+            reason: "COPY to process standard input/output is not allowed".into(),
+        });
+    }
     Ok(())
 }
 
@@ -1711,8 +1775,9 @@ mod tests {
         std::fs::create_dir_all(&dir_path).unwrap();
 
         let config = CopySecurityConfig {
-            allowed_base_dirs: Some(vec![dir.clone()]),
+            file_policy: CopyFilePolicy::Restricted(vec![dir.clone()]),
             allow_symlinks: false,
+            allow_stdio: false,
         };
 
         // Directory is rejected.
@@ -1802,6 +1867,37 @@ mod tests {
     }
 
     #[test]
+    fn default_copy_security_rejects_file_and_stdio_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("items.csv");
+        fs::write(&file, "id,name\n1,alice\n").unwrap();
+
+        let config = CopySecurityConfig::default();
+        let err = validate_file_path(file.to_str().unwrap(), &config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+        let err = validate_stdio(&config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_output_path_rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("output.csv");
+        symlink(dir.path().join("outside.csv"), &link).unwrap();
+        let config = CopySecurityConfig {
+            file_policy: CopyFilePolicy::Restricted(vec![dir.path().to_path_buf()]),
+            allow_symlinks: false,
+            allow_stdio: false,
+        };
+
+        let err = validate_output_path(link.to_str().unwrap(), &config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+    }
+
+    #[test]
     fn execute_copy_csv_inserts_rows() {
         let dir = std::env::temp_dir();
         let file_path = dir.join("alopex_copy_test.csv");
@@ -1821,7 +1917,7 @@ mod tests {
             file_path.to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1853,7 +1949,7 @@ mod tests {
             file_path.to_str().unwrap(),
             FileFormat::Parquet,
             CopyOptions::default(),
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1887,7 +1983,7 @@ mod tests {
             valid.to_str().unwrap(),
             FileFormat::Parquet,
             CopyOptions::default(),
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1911,7 +2007,7 @@ mod tests {
                 duplicate.to_str().unwrap(),
                 FileFormat::Parquet,
                 CopyOptions::default(),
-                &CopySecurityConfig::default(),
+                &CopySecurityConfig::trusted_local(),
             )
             .is_err()
         );

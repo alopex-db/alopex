@@ -238,10 +238,9 @@ impl ServerConfig {
                 Ok(canonical)
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(alopex_sql::executor::bulk::CopySecurityConfig {
-            allowed_base_dirs: Some(allowed_base_dirs),
-            allow_symlinks: false,
-        })
+        Ok(alopex_sql::executor::bulk::CopySecurityConfig::restricted(
+            allowed_base_dirs,
+        ))
     }
 
     fn normalize(&mut self) -> Result<()> {

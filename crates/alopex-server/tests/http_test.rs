@@ -913,6 +913,48 @@ async fn http_sql_copy_uses_configured_directory_and_is_atomic() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn http_sql_copy_rejects_process_stdio_targets() {
+    let (state, _temp, _copy_dir) = build_state_with_copy_dir().await;
+    let router = http::router(state);
+
+    for sql in [
+        "CREATE TABLE items (id INT PRIMARY KEY);",
+        "INSERT INTO items VALUES (1);",
+    ] {
+        let (status, _, body) = send_json(
+            router.clone(),
+            Method::POST,
+            "/sql",
+            json!({ "sql": sql }),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    }
+
+    for sql in [
+        "COPY items FROM STDIN WITH (FORMAT CSV);",
+        "COPY items TO STDOUT WITH (FORMAT CSV);",
+    ] {
+        let (status, _, body) = send_json(
+            router.clone(),
+            Method::POST,
+            "/sql",
+            json!({ "sql": sql }),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn http_sql_copy_parquet_vector_is_transactional() {
     let (state, _temp, copy_dir) = build_state_with_copy_dir().await;
     let router = http::router(state);

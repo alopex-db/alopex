@@ -66,7 +66,7 @@ fn columnar_scan_applies_pushdown_and_projection() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -147,7 +147,7 @@ fn a_lateral_correlated_predicate_is_not_fused_into_a_columnar_scan() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -239,7 +239,7 @@ fn columnar_projection_pushdown_covers_aggregate_filter_and_order_by() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();

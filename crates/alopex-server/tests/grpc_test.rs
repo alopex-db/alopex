@@ -437,6 +437,36 @@ async fn grpc_sql_copy_uses_the_same_configured_directory() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn grpc_sql_copy_rejects_process_stdio_targets() {
+    let (state, _temp, _copy_dir) = build_state_with_copy_dir().await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE items (id INT PRIMARY KEY);".to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("DDL");
+
+    for sql in [
+        "COPY items FROM STDIN WITH (FORMAT CSV);",
+        "COPY items TO STDOUT WITH (FORMAT CSV);",
+    ] {
+        let err = client
+            .execute_dml(grpc::proto::DmlRequest {
+                sql: sql.to_string(),
+                session_id: String::new(),
+            })
+            .await
+            .expect_err("COPY STDIO must be rejected remotely");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn grpc_vector_upsert_batch_rejects_duplicate_ids_atomically() {
     let (state, _temp) = build_state(AuthMode::None).await;
     let (channel, _handle) = spawn_grpc_server(state).await;

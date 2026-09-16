@@ -344,7 +344,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -368,7 +368,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                         &path,
                         format,
                         bulk::CopyOptions { header },
-                        &bulk::CopySecurityConfig::default(),
+                        &bulk::CopySecurityConfig::trusted_local(),
                     )
                 })
             }
@@ -394,7 +394,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                         &path,
                         format,
                         bulk::CopyOptions { header },
-                        &bulk::CopySecurityConfig::default(),
+                        &bulk::CopySecurityConfig::trusted_local(),
                     )
                 })
             }
@@ -857,7 +857,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -880,7 +880,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -904,7 +904,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::CreateSequence(statement) => {
