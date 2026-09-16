@@ -14,9 +14,11 @@ OPERATIONS = ("single", "batch", "csv", "parquet")
 SIZES = (10_000, 50_000)
 
 
-def load_rows(root: Path, source_commit: str) -> list[dict[str, object]]:
+def load_rows(
+    root: Path, source_commit: str, operations: tuple[str, ...] = OPERATIONS
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for operation in OPERATIONS:
+    for operation in operations:
         for size in SIZES:
             path = root / f"{operation}-{size}.json"
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -33,8 +35,10 @@ def load_rows(root: Path, source_commit: str) -> list[dict[str, object]]:
     return rows
 
 
-def render(root: Path, source_commit: str) -> None:
-    rows = load_rows(root / "raw", source_commit)
+def render(
+    root: Path, source_commit: str, operations: tuple[str, ...] = OPERATIONS
+) -> None:
+    rows = load_rows(root / "raw", source_commit, operations)
     root.mkdir(parents=True, exist_ok=True)
     (root / "ingestion.raw.json").write_text(
         json.dumps(
@@ -43,7 +47,7 @@ def render(root: Path, source_commit: str) -> None:
                 "source_commit": source_commit,
                 "contract": {
                     "protocol": "http",
-                    "operations": list(OPERATIONS),
+                    "operations": list(operations),
                     "sizes": list(SIZES),
                     "warmups": 1,
                     "samples": 1,
@@ -91,5 +95,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--operations", nargs="+", choices=OPERATIONS, default=OPERATIONS)
     args = parser.parse_args()
-    render(args.root, args.source_commit)
+    render(args.root, args.source_commit, tuple(args.operations))
