@@ -14,7 +14,7 @@ pub struct HnswConfig {
     pub metric: Metric,
     /// 双方向接続の上限（2-100、既定16）。
     pub m: usize,
-    /// 構築時の探索幅（m 以上、既定200）。
+    /// 構築時の探索幅（m 以上、既定100）。
     pub ef_construction: usize,
 }
 
@@ -24,7 +24,7 @@ impl Default for HnswConfig {
             dimension: 0,
             metric: Metric::Cosine,
             m: 16,
-            ef_construction: 200,
+            ef_construction: 100,
         }
     }
 }

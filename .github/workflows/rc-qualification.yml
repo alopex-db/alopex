@@ -1,0 +1,121 @@
+name: RC Qualification
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Candidate branch or commit
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact candidate commit SHA
+        required: true
+        type: string
+
+jobs:
+  parser-assets:
+    name: Build parser (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_ref || github.ref }}
+      - name: Verify candidate identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha || github.sha }}"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build and verify parser archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-nim-parser.sh --backend host \
+            --target "${{ matrix.target }}" --archive-dir artifacts/parser
+          record="$(find artifacts/parser -maxdepth 1 -name '*${{ matrix.target }}.json' -type f -print -quit)"
+          test -n "${record}"
+          python scripts/release/parser_asset_manifest.py verify-target \
+            --record "${record}" --asset-dir artifacts/parser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rc-parser-${{ matrix.target }}
+          path: |
+            artifacts/parser/*.json
+            artifacts/parser/*.tar.gz
+          if-no-files-found: error
+
+  package:
+    name: Strict staged source and crate contents
+    needs: parser-assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.candidate_ref || github.ref }}
+      - name: Verify candidate identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha || github.sha }}"
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rc-parser-*
+          path: artifacts
+          merge-multiple: true
+      - name: Assemble exact parser manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
+          test "${#records[@]}" -eq 4
+          args=()
+          for record in "${records[@]}"; do args+=(--record "${record}"); done
+          python scripts/release/parser_asset_manifest.py assemble-manifest \
+            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest.json
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest artifacts/parser-vendor-manifest.json --asset-dir artifacts
+      - name: Build strict staged source and enumerate alopex-sql crate contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/alopex-rc-source"
+          mkdir -p "${stage}"
+          git archive --format=tar "${{ inputs.candidate_sha || github.sha }}" | tar -xf - -C "${stage}"
+          python "${stage}/scripts/release/stage_parser_assets.py" \
+            --manifest artifacts/parser-vendor-manifest.json --asset-dir artifacts \
+            --vendor-dir "${stage}/crates/alopex-sql/nim-sql-parser/vendor"
+          python "${stage}/scripts/release/retarget_python_parser_source.py" \
+            --manifest artifacts/parser-vendor-manifest.json \
+            --vendor-dir "${stage}/crates/alopex-sql/nim-sql-parser/vendor" \
+            --build-support "${stage}/crates/alopex-sql/build_support.rs"
+          env -u ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD -u NIM_SQL_PARSER_LIB_DIR \
+            cargo build --manifest-path "${stage}/Cargo.toml" -p alopex-sql
+          cargo package --manifest-path "${stage}/Cargo.toml" -p alopex-sql \
+            --allow-dirty --list > "${RUNNER_TEMP}/alopex-sql-package-files.txt"
+          grep -Fx 'nim-sql-parser/vendor/parser-vendor-manifest.json' \
+            "${RUNNER_TEMP}/alopex-sql-package-files.txt"
+          test "$(grep -Ec '^nim-sql-parser/vendor/[^/]+/(libalopex_sql_parser\.(so|dylib)|alopex_sql_parser\.dll)$' "${RUNNER_TEMP}/alopex-sql-package-files.txt")" -eq 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rc-parser-package-${{ inputs.candidate_sha || github.sha }}
+          path: |
+            artifacts/parser-vendor-manifest.json
+            ${{ runner.temp }}/alopex-sql-package-files.txt
+          if-no-files-found: error

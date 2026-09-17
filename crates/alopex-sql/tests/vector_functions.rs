@@ -57,6 +57,38 @@ fn vector_similarity_and_distance_end_to_end() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn readme_vector_query_executes() {
+    let results = run_sql(
+        r#"
+        CREATE TABLE knowledge_chunks (
+            id INTEGER PRIMARY KEY,
+            content TEXT,
+            embedding VECTOR(3),
+            created_at TIMESTAMP
+        );
+        INSERT INTO knowledge_chunks VALUES
+            (1, 'AlopexDB', [0.1, 0.5, 0.2], TIMESTAMP '2024-02-01 00:00:00');
+        SELECT content, vector_similarity(embedding, [0.1, 0.5, 0.2], 'cosine') AS score
+        FROM knowledge_chunks
+        WHERE created_at > TIMESTAMP '2024-01-01 00:00:00'
+        ORDER BY score DESC
+        LIMIT 5;
+        "#,
+    );
+    match &results[2] {
+        ExecutionResult::Query(query) => {
+            assert_eq!(query.rows.len(), 1);
+            assert_eq!(
+                query.rows[0][0],
+                alopex_sql::storage::SqlValue::Text("AlopexDB".into())
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn vector_dims_and_norm_end_to_end() {
     let sql = r#"
         CREATE TABLE dummy (id INT);

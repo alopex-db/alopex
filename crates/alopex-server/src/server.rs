@@ -12,6 +12,7 @@ use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdap
 use alopex_core::kv::AsyncKVStore;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, CatalogError, PersistentCatalog};
+use alopex_sql::executor::bulk::CopySecurityConfig;
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::erased::ErasedAsyncSqlTransaction;
 use tokio::sync::{broadcast, Semaphore};
@@ -100,7 +101,12 @@ impl Server {
             RemoteReadWorkerAuthorizer::new(auth.local_read_authorization_recheck());
         let distributed_read_registry = DistributedReadRegistry::new();
 
-        let txn_factory = build_txn_factory(async_store.clone(), catalog.clone(), metrics.clone());
+        let txn_factory = build_txn_factory(
+            async_store.clone(),
+            catalog.clone(),
+            metrics.clone(),
+            config.copy_security_config()?,
+        );
         let session_manager = Arc::new(SessionManager::new(
             SessionConfig {
                 ttl: config.session_ttl,
@@ -301,6 +307,7 @@ impl ServerState {
             AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, self.catalog.clone());
         let policy = MemoryControlPolicy::from_env_with_metrics(self.metrics.clone()).sql_policy();
         bridge.set_memory_policy(policy);
+        bridge.set_copy_security(self.config.copy_security_config()?);
         Ok(bridge)
     }
 }
@@ -357,17 +364,20 @@ fn build_txn_factory(
     store: Arc<AsyncKVStoreAdapter<AnyKV>>,
     catalog: Arc<RwLock<dyn Catalog + Send + Sync>>,
     metrics: Metrics,
+    copy_security: CopySecurityConfig,
 ) -> TransactionFactory {
     Arc::new(move || {
         let store = store.clone();
         let catalog = catalog.clone();
         let metrics = metrics.clone();
+        let copy_security = copy_security.clone();
         Box::pin(async move {
             let txn = store.begin_async().await?;
             let mut bridge: AsyncTxnBridge<'static, AsyncKVTransactionAdapter> =
                 AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
             let policy = MemoryControlPolicy::from_env_with_metrics(metrics).sql_policy();
             bridge.set_memory_policy(policy);
+            bridge.set_copy_security(copy_security);
             Ok(Box::new(bridge) as Box<dyn ErasedAsyncSqlTransaction>)
         })
     })

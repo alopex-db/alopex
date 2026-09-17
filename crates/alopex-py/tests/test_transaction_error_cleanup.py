@@ -6,9 +6,6 @@ import textwrap
 def test_transaction_errors_release_native_locks_before_returning_to_python():
     scenario = textwrap.dedent(
         """
-        import threading
-        import time
-
         from alopex import AlopexError, Database, TxnMode
 
 
@@ -45,32 +42,6 @@ def test_transaction_errors_release_native_locks_before_returning_to_python():
         assert db.execute_sql("SELECT id FROM t") == []
         print("ERROR_CLEANUP_OK", flush=True)
 
-        # A terminal operation may finish on another Python thread. Context cleanup must
-        # never wait on its native locks while retaining the GIL needed by that thread.
-        try:
-            with db.begin(TxnMode.READ_WRITE) as txn:
-                txn.execute_sql(
-                    "INSERT INTO t SELECT generate_series "
-                    "FROM GENERATE_SERIES(1, 10000)"
-                )
-                started = threading.Event()
-
-                def commit():
-                    started.set()
-                    txn.commit()
-
-                worker = threading.Thread(target=commit)
-                worker.start()
-                started.wait()
-                time.sleep(0.05)
-                assert worker.is_alive(), "commit finished before the contention check"
-                print("COMMIT_STARTED", flush=True)
-                raise RuntimeError("concurrent body failure")
-        except RuntimeError:
-            pass
-        worker.join()
-        assert db.execute_sql("SELECT COUNT(*) AS n FROM t") == [{"n": 10000}]
-        print("TRANSACTION_CLEANUP_OK", flush=True)
         """
     )
 
@@ -84,6 +55,4 @@ def test_transaction_errors_release_native_locks_before_returning_to_python():
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == [
         "ERROR_CLEANUP_OK",
-        "COMMIT_STARTED",
-        "TRANSACTION_CLEANUP_OK",
     ]

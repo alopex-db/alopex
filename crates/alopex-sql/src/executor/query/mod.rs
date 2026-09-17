@@ -171,6 +171,20 @@ fn matching_btree_index<C: Catalog + ?Sized>(
         .cloned()
 }
 
+pub(crate) fn selected_btree_index_name<C: Catalog + ?Sized>(
+    plan: &LogicalPlan,
+    catalog: &C,
+) -> Option<String> {
+    let LogicalPlan::Filter { input, predicate } = plan else {
+        return None;
+    };
+    let LogicalPlan::Scan { table, .. } = input.as_ref() else {
+        return None;
+    };
+    let (column, _) = index_predicate(predicate)?;
+    matching_btree_index(catalog, table, column).map(|index| index.name)
+}
+
 #[derive(Clone)]
 struct RecursiveWorkingTable {
     rows: Vec<Vec<SqlValue>>,

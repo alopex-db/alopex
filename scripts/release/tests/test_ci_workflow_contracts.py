@@ -171,25 +171,6 @@ class CiWorkflowContractTests(unittest.TestCase):
             clippy_job,
         )
 
-    def test_release_verdict_reuses_approved_ci_and_checks_delivery_only(self) -> None:
-        workflow = self.workflow("release.yml")
-        approval = workflow.split("  ci-gate:", maxsplit=1)[1].split(
-            "\n  build-release:", maxsplit=1
-        )[0]
-
-        self.assertIn("Approved source evidence", approval)
-        self.assertIn("gh run list --workflow ci.yml", approval)
-        self.assertIn("git merge-base --is-ancestor", approval)
-        for forbidden in (
-            "cargo test",
-            "cargo clippy",
-            "maturin",
-            "test-nim-parser.sh",
-            "v07_gate.sh",
-            "verify-v08-surfaces.sh",
-        ):
-            self.assertNotIn(forbidden, approval)
-
     def test_release_process_changes_have_a_short_dedicated_lane(self) -> None:
         process = self.workflow("release-process.yml")
         parity = self.workflow("parity-harness.yml")

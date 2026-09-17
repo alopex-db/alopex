@@ -1,8 +1,6 @@
 name: Required parity performance
 
 on:
-  schedule:
-    - cron: '23 2 * * 3'
   workflow_dispatch:
     inputs:
       issue_number:
@@ -32,7 +30,7 @@ env:
 
 jobs:
   performance:
-    name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
+    name: ${{ inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, linux, x64, alopex-performance]
     timeout-minutes: 360
     services:
@@ -109,7 +107,7 @@ jobs:
       - name: Measure paired engines
         id: benchmark
         env:
-          SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+          SUITE: ${{ inputs.suite || 'curated' }}
           ALOPEX_PERF_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -144,10 +142,38 @@ jobs:
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
+      - name: Measure structured vector ingestion
+        id: ingestion
+        run: |
+          root="performance-artifacts/ingestion"
+          mkdir -p "$root/raw"
+          for operation in single batch batch_existing csv parquet; do
+            for rows in 10000 50000; do
+              taskset -c 0 env \
+                ALOPEX_INGESTION_OPERATION="$operation" \
+                ALOPEX_INGESTION_ROWS="$rows" \
+                ALOPEX_INGESTION_SOURCE_COMMIT="$GITHUB_SHA" \
+                ALOPEX_INGESTION_OUTPUT="$root/raw/$operation-$rows.json" \
+                cargo test -p alopex-server --features lane_ci --test http_test \
+                  http_ingestion_measurement -- --ignored --exact --test-threads=1
+            done
+          done
+          python scripts/performance/release_ingestion_evidence.py \
+            --root "$root" \
+            --source-commit "$GITHUB_SHA"
+      - name: Measure B-tree access path
+        id: btree
+        run: |
+          mkdir -p performance-artifacts/btree
+          taskset -c 0 env \
+            ALOPEX_BTREE_MEASUREMENT_SOURCE_COMMIT="$GITHUB_SHA" \
+            ALOPEX_BTREE_MEASUREMENT_OUTPUT=performance-artifacts/btree/btree.json \
+            cargo test -p alopex-sql --features lane_ci --test executor_integration \
+              btree_access_path_measurement -- --ignored --exact --test-threads=1
       - name: Enforce curated/full performance contracts
         id: gate
         env:
-          SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+          SUITE: ${{ inputs.suite || 'curated' }}
         run: |
           python scripts/performance/parity_v0811_gate.py \
             --suite "$SUITE" \
@@ -163,6 +189,8 @@ jobs:
           HNSW_DATASET: ${{ steps.hnsw_dataset.outcome }}
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
+          INGESTION: ${{ steps.ingestion.outcome }}
+          BTREE: ${{ steps.btree.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -171,7 +199,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "ingestion", "btree", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)

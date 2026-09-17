@@ -111,7 +111,7 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         copy_txn.commit().unwrap();
@@ -171,7 +171,7 @@ fn columnar_default_row_id_mode_is_direct() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         copy_txn.commit().unwrap();
@@ -221,7 +221,7 @@ fn columnar_row_id_direct_is_encoded_with_segment_and_offset() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         copy_txn.commit().unwrap();
@@ -276,7 +276,7 @@ fn execute_columnar_row_ids_filters_and_returns_encoded_row_ids() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         copy_txn.commit().unwrap();
@@ -350,7 +350,7 @@ fn columnar_scan_falls_back_when_statistics_missing() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         copy_txn.commit().unwrap();

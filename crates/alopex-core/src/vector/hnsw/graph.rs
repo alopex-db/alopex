@@ -181,11 +181,6 @@ impl HnswGraph {
         validate_hnsw_vector(self.config.metric, vector)?;
         if let Some(node_id) = self.find_node_id(key) {
             let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
-            for other in self.nodes.iter_mut().flatten() {
-                for neighbors in &mut other.neighbors {
-                    neighbors.retain(|&neighbor| neighbor != node_id);
-                }
-            }
             let Some(node) = self
                 .nodes
                 .get_mut(node_id as usize)
@@ -205,11 +200,77 @@ impl HnswGraph {
                 self.active_count = self.active_count.saturating_add(1);
             }
             if !was_deleted || self.entry_point.is_some() {
+                self.repair_neighbors_for_update(node_id);
                 self.reconnect_existing(node_id)?;
             }
             Ok(node_id)
         } else {
             self.insert(key, vector, metadata)
+        }
+    }
+
+    fn repair_neighbors_for_update(&mut self, node_id: u32) {
+        let level = self
+            .node(node_id)
+            .map_or(0, |node| node.neighbors.len().saturating_sub(1));
+        for layer in 0..=level {
+            let one_hop = self
+                .node(node_id)
+                .and_then(|node| node.neighbors.get(layer))
+                .cloned()
+                .unwrap_or_default();
+            if one_hop.is_empty() {
+                continue;
+            }
+
+            let mut candidates = HashSet::from([node_id]);
+            let mut neighbors = Vec::with_capacity(one_hop.len());
+            for neighbor in one_hop {
+                let Some(node) = self.node(neighbor) else {
+                    continue;
+                };
+                candidates.insert(neighbor);
+                candidates.extend(node.neighbors.get(layer).into_iter().flatten().copied());
+                neighbors.push(neighbor);
+            }
+
+            let max_degree = if layer == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
+            for neighbor in neighbors {
+                let Some(vector) = self.node(neighbor).map(|node| node.vector.clone()) else {
+                    continue;
+                };
+                let mut scored = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&candidate| candidate != neighbor)
+                    .filter_map(|candidate| {
+                        self.node(candidate).map(|node| ScoredEntry {
+                            node_id: candidate,
+                            score: self.distance_raw(&vector, &node.vector),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
+                });
+                scored.truncate(self.config.ef_construction);
+                let selected = self.select_neighbors_heuristic(&scored, max_degree);
+                if let Some(node) = self
+                    .nodes
+                    .get_mut(neighbor as usize)
+                    .and_then(|node| node.as_mut())
+                {
+                    if layer < node.neighbors.len() {
+                        node.neighbors[layer] = selected;
+                    }
+                }
+            }
         }
     }
 
@@ -247,6 +308,18 @@ impl HnswGraph {
                 .filter(|entry| entry.node_id != node_id)
                 .collect();
             let selected = self.select_neighbors_heuristic(&selected, max_conn);
+            if selected.is_empty() {
+                continue;
+            }
+            if let Some(node) = self
+                .nodes
+                .get_mut(node_id as usize)
+                .and_then(|node| node.as_mut())
+            {
+                if l < node.neighbors.len() {
+                    node.neighbors[l].clear();
+                }
+            }
             self.connect_new_node(node_id, &selected, l);
             for &neighbor in &selected {
                 self.prune_neighbors(neighbor, l, max_conn);

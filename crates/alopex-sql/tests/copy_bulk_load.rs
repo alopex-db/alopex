@@ -60,7 +60,7 @@ fn copy_csv_success_and_query() {
             file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -116,7 +116,7 @@ fn copy_schema_mismatch_rolls_back() {
             bad_file.path().to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         );
         let err = res.unwrap_err();
         txn.rollback().unwrap();

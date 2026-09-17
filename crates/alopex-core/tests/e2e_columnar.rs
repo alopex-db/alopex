@@ -94,7 +94,7 @@ fn test_compression_ratio_analytical_data() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn test_scan_throughput_single_column() {
+fn e2e_scan_throughput_single_column() {
     let rows = 200_000usize;
     let cfg = SegmentConfigV2 {
         row_group_size: 4096,

@@ -53,8 +53,8 @@ jobs:
           [[ "$(git cat-file -t "${RELEASE_TAG_NAME}")" == "tag" ]]
           test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
-          git fetch origin main
-          git merge-base --is-ancestor "${RELEASE_TARGET_SHA}" origin/main
+          # The release candidate is selected by its immutable tag.  It may
+          # originate from a maintained release branch rather than main.
           approved=false
           for attempt in $(seq 1 30); do
             if gh run list --workflow ci.yml --commit "${RELEASE_TARGET_SHA}" \
@@ -191,10 +191,6 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
 
-      - name: Verify release workflow contract
-        shell: bash
-        run: bash scripts/release/v07_gate.sh --workflow-contract-only
-
       - name: Verify peeled release tag
         shell: bash
         run: |
@@ -316,60 +312,9 @@ jobs:
           manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
           python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
             --manifest "${manifest}" --asset-dir "${asset_dir}"
-          RELEASE_STAGE="${RELEASE_STAGE}" MANIFEST="${manifest}" ASSET_DIR="${asset_dir}" \
-            python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path, PurePosixPath
-          import tarfile
-
-          stage = Path(os.environ["RELEASE_STAGE"])
-          manifest_path = Path(os.environ["MANIFEST"])
-          asset_dir = Path(os.environ["ASSET_DIR"])
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          vendor = stage / "crates/alopex-sql/nim-sql-parser/vendor"
-          for asset in manifest["assets"]:
-              archive = asset_dir / asset["archive"]["filename"]
-              library_path = PurePosixPath(asset["library"]["path"])
-              if library_path.is_absolute() or ".." in library_path.parts:
-                  raise SystemExit(f"unsafe parser library path: {library_path}")
-              with tarfile.open(archive, "r:gz") as handle:
-                  def read_asset(identity):
-                      path = PurePosixPath(identity["path"])
-                      if path.is_absolute() or ".." in path.parts:
-                          raise SystemExit(f"unsafe parser library path: {path}")
-                      member = handle.getmember(str(path))
-                      source = handle.extractfile(member)
-                      if source is None:
-                          raise SystemExit(f"parser library is not a file: {path}")
-                      data = source.read()
-                      if hashlib.sha256(data).hexdigest() != identity["sha256"]:
-                          raise SystemExit(f"parser library digest mismatch: {asset['target']}")
-                      return path.name, data
-                  dynamic_name, library = read_asset(asset["library"])
-                  static_name, static_library = read_asset(asset["static_library"])
-              expected = asset["library"]["sha256"]
-              target_dir = vendor / asset["target"]
-              target_dir.mkdir(parents=True, exist_ok=True)
-              (target_dir / dynamic_name).write_bytes(library)
-              (target_dir / static_name).write_bytes(static_library)
-              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.25.0\n")
-              (target_dir / "SHA256SUMS").write_bytes(
-                  f"{expected}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
-              )
-          fixed_manifest = vendor / "parser-vendor-manifest.json"
-          versioned_manifests = sorted(vendor.glob("parser-vendor-manifest-v*.json"))
-          if fixed_manifest.is_file() and not versioned_manifests:
-              destination_manifest = fixed_manifest
-          elif not fixed_manifest.exists() and len(versioned_manifests) == 1:
-              destination_manifest = versioned_manifests[0]
-          else:
-              raise SystemExit(
-                  "unknown or ambiguous parser vendor manifest layout in release staging"
-              )
-          destination_manifest.write_bytes(manifest_path.read_bytes())
-          PY
+          python "${RELEASE_STAGE}/scripts/release/stage_parser_assets.py" \
+            --manifest "${manifest}" --asset-dir "${asset_dir}" \
+            --vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor"
           python scripts/release/retarget_python_parser_source.py \
             --manifest "${manifest}" \
             --vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor" \

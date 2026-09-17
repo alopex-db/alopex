@@ -88,10 +88,32 @@ fn explain_result(
     format: ExplainFormat,
     elapsed_ns: Option<u64>,
     rows: Option<u64>,
+    index_name: Option<&str>,
 ) -> ExecutionResult {
     let (column, value) = match format {
-        ExplainFormat::Text => ("QUERY PLAN", plan.explain_text(elapsed_ns, rows)),
-        ExplainFormat::Json => ("query_plan", plan.explain_json(analyze, elapsed_ns, rows)),
+        ExplainFormat::Text => {
+            let mut value = plan.explain_text(elapsed_ns, rows);
+            if let Some(index_name) = index_name {
+                value = value.replacen(
+                    "Scan table=",
+                    &format!("IndexScan index={index_name} table="),
+                    1,
+                );
+            }
+            ("QUERY PLAN", value)
+        }
+        ExplainFormat::Json => {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
+                    .expect("LogicalPlan::explain_json must return JSON");
+            if let Some(index_name) = index_name {
+                value["physical_plan"]["access_path"] = serde_json::json!({
+                    "node": "IndexScan",
+                    "index": index_name,
+                });
+            }
+            ("query_plan", value.to_string())
+        }
     };
     ExecutionResult::Query(QueryResult::new(
         vec![ColumnInfo::new(column, ResolvedType::Text)],
@@ -125,6 +147,11 @@ pub struct Executor<S: KVStore, C: Catalog> {
 }
 
 impl<S: KVStore, C: Catalog> Executor<S, C> {
+    fn selected_btree_index_name(&self, plan: &LogicalPlan) -> Option<String> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        query::selected_btree_index_name(plan, &*catalog)
+    }
+
     fn run_in_write_txn<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut SqlTransaction<'_, S>) -> Result<R>,
@@ -233,8 +260,16 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let index_name = self.selected_btree_index_name(&input);
                 if !analyze {
-                    return Ok(explain_result(&input, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        false,
+                        format,
+                        None,
+                        None,
+                        index_name.as_deref(),
+                    ));
                 }
                 let started = Instant::now();
                 let result = self.execute((*input).clone())?;
@@ -245,6 +280,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     format,
                     Some(elapsed_ns),
                     Some(result_rows(&result)),
+                    index_name.as_deref(),
                 ));
             }
             plan => plan,
@@ -308,7 +344,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -332,7 +368,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                         &path,
                         format,
                         bulk::CopyOptions { header },
-                        &bulk::CopySecurityConfig::default(),
+                        &bulk::CopySecurityConfig::trusted_local(),
                     )
                 })
             }
@@ -358,7 +394,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                         &path,
                         format,
                         bulk::CopyOptions { header },
-                        &bulk::CopySecurityConfig::default(),
+                        &bulk::CopySecurityConfig::trusted_local(),
                     )
                 })
             }
@@ -640,8 +676,16 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 format,
                 input,
             } => {
+                let index_name = self.selected_btree_index_name(&input);
                 if !analyze {
-                    return Ok(explain_result(&input, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        false,
+                        format,
+                        None,
+                        None,
+                        index_name.as_deref(),
+                    ));
                 }
                 let started = Instant::now();
                 let result = self.execute_in_txn((*input).clone(), txn)?;
@@ -652,6 +696,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     format,
                     Some(elapsed_ns),
                     Some(result_rows(&result)),
+                    index_name.as_deref(),
                 ));
             }
             plan => plan,
@@ -812,7 +857,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -835,7 +880,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::Copy {
@@ -859,7 +904,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     &path,
                     format,
                     bulk::CopyOptions { header },
-                    &bulk::CopySecurityConfig::default(),
+                    &bulk::CopySecurityConfig::trusted_local(),
                 )
             }
             LogicalPlan::CreateSequence(statement) => {
@@ -1321,7 +1366,10 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
     }
 }
 
-fn copy_format(path: &str, options: &[crate::ast::dml::CopyOption]) -> Result<bulk::FileFormat> {
+pub(crate) fn copy_format(
+    path: &str,
+    options: &[crate::ast::dml::CopyOption],
+) -> Result<bulk::FileFormat> {
     let Some(format) = options
         .iter()
         .find(|option| option.name.eq_ignore_ascii_case("format"))

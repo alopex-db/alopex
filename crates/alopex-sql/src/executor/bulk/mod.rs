@@ -31,6 +31,7 @@ use crate::catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
 };
 use crate::columnar::statistics::compute_row_group_statistics;
+use crate::executor::dml::{populate_prevalidated_indexes, validate_unique_indexes_before_insert};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
@@ -57,13 +58,47 @@ pub struct CopyOptions {
     pub header: bool,
 }
 
+/// ファイルパスを使う COPY の権限。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CopyFilePolicy {
+    /// ファイルシステムを使う COPY を拒否する。
+    #[default]
+    Denied,
+    /// 指定されたベースディレクトリ配下だけを許可する。
+    Restricted(Vec<PathBuf>),
+    /// 明示的に信頼されたローカルプロセスだけが使う無制限アクセス。
+    Unrestricted,
+}
+
 /// COPY セキュリティ設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopySecurityConfig {
-    /// 許可するベースディレクトリ一覧（None なら無制限）。
-    pub allowed_base_dirs: Option<Vec<PathBuf>>,
+    /// ファイルシステムを使う COPY の権限。
+    pub file_policy: CopyFilePolicy,
     /// シンボリックリンクを許可するか。
     pub allow_symlinks: bool,
+    /// プロセスの標準入出力を COPY の転送先として許可するか。
+    pub allow_stdio: bool,
+}
+
+impl CopySecurityConfig {
+    /// ローカル埋め込み実行用の明示的な権限。
+    pub fn trusted_local() -> Self {
+        Self {
+            file_policy: CopyFilePolicy::Unrestricted,
+            allow_symlinks: false,
+            allow_stdio: true,
+        }
+    }
+
+    /// 指定ディレクトリに限定したファイル COPY 権限。
+    pub fn restricted(allowed_base_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            file_policy: CopyFilePolicy::Restricted(allowed_base_dirs),
+            allow_symlinks: false,
+            allow_stdio: false,
+        }
+    }
 }
 
 /// 入力スキーマのフィールド。
@@ -116,7 +151,9 @@ pub fn execute_copy<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
 
-    if file_path != "-" {
+    if file_path == "-" {
+        validate_stdio(config)?;
+    } else {
         validate_file_path(file_path, config)?;
     }
 
@@ -242,6 +279,7 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
     if file_path == "-" {
+        validate_stdio(config)?;
         if format != FileFormat::Csv {
             return Err(ExecutorError::UnsupportedFormat(
                 "COPY TO STDOUT currently supports CSV only".into(),
@@ -338,6 +376,7 @@ pub fn execute_copy_query_to(
     config: &CopySecurityConfig,
 ) -> Result<ExecutionResult> {
     if file_path == "-" {
+        validate_stdio(config)?;
         if format == FileFormat::Parquet {
             return Err(ExecutorError::UnsupportedFormat(
                 "COPY TO STDOUT currently supports CSV only".into(),
@@ -624,7 +663,12 @@ fn is_copy_temp_file_name(file_name: &str, output_name: &str) -> bool {
 
 fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
-    if path.exists() && !config.allow_symlinks && path.is_symlink() {
+    reject_denied_file_policy(file_path, config)?;
+    if !config.allow_symlinks
+        && fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    {
         return Err(ExecutorError::PathValidationFailed {
             path: file_path.into(),
             reason: "symbolic links not allowed".into(),
@@ -638,7 +682,7 @@ fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<
                 path: file_path.into(),
                 reason: error.to_string(),
             })?;
-    if let Some(base_dirs) = &config.allowed_base_dirs
+    if let CopyFilePolicy::Restricted(base_dirs) = &config.file_policy
         && !base_dirs
             .iter()
             .any(|base| canonical_parent.starts_with(base))
@@ -681,6 +725,7 @@ fn csv_value(value: &SqlValue) -> String {
 /// パスセキュリティ検証。
 pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
+    reject_denied_file_policy(file_path, config)?;
 
     // 先に存在確認を行い、設計どおり FileNotFound を優先する。
     if !path.exists() {
@@ -694,7 +739,7 @@ pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Resul
             reason: format!("failed to canonicalize: {e}"),
         })?;
 
-    if let Some(base_dirs) = &config.allowed_base_dirs {
+    if let CopyFilePolicy::Restricted(base_dirs) = &config.file_policy {
         let allowed = base_dirs.iter().any(|base| canonical.starts_with(base));
         if !allowed {
             return Err(ExecutorError::PathValidationFailed {
@@ -734,6 +779,26 @@ pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Resul
         }
     }
 
+    Ok(())
+}
+
+fn reject_denied_file_policy(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
+    if config.file_policy == CopyFilePolicy::Denied {
+        return Err(ExecutorError::PathValidationFailed {
+            path: file_path.into(),
+            reason: "file COPY is not allowed".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_stdio(config: &CopySecurityConfig) -> Result<()> {
+    if !config.allow_stdio {
+        return Err(ExecutorError::PathValidationFailed {
+            path: "-".into(),
+            reason: "COPY to process standard input/output is not allowed".into(),
+        });
+    }
     Ok(())
 }
 
@@ -801,30 +866,37 @@ fn bulk_load_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
-    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::new();
+    let mut rows = Vec::new();
+    while let Some(batch) = reader.next_batch(1024)? {
+        for row in batch {
+            if row.len() != table.column_count() {
+                return Err(ExecutorError::BulkLoad(format!(
+                    "row has {} columns, expected {}",
+                    row.len(),
+                    table.column_count()
+                )));
+            }
+            rows.push(row);
+        }
+    }
+    let row_values = rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    validate_unique_indexes_before_insert(txn, &btree_indexes, &row_values)?;
+
+    let mut staged = Vec::with_capacity(rows.len());
     {
         let mut storage = txn.table_storage(table);
-        while let Some(batch) = reader.next_batch(1024)? {
-            for row in batch {
-                if row.len() != table.column_count() {
-                    return Err(ExecutorError::BulkLoad(format!(
-                        "row has {} columns, expected {}",
-                        row.len(),
-                        table.column_count()
-                    )));
-                }
-                let row_id = storage
-                    .next_row_id()
-                    .map_err(|e| map_storage_error(table, e))?;
-                storage
-                    .insert(row_id, &row)
-                    .map_err(|e| map_storage_error(table, e))?;
-                staged.push((row_id, row));
-            }
+        for row in rows {
+            let row_id = storage
+                .next_row_id()
+                .map_err(|e| map_storage_error(table, e))?;
+            storage
+                .insert(row_id, &row)
+                .map_err(|e| map_storage_error(table, e))?;
+            staged.push((row_id, row));
         }
     }
 
-    populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_prevalidated_indexes(txn, &btree_indexes, &staged)?;
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
@@ -1601,54 +1673,6 @@ fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError 
     }
 }
 
-fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
-    match err {
-        StorageError::UniqueViolation { .. } => {
-            if index.name.starts_with("__pk_") {
-                ExecutorError::ConstraintViolation(
-                    crate::executor::ConstraintViolation::PrimaryKey {
-                        columns: index.columns.clone(),
-                        value: None,
-                    },
-                )
-            } else {
-                ExecutorError::ConstraintViolation(crate::executor::ConstraintViolation::Unique {
-                    index_name: index.name.clone(),
-                    columns: index.columns.clone(),
-                    value: None,
-                })
-            }
-        }
-        StorageError::NullConstraintViolation { column } => {
-            ExecutorError::ConstraintViolation(crate::executor::ConstraintViolation::NotNull {
-                column,
-            })
-        }
-        StorageError::TransactionConflict => ExecutorError::TransactionConflict,
-        other => ExecutorError::Storage(other),
-    }
-}
-
-fn populate_indexes<'txn, S: KVStore + 'txn>(
-    txn: &mut impl SqlTxn<'txn, S>,
-    indexes: &[IndexMetadata],
-    rows: &[(u64, Vec<SqlValue>)],
-) -> Result<()> {
-    for index in indexes {
-        let mut storage =
-            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
-        for (row_id, row) in rows {
-            if should_skip_unique_index_for_null(index, row) {
-                continue;
-            }
-            storage
-                .insert(row, *row_id)
-                .map_err(|e| map_index_error(index, e))?;
-        }
-    }
-    Ok(())
-}
-
 fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
@@ -1656,31 +1680,23 @@ fn populate_hnsw_indexes<'txn, S: KVStore + 'txn>(
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
     for index in indexes {
-        for (row_id, row) in rows {
-            HnswBridge::on_insert(txn, table, index, *row_id, row)?;
-        }
+        HnswBridge::on_insert_batch(txn, table, index, rows)?;
     }
     Ok(())
-}
-
-fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) -> bool {
-    index.unique
-        && index
-            .column_indices
-            .iter()
-            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::ddl::VectorMetric;
     use crate::catalog::{ColumnMetadata, MemoryCatalog, StorageType};
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
     use ::parquet::arrow::ArrowWriter;
     use alopex_core::kv::memory::MemoryKV;
-    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_array::types::Float32Type;
+    use arrow_array::{Array, FixedSizeListArray, Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use std::fs::File;
     use std::io::Write;
@@ -1714,6 +1730,44 @@ mod tests {
         txn.commit().unwrap();
     }
 
+    fn create_vector_table(bridge: &TxnBridge<MemoryKV>, catalog: &mut MemoryCatalog) {
+        let table = TableMetadata::new(
+            "items",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new(
+                    "embedding",
+                    ResolvedType::Vector {
+                        dimension: 2,
+                        metric: VectorMetric::L2,
+                    },
+                ),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn write_vector_parquet(path: &Path, rows: &[(i32, [f32; 2])]) {
+        let ids = Int32Array::from(rows.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            rows.iter().map(|(_, vector)| Some(vector.map(Some))),
+            2,
+        );
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("embedding", embeddings.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ids), Arc::new(embeddings)])
+            .unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     #[test]
     fn validate_file_path_rejects_symlink_and_directory() {
         let dir = std::env::temp_dir();
@@ -1721,8 +1775,9 @@ mod tests {
         std::fs::create_dir_all(&dir_path).unwrap();
 
         let config = CopySecurityConfig {
-            allowed_base_dirs: Some(vec![dir.clone()]),
+            file_policy: CopyFilePolicy::Restricted(vec![dir.clone()]),
             allow_symlinks: false,
+            allow_stdio: false,
         };
 
         // Directory is rejected.
@@ -1812,6 +1867,37 @@ mod tests {
     }
 
     #[test]
+    fn default_copy_security_rejects_file_and_stdio_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("items.csv");
+        fs::write(&file, "id,name\n1,alice\n").unwrap();
+
+        let config = CopySecurityConfig::default();
+        let err = validate_file_path(file.to_str().unwrap(), &config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+        let err = validate_stdio(&config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_output_path_rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("output.csv");
+        symlink(dir.path().join("outside.csv"), &link).unwrap();
+        let config = CopySecurityConfig {
+            file_policy: CopyFilePolicy::Restricted(vec![dir.path().to_path_buf()]),
+            allow_symlinks: false,
+            allow_stdio: false,
+        };
+
+        let err = validate_output_path(link.to_str().unwrap(), &config).unwrap_err();
+        assert!(matches!(err, ExecutorError::PathValidationFailed { .. }));
+    }
+
+    #[test]
     fn execute_copy_csv_inserts_rows() {
         let dir = std::env::temp_dir();
         let file_path = dir.join("alopex_copy_test.csv");
@@ -1831,7 +1917,7 @@ mod tests {
             file_path.to_str().unwrap(),
             FileFormat::Csv,
             CopyOptions { header: true },
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1863,7 +1949,7 @@ mod tests {
             file_path.to_str().unwrap(),
             FileFormat::Parquet,
             CopyOptions::default(),
-            &CopySecurityConfig::default(),
+            &CopySecurityConfig::trusted_local(),
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1876,6 +1962,61 @@ mod tests {
         let rows: Vec<_> = storage.scan().unwrap().map(|r| r.unwrap().1).collect();
         assert_eq!(rows.len(), 2);
         assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("user0".into())]));
+    }
+
+    #[test]
+    fn execute_copy_parquet_vector_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid.parquet");
+        let duplicate = dir.path().join("duplicate.parquet");
+        write_vector_parquet(&valid, &[(1, [1.0, 0.0]), (2, [0.0, 1.0])]);
+        write_vector_parquet(&duplicate, &[(3, [1.0, 0.0]), (3, [0.0, 1.0])]);
+
+        let (bridge, mut catalog) = bridge();
+        create_vector_table(&bridge, &mut catalog);
+
+        let mut txn = bridge.begin_write().unwrap();
+        let result = execute_copy(
+            &mut txn,
+            &catalog,
+            "items",
+            valid.to_str().unwrap(),
+            FileFormat::Parquet,
+            CopyOptions::default(),
+            &CopySecurityConfig::trusted_local(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(result, ExecutionResult::RowsAffected(2));
+
+        let table = catalog.get_table("items").unwrap().clone();
+        let mut read_txn = bridge.begin_read().unwrap();
+        let mut storage = read_txn.table_storage(&table);
+        let rows: Vec<_> = storage.scan().unwrap().map(|row| row.unwrap().1).collect();
+        assert!(rows.contains(&vec![
+            SqlValue::Integer(1),
+            SqlValue::Vector(vec![1.0, 0.0])
+        ]));
+
+        let mut txn = bridge.begin_write().unwrap();
+        assert!(
+            execute_copy(
+                &mut txn,
+                &catalog,
+                "items",
+                duplicate.to_str().unwrap(),
+                FileFormat::Parquet,
+                CopyOptions::default(),
+                &CopySecurityConfig::trusted_local(),
+            )
+            .is_err()
+        );
+        txn.rollback().unwrap();
+
+        let mut read_txn = bridge.begin_read().unwrap();
+        let mut storage = read_txn.table_storage(&table);
+        let rows: Vec<_> = storage.scan().unwrap().map(|row| row.unwrap().1).collect();
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

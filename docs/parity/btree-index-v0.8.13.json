@@ -1,0 +1,22 @@
+{
+  "schema": "alopex.reference-inventory/v1",
+  "api": "SQL CREATE INDEX ... USING BTREE; EXPLAIN simple equality/range filters",
+  "reference": {
+    "project": "postgres/postgres",
+    "commit": "0d1c00c624fa7367d4a895f44381887757289682",
+    "license": "PostgreSQL",
+    "implementation": "src/test/regress/sql/create_index.sql",
+    "test": "src/test/regress/expected/create_index.out"
+  },
+  "relationship": "extended",
+  "extension": {
+    "base_contract": "A B-tree index supplies an index access path for indexed predicates and EXPLAIN identifies the chosen path.",
+    "difference": "Alopex supports the issue-scoped simple equality and range planner paths, not PostgreSQL's complete B-tree operator-class surface.",
+    "reason": "Issue #425 defines the supported v0.8.13 planner boundary."
+  },
+  "evidence": [
+    "crates/alopex-sql/tests/executor_integration.rs#btree_index_answers_equality_and_range_filters",
+    "crates/alopex-sql/tests/executor_integration.rs#explain_reports_the_selected_btree_access_path",
+    "crates/alopex-sql/tests/executor_integration.rs#btree_access_path_measurement"
+  ]
+}

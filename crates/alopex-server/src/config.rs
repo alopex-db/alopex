@@ -31,6 +31,9 @@ pub struct ServerConfig {
     pub admin_allowlist: Vec<IpAddr>,
     /// Data directory for storage.
     pub data_dir: PathBuf,
+    /// Canonical local directories from which public SQL COPY may read or write.
+    /// An empty list disables public file COPY.
+    pub copy_allowed_dirs: Vec<PathBuf>,
     /// API prefix for HTTP routes.
     pub api_prefix: String,
     /// Authentication mode.
@@ -72,6 +75,7 @@ impl Default for ServerConfig {
             admin_bind: "127.0.0.1:8081".parse().unwrap(),
             admin_allowlist: Vec::new(),
             data_dir: PathBuf::from("./data"),
+            copy_allowed_dirs: Vec::new(),
             api_prefix: String::new(),
             auth_mode: AuthMode::None,
             tls: None,
@@ -165,6 +169,7 @@ impl ServerConfig {
                 "max_response_size must be greater than 0".into(),
             ));
         }
+        self.copy_security_config()?;
         if self.max_request_size == 0 {
             return Err(ServerError::InvalidConfig(
                 "max_request_size must be greater than 0".into(),
@@ -210,6 +215,32 @@ impl ServerConfig {
     /// Build cluster manager configuration from server configuration.
     pub fn cluster_manager_config(&self) -> Result<ClusterManagerConfig> {
         self.cluster.to_manager_config()
+    }
+
+    /// Build the file-path policy used by the public SQL executor.
+    pub fn copy_security_config(&self) -> Result<alopex_sql::executor::bulk::CopySecurityConfig> {
+        let allowed_base_dirs = self
+            .copy_allowed_dirs
+            .iter()
+            .map(|path| {
+                let canonical = path.canonicalize().map_err(|err| {
+                    ServerError::InvalidConfig(format!(
+                        "copy_allowed_dirs entry {} is not accessible: {err}",
+                        path.display()
+                    ))
+                })?;
+                if !canonical.is_dir() {
+                    return Err(ServerError::InvalidConfig(format!(
+                        "copy_allowed_dirs entry {} is not a directory",
+                        path.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(alopex_sql::executor::bulk::CopySecurityConfig::restricted(
+            allowed_base_dirs,
+        ))
     }
 
     fn normalize(&mut self) -> Result<()> {

@@ -1,5 +1,9 @@
 # Commit and tag identity release pipeline
 
+Which jobs may exist at all is governed by the
+[CI and test policy](ci-test-policy.md). This document records the owner of
+every job that policy allows.
+
 ## Target invariant and source of truth
 
 The release identity is an exact commit SHA, never branch membership. Development
@@ -19,7 +23,8 @@ correctness.
 | behavior, execution path, fast resource/performance policy | Development CI | change the commit |
 | broad compatibility, stress, durability, statistical performance | Extended Verification | change the commit or versioned policy |
 | archive/package/install/manifest/digest qualification | RC Qualification | create a new immutable RC after a fix |
-| publication or public reachability | Stable Delivery | retry or repair-forward the same stable release |
+| failed or cancelled publication before any public artifact exists | Stable Delivery | cancel active workflows, verify no public artifact exists, delete every unpublished release tag immediately, then return to corrected-main tagging |
+| publication or public reachability after any public artifact exists | Stable Delivery | retry or repair-forward the same stable release |
 
 ## Workflow job inventory
 
@@ -51,7 +56,6 @@ job's owner.
 | `alopex-py.yml:polars-test` | Development CI | exact-SHA Polars compatibility result |
 | `alopex-py.yml:server-e2e` | Development CI | exact-SHA client/server behavior result |
 | `alopex-py.yml:typecheck` | Development CI | exact-SHA public typing result |
-| `alopex-py.yml:benchmarks` | Development CI | fast exact-SHA benchmark policy result |
 | `alopex-py.yml:ci-success` | Development CI | status-only owner join |
 | `ci.yml:scope` | Development CI | exact-SHA change classification |
 | `ci.yml:fmt` | Development CI | exact-SHA formatting result |
@@ -63,8 +67,6 @@ job's owner.
 | `ci.yml:build` | Development CI | exact-SHA cross-platform build result |
 | `ci.yml:v08-release-gate` | Development CI | exact-SHA implementation-surface result |
 | `ci.yml:ci-success` | Development CI | required status-only join |
-| `compatibility.yml:historical-parser` | Extended Verification | historical parser matrix result |
-| `compatibility.yml:historical-contract` | Extended Verification | historical API matrix result |
 | `compatibility.yml:current-windows-full` | Extended Verification | Windows full-workspace result |
 | `compatibility.yml:native` | Development CI | exact-SHA native compatibility result |
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
@@ -80,6 +82,8 @@ job's owner.
 | `public-release-verification.yml:notify-scheduled-failure` | Stable Delivery | scheduled reachability notification |
 | `release-process.yml:contract` | Development CI | workflow contract tests |
 | `release-process.yml:state-model` | Development CI | legal transition model result |
+| `rc-qualification.yml:parser-assets` | RC Qualification | exact-SHA parser archive and record per target |
+| `rc-qualification.yml:package` | RC Qualification | strict staged source and crate-content qualification |
 | `release.yml:ci-gate` | Stable Delivery | approved RC identity check |
 | `release.yml:build-release` | RC Qualification | moved to `release-candidate.yml` |
 | `release.yml:create-release` | Stable Delivery | exact candidate asset promotion |
@@ -116,7 +120,11 @@ contract test then requires their new workflow-qualified names.
   new RC number.
 - A stable tag is not created until an approved RC manifest exists for the same
   peeled SHA.
-- Stable partial publication uses repair-forward only. No source rebuild or
-  qualification rerun may replace already-published bytes.
+- Before any public artifact exists, a failed or cancelled tag-triggered
+  workflow requires cancelling active workflows, verifying the absence of public
+  artifacts, and deleting every unpublished release tag immediately.
+- After any public artifact exists, stable partial publication uses
+  repair-forward only. No source rebuild or qualification rerun may replace
+  already-published bytes.
 - Candidate views can be regenerated from `candidate-manifest.json`; Markdown is
   never an input.
