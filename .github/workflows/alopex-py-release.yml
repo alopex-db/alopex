@@ -609,16 +609,20 @@ jobs:
             echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
             exit 1
           }
-          git fetch --force origin main "refs/tags/${core_tag}:refs/tags/${core_tag}" \
+          release_branch="release/v${version}"
+          git fetch --force origin main \
+            "refs/heads/${release_branch}:refs/remotes/origin/${release_branch}" \
+            "refs/tags/${core_tag}:refs/tags/${core_tag}" \
             "refs/tags/${PYTHON_TAG_NAME}:refs/tags/${PYTHON_TAG_NAME}"
           git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}" || {
             echo "Python tag must descend from the Core tag" >&2
             exit 1
           }
-          git merge-base --is-ancestor "${python_tag_sha}" origin/main || {
-            echo "Python tag is not merged to main" >&2
+          if ! git merge-base --is-ancestor "${python_tag_sha}" origin/main \
+            && ! git merge-base --is-ancestor "${python_tag_sha}" "origin/${release_branch}"; then
+            echo "Python tag is neither on main nor ${release_branch}" >&2
             exit 1
-          }
+          fi
           version_at_tag="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
           test "${version_at_tag}" = "${version}"
           [[ "${CORE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
