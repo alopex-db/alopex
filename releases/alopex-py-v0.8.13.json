@@ -1,0 +1,118 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "04fb191a390b768acd08919aea6004b86d002ac0",
+    "environment_fingerprint": "5085be655afe9b76",
+    "has_regressions": true,
+    "metrics": {
+      "read_overhead_pct": {
+        "baseline_mad": 0.043514507230482835,
+        "baseline_max": 0.6974326897620138,
+        "baseline_median": 0.4024098398282087,
+        "baseline_min": 0.14606858381484542,
+        "current": 0.3397616001471526,
+        "direction": "lower_is_better",
+        "method": "median_mad",
+        "minimum_samples": 5,
+        "robust_z": -0.9710839063637826,
+        "robust_z_threshold": 3.5,
+        "sample_count": 8,
+        "status": "stable",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "baseline_mad": 0.0004297999709024232,
+        "baseline_max": 0.006083400000989057,
+        "baseline_median": 0.0009572499919840995,
+        "baseline_min": -0.001473600013923713,
+        "current": 0.007000299967785397,
+        "direction": "lower_is_better",
+        "method": "median_mad",
+        "minimum_samples": 5,
+        "robust_z": 9.483567902807865,
+        "robust_z_threshold": 3.5,
+        "sample_count": 8,
+        "status": "regression",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "baseline_mad": 0.14829917788945302,
+        "baseline_max": 1.0219403204158186,
+        "baseline_median": 0.3540454521649779,
+        "baseline_min": 0.05091206741828724,
+        "current": 0.3470376062033769,
+        "direction": "lower_is_better",
+        "method": "median_mad",
+        "minimum_samples": 5,
+        "robust_z": -0.03187335336830635,
+        "robust_z_threshold": 3.5,
+        "sample_count": 8,
+        "status": "stable",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "regression",
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  },
+  "record": {
+    "commit": "04fb191a390b768acd08919aea6004b86d002ac0",
+    "dependencies": {
+      "alopex": "0.8.13",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.21.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "cpu_governor": "unavailable",
+      "fingerprint": "5085be655afe9b76",
+      "kernel": "6.17.0-1022-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "unavailable"
+    },
+    "lock_hash": "017fcd3587a8bcec65212999df53f351dbb9ea9d361806ea4775b40ed5e04db5",
+    "measured_at": "2026-09-17T14:53:16.254153+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.3397616001471526
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": 0.007000299967785397
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.3470376062033769
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/alopex-py-v0.8.13",
+    "schema_version": 1,
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  }
+}
