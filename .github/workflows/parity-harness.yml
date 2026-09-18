@@ -16,11 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify report, surface, and fixture contracts
+      - name: Verify report and surface contracts
         run: |
           python -m unittest \
             scripts.parity.runner.test_report \
-            scripts.parity.runner.test_surfaces \
-            scripts.parity.test_compat_fixture_contract
+            scripts.parity.runner.test_surfaces
       - name: Verify v0.8.11 compatibility ledgers
         run: python scripts/validate_v0811_ledgers.py

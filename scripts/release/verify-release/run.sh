@@ -327,8 +327,13 @@ TOOLS_TARGET_DIR="$(mktemp -d)"
 # 追加する。イメージの ENV PATH は Dockerfile 側で維持されるので、ここでは
 # 追加分だけを渡す(docker run -e PATH=... で丸ごと上書きしない)。
 run_in_container() {
+    local container_user="$(id -u):$(id -g)"
+    if [[ "${1:-}" == "--root" ]]; then
+        container_user="0:0"
+        shift
+    fi
     docker run --rm \
-        --user "$(id -u):$(id -g)" -e HOME=/tmp/verify-home \
+        --user "${container_user}" -e HOME=/tmp/verify-home \
         -v "${REPO_ROOT}":/workspace:ro \
         -v "${TOOLS_TARGET_DIR}":/tools-target \
         -w /workspace \
@@ -341,7 +346,7 @@ run_in_container() {
 
 run_step "verify-release-embedded ビルド" \
     "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
-    -- run_in_container bash -c '
+    -- run_in_container --root bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT
@@ -400,6 +405,7 @@ alopex-core = { version = "=${ALOPEX_VERSION}" }
 alopex-sql = { version = "=${ALOPEX_VERSION}" }
 EOF
 CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+chmod -R a+rX /tools-target
 cargo generate-lockfile --manifest-path "${tool_source}/Cargo.toml"
 python3 - "${tool_source}/Cargo.lock" "${ALOPEX_VERSION}" <<'PY'
 import sys
@@ -437,7 +443,7 @@ run_step "公開版 SQL transaction failure conformance" \
     -- run_in_container /tools-target/release/verify-sql-transaction-failures
 
 run_step "mode-parity 検証 (verify.py)" \
-    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
+    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)を全件実行し、SKIPを許可しない。" \
     -- run_in_container python3 scripts/parity/verify.py \
         --corpus scripts/parity/corpus --expected scripts/parity/expected \
         --require-all

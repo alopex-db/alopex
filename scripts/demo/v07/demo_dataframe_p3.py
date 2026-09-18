@@ -136,7 +136,7 @@ def run_scene1(alopex: Any) -> Dict[str, Any]:
         .split("-", "parts")
         .str("name")
         .extract(r"([A-Za-z]+)-(\d+)", 2, "num")
-        .to_dict()
+        .to_dict(as_series=False)
     )
 
 
@@ -171,7 +171,7 @@ df.str("name").to_lowercase("lower")
   .str("name").contains(r"\\d+", "has_digits")
   .str("name").split("-", "parts")
   .str("name").extract(r"([A-Za-z]+)-(\\d+)", 2, "num")
-  .to_dict()
+  .to_dict(as_series=False)
 """
 
 SCENE1_RS_CALLS = """
@@ -241,7 +241,7 @@ def run_scene2(alopex: Any) -> Dict[str, Any]:
         .weekday("weekday")
         .dt("ts")
         .convert_time_zone("Z", "+09:00", "tokyo")
-        .to_dict()
+        .to_dict(as_series=False)
     )
 
 
@@ -251,7 +251,7 @@ df.dt("ts").year("year")
   .dt("ts").month("month")
   .dt("ts").weekday("weekday")
   .dt("ts").convert_time_zone("Z", "+09:00", "tokyo")
-  .to_dict()
+  .to_dict(as_series=False)
 """
 
 SCENE2_RS_CALLS = """
@@ -356,12 +356,12 @@ def run_scene3(alopex: Any) -> Dict[str, Dict[str, Any]]:
     words_back = words_imploded.explode("word")
 
     return {
-        "list_ops": with_ops.to_dict(),
-        "exploded": exploded.to_dict(),
-        "roundtrip_flat": roundtrip_flat.to_dict(),
-        "roundtrip_back": roundtrip_back.to_dict(),
-        "words_imploded": words_imploded.to_dict(),
-        "words_back": words_back.to_dict(),
+        "list_ops": with_ops.to_dict(as_series=False),
+        "exploded": exploded.to_dict(as_series=False),
+        "roundtrip_flat": roundtrip_flat.to_dict(as_series=False),
+        "roundtrip_back": roundtrip_back.to_dict(as_series=False),
+        "words_imploded": words_imploded.to_dict(as_series=False),
+        "words_back": words_back.to_dict(as_series=False),
     }
 
 
