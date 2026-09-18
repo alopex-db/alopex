@@ -306,8 +306,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          branch="report/verify-release-v${VERSION}"
-          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          report_id="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          report_path="reports/release-verification/v${VERSION}/${report_id}"
+          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/${report_path}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if curl -fsSL "${public_url}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
             cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
             echo "The exact report is already present on docs main."
@@ -316,7 +319,7 @@ jobs:
           fi
           if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
             git fetch --force origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
-            existing="$(git show "refs/remotes/origin/${branch}:${REPORT_PATH}.md")"
+            existing="$(git show "refs/remotes/origin/${branch}:${report_path}.md")"
             cmp -s "${REPORT_ROOT}/v${VERSION}.md" <(printf '%s' "${existing}") || {
               echo "refusing to overwrite immutable report: ${branch}" >&2
               exit 1
@@ -324,16 +327,16 @@ jobs:
             echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          mkdir -p "$(dirname "${REPORT_PATH}")"
-          if [[ -e "${REPORT_PATH}.md" ]]; then
-            echo "refusing to overwrite immutable report: ${REPORT_PATH}" >&2
+          mkdir -p "$(dirname "${report_path}")"
+          if [[ -e "${report_path}.md" ]]; then
+            echo "refusing to overwrite immutable report: ${report_path}" >&2
             exit 1
           fi
-          cp "${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
+          cp "${REPORT_ROOT}/v${VERSION}.md" "${report_path}.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "${branch}"
-          git add "${REPORT_PATH}.md"
+          git add "${report_path}.md"
           git commit -m "docs(release): retain v${VERSION} verification report"
           git push origin "${branch}"
           echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
