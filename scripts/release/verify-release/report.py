@@ -86,14 +86,12 @@ def record(args: argparse.Namespace) -> None:
         for line in diagnostics
     ):
         status = "incomplete"
-    tail = lines[-60:]
-    excerpt = diagnostics + [line for line in tail if line not in diagnostics]
     payload["steps"].append(
         {
             "name": args.name,
             "status": status,
             "description": args.description,
-            "log_excerpt": excerpt,
+            "log_excerpt": lines,
             "diagnostics": diagnostics,
         }
     )
