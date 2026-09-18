@@ -469,3 +469,14 @@ jobs:
           done
           [[ -n "${run_id}" ]]
           gh run watch "${run_id}" --exit-status
+
+      - name: Dispatch independent public verification report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON_TAG: ${{ steps.release.outputs.python_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PYTHON_TAG#alopex-py-v}"
+          gh workflow run public-release-verification.yml --ref "${PYTHON_TAG}" \
+            -f "version=${version}"
