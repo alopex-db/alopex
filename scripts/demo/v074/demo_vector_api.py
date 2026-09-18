@@ -235,7 +235,7 @@ def scene2_python_native(alopex: Any) -> bool:
         show_call("db.search_hnsw('idx_docs_embedding', query, 2)")
         results, stats = db.search_hnsw("idx_docs_embedding", query, 2)
         show_rows(results)
-        print(f"       node_count={stats.node_count}")
+        print(f"       nodes_visited={stats.nodes_visited}")
         show_call("db.get_hnsw_stats('idx_docs_embedding')")
         print(f"       node_count={db.get_hnsw_stats('idx_docs_embedding').node_count}")
 
