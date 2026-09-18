@@ -295,7 +295,13 @@ write_report() {
 rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
 nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
 python3 "${SCRIPT_DIR}/report.py" init --results "${RESULTS_FILE}" \
-    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}"
+    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}" \
+    --commit "${RELEASE_VERIFICATION_COMMIT:-unknown}" \
+    --tag "${RELEASE_VERIFICATION_TAG:-unknown}" \
+    --run-id "${RELEASE_VERIFICATION_RUN_ID:-unknown}" \
+    --run-attempt "${RELEASE_VERIFICATION_RUN_ATTEMPT:-1}" \
+    --run-url "${RELEASE_VERIFICATION_RUN_URL:-unknown}" \
+    --responsibility "${RELEASE_VERIFICATION_RESPONSIBILITY:-Extended Verification / public release scenarios}"
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
@@ -614,9 +620,21 @@ run_step "v${ALOPEX_VERSION} v0.8.11 SQL surfaces not covered above (demo_sql_v0
     "PyPI公開版で、SHOW/DESC/information_schema.columns、? 位置パラメータと EXPLAIN (FORMAT JSON) のパラメータ秘匿、動的 VIEW が作成後の変更を反映すること、ALTER TABLE ADD COLUMN の既存行への DEFAULT 反映と RENAME COLUMN、TRUNCATE 後もテーブルが使えること、MERGE の一致更新・不一致挿入を自己検証する。" \
     -- run_in_container python3 scripts/demo/v0811/demo_sql_v0811_surfaces.py
 
-run_step "v${ALOPEX_VERSION} SQL correctness contracts (demo_sql_v0813.py)" \
-    "PyPI公開版で、v0.8.13で追加された機能のうち文法追加を伴わないものを自己検証する: 複数行 upsert の EXCLUDED 反映と同一バッチ内重複IDの原子的拒否(#411)、CSV vector ingestion の COPY が全行成功または全行ロールバックすること(#412)、CREATE INDEX 後の EXPLAIN が IndexScan アクセスパスを選ぶこと(#425)、INNER/LEFT JOIN で NULL=NULL が一致しないこと(#424)。" \
-    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py
+run_step "v${ALOPEX_VERSION} #411 atomic batch upsert" \
+    "PyPI公開版で、複数行 upsert が EXCLUDED 値を反映し、同一 statement 内の重複IDを部分書込みなしで拒否することを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario atomic-batch-upsert
+
+run_step "v${ALOPEX_VERSION} #412 transactional CSV vector COPY" \
+    "PyPI公開版で、CSV vector ingestion の COPY が正常バッチを全行反映し、一行でも不正なら部分書込みなしで全体をロールバックすることを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario csv-vector-copy
+
+run_step "v${ALOPEX_VERSION} #425 B-tree IndexScan plan selection" \
+    "PyPI公開版で、CREATE INDEX 後の equality/range filter の EXPLAIN が IndexScan を選び、取得行も正しいことを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario btree-index-plan
+
+run_step "v${ALOPEX_VERSION} #424 NULL-safe equi-join" \
+    "PyPI公開版で、INNER JOIN と LEFT JOIN の双方で NULL=NULL が一致せず、LEFT JOIN の未一致行が保持されることを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario null-equi-join
 
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \

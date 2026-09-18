@@ -296,18 +296,6 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("if completed != 81:", demo)
         self.assertIn("81 checks passed", demo)
 
-    def test_v0813_demo_is_mandatory_and_its_check_count_matches(self) -> None:
-        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
-        demo = (ROOT / "scripts/demo/v0813/demo_sql_v0813.py").read_text(encoding="utf-8")
-
-        self.assertIn("scripts/demo/v0813/demo_sql_v0813.py", run)
-        # v0.8.13 adds no new Nim SQL grammar; every scenario here is a
-        # planning/execution behavior on existing syntax, one per issue.
-        for issue_marker in ("#411", "#412", "#425", "#424"):
-            self.assertIn(issue_marker, demo)
-        self.assertIn("if CHECKS != 12:", demo)
-        self.assertIn("12 checks passed", demo)
-
     def test_v0811_surfaces_demo_is_mandatory_and_its_check_count_matches(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
         demo = (

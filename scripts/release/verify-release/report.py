@@ -141,9 +141,9 @@ def render(args: argparse.Namespace) -> None:
     if status == "success":
         lines.extend(
             [
-                f"v{version} は、PyPIから完全一致wheelを取得し、隔離先への導入と",
-                "最小importが成功している。既知機能・実行経路・性能の正しさは、",
-                "対象commitのDevelopment CI / Extended Verificationが所有する。",
+                f"v{version} は、公開済みの完全一致パッケージだけを用いて、",
+                "下記の配布後シナリオを完走した。各契約の入力・期待値・実行ログは、",
+                "対応するステップの証跡として保存している。",
             ]
         )
     elif status == "failure":

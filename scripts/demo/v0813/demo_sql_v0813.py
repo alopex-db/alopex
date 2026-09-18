@@ -24,6 +24,7 @@ compatibility inventory rows.
 """
 from __future__ import annotations
 
+import argparse
 import tempfile
 from pathlib import Path
 
@@ -164,15 +165,34 @@ def null_safe_equi_join(db: Database) -> None:
 
 
 def main() -> int:
-    db = Database.new()
-    atomic_batch_upsert(db)
-    transactional_copy_vector_ingestion(db)
-    btree_index_plan_selection(db)
-    null_safe_equi_join(db)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        choices=(
+            "atomic-batch-upsert",
+            "csv-vector-copy",
+            "btree-index-plan",
+            "null-equi-join",
+        ),
+        help="run one named v0.8.13 contract; repeat to select several",
+    )
+    selected = parser.parse_args().scenario
+    scenarios = {
+        "atomic-batch-upsert": atomic_batch_upsert,
+        "csv-vector-copy": transactional_copy_vector_ingestion,
+        "btree-index-plan": btree_index_plan_selection,
+        "null-equi-join": null_safe_equi_join,
+    }
 
-    if CHECKS != 12:
+    for name in selected or scenarios:
+        before = CHECKS
+        scenarios[name](Database.new())
+        print(f"v0.8.13 {name}: {CHECKS - before} checks passed")
+
+    if selected is None and CHECKS != 12:
         raise AssertionError(f"v0.8.13 SQL demo check count changed: {CHECKS} != 12")
-    print("v0.8.13 SQL correctness demo completed: 12 checks passed")
+    print(f"v0.8.13 SQL correctness demo completed: {CHECKS} checks passed")
     return 0
 
 

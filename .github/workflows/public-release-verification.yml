@@ -72,7 +72,7 @@ jobs:
             --commit unresolved --tag "${report_tag}" \
             --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --responsibility "Stable Delivery / downstream availability"
+            --responsibility "Extended Verification / public release scenarios"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
 
@@ -129,10 +129,10 @@ jobs:
             --commit "${python_commit}" --tag "${python_tag}" \
             --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --responsibility "Stable Delivery / downstream availability"
+            --responsibility "Extended Verification / public release scenarios"
 
-      - name: Verify exact public package availability
-        id: availability
+      - name: Wait for exact public package availability
+        id: readiness
         env:
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
@@ -170,18 +170,30 @@ jobs:
             echo "PyPI did not make alopex==${VERSION} installable within 10 minutes" >&2
             exit 1
           fi
-          python3 scripts/release/verify-release/report.py record \
-            --results "${REPORT_ROOT}/v${VERSION}.json" \
-            --name "public package availability" --status success \
-            --description "PyPIから完全一致wheelを取得し、隔離先へ導入してimportできることを確認する。既知機能の正しさは対象commitのDevelopment CI/Extended Verificationが所有する。" \
-            --log "${readiness_log}"
+      - name: Run released-package scenarios
+        id: scenarios
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RELEASE_VERIFICATION_COMMIT="${REPORT_COMMIT}"
+          export RELEASE_VERIFICATION_TAG="${REPORT_TAG}"
+          export RELEASE_VERIFICATION_RUN_ID="${GITHUB_RUN_ID}"
+          export RELEASE_VERIFICATION_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}"
+          export RELEASE_VERIFICATION_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          export RELEASE_VERIFICATION_RESPONSIBILITY="Extended Verification / public release scenarios"
+          bash scripts/release/verify-release/run.sh "${VERSION}" \
+            --results-file "${REPORT_ROOT}/v${VERSION}.json" \
+            --report-dir "${REPORT_ROOT}"
 
       - name: Finalize verification report
         if: always()
         env:
           VERSION: ${{ steps.release.outputs.version || steps.report_context.outputs.version || 'unknown' }}
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
-          AVAILABILITY_OUTCOME: ${{ steps.availability.outcome }}
+          READINESS_OUTCOME: ${{ steps.readiness.outcome }}
+          SCENARIOS_OUTCOME: ${{ steps.scenarios.outcome }}
         shell: bash
         run: |
           set -u
@@ -199,10 +211,10 @@ jobs:
               --commit "${REPORT_COMMIT:-unresolved}" --tag "${report_tag}" \
               --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
               --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-              --responsibility "Stable Delivery / downstream availability"
+              --responsibility "Extended Verification / public release scenarios"
           fi
           orchestration_status=""
-          for outcome in "${RELEASE_OUTCOME:-skipped}" "${AVAILABILITY_OUTCOME:-skipped}"; do
+          for outcome in "${RELEASE_OUTCOME:-skipped}" "${READINESS_OUTCOME:-skipped}" "${SCENARIOS_OUTCOME:-skipped}"; do
             if [[ "${outcome}" == failure ]]; then
               orchestration_status=failure
               break
@@ -222,7 +234,8 @@ jobs:
             failure_log="${report_root}/workflow-failure.log"
             {
               echo "release=${RELEASE_OUTCOME:-skipped}"
-              echo "availability=${AVAILABILITY_OUTCOME:-skipped}"
+              echo "readiness=${READINESS_OUTCOME:-skipped}"
+              echo "scenarios=${SCENARIOS_OUTCOME:-skipped}"
             } > "${failure_log}"
             python3 scripts/release/verify-release/report.py record \
               --results "${results}" --name "workflow orchestration" --status "${orchestration_status}" \

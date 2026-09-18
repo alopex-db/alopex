@@ -68,7 +68,6 @@ python3 "${repo}/scripts/release/verify-release/report.py" validate-report \
   --results "${complete}"
 python3 "${repo}/scripts/release/verify-release/report.py" render \
   --results "${complete}" --output-dir "${output}"
-grep -Fq '最小importが成功している' "${output}/v0.8.5.md"
 python3 - "${complete}" <<'PY'
 import json
 import sys
