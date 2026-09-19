@@ -348,9 +348,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh workflow run publish-release-verification.yml \
-            --repo alopex-db/docs \
-            -f "version=${VERSION}"
+          gh api --method POST repos/alopex-db/docs/dispatches \
+            -f event_type=release-verification-ready \
+            -f "client_payload[version]=${VERSION}"
 
       - name: Wait for identical bytes on docs main
         shell: bash
