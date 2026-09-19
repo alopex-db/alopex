@@ -20,7 +20,7 @@ python3 "${repo}/scripts/release/verify-release/report.py" init \
 } >"${log}"
 python3 "${repo}/scripts/release/verify-release/report.py" record \
   --results "${results}" --name demo --status failure \
-  --description "failure extraction" --log "${log}"
+  --description "failure extraction" --duration-ms 1234 --log "${log}"
 python3 "${repo}/scripts/release/verify-release/report.py" finalize \
   --results "${results}"
 
@@ -36,6 +36,7 @@ grep -Fq '| Commit | `deadbeef` |' "${report}"
 grep -Fq '| Run | `123` / attempt `2` |' "${report}"
 grep -Fq '| 失敗段階 | demo |' "${report}"
 grep -Fq '| 実行 | https://example.invalid/run/1 |' "${report}"
+grep -Fq '> 実行時間: **1.234 秒**' "${report}"
 if grep -Fq 'サーバー・クラスタのすべて' "${report}"; then
   echo "public availability report must not claim functionality demos" >&2
   exit 1
@@ -53,6 +54,7 @@ assert payload["started_at"].endswith("Z")
 assert payload["completed_at"].endswith("Z")
 assert payload["identity"]["run_id"] == "123"
 assert payload["identity"]["run_attempt"] == 2
+assert payload["steps"][0]["duration_ms"] == 1234
 PY
 
 complete="${scratch}/complete.json"

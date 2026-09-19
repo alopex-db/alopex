@@ -262,20 +262,23 @@ run_step() {
     shift
     STEP_INDEX=$((STEP_INDEX + 1))
     local logfile="${LOG_DIR}/step-${STEP_INDEX}.log"
+    local started_ns
+    started_ns="$(date +%s%N)"
 
     log_info "${name}"
     "$@" 2>&1 | tee "${logfile}"
     local status="${PIPESTATUS[0]}"
+    local duration_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status success --description "${description}" --log "${logfile}"
+            --name "${name}" --status success --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
         OVERALL_STATUS="fail"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status failure --description "${description}" --log "${logfile}"
+            --name "${name}" --status failure --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
         write_report
         exit "${status}"
     fi
