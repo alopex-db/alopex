@@ -341,6 +341,17 @@ jobs:
           git push origin "${branch}"
           echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
 
+      - name: Request docs report ingestion
+        if: steps.publish.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run publish-release-verification.yml \
+            --repo alopex-db/docs \
+            -f "version=${VERSION}"
+
       - name: Wait for identical bytes on docs main
         shell: bash
         run: |
@@ -359,7 +370,7 @@ jobs:
           exit 1
 
       - name: Cleanup publication branch
-        if: always() && steps.publish.outputs.branch != ''
+        if: success() && steps.publish.outputs.branch != ''
         env:
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
