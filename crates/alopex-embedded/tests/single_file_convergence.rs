@@ -230,6 +230,7 @@ fn empty_database_converges_to_a_valid_empty_container() {
         txn.put(&key(1), &value(1)).expect("put");
         txn.commit().expect("commit");
         db.close().expect("close");
+        drop(db);
     }
 
     let db = Database::open(&copied).expect("reopen after writing into an empty container");

@@ -482,6 +482,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-testpypi]
     steps:
+      - name: Checkout release commit for its correctness demos
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Wait for TestPyPI indexing
         run: sleep 60
       - name: Setup Python
@@ -492,11 +496,33 @@ jobs:
         run: |
           pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            alopex
+            alopex numpy
       - name: Verify import
         run: |
           python -c "from alopex import Database; print('Database import OK')"
           python -c "from alopex import Transaction; print('Transaction import OK')"
+      # An import smoke test alone does not catch a broken release: v0.8.11's
+      # post-release HNSW benchmark failure (issue #395) was only discovered
+      # after PyPI publication because nothing ran a functional scenario
+      # before publish-pypi, and no release verification report since
+      # v0.8.10 has actually exercised any SQL scenario (v0.8.11 published no
+      # report at all; v0.8.12's report contains only this import check).
+      # These three demos are pure Python + the published wheel (no server,
+      # no compiled binary, no extra dependency) so they run safely here
+      # against the TestPyPI-installed wheel, before the real PyPI publish
+      # is allowed to proceed: the v0.8 baseline (demo_sql_v08.py, 81
+      # checks), every v0.8.11 SQL surface (the two demo_sql_v0811*
+      # scripts), and every v0.8.13 scenario that is new since v0.8.12
+      # (demo_sql_v0813.py). Wider demos that need a compiled binary or a
+      # running server (scripts/demo/v07, v074, v08/demo_embedded_v08.sh)
+      # remain a manual make verify-release rehearsal; see
+      # docs/release-v0.8-support.md.
+      - name: Run pre-publish correctness demos (baseline + every scenario since v0.8.11)
+        run: |
+          python3 scripts/demo/v08/demo_sql_v08.py
+          python3 scripts/demo/v0811/demo_sql_mutations.py
+          python3 scripts/demo/v0811/demo_sql_v0811_surfaces.py
+          python3 scripts/demo/v0813/demo_sql_v0813.py
 
   publish-pypi:
     name: publish-pypi
@@ -583,16 +609,21 @@ jobs:
             echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
             exit 1
           }
+          release_branch="release/v${version}"
           git fetch --force origin main "refs/tags/${core_tag}:refs/tags/${core_tag}" \
             "refs/tags/${PYTHON_TAG_NAME}:refs/tags/${PYTHON_TAG_NAME}"
           git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}" || {
             echo "Python tag must descend from the Core tag" >&2
             exit 1
           }
-          git merge-base --is-ancestor "${python_tag_sha}" origin/main || {
-            echo "Python tag is not merged to main" >&2
-            exit 1
-          }
+          if ! git merge-base --is-ancestor "${python_tag_sha}" origin/main; then
+            git ls-remote --exit-code --heads origin "${release_branch}" >/dev/null
+            git fetch --force origin "refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
+            git merge-base --is-ancestor "${python_tag_sha}" "origin/${release_branch}" || {
+              echo "Python tag is neither on main nor ${release_branch}" >&2
+              exit 1
+            }
+          fi
           version_at_tag="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
           test "${version_at_tag}" = "${version}"
           [[ "${CORE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]

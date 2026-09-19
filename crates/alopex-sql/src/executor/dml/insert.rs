@@ -4,6 +4,7 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::ast::expr::Expr;
+use crate::ast::span::Span;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
@@ -14,10 +15,11 @@ use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
 use crate::planner::type_checker::TypeChecker;
-use crate::planner::typed_expr::Projection;
-use crate::planner::typed_expr::TypedExpr;
+use crate::planner::typed_expr::{Projection, TypedAssignment, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue, StorageError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+type ConflictRows = HashMap<Vec<u8>, (u64, Vec<SqlValue>)>;
 
 /// Execute INSERT statements.
 #[allow(dead_code)]
@@ -163,6 +165,93 @@ pub fn execute_insert_rows_with_plan<
     )
 }
 
+/// Upsert vector values received from a structured API request.
+///
+/// This shares the SQL INSERT/ON CONFLICT executor so constraints and secondary
+/// indexes remain transactional, without serializing request values as SQL.
+#[allow(dead_code)]
+pub fn execute_vector_upsert_rows<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    primary_key: &str,
+    vector_column: &str,
+    values: Vec<(u64, Vec<f32>)>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    let primary_key_index = table
+        .get_column_index(primary_key)
+        .ok_or_else(|| ExecutorError::ColumnNotFound(primary_key.to_string()))?;
+    let vector_column_index = table
+        .get_column_index(vector_column)
+        .ok_or_else(|| ExecutorError::ColumnNotFound(vector_column.to_string()))?;
+    let columns = vec![primary_key.to_string(), vector_column.to_string()];
+    validate_columns(&table, &columns)?;
+    let context = EvalContext::new(&[]);
+    let rows = values
+        .into_iter()
+        .map(|(id, vector)| {
+            let id = i64::try_from(id).map_err(|_| ExecutorError::InvalidOperation {
+                operation: "vector upsert".into(),
+                reason: "primary key exceeds signed 64-bit range".into(),
+            })?;
+            build_row_from_values(
+                catalog,
+                &table,
+                &columns,
+                vec![SqlValue::BigInt(id), SqlValue::Vector(vector)],
+                &context,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let conflict = OnConflictPlan {
+        columns: vec![primary_key.to_string()],
+        constraint: None,
+        action: OnConflictActionPlan::DoUpdate {
+            assignments: vec![TypedAssignment::new(
+                vector_column.to_string(),
+                vector_column_index,
+                TypedExpr::column_ref(
+                    "excluded".to_string(),
+                    vector_column.to_string(),
+                    table.column_count() + vector_column_index,
+                    table.columns[vector_column_index].data_type.clone(),
+                    Span::default(),
+                ),
+            )],
+            selection: None,
+        },
+    };
+    let is_primary_key = table
+        .primary_key
+        .as_ref()
+        .is_some_and(|keys| keys.first().is_some_and(|key| key == primary_key))
+        || table.columns[primary_key_index].primary_key;
+    if !is_primary_key {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "vector upsert".into(),
+            reason: "configured primary key column is not a primary key".into(),
+        });
+    }
+    insert_rows(
+        txn,
+        catalog,
+        &table,
+        table_name,
+        rows,
+        Some(&conflict),
+        None,
+    )
+}
+
 pub fn execute_insert_with_plan<
     'txn,
     S: KVStore + 'txn,
@@ -210,8 +299,21 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     if let Some(plan) = conflict {
         reject_duplicate_conflict_keys(table, plan, &rows)?;
     }
+    let conflict_indices = conflict.and_then(|plan| conflict_column_indices(table, plan));
+    let conflict_index = conflict_indices.as_ref().and_then(|indices| {
+        catalog
+            .get_indexes_for_table(table_name)
+            .into_iter()
+            .find(|index| index.unique && index.column_indices == *indices)
+            .cloned()
+    });
+    let conflicts = conflict_indices
+        .as_ref()
+        .map(|indices| load_conflicts(txn, table, indices, &rows, conflict_index.as_ref()))
+        .transpose()?;
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
+    let mut update_changes: Vec<(u64, Vec<SqlValue>, Vec<SqlValue>)> = Vec::new();
     for mut row in rows {
         for (index, column) in table.columns.iter().enumerate() {
             if row[index].is_null()
@@ -223,7 +325,14 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
             }
         }
         if let Some(plan) = conflict {
-            if let Some((row_id, old_row)) = find_conflict(txn, table, plan, &row)? {
+            let key = conflict_indices
+                .as_ref()
+                .map(|indices| conflict_key(&row, indices))
+                .transpose()?
+                .flatten();
+            let existing =
+                key.and_then(|key| conflicts.as_ref().and_then(|rows| rows.get(&key).cloned()));
+            if let Some((row_id, old_row)) = existing {
                 match &plan.action {
                     OnConflictActionPlan::DoNothing => continue,
                     OnConflictActionPlan::DoUpdate {
@@ -254,12 +363,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
                         super::constraints::apply_parent_update::<S, C, T>(
                             txn, catalog, table, &old_row, &new_row, 0,
                         )?;
-                        super::update::apply_changes(
-                            txn,
-                            catalog,
-                            table,
-                            &[(row_id, old_row, new_row.clone())],
-                        )?;
+                        update_changes.push((row_id, old_row, new_row.clone()));
                         updated_rows.push((row_id, new_row));
                         continue;
                     }
@@ -268,6 +372,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         }
         super::constraints::validate_row::<S, C, T>(txn, catalog, table, &row, &insert_rows)?;
         insert_rows.push(row);
+    }
+    if !update_changes.is_empty() {
+        super::update::apply_changes(txn, catalog, table, &update_changes)?;
     }
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)
@@ -280,6 +387,11 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
+
+    // Validate through the index before staging table rows, preserving atomic
+    // failure without scanning the whole table.
+    let insert_values = insert_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    validate_unique_indexes_before_insert(txn, &btree_indexes, &insert_values)?;
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(insert_rows.len());
 
@@ -298,7 +410,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     }
 
     // Populate indexes using one handle per index for the whole batch.
-    populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_prevalidated_indexes(txn, &btree_indexes, &staged)?;
     populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
@@ -330,7 +442,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
             columns, rows,
         )))
     } else {
-        Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+        Ok(ExecutionResult::RowsAffected(
+            (staged.len() + updated_rows.len()) as u64,
+        ))
     }
 }
 
@@ -383,39 +497,91 @@ fn reject_duplicate_conflict_keys(
     Ok(())
 }
 
-fn find_conflict<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
-    txn: &mut T,
-    table: &TableMetadata,
-    plan: &OnConflictPlan,
-    row: &[SqlValue],
-) -> Result<Option<(u64, Vec<SqlValue>)>> {
+fn conflict_column_indices(table: &TableMetadata, plan: &OnConflictPlan) -> Option<Vec<usize>> {
     let names = if plan.columns.is_empty() {
         table.primary_key.clone().unwrap_or_default()
     } else {
         plan.columns.clone()
     };
-    if names.is_empty() {
-        return Ok(None);
-    }
     let indices = names
         .iter()
         .filter_map(|name| table.get_column_index(name))
         .collect::<Vec<_>>();
-    if indices.len() != names.len() {
-        return Ok(None);
+    (indices.len() == names.len() && !indices.is_empty()).then_some(indices)
+}
+
+fn conflict_key(row: &[SqlValue], indices: &[usize]) -> Result<Option<Vec<u8>>> {
+    let values = indices
+        .iter()
+        .map(|&index| row[index].clone())
+        .collect::<Vec<_>>();
+    if values.iter().any(SqlValue::is_null) {
+        Ok(None)
+    } else {
+        Ok(Some(encode_group_key(&values)?))
     }
+}
+
+fn load_conflicts<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    table: &TableMetadata,
+    indices: &[usize],
+    rows: &[Vec<SqlValue>],
+    conflict_index: Option<&IndexMetadata>,
+) -> Result<ConflictRows> {
+    if let Some(index) = conflict_index {
+        return load_conflicts_from_index(txn, table, indices, rows, index);
+    }
+    let mut conflicts = HashMap::new();
     let mut storage = txn.table_storage(table);
     let mut iter = storage.range_scan(0, u64::MAX)?;
     while let Some(item) = iter.next() {
         let (row_id, existing) = item?;
-        if indices
-            .iter()
-            .all(|&idx| !row[idx].is_null() && row[idx] == existing[idx])
-        {
-            return Ok(Some((row_id, existing)));
+        if let Some(key) = conflict_key(&existing, indices)? {
+            conflicts.entry(key).or_insert((row_id, existing));
         }
     }
-    Ok(None)
+    Ok(conflicts)
+}
+
+fn load_conflicts_from_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    table: &TableMetadata,
+    indices: &[usize],
+    rows: &[Vec<SqlValue>],
+    index: &IndexMetadata,
+) -> Result<ConflictRows> {
+    let mut lookups = Vec::new();
+    for row in rows {
+        if let Some(key) = conflict_key(row, indices)? {
+            let values: Vec<SqlValue> = indices.iter().map(|&index| row[index].clone()).collect();
+            lookups.push((key, values));
+        }
+    }
+
+    let mut matched_rows = Vec::new();
+    {
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        let values = lookups
+            .iter()
+            .map(|(_, values)| values.clone())
+            .collect::<Vec<_>>();
+        for (position, row_id) in storage.lookup_many(&values)? {
+            matched_rows.push((lookups[position].0.clone(), row_id));
+        }
+    }
+
+    let mut conflicts = HashMap::new();
+    let mut storage = txn.table_storage(table);
+    for (key, row_id) in matched_rows {
+        if let Some(existing) = storage.get(row_id)?
+            && conflict_key(&existing, indices)? == Some(key.clone())
+        {
+            conflicts.entry(key).or_insert((row_id, existing));
+        }
+    }
+    Ok(conflicts)
 }
 
 fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
@@ -601,21 +767,60 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+pub(crate) fn populate_prevalidated_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
     for index in indexes {
+        let batch_validated = index.unique && rows.len() > 1;
         let mut storage =
             txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
         for (row_id, row) in rows {
             if should_skip_unique_index_for_null(index, row) {
                 continue;
             }
-            storage
-                .insert(row, *row_id)
+            if batch_validated {
+                storage
+                    .insert_prevalidated_unique(row, *row_id)
+                    .map_err(|e| map_index_error(index, e))?;
+            } else {
+                storage
+                    .insert(row, *row_id)
+                    .map_err(|e| map_index_error(index, e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unique_indexes_before_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    indexes: &[IndexMetadata],
+    rows: &[&[SqlValue]],
+) -> Result<()> {
+    for index in indexes
+        .iter()
+        .filter(|index| index.unique && rows.len() > 1)
+    {
+        let mut keys = HashSet::with_capacity(rows.len());
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        for row in rows {
+            if should_skip_unique_index_for_null(index, row) {
+                continue;
+            }
+            let key = storage
+                .validate_unique_row(row)
                 .map_err(|e| map_index_error(index, e))?;
+            if !keys.insert(key) {
+                return Err(map_index_error(
+                    index,
+                    StorageError::UniqueViolation {
+                        index_id: index.index_id,
+                    },
+                ));
+            }
         }
     }
     Ok(())
@@ -628,9 +833,7 @@ fn populate_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
     for index in indexes {
-        for (row_id, row) in rows {
-            HnswBridge::on_insert(txn, table, index, *row_id, row)?;
-        }
+        HnswBridge::on_insert_batch(txn, table, index, rows)?;
     }
     Ok(())
 }
@@ -640,6 +843,7 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::executor::ddl::create_index::execute_create_index;
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::typed_expr::TypedExprKind;
     use crate::planner::types::ResolvedType;
@@ -779,5 +983,93 @@ mod tests {
             ExecutorError::ConstraintViolation(ConstraintViolation::PrimaryKey { .. })
         ));
         txn.rollback().unwrap();
+    }
+
+    #[test]
+    fn batch_insert_secondary_unique_violation_is_atomic() {
+        let (bridge, mut catalog) = bridge();
+        let table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text).with_not_null(true),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+
+        let mut ddl_txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut ddl_txn, &mut catalog, table, vec![], false).unwrap();
+        ddl_txn.commit().unwrap();
+        let stored_table = catalog.get_table("users").unwrap().clone();
+
+        let mut index_txn = bridge.begin_write().unwrap();
+        execute_create_index(
+            &mut index_txn,
+            &mut catalog,
+            IndexMetadata::new(0, "idx_users_name", "users", vec!["name".into()])
+                .with_column_indices(vec![1])
+                .with_unique(true),
+            false,
+        )
+        .unwrap();
+        index_txn.commit().unwrap();
+
+        let mut seed_txn = bridge.begin_write().unwrap();
+        execute_insert_rows(
+            &mut seed_txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]],
+        )
+        .unwrap();
+        seed_txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let err = execute_insert_rows(
+            &mut txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::Text("bob".into())],
+                vec![SqlValue::Integer(3), SqlValue::Text("alice".into())],
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+        ));
+
+        {
+            let mut storage = txn.table_storage(&stored_table);
+            assert!(storage.get(2).unwrap().is_none());
+            assert!(storage.get(3).unwrap().is_none());
+        }
+        txn.rollback().unwrap();
+
+        let mut duplicate_txn = bridge.begin_write().unwrap();
+        let err = execute_insert_rows(
+            &mut duplicate_txn,
+            &catalog,
+            "users",
+            vec!["id".into(), "name".into()],
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::Text("bob".into())],
+                vec![SqlValue::Integer(3), SqlValue::Text("bob".into())],
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+        ));
+        {
+            let mut storage = duplicate_txn.table_storage(&stored_table);
+            assert!(storage.get(2).unwrap().is_none());
+            assert!(storage.get(3).unwrap().is_none());
+        }
+        duplicate_txn.rollback().unwrap();
     }
 }

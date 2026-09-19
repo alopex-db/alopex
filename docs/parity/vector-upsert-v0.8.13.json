@@ -1,0 +1,26 @@
+{
+  "schema": "alopex.reference-inventory/v1",
+  "api": "HTTP.POST./vector/upsert-batch;gRPC.VectorUpsertBatch",
+  "reference": {
+    "project": "qdrant/qdrant",
+    "commit": "829abe0ad8c425d4c6c1fd5042db8ea92a01ff84",
+    "license": "Apache-2.0",
+    "implementation": [
+      "src/actix/api/update_api.rs#upsert_points",
+      "src/tonic/api/update_common.rs#do_upsert_points",
+      "lib/collection/src/collection_manager/segments_updater.rs#upsert_points"
+    ],
+    "test": "lib/collection/src/tests/hw_metrics.rs#test_hw_metrics_cancellation"
+  },
+  "relationship": "extended",
+  "extension": {
+    "base_contract": "structured HTTP/gRPC point batch reaches one shared update owner without SQL serialization",
+    "difference": "Alopex rejects duplicate IDs in a request and atomically updates only the selected vector column.",
+    "reason": "Issue #411 requires deterministic duplicate handling and SQL ON CONFLICT-compatible column updates."
+  },
+  "evidence": [
+    "crates/alopex-server/tests/http_test.rs#http_vector_upsert_batch_accepts_10k_structured_vectors",
+    "crates/alopex-server/tests/http_test.rs#http_vector_upsert_batch_rejects_duplicate_ids_atomically",
+    "crates/alopex-server/tests/grpc_test.rs#grpc_vector_upsert_batch_rejects_duplicate_ids_atomically"
+  ]
+}

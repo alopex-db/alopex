@@ -29,7 +29,7 @@ _STATUSES = (STATUS_PASS, STATUS_FAIL, STATUS_SKIP, STATUS_ERROR)
 class CaseResult:
     """1 検証ケース(経路 or マトリクスセル)の結果。"""
 
-    section: str  # 例: "s2a", "s2b", "s2c", "demo:act1"
+    section: str  # 例: "s2a", "s2b", "demo:act1"
     case_id: str  # 例: "embedded<->http", "writer=cli/reader=grpc"
     status: str
     detail: str = ""

@@ -2,9 +2,10 @@ use std::fs::File;
 
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray, ListArray,
-    MapArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeListArray,
+    Float32Array, Float64Array, Int32Array, Int64Array, IntervalMonthDayNanoArray,
+    LargeBinaryArray, LargeListArray, ListArray, MapArray, StringArray, StructArray,
+    Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -33,12 +34,17 @@ impl ParquetReader {
             ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
         })?;
 
+        let target_types: Vec<ResolvedType> = table_meta
+            .columns
+            .iter()
+            .map(|column| column.data_type.clone())
+            .collect();
         let arrow_schema = builder.schema();
         let mut fields = Vec::with_capacity(arrow_schema.fields().len());
-        for f in arrow_schema.fields() {
-            let ty = map_arrow_type(f.data_type())?;
+        for (index, field) in arrow_schema.fields().iter().enumerate() {
+            let ty = map_arrow_type(field.data_type(), target_types.get(index))?;
             fields.push(CopyField {
-                name: Some(f.name().clone()),
+                name: Some(field.name().clone()),
                 data_type: Some(ty),
             });
         }
@@ -48,12 +54,6 @@ impl ParquetReader {
             .build()
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
         // TODO: バッチサイズを open 引数で受け取れるようにし、呼び出し側で柔軟に制御できるようにする。
-
-        let target_types: Vec<ResolvedType> = table_meta
-            .columns
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect();
 
         Ok(Self {
             schema: CopySchema { fields },
@@ -114,7 +114,22 @@ impl BulkReader for ParquetReader {
     }
 }
 
-fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
+fn map_arrow_type(dt: &ArrowDataType, target: Option<&ResolvedType>) -> Result<ResolvedType> {
+    if let (
+        ArrowDataType::FixedSizeList(field, dimension),
+        Some(
+            vector @ ResolvedType::Vector {
+                dimension: target_dimension,
+                ..
+            },
+        ),
+    ) = (dt, target)
+        && matches!(field.data_type(), ArrowDataType::Float32)
+        && *dimension as u32 == *target_dimension
+    {
+        return Ok(vector.clone());
+    }
+
     match dt {
         ArrowDataType::Int32 => Ok(ResolvedType::Integer),
         ArrowDataType::Int64 => Ok(ResolvedType::BigInt),
@@ -279,6 +294,27 @@ fn arrow_value_to_sql(
             Ok(SqlValue::Blob(arr.value(row_idx).to_vec()))
         }
         (
+            ArrowDataType::FixedSizeList(field, dimension),
+            ResolvedType::Vector {
+                dimension: target_dimension,
+                ..
+            },
+        ) if matches!(field.data_type(), ArrowDataType::Float32)
+            && *dimension as u32 == *target_dimension =>
+        {
+            let list = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            let values = list.value(row_idx);
+            let values = values.as_any().downcast_ref::<Float32Array>().unwrap();
+            if (0..values.len()).any(|index| values.is_null(index)) {
+                return Err(ExecutorError::BulkLoad(
+                    "vector parquet values must not contain NULL".into(),
+                ));
+            }
+            Ok(SqlValue::Vector(
+                (0..values.len()).map(|index| values.value(index)).collect(),
+            ))
+        }
+        (
             ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _),
             ResolvedType::Timestamp,
         ) => {
@@ -374,7 +410,7 @@ mod tests {
             .unwrap();
         let ty = ArrowDataType::Decimal128(10, 3);
         assert_eq!(
-            map_arrow_type(&ty).unwrap(),
+            map_arrow_type(&ty, None).unwrap(),
             ResolvedType::Decimal {
                 precision: 10,
                 scale: 3,
@@ -392,6 +428,31 @@ mod tests {
             )
             .unwrap(),
             SqlValue::Decimal(DecimalValue::new(1235, 2))
+        );
+    }
+
+    #[test]
+    fn fixed_size_float_list_maps_to_vector() {
+        use crate::ast::ddl::VectorMetric;
+        use arrow_array::FixedSizeListArray;
+        use arrow_array::types::Float32Type;
+
+        let array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            [Some([Some(1.0), Some(2.0)])],
+            2,
+        );
+        let vector_type = ResolvedType::Vector {
+            dimension: 2,
+            metric: VectorMetric::L2,
+        };
+
+        assert_eq!(
+            map_arrow_type(array.data_type(), Some(&vector_type)).unwrap(),
+            vector_type
+        );
+        assert_eq!(
+            arrow_value_to_sql(&array, array.data_type(), &vector_type, 0).unwrap(),
+            SqlValue::Vector(vec![1.0, 2.0])
         );
     }
 }

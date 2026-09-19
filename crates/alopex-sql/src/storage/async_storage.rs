@@ -298,6 +298,20 @@ where
 /// Async SQL transaction trait for executing SQL within a transaction context.
 pub trait AsyncSqlTransaction<'txn>: MaybeSend {
     fn async_execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, ExecResult<ExecutionResult>>;
+    fn async_vector_upsert<'a>(
+        &'a mut self,
+        table: String,
+        primary_key: String,
+        vector_column: String,
+        values: Vec<(u64, Vec<f32>)>,
+    ) -> BoxFuture<'a, ExecResult<ExecutionResult>> {
+        Box::pin(async move {
+            let _ = (table, primary_key, vector_column, values);
+            Err(ExecutorError::UnsupportedOperation(
+                "structured vector upsert".into(),
+            ))
+        })
+    }
     fn async_execute_multi<'a>(
         &'a mut self,
         sql: &'a str,
@@ -325,6 +339,71 @@ where
                     operation: "async_execute".into(),
                     reason: "empty SQL".into(),
                 })
+        })
+    }
+
+    fn async_vector_upsert<'a>(
+        &'a mut self,
+        table: String,
+        primary_key: String,
+        vector_column: String,
+        values: Vec<(u64, Vec<f32>)>,
+    ) -> BoxFuture<'a, ExecResult<ExecutionResult>> {
+        let catalog = match self.catalog.clone() {
+            Some(catalog) => catalog,
+            None => {
+                return Box::pin(async move {
+                    Err(ExecutorError::InvalidOperation {
+                        operation: "async_vector_upsert".into(),
+                        reason: "catalog not configured".into(),
+                    })
+                });
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let mode = self.mode;
+        let memory_policy = self.memory_policy.clone();
+        Box::pin(async move {
+            let (txn, hnsw_indices) = {
+                let mut guard = state.lock().await;
+                let txn = guard
+                    .txn
+                    .take()
+                    .ok_or(ExecutorError::Storage(StorageError::TransactionClosed))?;
+                let hnsw = std::mem::take(&mut guard.hnsw_indices);
+                (txn, hnsw)
+            };
+            let handle = tokio::runtime::Handle::current();
+            let join = tokio::task::spawn_blocking(move || {
+                let mut blocking_txn =
+                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
+                let result = if mode == TxnMode::ReadWrite {
+                    let guard = catalog.read().expect("catalog lock poisoned");
+                    dml::execute_vector_upsert_rows(
+                        &mut blocking_txn,
+                        &*guard,
+                        &table,
+                        &primary_key,
+                        &vector_column,
+                        values,
+                    )
+                } else {
+                    Err(ExecutorError::ReadOnlyTransaction {
+                        operation: "vector upsert".into(),
+                    })
+                };
+                let (txn, hnsw) = blocking_txn.into_parts();
+                (result, txn, hnsw)
+            });
+            let (result, txn, hnsw_indices) =
+                join.await.map_err(|_| ExecutorError::InvalidOperation {
+                    operation: "async_vector_upsert".into(),
+                    reason: "blocking task cancelled".into(),
+                })?;
+            let mut guard = state.lock().await;
+            guard.txn = Some(txn);
+            guard.hnsw_indices = hnsw_indices;
+            result
         })
     }
 

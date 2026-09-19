@@ -13,8 +13,16 @@ core_tag="v${version}"
 python_tag="alopex-py-v${version}"
 candidate_sha="$(git rev-parse HEAD)"
 
+release_branch="release/v${version}"
 git fetch --force origin main "refs/tags/${core_tag}:refs/tags/${core_tag}"
-git merge-base --is-ancestor "${candidate_sha}" origin/main
+if ! git merge-base --is-ancestor "${candidate_sha}" origin/main; then
+  git ls-remote --exit-code --heads origin "${release_branch}" >/dev/null
+  git fetch --force origin "refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
+  git merge-base --is-ancestor "${candidate_sha}" "origin/${release_branch}" || {
+    echo "Python release candidate is neither on main nor ${release_branch}" >&2
+    exit 1
+  }
+fi
 core_sha="$(git rev-parse "${core_tag}^{commit}")"
 git merge-base --is-ancestor "${core_sha}" HEAD
 

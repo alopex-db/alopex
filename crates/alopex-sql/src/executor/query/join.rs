@@ -154,18 +154,22 @@ fn hash_join_with_widths(
         matches!(join_type, JoinType::Left | JoinType::Full),
         matches!(join_type, JoinType::Right | JoinType::Full),
         |row| {
-            row.get(left_key).map(hash_key).ok_or({
-                ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
-                    index: left_key,
+            row.get(left_key)
+                .map(|value| hash_key(value, "null-left"))
+                .ok_or({
+                    ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
+                        index: left_key,
+                    })
                 })
-            })
         },
         |row| {
-            row.get(right_key).map(hash_key).ok_or({
-                ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
-                    index: right_key,
+            row.get(right_key)
+                .map(|value| hash_key(value, "null-right"))
+                .ok_or({
+                    ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
+                        index: right_key,
+                    })
                 })
-            })
         },
     )?;
     Ok(materialize_join_pairs(pairs, left_width, right_width))
@@ -244,8 +248,9 @@ fn equi_join_keys(condition: &TypedExpr, left_width: usize) -> Option<(usize, us
 /// clause. Numeric values therefore share one representation, and integral
 /// floating point values render as integers so they land in the same bucket as
 /// the equal integer.
-fn hash_key(value: &SqlValue) -> String {
+fn hash_key(value: &SqlValue, null_key: &str) -> String {
     match value {
+        SqlValue::Null => null_key.to_string(),
         SqlValue::Integer(v) => format!("num:{v}"),
         SqlValue::BigInt(v) | SqlValue::Timestamp(v) => format!("num:{v}"),
         SqlValue::Float(v) => numeric_hash_key(f64::from(*v)),

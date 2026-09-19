@@ -294,7 +294,7 @@ async fn grpc_sql_vector_transaction_flow() {
         .await
         .expect("vector upsert");
 
-    client
+    let batch = client
         .vector_upsert_batch(grpc::proto::VectorUpsertBatchRequest {
             table: "items".to_string(),
             vectors: vec![
@@ -310,7 +310,9 @@ async fn grpc_sql_vector_transaction_flow() {
             column: String::new(),
         })
         .await
-        .expect("vector upsert batch");
+        .expect("vector upsert batch")
+        .into_inner();
+    assert_eq!(batch.affected_rows, 2);
 
     let search = client
         .vector_search(grpc::proto::VectorSearchRequest {
@@ -383,7 +385,10 @@ async fn grpc_sql_vector_transaction_flow() {
 async fn grpc_sql_copy_uses_the_same_configured_directory() {
     let (state, _temp, copy_dir) = build_state_with_copy_dir().await;
     let fixture = copy_dir.join("items.csv");
+    let invalid = copy_dir.join("invalid-items.csv");
     fs::write(&fixture, "id,embedding\n1,\"[1.0,0.0]\"\n2,\"[0.0,1.0]\"\n").expect("CSV fixture");
+    fs::write(&invalid, "id,embedding\n3,\"[1.0,0.0]\"\n4,\"[1.0]\"\n")
+        .expect("invalid CSV fixture");
     let (channel, _handle) = spawn_grpc_server(state).await;
     let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
 
@@ -406,6 +411,103 @@ async fn grpc_sql_copy_uses_the_same_configured_directory() {
         .expect("COPY")
         .into_inner();
     assert_eq!(response.affected_rows, 2);
+
+    let err = client
+        .execute_dml(grpc::proto::DmlRequest {
+            sql: format!(
+                "COPY items (id, embedding) FROM '{}' WITH (FORMAT CSV, HEADER TRUE);",
+                invalid.display()
+            ),
+            session_id: String::new(),
+        })
+        .await
+        .expect_err("invalid COPY");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    let mut rows = client
+        .execute_sql(grpc::proto::SqlRequest {
+            sql: "SELECT id FROM items ORDER BY id;".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("verification query")
+        .into_inner();
+    assert_eq!(rows.message().await.unwrap().unwrap().rows.len(), 2);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_sql_copy_rejects_process_stdio_targets() {
+    let (state, _temp, _copy_dir) = build_state_with_copy_dir().await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE items (id INT PRIMARY KEY);".to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("DDL");
+
+    for sql in [
+        "COPY items FROM STDIN WITH (FORMAT CSV);",
+        "COPY items TO STDOUT WITH (FORMAT CSV);",
+    ] {
+        let err = client
+            .execute_dml(grpc::proto::DmlRequest {
+                sql: sql.to_string(),
+                session_id: String::new(),
+            })
+            .await
+            .expect_err("COPY STDIO must be rejected remotely");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_vector_upsert_batch_rejects_duplicate_ids_atomically() {
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    client
+        .execute_ddl(grpc::proto::DdlRequest {
+            sql: "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("DDL");
+
+    let err = client
+        .vector_upsert_batch(grpc::proto::VectorUpsertBatchRequest {
+            table: "items".into(),
+            vectors: vec![
+                grpc::proto::VectorUpsertBatchItem {
+                    id: 1,
+                    vector: vec![1.0, 0.0],
+                },
+                grpc::proto::VectorUpsertBatchItem {
+                    id: 1,
+                    vector: vec![0.0, 1.0],
+                },
+            ],
+            column: String::new(),
+        })
+        .await
+        .expect_err("duplicate IDs must fail");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    let mut rows = client
+        .execute_sql(grpc::proto::SqlRequest {
+            sql: "SELECT id FROM items;".into(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("query")
+        .into_inner();
+    assert!(rows.message().await.unwrap().unwrap().rows.is_empty());
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

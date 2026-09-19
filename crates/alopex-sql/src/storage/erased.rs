@@ -7,6 +7,13 @@ use crate::storage::AsyncSqlTransaction;
 /// Object-safe async SQL transaction for type erasure.
 pub trait ErasedAsyncSqlTransaction: MaybeSend + 'static {
     fn execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecutionResult>>;
+    fn vector_upsert<'a>(
+        &'a mut self,
+        table: String,
+        primary_key: String,
+        vector_column: String,
+        values: Vec<(u64, Vec<f32>)>,
+    ) -> BoxFuture<'a, Result<ExecutionResult>>;
     fn execute_multi<'a>(&'a mut self, sql: &'a str)
     -> BoxFuture<'a, Result<Vec<ExecutionResult>>>;
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>>;
@@ -22,6 +29,16 @@ where
 {
     fn execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecutionResult>> {
         self.async_execute(sql)
+    }
+
+    fn vector_upsert<'a>(
+        &'a mut self,
+        table: String,
+        primary_key: String,
+        vector_column: String,
+        values: Vec<(u64, Vec<f32>)>,
+    ) -> BoxFuture<'a, Result<ExecutionResult>> {
+        self.async_vector_upsert(table, primary_key, vector_column, values)
     }
 
     fn execute_multi<'a>(

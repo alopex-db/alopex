@@ -71,21 +71,57 @@ responsibility.
 | RC Qualification | package/archive structure, installability, manifest/digest, and minimum runtime smoke for one produced candidate | It consumes prior evidence; it does not rerun ordinary functionality or performance suites. |
 | Stable Delivery | promotion of the approved same-SHA candidate and public registry availability | It never first tests known functionality, execution paths, completeness, or performance. |
 
-The former public-demo checks have one pre-tag owner each:
+The former public-demo checks have one owner each. None of them run inside
+`v08-release-gate` today; `verify-v08-surfaces.sh` only runs
+`type_capability_gate.py` (a filesystem existence check against
+`docs/sql-type-capabilities.json`, not an execution of the demos it lists),
+`cargo test --workspace --features lane_ci`, and `pytest crates/alopex-py/tests`.
+Every `scripts/demo/*` script below only actually runs inside
+`scripts/release/verify-release/run.sh`'s container flow (built from published
+crates.io/PyPI bytes), which no workflow calls automatically; the only caller
+is the manual `make verify-release`.
 
-| Moved check | Owner |
-| --- | --- |
-| `demo_cluster.py / demo_routing.py` | Development CI (`v08-release-gate`) |
-| `demo_dataframe_p3.py / demo_api_surfaces.py` | Development CI (`v08-release-gate`) |
-| `demo_sql_v074.sh / demo_sql_v08.py / demo_sql_mutations.py` | Development CI (`v08-release-gate`) |
-| `demo_vector_api.py / demo_embedded_v08.sh` | Development CI (`v08-release-gate`) |
-| `hnsw_v0811_contract.py` | Extended Verification (`parity-performance.yml`) |
+| Moved check | Automated owner | How it actually runs pre-tag |
+| --- | --- | --- |
+| `demo_cluster.py / demo_routing.py` | none | manual `make verify-release` only (needs a running cluster-status server) |
+| `demo_dataframe_p3.py / demo_api_surfaces.py` | none | manual `make verify-release` only (needs a compiled server/CLI) |
+| `demo_sql_v074.sh` | none | manual `make verify-release` only (drives the CLI binary, not pure Python) |
+| `demo_vector_api.py / demo_embedded_v08.sh` | none | manual `make verify-release` only (embedded demo needs a compiled Rust binary) |
+| `demo_sql_v08.py` (v0.8 baseline, 81 checks) | `alopex-py-release.yml:verify-testpypi` | pure Python against the published wheel; runs against the TestPyPI-installed wheel and blocks `publish-pypi` on failure |
+| `demo_sql_mutations.py` (v0.8.11 CHECK/FK/RETURNING/ON CONFLICT/SEQUENCE/COPY CSV) | `alopex-py-release.yml:verify-testpypi` | same as above |
+| `demo_sql_v0811_surfaces.py` (v0.8.11 SHOW/DESC/information_schema, `?` params, EXPLAIN JSON, dynamic VIEW, ALTER TABLE/TRUNCATE, MERGE) | `alopex-py-release.yml:verify-testpypi` | same as above |
+| `demo_sql_v0813.py` (new-since-v0.8.12 scenarios: #411, #412, #425, #424) | `alopex-py-release.yml:verify-testpypi` | same as above |
+| `hnsw_v0811_contract.py` | Extended Verification (`parity-performance.yml`) | `workflow_dispatch` only, requires an owning `issue_number` |
 
 Before creating a stable tag, every owning issue must have recorded its required
 Development CI / Extended Verification evidence against the target commit. The
 existing `v08-release-gate` owns the checked-out implementation surface; the
 post-publication workflow must not run its release demos as a second, late
 source of truth.
+
+**Mandatory pre-tag rehearsal.** `demo_cluster.py`, `demo_routing.py`,
+`demo_dataframe_p3.py`, `demo_api_surfaces.py`, `demo_sql_v074.sh`,
+`demo_vector_api.py`, and `demo_embedded_v08.sh` still have no automated
+caller because each needs a compiled server/CLI binary or a running server,
+which a plain `pip install`-only CI job cannot provide cheaply. For these
+seven, the release operator must run `make verify-release` (or, at minimum,
+the individual scripts against the release-candidate build) at least once,
+end to end, with every step green, before Checkpoint 3 (publication). A
+green `v08-release-gate` on `main` is not equivalent to this rehearsal: it
+never executes any `scripts/demo/*` file. Issue #395 (v0.8.11's post-release
+HNSW benchmark failure, discovered only after tagging) is the precedent this
+rehearsal exists to prevent, and no release verification report since
+v0.8.10 has exercised any SQL scenario at all (v0.8.11 published no report;
+v0.8.12's report contains only the package-availability check).
+
+The four pure-Python SQL demos (`demo_sql_v08.py`, `demo_sql_mutations.py`,
+`demo_sql_v0811_surfaces.py`, `demo_sql_v0813.py`) need neither a compiled
+binary nor a running server, so they no longer depend on that manual
+rehearsal: `alopex-py-release.yml:verify-testpypi` now runs all four against
+the TestPyPI-installed wheel and blocks `publish-pypi` on any failure. This
+is enforcement, not merely an instruction: a broken SQL scenario stops the
+release before the real PyPI publish, the same way it should have stopped
+v0.8.11's release.
 
 ## Tag failure recovery
 

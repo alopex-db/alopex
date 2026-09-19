@@ -53,25 +53,37 @@ impl HnswBridge {
         }
     }
 
-    /// INSERT/UPSERT 時のインデックス更新。
-    pub fn on_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    /// INSERT/UPSERT 時の HNSW インデックス一括更新。
+    pub fn on_insert_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
-        row_id: u64,
-        row: &[SqlValue],
+        rows: &[(u64, Vec<SqlValue>)],
     ) -> Result<()> {
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
         let (column, col_idx) = vector_column(table, index)?;
-        let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
+        let vectors = rows
+            .iter()
+            .map(|(row_id, row)| {
+                Ok((
+                    row_id.to_be_bytes(),
+                    required_vector(row_id, &table.name, column, &row[col_idx])?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
         entry
             .index
-            .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
+            .upsert_staged_batch(
+                vectors
+                    .iter()
+                    .map(|(row_id, vector)| (&row_id[..], &vector[..], &[][..])),
+                &mut entry.state,
+            )
             .map_err(ExecutorError::from)?;
-        entry.dirty = true;
+        entry.dirty = !vectors.is_empty();
         Ok(())
     }
 
@@ -93,34 +105,42 @@ impl HnswBridge {
         Ok(())
     }
 
-    /// UPDATE 時のインデックス更新。
-    pub fn on_update<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    /// UPDATE 時の HNSW インデックス一括更新。
+    pub fn on_update_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
-        row_id: u64,
-        old_row: &[SqlValue],
-        new_row: &[SqlValue],
+        changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
     ) -> Result<()> {
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
         let (column, col_idx) = vector_column(table, index)?;
-        if old_row
-            .get(col_idx)
-            .zip(new_row.get(col_idx))
-            .is_some_and(|(old, new)| old == new)
-        {
-            return Ok(());
+        let mut vectors = Vec::new();
+        for (row_id, old_row, new_row) in changes {
+            if old_row
+                .get(col_idx)
+                .zip(new_row.get(col_idx))
+                .is_some_and(|(old, new)| old == new)
+            {
+                continue;
+            }
+            vectors.push((
+                row_id.to_be_bytes(),
+                required_vector(row_id, &table.name, column, &new_row[col_idx])?,
+            ));
         }
-
-        let vector = required_vector(&row_id, &table.name, column, &new_row[col_idx])?;
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
         entry
             .index
-            .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
+            .upsert_staged_batch(
+                vectors
+                    .iter()
+                    .map(|(row_id, vector)| (&row_id[..], &vector[..], &[][..])),
+                &mut entry.state,
+            )
             .map_err(ExecutorError::from)?;
-        entry.dirty = true;
+        entry.dirty = !vectors.is_empty();
         Ok(())
     }
 

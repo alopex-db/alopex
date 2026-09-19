@@ -63,5 +63,5 @@ Violations are written to `checks/perf_*.json` before failing the test.
 ## CI usage
 
 The perf lane downloads the latest `perf-baselines` artifact and runs only on
-`schedule`/`workflow_dispatch`. This keeps PR CI lightweight while still enforcing
-nightly regression checks.
+the weekly `schedule` or `workflow_dispatch`. This keeps PR CI lightweight while
+still enforcing periodic regression checks.

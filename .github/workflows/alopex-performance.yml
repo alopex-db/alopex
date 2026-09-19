@@ -2,7 +2,6 @@ name: Alopex Python Performance Advisory
 
 on:
   push:
-    branches: [main]
     tags: ["v*", "alopex-py-v*"]
   schedule:
     - cron: "17 3 * * 2,5"

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 
@@ -47,6 +48,30 @@ impl<'a, 'txn, T: KVTransaction<'txn>> IndexStorage<'a, 'txn, T> {
         Ok(())
     }
 
+    /// Insert an entry after the caller has validated the unique key set.
+    pub(crate) fn insert_prevalidated_unique(
+        &mut self,
+        row: &[SqlValue],
+        row_id: u64,
+    ) -> Result<()> {
+        let values = self.extract_values(row)?;
+        let key = self.build_key(&values, row_id)?;
+        self.txn.put(key, Vec::new())?;
+        Ok(())
+    }
+
+    /// Validate that no existing entry has this unique value and return its exact index key.
+    pub(crate) fn validate_unique_row(&mut self, row: &[SqlValue]) -> Result<Vec<u8>> {
+        let values = self.extract_values(row)?;
+        let prefix = self.value_prefix(&values)?;
+        if self.txn.scan_prefix(&prefix)?.next().is_some() {
+            return Err(StorageError::UniqueViolation {
+                index_id: self.index_id,
+            });
+        }
+        Ok(prefix)
+    }
+
     /// Delete an index entry associated with the provided row values and RowID.
     pub fn delete(&mut self, row: &[SqlValue], row_id: u64) -> Result<()> {
         let values = self.extract_values(row)?;
@@ -75,6 +100,34 @@ impl<'a, 'txn, T: KVTransaction<'txn>> IndexStorage<'a, 'txn, T> {
             });
         }
         self.lookup_internal(values)
+    }
+
+    /// Equality lookup for multiple index values with one index scan.
+    pub(crate) fn lookup_many(&mut self, values: &[Vec<SqlValue>]) -> Result<Vec<(usize, u64)>> {
+        let mut prefixes = HashMap::with_capacity(values.len());
+        for (position, value) in values.iter().enumerate() {
+            if value.len() != self.column_indices.len() {
+                return Err(StorageError::TypeMismatch {
+                    expected: format!("{} values", self.column_indices.len()),
+                    actual: format!("{} values", value.len()),
+                });
+            }
+            prefixes.insert(self.value_prefix(value)?, position);
+        }
+
+        let index_prefix = KeyEncoder::index_prefix(self.index_id);
+        let iter = self.txn.scan_prefix(&index_prefix)?;
+        let mut matches = Vec::new();
+        for (key, _) in iter {
+            let value_end = key
+                .len()
+                .checked_sub(8)
+                .ok_or(StorageError::InvalidKeyFormat)?;
+            if let Some(&position) = prefixes.get(&key[..value_end]) {
+                matches.push((position, extract_row_id(&key, self.index_id)?));
+            }
+        }
+        Ok(matches)
     }
 
     /// Range lookup for single-column index.
@@ -290,6 +343,27 @@ mod tests {
                 .lookup_composite(&[SqlValue::Text("tokyo".into()), SqlValue::Integer(2)])
                 .unwrap();
             assert_eq!(ids, vec![20]);
+        });
+    }
+
+    #[test]
+    fn lookup_many_returns_only_requested_values() {
+        with_index(true, vec![0], |index| {
+            for id in 1..=3 {
+                index
+                    .insert(&[SqlValue::Integer(id)], id as u64 * 10)
+                    .unwrap();
+            }
+
+            let mut ids = index
+                .lookup_many(&[
+                    vec![SqlValue::Integer(3)],
+                    vec![SqlValue::Integer(1)],
+                    vec![SqlValue::Integer(9)],
+                ])
+                .unwrap();
+            ids.sort();
+            assert_eq!(ids, vec![(0, 30), (1, 10)]);
         });
     }
 

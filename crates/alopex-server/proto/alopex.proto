@@ -82,6 +82,7 @@ message VectorUpsertBatchRequest {
 
 message VectorUpsertBatchResponse {
   bool success = 1;
+  uint64 affected_rows = 2;
 }
 
 message VectorDeleteRequest {

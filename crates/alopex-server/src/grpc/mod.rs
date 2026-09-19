@@ -670,11 +670,12 @@ impl AlopexService for AlopexServiceImpl {
                 Some(req.column)
             },
         };
-        crate::http::vector::upsert_batch_impl(self.state.clone(), upsert_request)
+        let response = crate::http::vector::upsert_batch_impl(self.state.clone(), upsert_request)
             .await
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
         Ok(Response::new(proto::VectorUpsertBatchResponse {
-            success: true,
+            success: response.success,
+            affected_rows: response.affected_rows as u64,
         }))
     }
 

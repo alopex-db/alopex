@@ -262,20 +262,23 @@ run_step() {
     shift
     STEP_INDEX=$((STEP_INDEX + 1))
     local logfile="${LOG_DIR}/step-${STEP_INDEX}.log"
+    local started_ns
+    started_ns="$(date +%s%N)"
 
     log_info "${name}"
     "$@" 2>&1 | tee "${logfile}"
     local status="${PIPESTATUS[0]}"
+    local duration_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status success --description "${description}" --log "${logfile}"
+            --name "${name}" --status success --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
         OVERALL_STATUS="fail"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status failure --description "${description}" --log "${logfile}"
+            --name "${name}" --status failure --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
         write_report
         exit "${status}"
     fi
@@ -295,7 +298,13 @@ write_report() {
 rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
 nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
 python3 "${SCRIPT_DIR}/report.py" init --results "${RESULTS_FILE}" \
-    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}"
+    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}" \
+    --commit "${RELEASE_VERIFICATION_COMMIT:-unknown}" \
+    --tag "${RELEASE_VERIFICATION_TAG:-unknown}" \
+    --run-id "${RELEASE_VERIFICATION_RUN_ID:-unknown}" \
+    --run-attempt "${RELEASE_VERIFICATION_RUN_ATTEMPT:-1}" \
+    --run-url "${RELEASE_VERIFICATION_RUN_URL:-unknown}" \
+    --responsibility "${RELEASE_VERIFICATION_RESPONSIBILITY:-Extended Verification / public release scenarios}"
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
@@ -321,8 +330,13 @@ TOOLS_TARGET_DIR="$(mktemp -d)"
 # 追加する。イメージの ENV PATH は Dockerfile 側で維持されるので、ここでは
 # 追加分だけを渡す(docker run -e PATH=... で丸ごと上書きしない)。
 run_in_container() {
+    local container_user="$(id -u):$(id -g)"
+    if [[ "${1:-}" == "--root" ]]; then
+        container_user="0:0"
+        shift
+    fi
     docker run --rm \
-        --user "$(id -u):$(id -g)" -e HOME=/tmp/verify-home \
+        --user "${container_user}" -e HOME=/tmp/verify-home \
         -v "${REPO_ROOT}":/workspace:ro \
         -v "${TOOLS_TARGET_DIR}":/tools-target \
         -w /workspace \
@@ -335,7 +349,7 @@ run_in_container() {
 
 run_step "verify-release-embedded ビルド" \
     "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
-    -- run_in_container bash -c '
+    -- run_in_container --root bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT
@@ -394,6 +408,7 @@ alopex-core = { version = "=${ALOPEX_VERSION}" }
 alopex-sql = { version = "=${ALOPEX_VERSION}" }
 EOF
 CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+chmod -R a+rX /tools-target
 cargo generate-lockfile --manifest-path "${tool_source}/Cargo.toml"
 python3 - "${tool_source}/Cargo.lock" "${ALOPEX_VERSION}" <<'PY'
 import sys
@@ -431,7 +446,7 @@ run_step "公開版 SQL transaction failure conformance" \
     -- run_in_container /tools-target/release/verify-sql-transaction-failures
 
 run_step "mode-parity 検証 (verify.py)" \
-    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
+    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)を全件実行し、SKIPを許可しない。" \
     -- run_in_container python3 scripts/parity/verify.py \
         --corpus scripts/parity/corpus --expected scripts/parity/expected \
         --require-all
@@ -609,6 +624,26 @@ run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. native JSON/JSONB, JSON-
 run_step "v${ALOPEX_VERSION} v0.8.11 SQL mutation contracts" \
     "PyPI公開版で、CHECK/FK、RETURNING/ON CONFLICT、SEQUENCE/CURRVAL、CSV COPY round-trip、未知FORMAT拒否、information_schema introspectionを自己検証する。" \
     -- run_in_container python3 scripts/demo/v0811/demo_sql_mutations.py
+
+run_step "v${ALOPEX_VERSION} v0.8.11 SQL surfaces not covered above (demo_sql_v0811_surfaces.py)" \
+    "PyPI公開版で、SHOW/DESC/information_schema.columns、? 位置パラメータと EXPLAIN (FORMAT JSON) のパラメータ秘匿、動的 VIEW が作成後の変更を反映すること、ALTER TABLE ADD COLUMN の既存行への DEFAULT 反映と RENAME COLUMN、TRUNCATE 後もテーブルが使えること、MERGE の一致更新・不一致挿入を自己検証する。" \
+    -- run_in_container python3 scripts/demo/v0811/demo_sql_v0811_surfaces.py
+
+run_step "v${ALOPEX_VERSION} #411 atomic batch upsert" \
+    "PyPI公開版で、複数行 upsert が EXCLUDED 値を反映し、同一 statement 内の重複IDを部分書込みなしで拒否することを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario atomic-batch-upsert
+
+run_step "v${ALOPEX_VERSION} #412 transactional CSV vector COPY" \
+    "PyPI公開版で、CSV vector ingestion の COPY が正常バッチを全行反映し、一行でも不正なら部分書込みなしで全体をロールバックすることを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario csv-vector-copy
+
+run_step "v${ALOPEX_VERSION} #425 B-tree IndexScan plan selection" \
+    "PyPI公開版で、CREATE INDEX 後の equality/range filter の EXPLAIN が IndexScan を選び、取得行も正しいことを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario btree-index-plan
+
+run_step "v${ALOPEX_VERSION} #424 NULL-safe equi-join" \
+    "PyPI公開版で、INNER JOIN と LEFT JOIN の双方で NULL=NULL が一致せず、LEFT JOIN の未一致行が保持されることを確認する。" \
+    -- run_in_container python3 scripts/demo/v0813/demo_sql_v0813.py --scenario null-equi-join
 
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \

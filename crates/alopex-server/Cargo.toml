@@ -50,6 +50,8 @@ alopex-cli = { path = "../alopex-cli" }
 alopex-core = { path = "../alopex-core" }
 alopex-embedded = { path = "../alopex-embedded" }
 alopex-sql = { path = "../alopex-sql", features = ["tokio"] }
+arrow-array = "53"
+arrow-schema = "53"
 futures-core = { workspace = true }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
@@ -57,6 +59,7 @@ http-body-util = "0.1"
 rcgen = "0.12"
 tempfile = "3.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+parquet = { version = "53", features = ["arrow"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

@@ -115,7 +115,6 @@ def inventory() -> list[dict[str, str]]:
     executor = (ROOT / "crates/alopex-sql/src/executor/mod.rs").read_text(encoding="utf-8")
     embedded = (ROOT / "crates/alopex-embedded/src/sql_api.rs").read_text(encoding="utf-8")
     pyi = (ROOT / "crates/alopex-py/python/alopex/_alopex.pyi").read_text(encoding="utf-8")
-    server = (ROOT / "crates/alopex-server/src/http/sql.rs").read_text(encoding="utf-8")
     rows = [
         {"surface": "statement", "api": f"statement.{name}"} for name in statements
     ]
@@ -146,7 +145,6 @@ def inventory() -> list[dict[str, str]]:
         ("Python", "Python.Database.copy_from_csv", pyi, "copy_from_csv"),
         ("Python", "Python.Database.copy_to_csv", pyi, "copy_to_csv"),
         ("Python", "Python.Database.list_sequences", pyi, "list_sequences"),
-        ("server", "server.COPY_local_only_rejection", server, "uses_remote_copy"),
     ):
         if symbol not in source:
             raise RuntimeError(f"SQL public surface disappeared: {api}")

@@ -15,7 +15,7 @@ use crate::http::{error_response, json_response, RequestContext};
 use crate::server::ServerState;
 
 const DEFAULT_M: usize = 16;
-const DEFAULT_EF_CONSTRUCTION: usize = 200;
+const DEFAULT_EF_CONSTRUCTION: usize = 100;
 
 #[derive(Debug, Deserialize)]
 pub struct HnswSearchRequest {

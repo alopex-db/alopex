@@ -5,8 +5,11 @@ use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::planner::logical_plan::LogicalPlan;
 use alopex_sql::planner::typed_expr::{Projection, TypedAssignment, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
-use alopex_sql::{Catalog, Compression, StorageType};
+use alopex_sql::{Catalog, Compression, ExplainFormat, StorageType};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 fn create_executor() -> (
     Executor<MemoryKV, MemoryCatalog>,
@@ -24,6 +27,352 @@ fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
         resolved_type: ty,
         span: Span::default(),
     }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn btree_index_answers_equality_and_range_filters() {
+    use alopex_sql::ast::ddl::IndexMethod;
+    use alopex_sql::storage::SqlValue;
+
+    let (mut executor, _catalog) = create_executor();
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "items",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer)
+                        .with_primary_key(true)
+                        .with_not_null(true),
+                    ColumnMetadata::new("score", ResolvedType::Integer),
+                ],
+            )
+            .with_primary_key(vec!["id".into()]),
+            if_not_exists: false,
+            with_options: vec![],
+        })
+        .unwrap();
+
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["id".into(), "score".into()],
+            values: vec![
+                vec![number(1), number(10)],
+                vec![number(2), number(20)],
+                vec![number(3), number(30)],
+            ],
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    executor
+        .execute(LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "idx_items_score",
+                "items",
+                vec!["score".into()],
+            )
+            .with_method(IndexMethod::BTree),
+            if_not_exists: false,
+        })
+        .unwrap();
+
+    let predicate = |op, value| TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(TypedExpr {
+                kind: TypedExprKind::ColumnRef {
+                    table: "items".into(),
+                    column: "score".into(),
+                    column_index: 1,
+                },
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            }),
+            op,
+            right: Box::new(number(value)),
+        },
+        resolved_type: ResolvedType::Boolean,
+        span: Span::default(),
+    };
+    let scan = || {
+        LogicalPlan::scan(
+            "items".into(),
+            Projection::All(vec!["id".into(), "score".into()]),
+        )
+    };
+    let mut query_rows = |plan| match executor.execute(plan).unwrap() {
+        ExecutionResult::Query(query) => query.rows,
+        other => panic!("unexpected result {other:?}"),
+    };
+
+    assert_eq!(
+        query_rows(LogicalPlan::filter(
+            scan(),
+            predicate(alopex_sql::ast::expr::BinaryOp::Eq, 20),
+        )),
+        vec![vec![SqlValue::Integer(2), SqlValue::Integer(20)]]
+    );
+    assert_eq!(
+        query_rows(LogicalPlan::filter(
+            scan(),
+            predicate(alopex_sql::ast::expr::BinaryOp::GtEq, 20),
+        )),
+        vec![
+            vec![SqlValue::Integer(2), SqlValue::Integer(20)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+        ]
+    );
+}
+
+#[test]
+#[ignore = "the performance workflow runs this fixed 4k/7-sample case"]
+fn btree_access_path_measurement() {
+    const ROWS: i32 = 4_000;
+    const SAMPLES: usize = 7;
+
+    fn number(value: i32) -> TypedExpr {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    }
+
+    fn query_plan() -> LogicalPlan {
+        let predicate = TypedExpr {
+            kind: TypedExprKind::BinaryOp {
+                left: Box::new(TypedExpr {
+                    kind: TypedExprKind::ColumnRef {
+                        table: "items".into(),
+                        column: "score".into(),
+                        column_index: 1,
+                    },
+                    resolved_type: ResolvedType::Integer,
+                    span: Span::default(),
+                }),
+                op: alopex_sql::ast::expr::BinaryOp::Eq,
+                right: Box::new(number(500)),
+            },
+            resolved_type: ResolvedType::Boolean,
+            span: Span::default(),
+        };
+        LogicalPlan::filter(
+            LogicalPlan::scan("items".into(), Projection::All(vec!["id".into()])),
+            predicate,
+        )
+    }
+
+    fn executor_with_data(indexed: bool) -> Executor<MemoryKV, MemoryCatalog> {
+        use alopex_sql::ast::ddl::IndexMethod;
+
+        let (mut executor, _catalog) = create_executor();
+        executor
+            .execute(LogicalPlan::CreateTable {
+                table: TableMetadata::new(
+                    "items",
+                    vec![
+                        ColumnMetadata::new("id", ResolvedType::Integer)
+                            .with_primary_key(true)
+                            .with_not_null(true),
+                        ColumnMetadata::new("score", ResolvedType::Integer),
+                    ],
+                )
+                .with_primary_key(vec!["id".into()]),
+                if_not_exists: false,
+                with_options: vec![],
+            })
+            .expect("table");
+        executor
+            .execute(LogicalPlan::Insert {
+                table: "items".into(),
+                columns: vec!["id".into(), "score".into()],
+                values: (0..ROWS)
+                    .map(|id| vec![number(id), number(id % 1_000)])
+                    .collect(),
+                conflict: None,
+                returning: None,
+            })
+            .expect("fixed input");
+        if indexed {
+            executor
+                .execute(LogicalPlan::CreateIndex {
+                    index: alopex_sql::catalog::IndexMetadata::new(
+                        0,
+                        "idx_items_score",
+                        "items",
+                        vec!["score".into()],
+                    )
+                    .with_method(IndexMethod::BTree),
+                    if_not_exists: false,
+                })
+                .expect("btree index");
+        }
+        executor
+    }
+
+    fn samples(executor: &mut Executor<MemoryKV, MemoryCatalog>) -> Vec<u128> {
+        let result = executor.execute(query_plan()).expect("warmup query");
+        let ExecutionResult::Query(result) = result else {
+            panic!("warmup query result expected");
+        };
+        assert_eq!(result.rows.len(), 4);
+        (0..SAMPLES)
+            .map(|_| {
+                let started = Instant::now();
+                let result = executor.execute(query_plan()).expect("query");
+                let ExecutionResult::Query(result) = result else {
+                    panic!("query result expected");
+                };
+                assert_eq!(result.rows.len(), 4);
+                started.elapsed().as_nanos()
+            })
+            .collect()
+    }
+
+    fn median(samples: &[u128]) -> u128 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    let mut scan = executor_with_data(false);
+    let scan_samples = samples(&mut scan);
+    let mut indexed = executor_with_data(true);
+    let indexed_samples = samples(&mut indexed);
+    let output = PathBuf::from(std::env::var("ALOPEX_BTREE_MEASUREMENT_OUTPUT").expect("output"));
+    fs::create_dir_all(output.parent().expect("output directory")).expect("output directory");
+    let raw = serde_json::json!({
+        "schema": "alopex.btree-access-path-measurement/v1",
+        "source_commit": std::env::var("ALOPEX_BTREE_MEASUREMENT_SOURCE_COMMIT").unwrap_or_else(|_| "local".into()),
+        "rows": ROWS,
+        "warmups": 1,
+        "samples": SAMPLES,
+        "runtime_threads": 1,
+        "predicate": "score = 500",
+        "scan_samples_ns": scan_samples,
+        "scan_median_ns": median(&scan_samples),
+        "indexed_samples_ns": indexed_samples,
+        "indexed_median_ns": median(&indexed_samples),
+    });
+    let temporary = output.with_extension("tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&raw).expect("raw JSON"),
+    )
+    .expect("raw JSON");
+    fs::rename(temporary, output).expect("atomic raw JSON output");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explain_reports_the_selected_btree_access_path() {
+    use alopex_sql::ast::ddl::IndexMethod;
+
+    let (mut executor, _catalog) = create_executor();
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "items",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer)
+                        .with_primary_key(true)
+                        .with_not_null(true),
+                    ColumnMetadata::new("score", ResolvedType::Integer),
+                ],
+            )
+            .with_primary_key(vec!["id".into()]),
+            if_not_exists: false,
+            with_options: vec![],
+        })
+        .unwrap();
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["id".into(), "score".into()],
+            values: vec![vec![number(1), number(10)], vec![number(2), number(20)]],
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    executor
+        .execute(LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "idx_items_score",
+                "items",
+                vec!["score".into()],
+            )
+            .with_method(IndexMethod::BTree),
+            if_not_exists: false,
+        })
+        .unwrap();
+
+    let predicate = TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(TypedExpr {
+                kind: TypedExprKind::ColumnRef {
+                    table: "items".into(),
+                    column: "score".into(),
+                    column_index: 1,
+                },
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            }),
+            op: alopex_sql::ast::expr::BinaryOp::Eq,
+            right: Box::new(number(20)),
+        },
+        resolved_type: ResolvedType::Boolean,
+        span: Span::default(),
+    };
+    let input = LogicalPlan::filter(
+        LogicalPlan::scan("items".into(), Projection::All(vec!["id".into()])),
+        predicate,
+    );
+    let result = executor
+        .execute(LogicalPlan::Explain {
+            analyze: false,
+            format: ExplainFormat::Text,
+            input: Box::new(input.clone()),
+        })
+        .unwrap();
+    let ExecutionResult::Query(result) = result else {
+        panic!("EXPLAIN must return a query result");
+    };
+    let plan = match &result.rows[0][0] {
+        alopex_sql::storage::SqlValue::Text(plan) => plan,
+        value => panic!("unexpected EXPLAIN value {value:?}"),
+    };
+    assert!(plan.contains("IndexScan index=idx_items_score"), "{plan}");
+
+    let result = executor
+        .execute(LogicalPlan::Explain {
+            analyze: false,
+            format: ExplainFormat::Json,
+            input: Box::new(input),
+        })
+        .unwrap();
+    let ExecutionResult::Query(result) = result else {
+        panic!("EXPLAIN (FORMAT JSON) must return a query result");
+    };
+    let plan = match &result.rows[0][0] {
+        alopex_sql::storage::SqlValue::Text(plan) => plan,
+        value => panic!("unexpected EXPLAIN JSON value {value:?}"),
+    };
+    assert!(plan.contains("\"node\":\"IndexScan\""), "{plan}");
+    assert!(plan.contains("\"index\":\"idx_items_score\""), "{plan}");
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

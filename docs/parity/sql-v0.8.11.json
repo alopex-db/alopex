@@ -2319,17 +2319,6 @@
       "performance_evidence": "sql-streaming"
     },
     {
-      "surface": "server",
-      "api": "server.COPY_local_only_rejection",
-      "claim": "streaming query",
-      "status": "known-performance-divergence",
-      "reference": "datafusion:execute_stream",
-      "evidence": "crates/alopex-py/tests/test_sql.py#test_execute_sql_select_iteration_matches_guide_usage",
-      "issue": 307,
-      "performance_contract": "sql-datafusion-streaming-v1",
-      "performance_evidence": "sql-streaming"
-    },
-    {
       "surface": "statement",
       "api": "statement.AlterSequence",
       "claim": "SERIAL/IDENTITY/SEQUENCE",

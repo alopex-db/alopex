@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.13] — Unreleased
+
+### Added
+
+- Added atomic batch vector upsert across SQL, HTTP, and gRPC (#411).
+- Added transactional CSV/Parquet `COPY` over the server SQL surfaces (#412).
+- Added B-tree index selection for simple equality and range filters (#425).
+
+### Fixed
+
+- NULL join keys no longer match each other in equi-joins (#424).
+- Python transaction cleanup releases native locks without retaining the GIL (#402).
+- Updated the Rustls security release (#434).
+
+### Changed
+
+- Updated the public vector SQL sample to use the supported similarity function (#426).
+
 ## [0.8.12] — 2026-09-12
 
 ### Added

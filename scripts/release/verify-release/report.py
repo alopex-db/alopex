@@ -86,14 +86,13 @@ def record(args: argparse.Namespace) -> None:
         for line in diagnostics
     ):
         status = "incomplete"
-    tail = lines[-60:]
-    excerpt = diagnostics + [line for line in tail if line not in diagnostics]
     payload["steps"].append(
         {
             "name": args.name,
             "status": status,
             "description": args.description,
-            "log_excerpt": excerpt,
+            "duration_ms": args.duration_ms,
+            "log_excerpt": lines,
             "diagnostics": diagnostics,
         }
     )
@@ -141,9 +140,9 @@ def render(args: argparse.Namespace) -> None:
     if status == "success":
         lines.extend(
             [
-                f"v{version} は、PyPIから完全一致wheelを取得し、隔離先への導入と",
-                "最小importが成功している。既知機能・実行経路・性能の正しさは、",
-                "対象commitのDevelopment CI / Extended Verificationが所有する。",
+                f"v{version} は、公開済みの完全一致パッケージだけを用いて、",
+                "下記の配布後シナリオを完走した。各契約の入力・期待値・実行ログは、",
+                "対応するステップの証跡として保存している。",
             ]
         )
     elif status == "failure":
@@ -165,6 +164,9 @@ def render(args: argparse.Namespace) -> None:
                 "",
             ]
         )
+        duration_ms = step.get("duration_ms")
+        if duration_ms is not None:
+            lines.extend([f"> 実行時間: **{duration_ms / 1000:.3f} 秒**", ""])
         if step["log_excerpt"]:
             lines.extend(["```", *step["log_excerpt"], "```", ""])
     environment = payload["environment"]
@@ -285,6 +287,7 @@ def parser() -> argparse.ArgumentParser:
         "--status", choices=("success", "failure", "incomplete"), required=True
     )
     append.add_argument("--description", required=True)
+    append.add_argument("--duration-ms", type=int)
     append.add_argument("--log", type=Path, required=True)
     append.set_defaults(func=record)
 

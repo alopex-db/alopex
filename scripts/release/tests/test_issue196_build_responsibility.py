@@ -24,7 +24,9 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         )[0]
 
         self.assertIn("- os: macos-latest\n            rust: stable", compatibility_test)
-        self.assertIn("- os: ubuntu-latest\n            rust: beta", compatibility_test)
+        # A beta toolchain is not a release input, so it has no PR owner.
+        self.assertNotIn("rust: beta", compatibility_test)
+        self.assertNotIn("nextest", compatibility_test)
         self.assertNotIn("os: [ubuntu-latest, macos-latest, windows-latest]", compatibility_test)
         self.assertNotIn("name: Run doc tests", compatibility_test)
         self.assertIn("scripts/ci/run_with_metrics.py", compatibility_test)
@@ -63,25 +65,28 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         ):
             self.assertNotIn(duplicate_selector, verifier)
 
-    def test_historical_gates_are_independent_scheduled_owners(self) -> None:
+    def test_prior_version_gates_are_retired(self) -> None:
+        # The v0.6/v0.7 gates only re-ran behavior that the current workspace
+        # suites already assert on every pull request. They must not return as
+        # scheduled jobs, release steps, or scripts.
         compatibility = self.read(".github/workflows/compatibility.yml")
-        v07 = self.read("scripts/release/v07_gate.sh")
+        release = self.read(".github/workflows/release.yml")
+
+        for retired in ("historical-parser:", "historical-contract:", "v06_gate", "v07_gate"):
+            self.assertNotIn(retired, compatibility)
+            self.assertNotIn(retired, release)
+        self.assertFalse((ROOT / "scripts/release/v06_gate.sh").exists())
+        self.assertFalse((ROOT / "scripts/release/v07_gate.sh").exists())
+
+    def test_windows_full_suite_is_the_only_scheduled_compatibility_owner(self) -> None:
+        compatibility = self.read(".github/workflows/compatibility.yml")
 
         self.assertIn("workflow_dispatch:", compatibility)
         self.assertIn("schedule:", compatibility)
-        self.assertIn("historical-parser:", compatibility)
-        self.assertIn("historical-contract:", compatibility)
         self.assertIn("current-windows-full:", compatibility)
-        self.assertIn("gate: [v06, v07]", compatibility)
-        self.assertIn("actions/upload-artifact@v4", compatibility)
-        self.assertIn("actions/download-artifact@v4", compatibility)
         self.assertNotIn("actions/cache@v3", compatibility)
         self.assertIn("version: v0.15.0", compatibility)
         self.assertNotIn("version: latest", compatibility)
-        self.assertIn(
-            "CARGO_TARGET_DIR: ${{ github.workspace }}/target/historical-${{ matrix.gate }}",
-            compatibility,
-        )
         regular_event_guard = (
             "if: github.event_name == 'push' || github.event_name == 'pull_request'"
         )
@@ -100,16 +105,6 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         )
         self.assertIn('"$venv_python" -m pip install "numpy<2"', windows_full)
         self.assertIn('echo "PYTHONPATH=$python_site" >> "$GITHUB_ENV"', windows_full)
-        self.assertNotIn("V07_GATE_RUN_V06", v07)
-        self.assertNotIn("scripts/release/v06_gate.sh", v07)
-        self.assertNotIn("cargo clean --profile dev", v07)
-        self.assertNotIn("cargo fmt", v07)
-        self.assertNotIn("cargo clippy", v07)
-        main = v07.split("main() {", 1)[1]
-        self.assertLess(
-            main.index('if [[ "${1:-}" == "--workflow-contract-only" ]]'),
-            main.index("configure_python_environment"),
-        )
 
     def test_test_profile_reduces_debug_artifact_generation(self) -> None:
         workspace = self.read("Cargo.toml")

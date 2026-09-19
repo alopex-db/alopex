@@ -149,7 +149,8 @@ class LedgerContractTests(unittest.TestCase):
             / ".github/workflows/parity-performance.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("[self-hosted, linux, x64, alopex-performance]", workflow)
-        self.assertIn("schedule:", workflow)
+        # Performance acceptance is owned by its issue: dispatch only, no cron.
+        self.assertNotIn("schedule:", workflow)
         self.assertIn("issue_number:", workflow)
         self.assertIn("Owning issue number for this acceptance run", workflow)
         self.assertIn("required: true", workflow)

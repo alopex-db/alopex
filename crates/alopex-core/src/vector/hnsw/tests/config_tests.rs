@@ -2,6 +2,14 @@ use crate::vector::hnsw::HnswConfig;
 use crate::vector::Metric;
 use crate::Error;
 
+#[test]
+fn default_config_uses_the_reference_construction_width() {
+    let config = HnswConfig::default();
+
+    assert_eq!(config.m, 16);
+    assert_eq!(config.ef_construction, 100);
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn validate_accepts_valid_parameters() {

@@ -8,10 +8,9 @@ docs-public/specs/alopex-mode-parity-spec.md「シナリオ S2」:
 - S2-b: writer × reader マトリクス。writer がコーパスを実行 → プロセス終了 →
         reader が同一データディレクトリを開き 99_verify.sql を実行し、
         期待値ゴールデンと一致することを検証する(INV-1)。
-- S2-c: 旧バージョンデータディレクトリの互換検証。
 
 使い方:
-    python verify.py --corpus corpus/ --expected expected/ [--filter s2a|s2b|s2c]
+    python verify.py --corpus corpus/ --expected expected/ [--filter s2a|s2b]
 
 exit code: 成功 0 / 検証不一致 1 / 環境・起動エラー 2
 """
@@ -19,15 +18,12 @@ exit code: 成功 0 / 検証不一致 1 / 環境・起動エラー 2
 from __future__ import annotations
 
 import argparse
-import hashlib
 import itertools
-import json
 import shutil
 import signal
 import sys
-import tarfile
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 PARITY_DIR = Path(__file__).resolve().parent
@@ -47,8 +43,7 @@ from runner.surfaces import (  # noqa: E402
 
 SECTION_S2A = "s2a"
 SECTION_S2B = "s2b"
-SECTION_S2C = "s2c"
-ALL_FILTERS = (SECTION_S2A, SECTION_S2B, SECTION_S2C)
+ALL_FILTERS = (SECTION_S2A, SECTION_S2B)
 
 #: 全経路(reader として使える経路)
 ROUTES = ("embedded", "cli", "http", "grpc")
@@ -58,52 +53,6 @@ WRITERS = ("embedded", "cli", "http")
 #: (cluster-aware モード・単一メンバーで起動した alopex-server の HTTP 経路。
 #: v0.7.1 で有効化)。
 S2B_READERS = (*ROUTES, "cluster")
-
-#: S2-c 互換フィクスチャの置き場所。契約:
-#:   <root>/<version>/data/          旧バージョンで生成したデータディレクトリ
-#:   <root>/<version>/expected.json  99_verify.sql の期待値(normalize 形)
-COMPAT_FIXTURES_DIR = PARITY_DIR / "fixtures" / "compat"
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def extract_compat_data(
-    fixture: Path, destination: Path, expected_data: Dict[str, str]
-) -> Path:
-    archive = fixture / "data.tar.gz"
-    with tarfile.open(archive, mode="r:gz") as bundle:
-        members = bundle.getmembers()
-        for member in members:
-            path = PurePosixPath(member.name)
-            if path.is_absolute() or ".." in path.parts or path.parts[:1] != ("data",):
-                raise SurfaceError(f"unsafe compatibility archive member: {member.name}")
-            if not (member.isdir() or member.isfile()):
-                raise SurfaceError(
-                    f"unsupported archive member type: {member.name}"
-                )
-        # Python 3.11 distro builds differ on support for extractall(filter=...).
-        # Paths and member types are fully allow-listed above, so extraction
-        # remains fail-closed without depending on that newer keyword.
-        bundle.extractall(destination, members=members)
-
-    data_dir = destination / "data"
-    actual_data = {
-        path.relative_to(data_dir).as_posix(): sha256_file(path)
-        for path in sorted(data_dir.rglob("*"))
-        if path.is_file()
-    }
-    if actual_data != expected_data:
-        raise SurfaceError(
-            f"compatibility fixture data digest mismatch: {fixture.name}"
-        )
-    return data_dir
-
 
 def proto_path(repo: Path) -> Path:
     # released モードでは検証対象バージョンの proto を使う
@@ -467,104 +416,6 @@ def run_s2b(
 
 
 # ---------------------------------------------------------------------------
-# S2-c: データファイルのバージョン互換
-# ---------------------------------------------------------------------------
-
-
-def run_s2c(
-    rep: Report,
-    repo: Path,
-    binaries: Dict[str, Path],
-    corpus_dir: Path,
-    fixtures_dir: Path,
-) -> None:
-    if not fixtures_dir.is_dir() or not any(fixtures_dir.iterdir()):
-        rep.skip(
-            SECTION_S2C,
-            "compat-fixtures",
-            f"互換フィクスチャ未整備: {fixtures_dir}。"
-            " 現行の alopex-core フィクスチャ"
-            " (crates/alopex-core/examples/generate_compat_v0_1.rs) は"
-            " 単一ファイル形式(v0_1.alopex)であり、サーフェスが開ける"
-            " データディレクトリ形式のフィクスチャが存在しない。"
-            " フィクスチャ生成器のデータディレクトリ対応後に有効化する。",
-        )
-        return
-
-    try:
-        verify_statements = surfaces.load_statements(
-            [surfaces.verify_sql_path(corpus_dir)]
-        )
-    except SurfaceError as exc:
-        rep.error(SECTION_S2C, "setup", str(exc))
-        return
-
-    for fixture in sorted(p for p in fixtures_dir.iterdir() if p.is_dir()):
-        fixture_archive = fixture / "data.tar.gz"
-        fixture_expected = fixture / "expected.json"
-        fixture_provenance = fixture / "provenance.json"
-        if not all(
-            path.is_file()
-            for path in (fixture_archive, fixture_expected, fixture_provenance)
-        ):
-            rep.error(
-                SECTION_S2C,
-                fixture.name,
-                f"フィクスチャ契約違反: {fixture} に data.tar.gz、"
-                "expected.json、provenance.json が必要",
-            )
-            continue
-        try:
-            provenance = json.loads(fixture_provenance.read_text(encoding="utf-8"))
-            if provenance.get("schema") != "alopex-compat-fixture/v1":
-                raise SurfaceError(f"未知の fixture provenance: {fixture}")
-            archive_record = provenance.get("archive", {})
-            if archive_record.get("path") != fixture_archive.name or archive_record.get(
-                "sha256"
-            ) != sha256_file(fixture_archive):
-                raise SurfaceError(f"fixture archive digest mismatch: {fixture.name}")
-            if provenance.get("expected_sha256") != sha256_file(fixture_expected):
-                raise SurfaceError(f"fixture expected digest mismatch: {fixture.name}")
-            expected_data = {
-                item["path"]: item["sha256"] for item in provenance.get("data", [])
-            }
-            if not expected_data:
-                raise SurfaceError(f"fixture data digest list is empty: {fixture.name}")
-            expected_entries = normalize.load_statements_file(fixture_expected)
-        except (OSError, json.JSONDecodeError, KeyError, normalize.NormalizeError, SurfaceError) as exc:
-            rep.error(SECTION_S2C, fixture.name, str(exc))
-            continue
-
-        for reader in ROUTES:
-            case = f"{fixture.name}/reader={reader}"
-            with tempfile.TemporaryDirectory(prefix="parity-s2c-") as tmp:
-                base = Path(tmp)
-                try:
-                    # 開く際の回復処理等でフィクスチャを汚さないよう、sparse
-                    # archive を reader ごとの一時領域へ展開する。
-                    data_dir = extract_compat_data(fixture, base, expected_data)
-                    actual = _s2b_read_phase(
-                        reader,
-                        repo,
-                        binaries,
-                        corpus_dir,
-                        verify_statements,
-                        data_dir=data_dir,
-                        scratch=base / "reader",
-                        columns_source=expected_entries if reader == "grpc" else None,
-                    )
-                except SurfaceSkip as skip:
-                    rep.skip(SECTION_S2C, case, skip.reason)
-                    continue
-                except (SurfaceError, normalize.NormalizeError) as exc:
-                    rep.error(SECTION_S2C, case, str(exc))
-                    continue
-            rep.compare_record_lists(
-                SECTION_S2C, case, "expected", expected_entries, reader, actual
-            )
-
-
-# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -588,12 +439,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="append",
         choices=ALL_FILTERS,
         help="実行するシナリオ(省略時は全部)",
-    )
-    parser.add_argument(
-        "--compat-fixtures",
-        type=Path,
-        default=COMPAT_FIXTURES_DIR,
-        help="S2-c 互換フィクスチャのルート",
     )
     parser.add_argument(
         "--require-all",
@@ -624,9 +469,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_s2a(rep, repo, binaries, args.corpus)
     if SECTION_S2B in filters:
         run_s2b(rep, repo, binaries, args.corpus, args.expected)
-    if SECTION_S2C in filters:
-        run_s2c(rep, repo, binaries, args.corpus, args.compat_fixtures)
-
     print(rep.render(require_all=args.require_all))
     return rep.exit_code(require_all=args.require_all)
 
