@@ -358,13 +358,43 @@ impl PyTransaction {
         metadata: Option<Vec<Option<Vec<u8>>>>,
     ) -> PyResult<usize> {
         vector::require_numpy(py)?;
-        let vectors = vector::ndarray_f32_2d(vectors.bind(py))?;
         let name = name.to_owned();
-        py.detach(move || {
-            let vector_refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
-            self.with_txn_mut(|txn| {
-                txn.upsert_to_hnsw_batch(&name, &keys, &vector_refs, metadata.as_deref())
-            })
+        vector::with_ndarray_f32_2d_gil_safe(vectors.bind(py), |vectors| match vectors {
+            vector::MatrixSliceOrOwned::Borrowed {
+                ptr,
+                len,
+                rows,
+                columns,
+                _guard,
+            } => {
+                let _guard = _guard;
+                let ptr = ptr as usize;
+                py.detach(move || {
+                    let values = unsafe { std::slice::from_raw_parts(ptr as *const f32, len) };
+                    let vector_refs: Vec<&[f32]> = if columns == 0 {
+                        (0..rows).map(|_| &[][..]).collect()
+                    } else {
+                        values.chunks_exact(columns).collect()
+                    };
+                    self.with_txn_mut(|txn| {
+                        txn.upsert_to_hnsw_batch(&name, &keys, &vector_refs, metadata.as_deref())
+                    })
+                })
+            }
+            vector::MatrixSliceOrOwned::Owned {
+                values,
+                rows,
+                columns,
+            } => py.detach(move || {
+                let vector_refs: Vec<&[f32]> = if columns == 0 {
+                    (0..rows).map(|_| &[][..]).collect()
+                } else {
+                    values.chunks_exact(columns).take(rows).collect()
+                };
+                self.with_txn_mut(|txn| {
+                    txn.upsert_to_hnsw_batch(&name, &keys, &vector_refs, metadata.as_deref())
+                })
+            }),
         })
     }
 

@@ -21,8 +21,11 @@ use crate::storage::{SqlTxn, SqlValue};
 
 use super::{columnar_scan, project, scan};
 
-// HNSW deserialization dominates exact row scans below this size on the supported embedded path.
-const HNSW_MIN_ROWS: usize = 8_192;
+// #449 measured exact scan as faster at 8k rows, 128 dimensions, and k=10.
+const HNSW_BASE_MIN_ROWS: usize = 8_192;
+const HNSW_BASE_DIMENSIONS: usize = 128;
+const HNSW_BASE_K: usize = 10;
+const HNSW_MINIMUM_ROWS: usize = 1_024;
 
 /// LogicalPlan が KNN 最適化パターンに合致する場合、実行に必要な情報を抽出する。
 pub fn extract_knn_context(
@@ -47,18 +50,23 @@ pub fn extract_knn_context(
     }
 }
 
-/// Returns the physical HNSW path selected for a KNN-shaped logical plan.
-pub fn explain_hnsw_path<C: Catalog + ?Sized>(catalog: &C, plan: &LogicalPlan) -> Option<String> {
-    let (pattern, _, filter) = extract_knn_context(plan)?;
-    if filter.is_some() {
-        return None;
-    }
-    let table = catalog.get_table(&pattern.table)?;
-    if table.storage_options.storage_type != StorageType::Row {
-        return None;
-    }
-    let index = find_hnsw_index(catalog, table, &pattern.column)?;
-    Some(format!("HnswSearch index={} k={}", index.name, pattern.k))
+/// Returns the physical KNN path selected for a logical plan.
+pub fn explain_knn_path<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    plan: &LogicalPlan,
+) -> Result<Option<String>> {
+    let Some((pattern, _, filter)) = extract_knn_context(plan) else {
+        return Ok(None);
+    };
+    let Some(table) = catalog.get_table(&pattern.table) else {
+        return Ok(None);
+    };
+    let path = match selected_hnsw_index(txn, catalog, table, &pattern, filter.as_ref())? {
+        Some(index) => format!("HnswSearch index={} k={}", index.name, pattern.k),
+        None => "ExactKnnScan".to_string(),
+    };
+    Ok(Some(path))
 }
 
 /// KNN 最適化クエリを実行する。HNSW インデックスが存在しフィルタ無しならインデックス経路、
@@ -86,12 +94,7 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     let higher_is_better = pattern.sort_direction == SortDirection::Desc;
 
-    // HNSW インデックスがあり、フィルタ無し、Row ストレージの場合のみインデックス経路を使う。
-    if filter.is_none()
-        && table_meta.storage_options.storage_type == StorageType::Row
-        && table_exceeds_hnsw_threshold(txn, &table_meta)?
-        && let Some(index) = find_hnsw_index(catalog, &table_meta, &pattern.column)
-    {
+    if let Some(index) = selected_hnsw_index(txn, catalog, &table_meta, pattern, filter)? {
         let mut entries = execute_hnsw_search(
             txn,
             &table_meta,
@@ -121,18 +124,58 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     Ok(ExecutionResult::Query(projected))
 }
 
+fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table: &TableMetadata,
+    pattern: &KnnPattern,
+    filter: Option<&TypedExpr>,
+) -> Result<Option<IndexMetadata>> {
+    if filter.is_some() || table.storage_options.storage_type != StorageType::Row {
+        return Ok(None);
+    }
+    let Some(index) = find_hnsw_index(catalog, table, &pattern.column) else {
+        return Ok(None);
+    };
+    let dimension = vector_dimension(table, &pattern.column).unwrap_or(HNSW_BASE_DIMENSIONS);
+    let threshold = hnsw_row_threshold(pattern.k as usize, dimension);
+    Ok(table_exceeds_hnsw_threshold(txn, table, threshold)?.then_some(index))
+}
+
 fn table_exceeds_hnsw_threshold<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
+    threshold: usize,
 ) -> Result<bool> {
+    // ponytail: bounded pre-scan; replace with persisted table cardinality when the catalog owns it.
     let mut storage = txn.table_storage(table);
     let mut rows = storage.range_scan(0, u64::MAX)?;
-    for _ in 0..HNSW_MIN_ROWS {
+    for _ in 0..threshold {
         if rows.next().transpose()?.is_none() {
             return Ok(false);
         }
     }
     Ok(rows.next().transpose()?.is_some())
+}
+
+fn hnsw_row_threshold(k: usize, dimension: usize) -> usize {
+    HNSW_BASE_MIN_ROWS
+        .saturating_mul(k.max(HNSW_BASE_K))
+        .saturating_div(HNSW_BASE_K)
+        .saturating_mul(HNSW_BASE_DIMENSIONS)
+        .saturating_div(dimension.max(1))
+        .max(HNSW_MINIMUM_ROWS)
+}
+
+fn vector_dimension(table: &TableMetadata, column: &str) -> Option<usize> {
+    match &table
+        .columns
+        .get(table.get_column_index(column)?)?
+        .data_type
+    {
+        crate::planner::types::ResolvedType::Vector { dimension, .. } => Some(*dimension as usize),
+        _ => None,
+    }
 }
 
 fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
@@ -597,6 +640,14 @@ mod tests {
     use crate::planner::types::ResolvedType;
     use crate::storage::{SqlTransaction, TxnBridge};
     use alopex_core::kv::memory::MemoryKV;
+
+    #[test]
+    fn hnsw_threshold_scales_with_k_and_vector_dimension() {
+        assert_eq!(hnsw_row_threshold(10, 128), 8_192);
+        assert_eq!(hnsw_row_threshold(20, 128), 16_384);
+        assert_eq!(hnsw_row_threshold(10, 256), 4_096);
+        assert_eq!(hnsw_row_threshold(10, usize::MAX), HNSW_MINIMUM_ROWS);
+    }
 
     fn setup_table() -> (TxnBridge<MemoryKV>, MemoryCatalog, TableMetadata) {
         let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));

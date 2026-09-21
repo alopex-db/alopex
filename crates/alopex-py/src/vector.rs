@@ -4,7 +4,9 @@ use pyo3::types::PyAny;
 use pyo3::types::PyModule;
 use pyo3::Bound;
 
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 
 // =============================================================================
 // SliceOrOwned - GIL 解放対応のゼロコピー/フォールバック判別型
@@ -40,20 +42,51 @@ pub fn require_numpy(py: Python<'_>) -> PyResult<()> {
     }
 }
 
-pub fn ndarray_f32_2d(array: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
+/// A two-dimensional float32 array safe to consume while the GIL is released.
+pub enum MatrixSliceOrOwned {
+    Borrowed {
+        ptr: *const f32,
+        len: usize,
+        rows: usize,
+        columns: usize,
+        _guard: Py<PyArray2<f32>>,
+    },
+    Owned {
+        values: Vec<f32>,
+        rows: usize,
+        columns: usize,
+    },
+}
+
+pub fn with_ndarray_f32_2d_gil_safe<'py, F, R>(array: &Bound<'py, PyAny>, f: F) -> PyResult<R>
+where
+    F: FnOnce(MatrixSliceOrOwned) -> PyResult<R>,
+{
     let py = array.py();
-    let array = if let Ok(array) = array.extract::<PyReadonlyArray2<'_, f32>>() {
+    let array = if let Ok(array) = array.extract::<PyReadonlyArray2<'py, f32>>() {
         array
     } else {
         let numpy = PyModule::import(py, "numpy")?;
         let casted = array.call_method1("astype", (numpy.getattr("float32")?,))?;
-        casted.extract::<PyReadonlyArray2<'_, f32>>()?
+        casted.extract::<PyReadonlyArray2<'py, f32>>()?
     };
-    Ok(array
-        .as_array()
-        .outer_iter()
-        .map(|row| row.iter().copied().collect())
-        .collect())
+    let shape = array.shape();
+    let (rows, columns) = (shape[0], shape[1]);
+    if let Ok(values) = array.as_slice() {
+        let guard: Py<PyArray2<f32>> = array.as_untyped().clone().extract()?;
+        return f(MatrixSliceOrOwned::Borrowed {
+            ptr: values.as_ptr(),
+            len: values.len(),
+            rows,
+            columns,
+            _guard: guard,
+        });
+    }
+    f(MatrixSliceOrOwned::Owned {
+        values: array.as_array().iter().copied().collect(),
+        rows,
+        columns,
+    })
 }
 
 /// 旧 API: 後方互換性のため維持（新コードは with_ndarray_f32_gil_safe を使用）

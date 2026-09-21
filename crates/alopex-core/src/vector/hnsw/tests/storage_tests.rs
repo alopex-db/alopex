@@ -11,6 +11,8 @@ use crate::vector::hnsw::HnswStorage;
 use crate::vector::hnsw::{HnswIndex, HnswTransactionState};
 use crate::vector::Metric;
 use crate::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(serde::Serialize)]
 struct FormatV1Node {
@@ -76,6 +78,41 @@ fn staged_batch_publishes_stats_only_after_commit() {
 
     let mut txn = kv.begin(TxnMode::ReadWrite).unwrap();
     index.commit_staged(&mut txn, &mut state).unwrap();
+    assert_eq!(index.stats().node_count, 2);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_rejects_an_invalid_later_vector_without_mutation() {
+    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+    let mut state = HnswTransactionState::default();
+
+    let error = index
+        .upsert_staged_batch(
+            &[(b"valid", &[0.0, 0.0], b""), (b"invalid", &[1.0], b"")],
+            &mut state,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, Error::DimensionMismatch { .. }));
+    assert!(index.search(&[0.0, 0.0], 1, None).unwrap().0.is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn batch_avoids_per_item_insert_callbacks() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+    let callback_calls = Arc::clone(&calls);
+    index.on_insert(move |_| {
+        callback_calls.fetch_add(1, Ordering::Relaxed);
+    });
+
+    index
+        .upsert_batch(&[(b"a", &[0.0, 0.0], b""), (b"b", &[1.0, 0.0], b"")])
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(index.stats().node_count, 2);
 }
 
