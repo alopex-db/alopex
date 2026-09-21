@@ -102,8 +102,10 @@ fn explain_result(
             let mut document: serde_json::Value =
                 serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
                     .expect("logical plan must render valid JSON");
-            let selected_path = hnsw_path.unwrap_or_else(|| "LogicalDirect".to_string());
-            document["physical_plan"]["selected_path"] = serde_json::Value::String(selected_path);
+            if let Some(selected_path) = hnsw_path {
+                document["physical_plan"]["selected_path"] =
+                    serde_json::Value::String(selected_path);
+            }
             ("query_plan", document.to_string())
         }
     };
