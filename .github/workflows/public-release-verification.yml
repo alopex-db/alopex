@@ -176,12 +176,41 @@ jobs:
             --description "PyPIから完全一致wheelを取得し、隔離先へ導入してimportできることを確認する。既知機能の正しさは対象commitのDevelopment CI/Extended Verificationが所有する。" \
             --log "${readiness_log}"
 
+      - name: Re-run v0.8.14 public wheel scenario
+        id: vector_scenario
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="${RUNNER_TEMP}/pypi-install-v${VERSION}"
+          scenario="${RUNNER_TEMP}/verify-python-vector-api-v${VERSION}.py"
+          scenario_log="${RUNNER_TEMP}/vector-scenario-v${VERSION}.log"
+          git show "alopex-py-v${VERSION}:scripts/release/verify_python_vector_api.py" > "${scenario}"
+          python3 -m pip install --no-cache-dir --target "${install_dir}" numpy==2.2.1
+          set +e
+          PYTHONPATH="${install_dir}" python3 "${scenario}" 2>&1 | tee "${scenario_log}"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "${status}" -eq 0 ]]; then
+            outcome=success
+          else
+            outcome=failure
+          fi
+          python3 scripts/release/verify-release/report.py record \
+            --results "${REPORT_ROOT}/v${VERSION}.json" \
+            --name "v0.8.14 public vector scenario" --status "${outcome}" \
+            --description "PyPIから取得した完全一致wheelで、Kaggleと同じ組み込みPythonのベクトル投入・検索を再実行し、v0.8.14のget_vectors、バッチHNSW投入、重複キー原子拒否、kNN EXPLAIN経路表示を検証する。" \
+            --log "${scenario_log}"
+          exit "${status}"
+
       - name: Finalize verification report
         if: always()
         env:
           VERSION: ${{ steps.release.outputs.version || steps.report_context.outputs.version || 'unknown' }}
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
           AVAILABILITY_OUTCOME: ${{ steps.availability.outcome }}
+          VECTOR_SCENARIO_OUTCOME: ${{ steps.vector_scenario.outcome }}
         shell: bash
         run: |
           set -u
@@ -202,7 +231,7 @@ jobs:
               --responsibility "Stable Delivery / downstream availability"
           fi
           orchestration_status=""
-          for outcome in "${RELEASE_OUTCOME:-skipped}" "${AVAILABILITY_OUTCOME:-skipped}"; do
+          for outcome in "${RELEASE_OUTCOME:-skipped}" "${AVAILABILITY_OUTCOME:-skipped}" "${VECTOR_SCENARIO_OUTCOME:-skipped}"; do
             if [[ "${outcome}" == failure ]]; then
               orchestration_status=failure
               break

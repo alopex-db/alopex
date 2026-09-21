@@ -286,8 +286,9 @@ def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchE
     db.create_hnsw_index(name, config)
     started = time.perf_counter()
     with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-        for index, vector in enumerate(vectors):
-            transaction.upsert_to_hnsw(name, str(index).encode(), vector, None)
+        transaction.upsert_to_hnsw_batch(
+            name, [str(index).encode() for index in range(len(vectors))], vectors
+        )
         transaction.commit()
     del transaction
     db.flush()
@@ -850,10 +851,11 @@ def _alopex_hybrid(vectors):
     db.execute_sql("CREATE TABLE hybrid_rows (id INT PRIMARY KEY, bucket INT)")
     started = time.perf_counter()
     with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-        for index, vector in enumerate(vectors):
-            transaction.upsert_to_hnsw(
-                "hybrid_vectors", str(index).encode(), vector, None
-            )
+        transaction.upsert_to_hnsw_batch(
+            "hybrid_vectors",
+            [str(index).encode() for index in range(len(vectors))],
+            vectors,
+        )
         transaction.commit()
     for start in range(0, len(vectors), 500):
         values = ",".join(

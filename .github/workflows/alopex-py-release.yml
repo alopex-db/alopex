@@ -482,6 +482,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-testpypi]
     steps:
+      - name: Checkout release scenario
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Wait for TestPyPI indexing
         run: sleep 60
       - name: Setup Python
@@ -490,13 +494,15 @@ jobs:
           python-version: "3.11"
       - name: Install from TestPyPI
         run: |
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          pip install numpy==2.2.1
           pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            alopex
-      - name: Verify import
+            "alopex==${version}"
+      - name: Run v0.8.14 public wheel scenario
         run: |
-          python -c "from alopex import Database; print('Database import OK')"
-          python -c "from alopex import Transaction; print('Transaction import OK')"
+          python scripts/release/verify_python_vector_api.py
 
   publish-pypi:
     name: publish-pypi
