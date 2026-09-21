@@ -59,7 +59,7 @@ pub use alopex_core::{HnswConfig, HnswSearchResult, HnswStats, MemoryStats, Metr
 /// Streaming query row iterator for FR-7 compliance.
 pub use alopex_sql::executor::QueryRowIterator;
 use alopex_sql::storage::LocalRangeChangeJournal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -920,7 +920,7 @@ pub struct Transaction<'a> {
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
     vector_cache_invalidated: bool,
-    vector_index: Option<Vec<Key>>,
+    vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
     /// Whether DDL operations were performed in this transaction.
     pub(crate) catalog_modified: bool,
@@ -940,6 +940,36 @@ pub struct SearchResult {
 }
 
 pub(crate) const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
+
+/// Transaction-local vector key order plus constant-time membership checks.
+#[derive(Clone)]
+pub(crate) struct VectorKeyIndex {
+    keys: Vec<Key>,
+    members: HashSet<Key>,
+}
+
+impl VectorKeyIndex {
+    pub(crate) fn from_keys(keys: Vec<Key>) -> Self {
+        Self {
+            members: keys.iter().cloned().collect(),
+            keys,
+        }
+    }
+
+    pub(crate) fn keys(&self) -> &[Key] {
+        &self.keys
+    }
+
+    /// Returns whether this call added a previously unseen key.
+    pub(crate) fn insert(&mut self, key: Key) -> bool {
+        if self.members.insert(key.clone()) {
+            self.keys.push(key);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 impl<'a> Transaction<'a> {
     pub(crate) fn catalog_overlay(&self) -> &alopex_sql::catalog::CatalogOverlay {
@@ -1089,8 +1119,7 @@ impl<'a> Transaction<'a> {
         txn.put(key.to_vec(), payload).map_err(Error::Core)?;
 
         let keys = self.vector_index_mut()?;
-        if !keys.iter().any(|existing| existing == key) {
-            keys.push(key.to_vec());
+        if keys.insert(key.to_vec()) {
             self.vector_index_dirty = true;
         }
 
@@ -1370,8 +1399,8 @@ impl<'a> Transaction<'a> {
     }
 
     fn load_vector_index(&mut self) -> Result<Vec<Key>> {
-        if let Some(keys) = &self.vector_index {
-            return Ok(keys.clone());
+        if let Some(index) = &self.vector_index {
+            return Ok(index.keys().to_vec());
         }
         let txn = self.inner_mut()?;
         let Some(raw) = txn.get(&VECTOR_INDEX_KEY.to_vec()).map_err(Error::Core)? else {
@@ -1380,14 +1409,14 @@ impl<'a> Transaction<'a> {
         decode_index(&raw).map_err(Error::Core)
     }
 
-    fn vector_index_mut(&mut self) -> Result<&mut Vec<Key>> {
+    fn vector_index_mut(&mut self) -> Result<&mut VectorKeyIndex> {
         if self.vector_index.is_none() {
             let txn = self.inner_mut()?;
             let keys = match txn.get(&VECTOR_INDEX_KEY.to_vec()).map_err(Error::Core)? {
                 Some(raw) => decode_index(&raw).map_err(Error::Core)?,
                 None => Vec::new(),
             };
-            self.vector_index = Some(keys);
+            self.vector_index = Some(VectorKeyIndex::from_keys(keys));
         }
         Ok(self
             .vector_index
@@ -1400,7 +1429,8 @@ impl<'a> Transaction<'a> {
         {
             let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
             if self.vector_index_dirty {
-                let encoded = encode_index(self.vector_index.as_deref().unwrap_or_default())?;
+                let keys: &[Key] = self.vector_index.as_ref().map_or(&[], VectorKeyIndex::keys);
+                let encoded = encode_index(keys)?;
                 txn.put(VECTOR_INDEX_KEY.to_vec(), encoded)
                     .map_err(Error::Core)?;
             }
@@ -1572,14 +1602,13 @@ impl OwnedEmbeddedTransaction {
                     }
                 })
                 .map_err(Error::Core)?;
-            self.vector_index = Some(keys);
+            self.vector_index = Some(VectorKeyIndex::from_keys(keys));
         }
         let keys = self
             .vector_index
             .as_mut()
             .expect("vector index initialized above");
-        if !keys.iter().any(|entry| entry == &key) {
-            keys.push(key);
+        if keys.insert(key) {
             self.vector_index_dirty = true;
         }
         self.vector_cache_invalidated = true;
@@ -1647,7 +1676,7 @@ impl OwnedEmbeddedTransaction {
         let keys = match filter_keys {
             Some(keys) => keys.to_vec(),
             None => match self.vector_index.as_ref() {
-                Some(keys) => keys.clone(),
+                Some(index) => index.keys().to_vec(),
                 None => self
                     .session
                     .with_transaction(|transaction| {
@@ -2148,6 +2177,15 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;
+
+    #[test]
+    fn vector_key_index_deduplicates_and_preserves_order() {
+        let mut index = VectorKeyIndex::from_keys(vec![b"existing".to_vec()]);
+
+        assert!(!index.insert(b"existing".to_vec()));
+        assert!(index.insert(b"new".to_vec()));
+        assert_eq!(index.keys(), [b"existing".to_vec(), b"new".to_vec()]);
+    }
 
     #[test]
     fn test_open_and_crud() {

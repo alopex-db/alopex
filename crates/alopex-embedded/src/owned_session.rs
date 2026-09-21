@@ -16,7 +16,7 @@ use alopex_core::TxnMode;
 use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::storage::LocalRangeChangeJournal;
 
-use crate::{Database, Error, Result};
+use crate::{Database, Error, Result, VectorKeyIndex};
 
 /// Factory for owned local read and transaction sessions from one embedded database.
 ///
@@ -127,7 +127,7 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
-    pub(crate) vector_index: Option<Vec<alopex_core::Key>>,
+    pub(crate) vector_index: Option<VectorKeyIndex>,
     pub(crate) vector_index_dirty: bool,
     pub(crate) failed: bool,
     savepoints: Vec<OwnedEmbeddedSavepoint>,
@@ -139,7 +139,7 @@ struct OwnedEmbeddedSavepoint {
     overlay: CatalogOverlay,
     catalog_modified: bool,
     vector_cache_invalidated: bool,
-    vector_index: Option<Vec<alopex_core::Key>>,
+    vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
 }
 
@@ -245,8 +245,12 @@ impl OwnedEmbeddedTransaction {
         let mut preparation = Ok(());
         let vector_index = if self.vector_index_dirty {
             Some(
-                crate::encode_index(self.vector_index.as_deref().unwrap_or_default())
-                    .map_err(Error::Core)?,
+                crate::encode_index(
+                    self.vector_index
+                        .as_ref()
+                        .map_or(&[] as &[alopex_core::Key], VectorKeyIndex::keys),
+                )
+                .map_err(Error::Core)?,
             )
         } else {
             None

@@ -136,6 +136,8 @@ jobs:
             --max-scale-n 50000 \
             --output performance-artifacts/hnsw \
             --release-version "$RELEASE_VERSION"
+          taskset -c 0 python scripts/performance/flat_vector_ingest_v0814.py \
+            --output performance-artifacts/hnsw/flat-vector-ingest-v0814.json
           python scripts/performance/release_hnsw_evidence.py \
             --root performance-artifacts/hnsw \
             --version "$RELEASE_VERSION" \
