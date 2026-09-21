@@ -27,6 +27,7 @@ pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{
     DistinctOnIterator, FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator,
 };
+pub use knn::explain_hnsw_path;
 pub use project::{project_row_values, projected_columns};
 pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,

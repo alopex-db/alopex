@@ -44,6 +44,20 @@ pub fn extract_knn_context(
     }
 }
 
+/// Returns the physical HNSW path selected for a KNN-shaped logical plan.
+pub fn explain_hnsw_path<C: Catalog + ?Sized>(catalog: &C, plan: &LogicalPlan) -> Option<String> {
+    let (pattern, _, filter) = extract_knn_context(plan)?;
+    if filter.is_some() {
+        return None;
+    }
+    let table = catalog.get_table(&pattern.table)?;
+    if table.storage_options.storage_type != StorageType::Row {
+        return None;
+    }
+    let index = find_hnsw_index(catalog, table, &pattern.column)?;
+    Some(format!("HnswSearch index={} k={}", index.name, pattern.k))
+}
+
 /// KNN 最適化クエリを実行する。HNSW インデックスが存在しフィルタ無しならインデックス経路、
 /// それ以外はヒープベースの全件スキャンで Top-K を選択する。
 pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
