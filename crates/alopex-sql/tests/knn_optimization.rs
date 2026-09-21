@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::memory::MemoryKV;
-use alopex_sql::catalog::MemoryCatalog;
+use alopex_sql::catalog::{Catalog, MemoryCatalog};
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::{ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
@@ -41,7 +41,7 @@ fn knn_optimization_without_index() {
     let (mut executor, catalog) = run_sql(sql);
 
     let query =
-        "SELECT id FROM items ORDER BY vector_similarity(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2";
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2";
     let stmt = Parser::parse_sql(&AlopexDialect, query)
         .unwrap()
         .pop()
@@ -81,7 +81,7 @@ fn explain_knn_reports_exact_scan_when_small_table_skips_hnsw() {
     let (mut executor, catalog) = run_sql(sql);
     let stmt = Parser::parse_sql(
         &AlopexDialect,
-        "EXPLAIN SELECT id FROM items ORDER BY vector_similarity(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2",
+        "EXPLAIN SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2",
     )
     .unwrap()
     .pop()
@@ -102,7 +102,7 @@ fn explain_knn_reports_exact_scan_when_small_table_skips_hnsw() {
 
     let stmt = Parser::parse_sql(
         &AlopexDialect,
-        "EXPLAIN (FORMAT JSON) SELECT id FROM items ORDER BY vector_similarity(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2",
+        "EXPLAIN (FORMAT JSON) SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2",
     )
     .unwrap()
     .pop()
@@ -119,4 +119,22 @@ fn explain_knn_reports_exact_scan_when_small_table_skips_hnsw() {
     };
     let document: serde_json::Value = serde_json::from_str(plan).unwrap();
     assert_eq!(document["physical_plan"]["selected_path"], "ExactKnnScan");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn hnsw_index_accepts_search_ef_default() {
+    let (_executor, catalog) = run_sql(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=256);",
+    );
+    assert_eq!(
+        catalog
+            .read()
+            .unwrap()
+            .get_index("idx_items_embedding")
+            .unwrap()
+            .get_option("ef_search"),
+        Some("256")
+    );
 }

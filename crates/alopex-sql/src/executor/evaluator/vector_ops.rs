@@ -66,10 +66,7 @@ impl FromStr for VectorMetric {
     }
 }
 
-/// ベクトル類似度/距離を計算する。
-///
-/// - 内部計算: f32（メモリ効率）
-/// - 返却値: f64（SQL DOUBLE として返す想定）
+/// ベクトル類似度を計算する。大きい値ほど類似する。
 pub fn vector_similarity(
     column_value: &[f32],
     query_vector: &[f32],
@@ -79,18 +76,24 @@ pub fn vector_similarity(
 
     match metric {
         VectorMetric::Cosine => compute_cosine_similarity(column_value, query_vector),
-        VectorMetric::L2 => compute_l2_distance(column_value, query_vector),
+        VectorMetric::L2 => Ok(-compute_l2_distance(column_value, query_vector)?),
         VectorMetric::Inner => compute_inner_product(column_value, query_vector),
     }
 }
 
-/// vector_similarity のエイリアス。距離メトリクスでも同一の実装を利用する。
+/// ベクトル距離を計算する。小さい値ほど近い。
 pub fn vector_distance(
     column_value: &[f32],
     query_vector: &[f32],
     metric: VectorMetric,
 ) -> Result<f64, VectorError> {
-    vector_similarity(column_value, query_vector, metric)
+    validate_dimensions(column_value, query_vector)?;
+
+    match metric {
+        VectorMetric::Cosine => Ok(1.0 - compute_cosine_similarity(column_value, query_vector)?),
+        VectorMetric::L2 => compute_l2_distance(column_value, query_vector),
+        VectorMetric::Inner => Ok(-compute_inner_product(column_value, query_vector)?),
+    }
 }
 
 pub fn vector_dims(vector: &[f32]) -> usize {
@@ -200,7 +203,7 @@ mod tests {
     fn l2_distance_basic() {
         let a = [0.0_f32, 0.0];
         let b = [3.0_f32, 4.0];
-        let v = vector_similarity(&a, &b, VectorMetric::L2).unwrap();
+        let v = vector_distance(&a, &b, VectorMetric::L2).unwrap();
         assert!((v - 5.0).abs() < 1e-6);
     }
 
@@ -227,11 +230,19 @@ mod tests {
     }
 
     #[test]
-    fn vector_distance_alias() {
-        let a = [1.0_f32, 2.0];
-        let b = [3.0_f32, 4.0];
-        let sim = vector_similarity(&a, &b, VectorMetric::Inner).unwrap();
-        let dist = vector_distance(&a, &b, VectorMetric::Inner).unwrap();
-        assert!((sim - dist).abs() < 1e-6);
+    fn distance_and_similarity_have_opposite_ordering() {
+        let a = [1.0_f32, 0.0];
+        let b = [1.0_f32, 0.0];
+        assert_eq!(
+            vector_similarity(&a, &b, VectorMetric::Cosine).unwrap(),
+            1.0
+        );
+        assert_eq!(vector_distance(&a, &b, VectorMetric::Cosine).unwrap(), 0.0);
+        assert_eq!(vector_similarity(&a, &b, VectorMetric::L2).unwrap(), 0.0);
+        assert_eq!(vector_distance(&a, &b, VectorMetric::L2).unwrap(), 0.0);
+
+        let b = [-1.0_f32, 0.0];
+        assert!(vector_similarity(&a, &b, VectorMetric::Cosine).unwrap() < 0.0);
+        assert!(vector_distance(&a, &b, VectorMetric::Cosine).unwrap() > 1.0);
     }
 }

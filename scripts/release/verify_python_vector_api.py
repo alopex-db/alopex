@@ -104,19 +104,38 @@ def main() -> None:
             "CREATE TABLE knn_explain (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
         )
         db.execute_sql(
-            "CREATE INDEX idx_knn_explain ON knn_explain (embedding) USING HNSW"
+            "CREATE INDEX idx_knn_explain ON knn_explain (embedding) USING HNSW "
+            "WITH (ef_search=128)"
         )
         db.execute_sql(
             "INSERT INTO knn_explain VALUES (1, [0.0, 0.0]), (2, [1.0, 0.0])"
         )
         explain = db.execute_sql(
             "EXPLAIN (FORMAT JSON) SELECT id FROM knn_explain "
-            "ORDER BY vector_similarity(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1"
+            "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1"
         )
         assert explain[0]["query_plan"]
         assert json.loads(explain[0]["query_plan"])["physical_plan"][
             "selected_path"
         ] == "ExactKnnScan"
+
+        db.execute_sql(
+            "CREATE TABLE vector_meaning (id INTEGER PRIMARY KEY, embedding VECTOR(2, COSINE))"
+        )
+        db.execute_sql(
+            "INSERT INTO vector_meaning VALUES (1, [1.0, 0.0]), (2, [-1.0, 0.0])"
+        )
+        meaning = db.execute_sql(
+            "SELECT vector_distance(embedding, [1.0, 0.0], 'cosine') AS distance, "
+            "vector_similarity(embedding, [1.0, 0.0], 'cosine') AS similarity "
+            "FROM vector_meaning WHERE id = 1"
+        )[0]
+        assert meaning["distance"] == 0.0 and meaning["similarity"] == 1.0
+        nearest = db.execute_sql(
+            "SELECT id FROM vector_meaning "
+            "ORDER BY vector_distance(embedding, [1.0, 0.0], 'cosine') ASC LIMIT 1"
+        )
+        assert nearest[0]["id"] == 1
 
         tx = db.begin(TxnMode.READ_WRITE)
         tx.delete_from_hnsw("wheel_vector_smoke", b"quarter")

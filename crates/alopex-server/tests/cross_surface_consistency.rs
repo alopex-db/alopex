@@ -786,7 +786,7 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
     let cli_sql_rows = run_cli_sql_rows(&db, "SELECT id, name FROM surface_items ORDER BY id;");
     let cli_vector_row = run_cli_sql_rows(
         &db,
-        "SELECT id FROM surface_items ORDER BY vector_similarity(embedding, [0.1, 0.0], 'l2') ASC LIMIT 1;",
+        "SELECT id FROM surface_items ORDER BY vector_distance(embedding, [0.1, 0.0], 'l2') ASC LIMIT 1;",
     );
     let cli_actual = json!({
         "sql_rows": normalize_sql_rows(&Value::Array(cli_sql_rows)),

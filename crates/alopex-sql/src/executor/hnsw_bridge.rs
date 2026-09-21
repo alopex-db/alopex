@@ -13,6 +13,16 @@ use crate::storage::{SqlTxn, SqlValue};
 pub struct HnswBridge;
 
 impl HnswBridge {
+    /// Returns the index-default search breadth, if configured.
+    pub(crate) fn search_ef(index: &IndexMetadata) -> Result<Option<usize>> {
+        index
+            .options
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("ef_search"))
+            .map(|(_, value)| parse_ef_search(value))
+            .transpose()
+    }
+
     /// HNSW インデックスを作成し、既存行を取り込む。
     pub fn create_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
@@ -225,6 +235,9 @@ fn build_config(index: &IndexMetadata, column: &ColumnMetadata) -> Result<HnswCo
                 })?;
                 config.ef_construction = parsed;
             }
+            "ef_search" => {
+                parse_ef_search(value)?;
+            }
             other => {
                 return Err(ExecutorError::Core(CoreError::UnknownOption {
                     key: other.to_string(),
@@ -234,6 +247,22 @@ fn build_config(index: &IndexMetadata, column: &ColumnMetadata) -> Result<HnswCo
     }
 
     Ok(config)
+}
+
+fn parse_ef_search(value: &str) -> Result<usize> {
+    let parsed: usize = value.parse().map_err(|_| {
+        ExecutorError::Core(CoreError::InvalidParameter {
+            param: "ef_search".into(),
+            reason: format!("整数値に変換できません: {value}"),
+        })
+    })?;
+    if parsed == 0 {
+        return Err(ExecutorError::Core(CoreError::InvalidParameter {
+            param: "ef_search".into(),
+            reason: "must be greater than zero".into(),
+        }));
+    }
+    Ok(parsed)
 }
 
 fn extract_vector(value: &SqlValue, column: &ColumnMetadata) -> Result<Option<Vec<f32>>> {
@@ -296,5 +325,21 @@ fn vector_column<'a>(
             column: column.name.clone(),
             expected: "VECTOR".into(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_ef_search_is_parsed_and_validated() {
+        let index = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("EF_SEARCH", "256");
+        assert_eq!(HnswBridge::search_ef(&index).unwrap(), Some(256));
+
+        let invalid = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("ef_search", "0");
+        assert!(HnswBridge::search_ef(&invalid).is_err());
     }
 }
