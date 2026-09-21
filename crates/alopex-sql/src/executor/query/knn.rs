@@ -21,6 +21,9 @@ use crate::storage::{SqlTxn, SqlValue};
 
 use super::{columnar_scan, project, scan};
 
+// HNSW deserialization dominates exact row scans below this size on the supported embedded path.
+const HNSW_MIN_ROWS: usize = 8_192;
+
 /// LogicalPlan が KNN 最適化パターンに合致する場合、実行に必要な情報を抽出する。
 pub fn extract_knn_context(
     plan: &LogicalPlan,
@@ -86,6 +89,7 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     // HNSW インデックスがあり、フィルタ無し、Row ストレージの場合のみインデックス経路を使う。
     if filter.is_none()
         && table_meta.storage_options.storage_type == StorageType::Row
+        && table_exceeds_hnsw_threshold(txn, &table_meta)?
         && let Some(index) = find_hnsw_index(catalog, &table_meta, &pattern.column)
     {
         let mut entries = execute_hnsw_search(
@@ -115,6 +119,20 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
     let projected = project::execute_project(rows, projection, &table_meta.columns)?;
     Ok(ExecutionResult::Query(projected))
+}
+
+fn table_exceeds_hnsw_threshold<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table: &TableMetadata,
+) -> Result<bool> {
+    let mut storage = txn.table_storage(table);
+    let mut rows = storage.range_scan(0, u64::MAX)?;
+    for _ in 0..HNSW_MIN_ROWS {
+        if rows.next().transpose()?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(rows.next().transpose()?.is_some())
 }
 
 fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
