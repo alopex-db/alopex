@@ -1646,15 +1646,18 @@ impl OwnedEmbeddedTransaction {
         };
         let keys = match filter_keys {
             Some(keys) => keys.to_vec(),
-            None => self
-                .session
-                .with_transaction(|transaction| {
-                    match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
-                        Some(raw) => decode_index(&raw),
-                        None => Ok(Vec::new()),
-                    }
-                })
-                .map_err(Error::Core)?,
+            None => match self.vector_index.as_ref() {
+                Some(keys) => keys.clone(),
+                None => self
+                    .session
+                    .with_transaction(|transaction| {
+                        match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
+                            Some(raw) => decode_index(&raw),
+                            None => Ok(Vec::new()),
+                        }
+                    })
+                    .map_err(Error::Core)?,
+            },
         };
         let mut rows = self
             .session

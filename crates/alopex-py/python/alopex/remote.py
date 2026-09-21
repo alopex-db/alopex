@@ -770,8 +770,14 @@ class RemoteTransaction:
     def get_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get_vector", _KV_REASON)
 
+    def get_vectors(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.get_vectors", _KV_REASON)
+
     def upsert_to_hnsw(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.upsert_to_hnsw", _HNSW_REASON)
+
+    def upsert_to_hnsw_batch(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.upsert_to_hnsw_batch", _HNSW_REASON)
 
     def delete_from_hnsw(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.delete_from_hnsw", _HNSW_REASON)
