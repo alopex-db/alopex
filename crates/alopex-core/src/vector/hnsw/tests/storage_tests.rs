@@ -8,6 +8,7 @@ use crate::vector::hnsw::types::HnswMetadata;
 use crate::vector::hnsw::HnswConfig;
 use crate::vector::hnsw::HnswGraph;
 use crate::vector::hnsw::HnswStorage;
+use crate::vector::hnsw::{HnswIndex, HnswTransactionState};
 use crate::vector::Metric;
 use crate::Error;
 
@@ -56,6 +57,26 @@ fn save_and_load_roundtrip_preserves_graph() {
     let keys: Vec<_> = results.iter().map(|r| r.key.clone()).collect();
     assert!(keys.contains(&b"a".to_vec()));
     assert!(keys.contains(&b"b".to_vec()));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn staged_batch_publishes_stats_only_after_commit() {
+    let kv = MemoryKV::new();
+    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged_batch(
+            &[(b"a", &[0.0, 0.0], b""), (b"b", &[1.0, 0.0], b"")],
+            &mut state,
+        )
+        .unwrap();
+
+    assert_eq!(index.stats().node_count, 0);
+
+    let mut txn = kv.begin(TxnMode::ReadWrite).unwrap();
+    index.commit_staged(&mut txn, &mut state).unwrap();
+    assert_eq!(index.stats().node_count, 2);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

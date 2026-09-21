@@ -56,10 +56,14 @@ impl HnswGraph {
         })
     }
 
+    pub(crate) fn validate_vector(&self, vector: &[f32]) -> Result<()> {
+        validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)
+    }
+
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        validate_dimensions(self.config.dimension, vector.len())?;
-        validate_hnsw_vector(self.config.metric, vector)?;
+        self.validate_vector(vector)?;
 
         if self.key_to_node.contains_key(key) {
             return Err(Error::InvalidParameter {
@@ -177,8 +181,7 @@ impl HnswGraph {
     /// 既存キーならベクトルとメタデータを更新し、無ければ挿入する。
     /// 既存ノードが deleted の場合は再有効化する。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        validate_dimensions(self.config.dimension, vector.len())?;
-        validate_hnsw_vector(self.config.metric, vector)?;
+        self.validate_vector(vector)?;
         if let Some(node_id) = self.find_node_id(key) {
             let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
             for other in self.nodes.iter_mut().flatten() {

@@ -348,6 +348,26 @@ impl PyTransaction {
         })
     }
 
+    #[pyo3(signature = (name, keys, vectors, metadata = None))]
+    fn upsert_to_hnsw_batch(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        keys: Vec<Vec<u8>>,
+        vectors: Py<PyAny>,
+        metadata: Option<Vec<Option<Vec<u8>>>>,
+    ) -> PyResult<usize> {
+        vector::require_numpy(py)?;
+        let vectors = vector::ndarray_f32_2d(vectors.bind(py))?;
+        let name = name.to_owned();
+        py.detach(move || {
+            let vector_refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
+            self.with_txn_mut(|txn| {
+                txn.upsert_to_hnsw_batch(&name, &keys, &vector_refs, metadata.as_deref())
+            })
+        })
+    }
+
     fn delete_from_hnsw(&self, name: &str, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete_from_hnsw(name, key))
             .map(|_| ())
@@ -394,6 +414,29 @@ impl PyTransaction {
                 )))
             }
         }
+    }
+
+    #[pyo3(signature = (keys, metric, zero_copy_return = true))]
+    fn get_vectors(
+        &self,
+        py: Python<'_>,
+        keys: Vec<Key>,
+        metric: PyMetric,
+        zero_copy_return: bool,
+    ) -> PyResult<Vec<Option<Py<PyAny>>>> {
+        vector::require_numpy(py)?;
+        let vectors =
+            py.detach(|| self.with_txn_mut(|txn| txn.get_vectors(&keys, metric.into())))?;
+        vectors
+            .into_iter()
+            .map(|values| {
+                if zero_copy_return {
+                    vector::vec_to_ndarray_opt(py, values)
+                } else {
+                    vector::vec_to_ndarray_opt_copy(py, values.as_deref())
+                }
+            })
+            .collect()
     }
 
     /// SQL をこのトランザクション内で実行する（コミットは行わない）。

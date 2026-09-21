@@ -4,7 +4,7 @@ use pyo3::types::PyAny;
 use pyo3::types::PyModule;
 use pyo3::Bound;
 
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 
 // =============================================================================
 // SliceOrOwned - GIL 解放対応のゼロコピー/フォールバック判別型
@@ -38,6 +38,22 @@ pub fn require_numpy(py: Python<'_>) -> PyResult<()> {
             "NumPy が見つかりません。`pip install numpy` を実行してください",
         ))
     }
+}
+
+pub fn ndarray_f32_2d(array: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
+    let py = array.py();
+    let array = if let Ok(array) = array.extract::<PyReadonlyArray2<'_, f32>>() {
+        array
+    } else {
+        let numpy = PyModule::import(py, "numpy")?;
+        let casted = array.call_method1("astype", (numpy.getattr("float32")?,))?;
+        casted.extract::<PyReadonlyArray2<'_, f32>>()?
+    };
+    Ok(array
+        .as_array()
+        .outer_iter()
+        .map(|row| row.iter().copied().collect())
+        .collect())
 }
 
 /// 旧 API: 後方互換性のため維持（新コードは with_ndarray_f32_gil_safe を使用）

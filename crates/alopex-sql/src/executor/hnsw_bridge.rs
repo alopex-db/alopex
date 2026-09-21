@@ -26,15 +26,21 @@ impl HnswBridge {
 
         let mut hnsw = HnswIndex::create(&index.name, config).map_err(ExecutorError::from)?;
 
-        {
+        let entries = {
             let mut storage = txn.table_storage(table);
+            let mut entries = Vec::new();
             for entry in storage.range_scan(0, u64::MAX)? {
                 let (row_id, row) = entry.map_err(ExecutorError::Storage)?;
                 let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
-                hnsw.upsert(&row_id.to_be_bytes(), &vector, &[])
-                    .map_err(ExecutorError::from)?;
+                entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
             }
-        }
+            entries
+        };
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|(key, vector, metadata)| (key.as_slice(), vector.as_slice(), metadata.as_slice()))
+            .collect();
+        hnsw.upsert_batch(&entries).map_err(ExecutorError::from)?;
 
         hnsw.save(txn.inner_mut()).map_err(ExecutorError::from)
     }
@@ -53,23 +59,30 @@ impl HnswBridge {
         }
     }
 
-    /// INSERT/UPSERT 時のインデックス更新。
-    pub fn on_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    /// Batch INSERT/UPSERT index update. Validation happens before the graph changes.
+    pub fn on_insert_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
-        row_id: u64,
-        row: &[SqlValue],
+        rows: &[(u64, Vec<SqlValue>)],
     ) -> Result<()> {
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
         let (column, col_idx) = vector_column(table, index)?;
-        let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
+        let mut owned_entries = Vec::with_capacity(rows.len());
+        for (row_id, row) in rows {
+            let vector = required_vector(row_id, &table.name, column, &row[col_idx])?;
+            owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+        }
+        let entries: Vec<_> = owned_entries
+            .iter()
+            .map(|(key, vector, metadata)| (key.as_slice(), vector.as_slice(), metadata.as_slice()))
+            .collect();
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
         entry
             .index
-            .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
+            .upsert_staged_batch(&entries, &mut entry.state)
             .map_err(ExecutorError::from)?;
         entry.dirty = true;
         Ok(())

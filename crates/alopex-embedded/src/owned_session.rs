@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alopex_core::kv::{
-    AnyKV, OwnedKVTransactionAdapter, OwnedReadOptions, OwnedReadSession,
+    AnyKV, KVTransaction, OwnedKVTransactionAdapter, OwnedReadOptions, OwnedReadSession,
     OwnedSessionFactory as CoreOwnedSessionFactory, OwnedTransactionSession,
 };
 use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
@@ -106,6 +106,8 @@ impl Database {
             journal,
             hnsw_indices: HashMap::new(),
             vector_cache_invalidated: false,
+            vector_index: None,
+            vector_index_dirty: false,
             failed: false,
             savepoints: Vec::new(),
         })
@@ -125,6 +127,8 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) vector_cache_invalidated: bool,
+    pub(crate) vector_index: Option<Vec<alopex_core::Key>>,
+    pub(crate) vector_index_dirty: bool,
     pub(crate) failed: bool,
     savepoints: Vec<OwnedEmbeddedSavepoint>,
 }
@@ -135,6 +139,8 @@ struct OwnedEmbeddedSavepoint {
     overlay: CatalogOverlay,
     catalog_modified: bool,
     vector_cache_invalidated: bool,
+    vector_index: Option<Vec<alopex_core::Key>>,
+    vector_index_dirty: bool,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -183,6 +189,8 @@ impl OwnedEmbeddedTransaction {
             overlay: self.overlay.clone(),
             catalog_modified: self.catalog_modified,
             vector_cache_invalidated: self.vector_cache_invalidated,
+            vector_index: self.vector_index.clone(),
+            vector_index_dirty: self.vector_index_dirty,
         });
         Ok(())
     }
@@ -197,6 +205,8 @@ impl OwnedEmbeddedTransaction {
         self.overlay = savepoint.overlay.clone();
         self.catalog_modified = savepoint.catalog_modified;
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
+        self.vector_index = savepoint.vector_index.clone();
+        self.vector_index_dirty = savepoint.vector_index_dirty;
         self.failed = false;
         self.savepoints.truncate(position + 1);
         Ok(())
@@ -233,12 +243,25 @@ impl OwnedEmbeddedTransaction {
             return Err(Error::TxnFailed);
         }
         let mut preparation = Ok(());
+        let vector_index = if self.vector_index_dirty {
+            Some(
+                crate::encode_index(self.vector_index.as_deref().unwrap_or_default())
+                    .map_err(Error::Core)?,
+            )
+        } else {
+            None
+        };
         let journal = self.journal.take();
         self.session
             .with_transaction(|transaction| {
                 let mut transaction = alopex_core::kv::any::AnyKVTransaction::Owned(
                     OwnedKVTransactionAdapter::new(transaction),
                 );
+                if let Some(encoded) = &vector_index {
+                    preparation = transaction
+                        .put(crate::VECTOR_INDEX_KEY.to_vec(), encoded.clone())
+                        .map_err(Error::Core);
+                }
                 for (index, state) in self.hnsw_indices.values_mut() {
                     if preparation.is_ok() {
                         preparation = index
