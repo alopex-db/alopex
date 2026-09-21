@@ -205,7 +205,7 @@ mod tests {
 
         let result = evaluate_function_call("vector_distance", &args, false, false, &ctx).unwrap();
         match result {
-            SqlValue::Double(v) => assert!((v - 32.0).abs() < 1e-6),
+            SqlValue::Double(v) => assert!((v + 32.0).abs() < 1e-6),
             other => panic!("unexpected value {other:?}"),
         }
     }

@@ -244,5 +244,18 @@ mod tests {
         let b = [-1.0_f32, 0.0];
         assert!(vector_similarity(&a, &b, VectorMetric::Cosine).unwrap() < 0.0);
         assert!(vector_distance(&a, &b, VectorMetric::Cosine).unwrap() > 1.0);
+
+        let a = [0.0_f32, 0.0];
+        let b = [3.0_f32, 4.0];
+        assert_eq!(vector_similarity(&a, &b, VectorMetric::L2).unwrap(), -5.0);
+        assert_eq!(vector_distance(&a, &b, VectorMetric::L2).unwrap(), 5.0);
+
+        let a = [1.0_f32, 2.0];
+        let b = [3.0_f32, 4.0];
+        assert_eq!(
+            vector_similarity(&a, &b, VectorMetric::Inner).unwrap(),
+            11.0
+        );
+        assert_eq!(vector_distance(&a, &b, VectorMetric::Inner).unwrap(), -11.0);
     }
 }

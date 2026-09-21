@@ -233,17 +233,20 @@ mod tests {
 
     #[test]
     fn reject_invalid_direction() {
-        let plan = build_plan("vector_similarity", true, "cosine", None);
-        assert!(detect_knn_pattern(&plan).is_none());
+        for metric in ["cosine", "l2", "inner"] {
+            let plan = build_plan("vector_similarity", true, metric, None);
+            assert!(detect_knn_pattern(&plan).is_none(), "{metric}");
 
-        let plan = build_plan("vector_distance", false, "cosine", None);
-        assert!(detect_knn_pattern(&plan).is_none());
+            let plan = build_plan("vector_distance", false, metric, None);
+            assert!(detect_knn_pattern(&plan).is_none(), "{metric}");
 
-        let plan = build_plan("vector_distance", true, "cosine", None);
-        assert_eq!(
-            detect_knn_pattern(&plan).unwrap().function,
-            VectorFunction::Distance
-        );
+            let plan = build_plan("vector_distance", true, metric, None);
+            assert_eq!(
+                detect_knn_pattern(&plan).unwrap().function,
+                VectorFunction::Distance,
+                "{metric}"
+            );
+        }
     }
 
     #[test]

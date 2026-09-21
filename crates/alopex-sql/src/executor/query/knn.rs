@@ -65,10 +65,23 @@ pub fn explain_knn_path<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         return Ok(None);
     };
     let path = match selected_hnsw_index(txn, catalog, table, &pattern, filter.as_ref())? {
-        Some(index) => format!("HnswSearch index={} k={}", index.name, pattern.k),
+        Some(index) => format_hnsw_path(&index, pattern.k, filter.is_some()),
         None => "ExactKnnScan".to_string(),
     };
     Ok(Some(path))
+}
+
+fn format_hnsw_path(index: &IndexMetadata, k: u64, has_filter: bool) -> String {
+    if has_filter {
+        // A filtered approximate result can be incomplete. The executor then
+        // preserves SQL semantics with an exact fallback.
+        format!(
+            "HnswSearchPostFilter index={} k={} fallback=ExactKnnScan",
+            index.name, k
+        )
+    } else {
+        format!("HnswSearch index={} k={}", index.name, k)
+    }
 }
 
 /// KNN 最適化クエリを実行する。HNSW インデックスが存在すれば索引経路、
@@ -867,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn hnsw_post_filter_expands_candidates_until_limit_is_met() {
+    fn hnsw_post_filter_falls_back_to_exact_when_candidates_are_insufficient() {
         let (bridge, mut catalog, _) = setup_table();
         let mut values = vec![[1.0, 0.0]; 65];
         values[64] = [-1.0, 0.0];
@@ -934,5 +947,15 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].row.values[0], SqlValue::Integer(64));
+    }
+
+    #[test]
+    fn filtered_hnsw_explain_discloses_exact_fallback() {
+        let index = IndexMetadata::new(0, "idx_items_embedding", "items", vec!["embedding".into()])
+            .with_method(IndexMethod::Hnsw);
+        assert_eq!(
+            format_hnsw_path(&index, 10, true),
+            "HnswSearchPostFilter index=idx_items_embedding k=10 fallback=ExactKnnScan"
+        );
     }
 }
