@@ -536,7 +536,7 @@ impl HnswGraph {
         results.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
+                .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         results
     }
@@ -546,7 +546,7 @@ impl HnswGraph {
         sorted.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
+                .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         let mut selected = Vec::with_capacity(max);
         for candidate in sorted {
@@ -554,15 +554,7 @@ impl HnswGraph {
                 break;
             }
             let diverse = selected.iter().all(|&chosen| {
-                let similarity = self
-                    .node(chosen)
-                    .map(|node| {
-                        self.distance_raw(
-                            self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
-                            &node.vector,
-                        )
-                    })
-                    .unwrap_or(f32::NEG_INFINITY);
+                let similarity = self.node_similarity(candidate.node_id, chosen);
                 similarity < candidate.score
             });
             if diverse || selected.is_empty() {
@@ -600,24 +592,23 @@ impl HnswGraph {
     }
 
     pub(crate) fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
-        let (neighbors_snapshot, query_vec) = {
+        let neighbors_snapshot = {
             let Some(node) = self.node(node_id) else {
                 return;
             };
             if level >= node.neighbors.len() || node.neighbors[level].len() <= max_degree {
                 return;
             }
-            (node.neighbors[level].clone(), node.vector.clone())
+            node.neighbors[level].clone()
         };
 
         let selected: Vec<ScoredEntry> = neighbors_snapshot
             .iter()
             .copied()
-            .filter_map(|n| {
-                self.node(n).map(|other| ScoredEntry {
-                    node_id: n,
-                    score: self.distance_raw(&query_vec, &other.vector),
-                })
+            .filter(|&n| self.node(n).is_some())
+            .map(|neighbor_id| ScoredEntry {
+                node_id: neighbor_id,
+                score: self.node_similarity(node_id, neighbor_id),
             })
             .collect();
 
@@ -710,8 +701,28 @@ impl HnswGraph {
         self.nodes.get(id as usize).and_then(|n| n.as_ref())
     }
 
-    fn node_key(&self, id: u32) -> Vec<u8> {
-        self.node(id).map(|n| n.key.clone()).unwrap_or_default()
+    fn node_key(&self, id: u32) -> &[u8] {
+        self.node(id).map_or(&[], |node| node.key.as_slice())
+    }
+
+    /// Scores two existing nodes with the same metric used by HNSW wiring.
+    /// Cosine similarity reuses the norms stored at insertion time.
+    pub(crate) fn node_similarity(&self, left_id: u32, right_id: u32) -> f32 {
+        let (Some(left), Some(right)) = (self.node(left_id), self.node(right_id)) else {
+            return f32::NEG_INFINITY;
+        };
+        match self.config.metric {
+            Metric::Cosine => {
+                if left.norm == 0.0 || right.norm == 0.0 {
+                    0.0
+                } else {
+                    self.kernel.inner_product(&left.vector, &right.vector)
+                        / (left.norm * right.norm)
+                }
+            }
+            Metric::L2 => self.kernel.l2(&left.vector, &right.vector),
+            Metric::InnerProduct => self.kernel.inner_product(&left.vector, &right.vector),
+        }
     }
 
     fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f32 {
