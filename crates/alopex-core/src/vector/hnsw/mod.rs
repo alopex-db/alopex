@@ -253,12 +253,16 @@ impl HnswIndex {
     ) -> Result<()> {
         let (modified, inserted, deleted_keys, requires_full_save) = state.prepare_for_commit();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        if inserted.is_empty() && !requires_full_save {
-            self.storage
-                .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        // Insertion and reconnection can mutate neighbor lists outside the
+        // transaction's directly addressed nodes. Persist every live slot in
+        // that case, but do not purge the index before rewriting it.
+        let modified = if requires_full_save || !inserted.is_empty() {
+            (0..graph.nodes.len() as u32).collect()
         } else {
-            self.storage.save(txn, &graph)?;
-        }
+            modified
+        };
+        self.storage
+            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
         self.stats_cache = Self::compute_stats(&graph);
         state.clear();
         Ok(())

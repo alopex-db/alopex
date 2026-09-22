@@ -78,7 +78,12 @@ fn staged_batch_publishes_stats_only_after_commit() {
 
     let mut txn = kv.begin(TxnMode::ReadWrite).unwrap();
     index.commit_staged(&mut txn, &mut state).unwrap();
+    kv.txn_manager().commit(txn).unwrap();
     assert_eq!(index.stats().node_count, 2);
+
+    let mut load_txn = kv.begin(TxnMode::ReadOnly).unwrap();
+    let loaded = HnswIndex::load("test_index", &mut load_txn).unwrap();
+    assert_eq!(loaded.search(&[0.0, 0.0], 2, None).unwrap().0.len(), 2);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
