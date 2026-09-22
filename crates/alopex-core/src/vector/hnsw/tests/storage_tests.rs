@@ -123,6 +123,35 @@ fn batch_avoids_per_item_insert_callbacks() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn bulk_batch_restores_hnsw_degree_limits() {
+    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+    let keys: Vec<Vec<u8>> = (0_u32..300).map(|id| id.to_be_bytes().to_vec()).collect();
+    let vectors: Vec<[f32; 2]> = (0_u32..300)
+        .map(|id| [id as f32 + 1.0, (id % 17) as f32 + 1.0])
+        .collect();
+    let entries: Vec<_> = keys
+        .iter()
+        .zip(&vectors)
+        .map(|(key, vector)| (key.as_slice(), vector.as_slice(), &[][..]))
+        .collect();
+
+    index.upsert_batch(&entries).unwrap();
+
+    let graph = index.graph.read().unwrap();
+    for node in graph.nodes.iter().flatten() {
+        for (level, neighbors) in node.neighbors.iter().enumerate() {
+            let limit = if level == 0 {
+                graph.config.m * 2
+            } else {
+                graph.config.m
+            };
+            assert!(neighbors.len() <= limit);
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn format_v1_without_persisted_norm_rebuilds_cached_norm() {
     let node_bytes = bincode::serialize(&FormatV1Node {
         key: b"legacy".to_vec(),

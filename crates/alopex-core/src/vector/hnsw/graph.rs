@@ -63,6 +63,26 @@ impl HnswGraph {
 
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
+        self.insert_with_pruning(key, vector, metadata, true)
+    }
+
+    /// Inserts a vector while deferring reverse-edge pruning to the bulk owner.
+    pub(crate) fn insert_unpruned(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+    ) -> Result<u32> {
+        self.insert_with_pruning(key, vector, metadata, false)
+    }
+
+    fn insert_with_pruning(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+        prune_reverse_edges: bool,
+    ) -> Result<u32> {
         self.validate_vector(vector)?;
 
         if self.key_to_node.contains_key(key) {
@@ -142,14 +162,11 @@ impl HnswGraph {
             let selected = self.select_neighbors_heuristic(&candidates, max_conn);
             self.connect_new_node(node_id, &selected, l);
 
-            // Prune neighbor lists to maintain degree constraints.
-            for &n in &selected {
-                let neighbor_max = if l == 0 {
-                    self.config.m * 2
-                } else {
-                    self.config.m
-                };
-                self.prune_neighbors(n, l, neighbor_max);
+            if prune_reverse_edges {
+                // Prune neighbor lists to maintain degree constraints.
+                for &n in &selected {
+                    self.prune_neighbors(n, l, max_conn);
+                }
             }
 
             if let Some(&first) = selected.first() {
@@ -621,6 +638,24 @@ impl HnswGraph {
         {
             if level < node.neighbors.len() {
                 node.neighbors[level] = selected;
+            }
+        }
+    }
+
+    /// Restores degree limits after a bulk construction chunk.
+    pub(crate) fn prune_overfull_neighbors(&mut self) {
+        for node_id in 0..self.nodes.len() as u32 {
+            let level_count = self
+                .node(node_id)
+                .map(|node| node.neighbors.len())
+                .unwrap_or_default();
+            for level in 0..level_count {
+                let max_degree = if level == 0 {
+                    self.config.m * 2
+                } else {
+                    self.config.m
+                };
+                self.prune_neighbors(node_id, level, max_degree);
             }
         }
     }

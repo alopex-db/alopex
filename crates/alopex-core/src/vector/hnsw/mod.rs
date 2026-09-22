@@ -21,6 +21,7 @@ use std::collections::HashSet;
 
 /// コンパクション待ちのタイムアウト（長時間ブロックを避けるため）。
 const COMPACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const BULK_PRUNE_INTERVAL: usize = 256;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
@@ -89,8 +90,21 @@ impl HnswIndex {
             }
             graph.validate_vector(vector)?;
         }
-        for (key, vector, metadata) in entries {
-            graph.upsert(key, vector, metadata)?;
+        let all_new = entries
+            .iter()
+            .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
+            if all_new {
+                graph.insert_unpruned(key, vector, metadata)?;
+                if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
+                    graph.prune_overfull_neighbors();
+                }
+            } else {
+                graph.upsert(key, vector, metadata)?;
+            }
+        }
+        if all_new {
+            graph.prune_overfull_neighbors();
         }
         self.stats_cache = Self::compute_stats(&graph);
         Ok(())
@@ -221,10 +235,23 @@ impl HnswIndex {
             graph.validate_vector(vector)?;
         }
         state.ensure_snapshot(&graph);
-        for (key, vector, metadata) in entries {
+        let all_new = entries
+            .iter()
+            .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             let existed = graph.find_node_id(key).is_some();
-            let node_id = graph.upsert(key, vector, metadata)?;
+            let node_id = if all_new {
+                graph.insert_unpruned(key, vector, metadata)?
+            } else {
+                graph.upsert(key, vector, metadata)?
+            };
             state.record_upsert(node_id, !existed, None);
+            if all_new && (position + 1) % BULK_PRUNE_INTERVAL == 0 {
+                graph.prune_overfull_neighbors();
+            }
+        }
+        if all_new {
+            graph.prune_overfull_neighbors();
         }
         Ok(())
     }
