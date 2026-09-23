@@ -144,9 +144,12 @@ def _environment() -> dict[str, object]:
     ).stdout.split(b"\0")
     source_hash = hashlib.sha256()
     for relative in sorted(path for path in source_files if path):
+        path = Path(os.fsdecode(relative))
+        if path.is_dir():
+            continue
         source_hash.update(relative)
         source_hash.update(b"\0")
-        source_hash.update(Path(os.fsdecode(relative)).read_bytes())
+        source_hash.update(path.read_bytes())
         source_hash.update(b"\0")
     return {
         "alopex_version": importlib.metadata.version("alopex"),
