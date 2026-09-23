@@ -840,6 +840,7 @@ pub struct MemoryTransaction<'a> {
     state: TxnState,
     start_version: u64,
     writes: BTreeMap<Key, Option<Value>>,
+    journal_before: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
 }
 
@@ -852,6 +853,7 @@ impl<'a> MemoryTransaction<'a> {
             state: TxnState::Active,
             start_version,
             writes: BTreeMap::new(),
+            journal_before: BTreeMap::new(),
             read_set: HashMap::new(),
         }
     }
@@ -859,6 +861,14 @@ impl<'a> MemoryTransaction<'a> {
     fn ensure_active(&self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+
+    fn record_journal_before_write(&mut self, key: &Key) -> Result<()> {
+        if !self.journal_before.contains_key(key) {
+            let before = self.get(key)?;
+            self.journal_before.insert(key.clone(), before);
         }
         Ok(())
     }
@@ -982,6 +992,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.record_journal_before_write(&key)?;
         self.writes.insert(key, Some(value));
         Ok(())
     }
@@ -993,6 +1004,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.record_journal_before_write(&key)?;
         self.writes.insert(key, None);
         Ok(())
     }
@@ -1026,6 +1038,21 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             .scan_from_internal(start)
             .filter_map(|(key, value)| value.map(|value| (key, value)));
         Ok(Box::new(iter))
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<super::JournalPendingWrite>> {
+        Some(
+            self.writes
+                .iter()
+                .map(|(key, after)| {
+                    (
+                        key.clone(),
+                        self.journal_before.get(key).cloned().flatten(),
+                        after.clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn commit_self(mut self) -> Result<()> {
