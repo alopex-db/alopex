@@ -328,6 +328,7 @@ impl HnswGraph {
             .into_iter()
             .filter_map(|c| self.node(c.node_id).map(|n| (c, n)))
             .filter(|(_, n)| !n.deleted)
+            .take(k)
             .map(|(c, n)| {
                 (
                     c.score,
@@ -343,9 +344,6 @@ impl HnswGraph {
         scored_results.sort_by(|(a_score, a), (b_score, b)| {
             b_score.total_cmp(a_score).then_with(|| a.key.cmp(&b.key))
         });
-        if scored_results.len() > k {
-            scored_results.truncate(k);
-        }
         let results = scored_results
             .into_iter()
             .map(|(_, result)| result)
@@ -499,7 +497,9 @@ impl HnswGraph {
         ef: usize,
         mut stats: Option<&mut SearchStats>,
     ) -> Vec<ScoredEntry> {
-        let mut visited = HashSet::new();
+        // HNSW traversals address nodes by a dense internal id.  A marker array avoids
+        // hashing and per-entry allocation on the search hot path.
+        let mut visited = vec![false; self.nodes.len()];
         let mut candidates = BinaryHeap::new();
         let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::new();
 
@@ -514,7 +514,7 @@ impl HnswGraph {
             node_id: entry_point,
             score: entry_score,
         };
-        visited.insert(entry_point);
+        visited[entry_point as usize] = true;
         candidates.push(entry.clone());
         best.push(Reverse(entry));
 
@@ -527,9 +527,13 @@ impl HnswGraph {
             if let Some(node) = self.node(candidate.node_id) {
                 if let Some(neighbors) = node.neighbors.get(level) {
                     for &n in neighbors {
-                        if !visited.insert(n) {
+                        let Some(seen) = visited.get_mut(n as usize) else {
+                            continue;
+                        };
+                        if *seen {
                             continue;
                         }
+                        *seen = true;
                         let s = self.distance(query, n, stats_ref);
                         let should_add =
                             best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
