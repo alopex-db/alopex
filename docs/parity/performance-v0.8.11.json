@@ -5,7 +5,7 @@
     "os": "ubuntu-24.04",
     "cpu_model": "AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx",
     "logical_cpu_count": 8,
-    "memory_bytes": 54744252416,
+    "memory_bytes": 54746497024,
     "cpu_affinity": [0],
     "build_profile": "release",
     "thread_count": 1
