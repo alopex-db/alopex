@@ -103,6 +103,69 @@ fn prepared_parameters_work_in_limit_offset_and_fetch_expressions() {
 }
 
 #[test]
+fn prepared_primary_key_query_and_update_preserve_exact_row_semantics() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql(
+            "CREATE TABLE items (id BIGINT PRIMARY KEY, note TEXT); \
+             INSERT INTO items VALUES (0, 'zero'), (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+
+    let mut statement = database
+        .prepare("SELECT note FROM items WHERE id = ?")
+        .unwrap();
+    statement.bind(1, SqlValue::Integer(1)).unwrap();
+    let ExecutionResult::Query(rows) = statement.execute().unwrap() else {
+        panic!("SELECT must return rows");
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::Text("one".into())]]);
+
+    database
+        .execute_sql("UPDATE items SET note = 'updated' WHERE id = 0")
+        .unwrap();
+    let ExecutionResult::Query(rows) = database
+        .execute_sql("SELECT id, note FROM items WHERE id >= 0 ORDER BY id LIMIT 2")
+        .unwrap()
+    else {
+        panic!("SELECT must return rows");
+    };
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![SqlValue::BigInt(0), SqlValue::Text("updated".into())],
+            vec![SqlValue::BigInt(1), SqlValue::Text("one".into())],
+        ]
+    );
+
+    let ExecutionResult::Query(rows) = database
+        .execute_sql("SELECT id, note FROM items ORDER BY id")
+        .unwrap()
+    else {
+        panic!("SELECT must return rows");
+    };
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![SqlValue::BigInt(0), SqlValue::Text("updated".into())],
+            vec![SqlValue::BigInt(1), SqlValue::Text("one".into())],
+            vec![SqlValue::BigInt(2), SqlValue::Text("two".into())],
+        ]
+    );
+
+    database
+        .execute_sql("CREATE TABLE narrow (id INTEGER PRIMARY KEY, note TEXT); INSERT INTO narrow VALUES (1, 'one')")
+        .unwrap();
+    let ExecutionResult::Query(rows) = database
+        .execute_sql("SELECT note FROM narrow WHERE id = 2147483648")
+        .unwrap()
+    else {
+        panic!("SELECT must return rows");
+    };
+    assert!(rows.rows.is_empty());
+}
+
+#[test]
 fn prepared_statement_rejects_missing_and_non_value_parameters() {
     let database = Arc::new(Database::new());
     assert!(database.execute_sql("SELECT ?").is_err());

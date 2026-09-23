@@ -2307,6 +2307,7 @@ pub fn merge_exact_aggregate_states(
 
 const DEFAULT_GROUP_LIMIT: usize = 1_000_000;
 const AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES: u64 = 32;
+const PARALLEL_AGGREGATE_MIN_ROWS: usize = 65_536;
 
 /// Aggregate execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3110,6 +3111,15 @@ pub fn should_use_single_for_parallel(parallelism: usize, aggregates: &[Aggregat
         })
 }
 
+fn should_use_parallel_aggregate(
+    row_count: usize,
+    parallelism: usize,
+    aggregates: &[AggregateExpr],
+) -> bool {
+    row_count >= PARALLEL_AGGREGATE_MIN_ROWS
+        && !should_use_single_for_parallel(parallelism, aggregates)
+}
+
 fn collect_iterator_rows(iter: &mut dyn RowIterator) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     while let Some(result) = iter.next_row() {
@@ -3430,6 +3440,18 @@ pub fn execute_parallel_aggregate_rows_with_policy<'a>(
             materialized_bytes = materialized_bytes.saturating_add(row_bytes);
         }
         input_rows.push(row);
+    }
+
+    if !should_use_parallel_aggregate(input_rows.len(), parallelism, &aggregates) {
+        return execute_single_aggregate_rows(
+            Box::new(VecIterator::new(input_rows, input_schema)),
+            group_keys,
+            aggregates,
+            having,
+            final_schema,
+            memory,
+            group_limit,
+        );
     }
 
     let fallback_rows = if memory.is_some() || group_limit < input_rows.len() {
@@ -3844,6 +3866,14 @@ mod tests {
         let parallel = collect_parallel_aggregate(Vec::new(), aggregates, 4);
 
         assert_eq!(parallel, single);
+    }
+
+    #[test]
+    fn parallel_aggregate_stays_single_below_worker_amortization_threshold() {
+        let aggregates = sample_aggregates();
+
+        assert!(!should_use_parallel_aggregate(34_250, 8, &aggregates));
+        assert!(should_use_parallel_aggregate(1_000_000, 8, &aggregates));
     }
 
     #[test]
