@@ -617,7 +617,7 @@ jobs:
 
   dispatch-python-release:
     name: Publish Python and require public demos
-    needs: [create-stable-release]
+    needs: [create-stable-release, promote-release]
     if: ${{ needs.create-stable-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:

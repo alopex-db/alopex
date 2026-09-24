@@ -514,7 +514,7 @@ jobs:
           set -euo pipefail
           test -n "${CANDIDATE_TAG}"
           mkdir -p wheels
-          gh release download "${CANDIDATE_TAG}" \
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
             --pattern "*.whl" --pattern "*.tar.gz" --dir wheels --clobber
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -537,7 +537,7 @@ jobs:
           set -euo pipefail
           test -n "${CANDIDATE_TAG}"
           mkdir -p wheels
-          gh release download "${CANDIDATE_TAG}" \
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
             --pattern "*.whl" --pattern "*.tar.gz" --dir wheels --clobber
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
