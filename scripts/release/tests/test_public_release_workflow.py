@@ -186,6 +186,18 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("Run public-package demos", verify)
         self.assertNotIn('verify-release/run.sh "${VERSION}"', verify)
 
+    def test_public_vector_scenario_uses_the_resolved_release_version(self) -> None:
+        self.assertIn("- name: Re-run public wheel scenario", self.text)
+        self.assertIn('--name "v${VERSION} public vector scenario"', self.text)
+        self.assertIn("v${VERSION}のget_vectors", self.text)
+        self.assertNotIn("v0.8.14 public vector scenario", self.text)
+        self.assertNotIn("v0.8.14のget_vectors", self.text)
+        scenario = (ROOT / "scripts/release/verify_python_vector_api.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("v0.8.14", scenario)
+        self.assertIn("version('alopex')", scenario)
+
     def test_stable_delivery_only_imports_exact_sha_benchmark_evidence(self) -> None:
         benchmark = self.text.split("  publish-vector-benchmark:\n", 1)[1].split(
             "  publish-publication-failure-report:\n", 1

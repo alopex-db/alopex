@@ -176,7 +176,7 @@ jobs:
             --description "PyPIから完全一致wheelを取得し、隔離先へ導入してimportできることを確認する。既知機能の正しさは対象commitのDevelopment CI/Extended Verificationが所有する。" \
             --log "${readiness_log}"
 
-      - name: Re-run v0.8.14 public wheel scenario
+      - name: Re-run public wheel scenario
         id: vector_scenario
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -199,8 +199,8 @@ jobs:
           fi
           python3 scripts/release/verify-release/report.py record \
             --results "${REPORT_ROOT}/v${VERSION}.json" \
-            --name "v0.8.14 public vector scenario" --status "${outcome}" \
-            --description "PyPIから取得した完全一致wheelで、Kaggleと同じ組み込みPythonのベクトル投入・検索を再実行し、v0.8.14のget_vectors、バッチHNSW投入、重複キー原子拒否、kNN EXPLAIN経路表示を検証する。" \
+            --name "v${VERSION} public vector scenario" --status "${outcome}" \
+            --description "PyPIから取得した完全一致wheelで、Kaggleと同じ組み込みPythonのベクトル投入・検索を再実行し、v${VERSION}のget_vectors、バッチHNSW投入、重複キー原子拒否、kNN EXPLAIN経路表示を検証する。" \
             --log "${scenario_log}"
           exit "${status}"
 

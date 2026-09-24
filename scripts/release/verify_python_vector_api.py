@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Exercise vector, HNSW, and streaming APIs from an installed wheel.
 
-This is the release scenario for the public Kaggle vector workflow and the
-v0.8.14 vector contracts.  It intentionally uses only the installed wheel.
+This is the release scenario for the public Kaggle vector workflow. It
+intentionally uses only the installed wheel.
 """
 
 from __future__ import annotations
 
 import json
+from importlib.metadata import version
 
 import numpy as np
 
@@ -144,7 +145,9 @@ def main() -> None:
     finally:
         db.close()
 
-    print("installed wheel executes v0.8.14 vector/HNSW/streaming contracts")
+    print(
+        f"installed wheel executes v{version('alopex')} vector/HNSW/streaming contracts"
+    )
     print("nearest=b'point' distance=0.0")
     print("second=b'quarter' distance=0.25")
     print("search_stats=nodes_visited")
