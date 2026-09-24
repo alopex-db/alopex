@@ -21,6 +21,7 @@ use std::collections::HashSet;
 
 /// コンパクション待ちのタイムアウト（長時間ブロックを避けるため）。
 const COMPACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const BULK_PRUNE_INTERVAL: usize = 256;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
@@ -73,6 +74,39 @@ impl HnswIndex {
             callback(&insert_stats);
         }
 
+        Ok(())
+    }
+
+    /// Inserts or updates a batch while computing aggregate statistics once.
+    pub fn upsert_batch(&mut self, entries: &[(&[u8], &[f32], &[u8])]) -> Result<()> {
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        for (key, vector, _) in entries {
+            if !seen.insert(*key) {
+                return Err(Error::InvalidParameter {
+                    param: "key".to_string(),
+                    reason: "duplicate key in batch".to_string(),
+                });
+            }
+            graph.validate_vector(vector)?;
+        }
+        let all_new = entries
+            .iter()
+            .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
+            if all_new {
+                graph.insert_unpruned(key, vector, metadata)?;
+                if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
+                    graph.prune_overfull_neighbors();
+                }
+            } else {
+                graph.upsert(key, vector, metadata)?;
+            }
+        }
+        if all_new {
+            graph.prune_overfull_neighbors();
+        }
+        self.stats_cache = Self::compute_stats(&graph);
         Ok(())
     }
 
@@ -169,6 +203,7 @@ impl HnswIndex {
     ) -> Result<()> {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        graph.validate_vector(vector)?;
         state.ensure_snapshot(&graph);
 
         let existed = graph.find_node_id(key).is_some();
@@ -178,7 +213,46 @@ impl HnswIndex {
         } else {
             state.record_upsert(node_id, true, None);
         }
-        self.stats_cache = Self::compute_stats(&graph);
+        Ok(())
+    }
+
+    /// Stages a batch atomically. Duplicate keys and invalid vectors are rejected before mutation.
+    pub fn upsert_staged_batch(
+        &mut self,
+        entries: &[(&[u8], &[f32], &[u8])],
+        state: &mut HnswTransactionState,
+    ) -> Result<()> {
+        self.wait_for_compaction("upsert")?;
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        for (key, vector, _) in entries {
+            if !seen.insert(*key) {
+                return Err(Error::InvalidParameter {
+                    param: "key".to_string(),
+                    reason: "duplicate key in batch".to_string(),
+                });
+            }
+            graph.validate_vector(vector)?;
+        }
+        state.ensure_snapshot(&graph);
+        let all_new = entries
+            .iter()
+            .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
+            let existed = graph.find_node_id(key).is_some();
+            let node_id = if all_new {
+                graph.insert_unpruned(key, vector, metadata)?
+            } else {
+                graph.upsert(key, vector, metadata)?
+            };
+            state.record_upsert(node_id, !existed, None);
+            if all_new && (position + 1) % BULK_PRUNE_INTERVAL == 0 {
+                graph.prune_overfull_neighbors();
+            }
+        }
+        if all_new {
+            graph.prune_overfull_neighbors();
+        }
         Ok(())
     }
 
@@ -200,18 +274,23 @@ impl HnswIndex {
 
     /// ステージした変更を保存する。
     pub fn commit_staged<'a, T: KVTransaction<'a>>(
-        &self,
+        &mut self,
         txn: &mut T,
         state: &mut HnswTransactionState,
     ) -> Result<()> {
         let (modified, inserted, deleted_keys, requires_full_save) = state.prepare_for_commit();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        if inserted.is_empty() && !requires_full_save {
-            self.storage
-                .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        // Insertion and reconnection can mutate neighbor lists outside the
+        // transaction's directly addressed nodes. Persist every live slot in
+        // that case, but do not purge the index before rewriting it.
+        let modified = if requires_full_save || !inserted.is_empty() {
+            (0..graph.nodes.len() as u32).collect()
         } else {
-            self.storage.save(txn, &graph)?;
-        }
+            modified
+        };
+        self.storage
+            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        self.stats_cache = Self::compute_stats(&graph);
         state.clear();
         Ok(())
     }

@@ -24,6 +24,7 @@ from typing import Callable
 DATASET_SIZE = 9171
 DIMENSION = 128
 QUERY_COUNT = 10_000
+MIN_DURATION_SECONDS = 2.0
 HYBRID_QUERY_COUNT = 200
 SEED = 42
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
@@ -286,8 +287,9 @@ def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchE
     db.create_hnsw_index(name, config)
     started = time.perf_counter()
     with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-        for index, vector in enumerate(vectors):
-            transaction.upsert_to_hnsw(name, str(index).encode(), vector, None)
+        transaction.upsert_to_hnsw_batch(
+            name, [str(index).encode() for index in range(len(vectors))], vectors
+        )
         transaction.commit()
     del transaction
     db.flush()
@@ -465,6 +467,7 @@ def measure_setting(
     ef_search: int,
     min_queries: int,
     run_count: int,
+    min_duration_seconds: float = MIN_DURATION_SECONDS,
     k: int = 10,
     dataset_size: int = DATASET_SIZE,
 ) -> list[dict[str, object]]:
@@ -485,7 +488,7 @@ def measure_setting(
         started = time.perf_counter()
         executed = 0
         latencies = []
-        for _ in range(min_queries):
+        while executed < min_queries or time.perf_counter() - started < min_duration_seconds:
             query_started = time.perf_counter_ns()
             engine.search(queries[executed % len(queries)], k, ef_search)
             latencies.append((time.perf_counter_ns() - query_started) / 1000)
@@ -850,10 +853,11 @@ def _alopex_hybrid(vectors):
     db.execute_sql("CREATE TABLE hybrid_rows (id INT PRIMARY KEY, bucket INT)")
     started = time.perf_counter()
     with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-        for index, vector in enumerate(vectors):
-            transaction.upsert_to_hnsw(
-                "hybrid_vectors", str(index).encode(), vector, None
-            )
+        transaction.upsert_to_hnsw_batch(
+            "hybrid_vectors",
+            [str(index).encode() for index in range(len(vectors))],
+            vectors,
+        )
         transaction.commit()
     for start in range(0, len(vectors), 500):
         values = ",".join(
@@ -1461,6 +1465,14 @@ def render_markdown(payload: dict[str, object]) -> str:
         "| N | engine | build s | index bytes | peak RSS bytes | QPS @ recall>=0.95 | ef_search | recall |",
         "|---:|---|---:|---:|---:|---:|---:|---:|",
     ]
+    scale_builds = {
+        (row["dataset_size"], row["engine"]): row
+        for row in scale.get("build_results", [])
+    }
+    scale_rows = [
+        {**scale_builds[(row["dataset_size"], row["engine"])], **row}
+        for row in scale.get("results", [])
+    ]
     scale_table.extend(
         f"| {int(row['dataset_size']):,} | {row['engine']} | "
         f"{float(row['build_time_seconds']):.2f} | {int(row['index_size_bytes'])} | "
@@ -1471,7 +1483,7 @@ def render_markdown(payload: dict[str, object]) -> str:
             if row.get("recall_at_selected_setting") is not None
             else "not met |"
         )
-        for row in scale.get("results", [])
+        for row in scale_rows
     )
     run = payload["provenance"]
     return (
@@ -1529,11 +1541,12 @@ def write_artifacts(
     run_provenance = provenance()
     payload = {
         "schema": "alopex.hnsw-diagnostic/v3",
-        "contract": {
+            "contract": {
             "dataset_size": DATASET_SIZE,
             "dimension": DIMENSION,
             "warmup": "one complete query cycle per engine/setting",
-            "query_count_per_run": QUERY_COUNT,
+            "min_queries": QUERY_COUNT,
+            "min_duration_seconds": MIN_DURATION_SECONDS,
             "runs": 3,
             "metrics": [
                 "recall_at_10",

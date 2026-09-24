@@ -107,6 +107,22 @@ fn cosine_search_prepares_query_norm_once() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn neighbor_selection_reuses_cached_node_norms() {
+    for (metric, left_vector, right_vector, expected_score) in [
+        (Metric::Cosine, [1.0, 0.0], [0.0, 1.0], 0.0),
+        (Metric::L2, [0.0, 0.0], [3.0, 4.0], -5.0),
+        (Metric::InnerProduct, [1.0, 2.0], [3.0, 4.0], 11.0),
+    ] {
+        let mut graph = HnswGraph::new(base_config().with_metric(metric)).unwrap();
+        let left = graph.insert(b"left", &left_vector, b"").unwrap();
+        let right = graph.insert(b"right", &right_vector, b"").unwrap();
+
+        assert!((graph.node_similarity(left, right) - expected_score).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn reverse_link_pruning_reuses_diverse_neighbor_selection() {
     let mut graph = HnswGraph::new(base_config().with_metric(Metric::Cosine)).unwrap();
     let root = graph.insert(b"root", &[1.0, 0.0], b"").unwrap();

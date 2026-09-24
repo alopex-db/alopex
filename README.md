@@ -70,12 +70,19 @@ CREATE TABLE knowledge_chunks (
 );
 
 -- Hybrid Search: SQL Filter + ANN Search
-SELECT content, cosine_similarity(embedding, [0.1, 0.5, ...]) as score
+CREATE INDEX knowledge_chunks_embedding_hnsw ON knowledge_chunks (embedding)
+USING HNSW WITH (ef_search = 128);
+
+SELECT content, vector_similarity(embedding, [0.1, 0.5, ...], 'cosine') AS score
 FROM knowledge_chunks
 WHERE created_at > '2024-01-01'
 ORDER BY score DESC
 LIMIT 5;
-````
+```
+
+`vector_similarity` always ranks nearest vectors with `DESC`; `vector_distance`
+always ranks nearest vectors with `ASC`. HNSW's optional `ef_search` index
+setting trades query latency for recall.
 
 ### The "Lake-Link" Import
 

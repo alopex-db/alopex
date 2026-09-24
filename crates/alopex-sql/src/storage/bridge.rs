@@ -68,7 +68,14 @@ impl LocalRangeChangeJournal {
     ) -> CoreResult<Self> {
         Ok(Self {
             scope,
-            before: sql_data_snapshot(transaction)?,
+            // MemoryKV exposes write-local before-images, so a journal need
+            // not scan every SQL row merely to begin a transaction. Backends
+            // without that capability retain the snapshot implementation.
+            before: if transaction.journal_pending_writes().is_some() {
+                BTreeMap::new()
+            } else {
+                sql_data_snapshot(transaction)?
+            },
         })
     }
 
@@ -79,8 +86,25 @@ impl LocalRangeChangeJournal {
         self,
         transaction: &mut T,
     ) -> CoreResult<Option<RangeChangeRecord>> {
-        let after = sql_data_snapshot(transaction)?;
-        let payload = self.payload(&after)?;
+        let payload = if let Some(writes) = transaction.journal_pending_writes() {
+            let mut before = BTreeMap::new();
+            let mut after = BTreeMap::new();
+            for (key, initial, final_value) in writes {
+                if !matches!(key.first(), Some(0x01 | 0x02)) {
+                    continue;
+                }
+                if let Some(value) = initial {
+                    before.insert(key.clone(), value);
+                }
+                if let Some(value) = final_value {
+                    after.insert(key, value);
+                }
+            }
+            self.payload_between(&before, &after)?
+        } else {
+            let after = sql_data_snapshot(transaction)?;
+            self.payload_between(&self.before, &after)?
+        };
         if payload.is_empty() {
             return Ok(None);
         }
@@ -108,11 +132,15 @@ impl LocalRangeChangeJournal {
         Ok(Some(record))
     }
 
-    fn payload(&self, after: &BTreeMap<Key, Value>) -> CoreResult<Vec<RangeChangePayload>> {
-        let keys: BTreeSet<&Key> = self.before.keys().chain(after.keys()).collect();
+    fn payload_between(
+        &self,
+        before: &BTreeMap<Key, Value>,
+        after: &BTreeMap<Key, Value>,
+    ) -> CoreResult<Vec<RangeChangePayload>> {
+        let keys: BTreeSet<&Key> = before.keys().chain(after.keys()).collect();
         let mut payload = Vec::new();
         for key in keys {
-            let before = self.before.get(key);
+            let before = before.get(key);
             let after = after.get(key);
             if before == after {
                 continue;

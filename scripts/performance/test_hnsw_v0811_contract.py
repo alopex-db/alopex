@@ -43,6 +43,7 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             ef_search=16,
             min_queries=3,
             run_count=1,
+            min_duration_seconds=0,
             dataset_size=2,
         )
         self.assertEqual(rows[0]["query_count"], 3)
@@ -261,9 +262,6 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                             "phase": "search",
                             "dataset_size": 10_000,
                             "engine": "alopex-hnsw",
-                            "build_time_seconds": 1.0,
-                            "index_size_bytes": 1024,
-                            "peak_rss_bytes": 2048,
                             "qps_at_recall_095": 10.0,
                             "ef_search_at_recall_095": 64,
                             "recall_at_selected_setting": 0.96,
@@ -279,9 +277,6 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         {
                             "dataset_size": 10_000,
                             "engine": "hnswlib",
-                            "build_time_seconds": 1.0,
-                            "index_size_bytes": 1024,
-                            "peak_rss_bytes": 2048,
                             "qps_at_recall_095": 0.0,
                             "ef_search_at_recall_095": None,
                             "recall_at_selected_setting": None,
@@ -293,6 +288,15 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                             "phase": "build",
                             "dataset_size": 10_000,
                             "engine": "alopex-hnsw",
+                            "build_time_seconds": 1.0,
+                            "index_size_bytes": 1024,
+                            "peak_rss_bytes": 2048,
+                            "node_count": 10_000,
+                        },
+                        {
+                            "phase": "build",
+                            "dataset_size": 10_000,
+                            "engine": "hnswlib",
                             "build_time_seconds": 1.0,
                             "index_size_bytes": 1024,
                             "peak_rss_bytes": 2048,

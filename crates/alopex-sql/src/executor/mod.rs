@@ -84,14 +84,30 @@ use std::time::Instant;
 
 fn explain_result(
     plan: &LogicalPlan,
+    hnsw_path: Option<String>,
     analyze: bool,
     format: ExplainFormat,
     elapsed_ns: Option<u64>,
     rows: Option<u64>,
 ) -> ExecutionResult {
     let (column, value) = match format {
-        ExplainFormat::Text => ("QUERY PLAN", plan.explain_text(elapsed_ns, rows)),
-        ExplainFormat::Json => ("query_plan", plan.explain_json(analyze, elapsed_ns, rows)),
+        ExplainFormat::Text => {
+            let mut text = plan.explain_text(elapsed_ns, rows);
+            if let Some(path) = hnsw_path {
+                text = format!("{path}\n{text}");
+            }
+            ("QUERY PLAN", text)
+        }
+        ExplainFormat::Json => {
+            let mut document: serde_json::Value =
+                serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
+                    .expect("logical plan must render valid JSON");
+            if let Some(selected_path) = hnsw_path {
+                document["physical_plan"]["selected_path"] =
+                    serde_json::Value::String(selected_path);
+            }
+            ("query_plan", document.to_string())
+        }
     };
     ExecutionResult::Query(QueryResult::new(
         vec![ColumnInfo::new(column, ResolvedType::Text)],
@@ -233,14 +249,19 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let hnsw_path = self.run_in_write_txn(|txn| {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::explain_knn_path(txn, &*catalog, &input)
+                })?;
                 if !analyze {
-                    return Ok(explain_result(&input, false, format, None, None));
+                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
                 }
                 let started = Instant::now();
                 let result = self.execute((*input).clone())?;
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
+                    hnsw_path,
                     true,
                     format,
                     Some(elapsed_ns),
@@ -640,14 +661,20 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 format,
                 input,
             } => {
+                let hnsw_path = {
+                    let (mut sql_txn, _) = txn.split_parts();
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
+                };
                 if !analyze {
-                    return Ok(explain_result(&input, false, format, None, None));
+                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
                 }
                 let started = Instant::now();
                 let result = self.execute_in_txn((*input).clone(), txn)?;
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
+                    hnsw_path,
                     true,
                     format,
                     Some(elapsed_ns),

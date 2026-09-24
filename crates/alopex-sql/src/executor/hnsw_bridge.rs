@@ -13,6 +13,16 @@ use crate::storage::{SqlTxn, SqlValue};
 pub struct HnswBridge;
 
 impl HnswBridge {
+    /// Returns the index-default search breadth, if configured.
+    pub(crate) fn search_ef(index: &IndexMetadata) -> Result<Option<usize>> {
+        index
+            .options
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("ef_search"))
+            .map(|(_, value)| parse_ef_search(value))
+            .transpose()
+    }
+
     /// HNSW インデックスを作成し、既存行を取り込む。
     pub fn create_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
@@ -26,15 +36,21 @@ impl HnswBridge {
 
         let mut hnsw = HnswIndex::create(&index.name, config).map_err(ExecutorError::from)?;
 
-        {
+        let entries = {
             let mut storage = txn.table_storage(table);
+            let mut entries = Vec::new();
             for entry in storage.range_scan(0, u64::MAX)? {
                 let (row_id, row) = entry.map_err(ExecutorError::Storage)?;
                 let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
-                hnsw.upsert(&row_id.to_be_bytes(), &vector, &[])
-                    .map_err(ExecutorError::from)?;
+                entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
             }
-        }
+            entries
+        };
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|(key, vector, metadata)| (key.as_slice(), vector.as_slice(), metadata.as_slice()))
+            .collect();
+        hnsw.upsert_batch(&entries).map_err(ExecutorError::from)?;
 
         hnsw.save(txn.inner_mut()).map_err(ExecutorError::from)
     }
@@ -53,23 +69,30 @@ impl HnswBridge {
         }
     }
 
-    /// INSERT/UPSERT 時のインデックス更新。
-    pub fn on_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    /// Batch INSERT/UPSERT index update. Validation happens before the graph changes.
+    pub fn on_insert_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
         txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
-        row_id: u64,
-        row: &[SqlValue],
+        rows: &[(u64, Vec<SqlValue>)],
     ) -> Result<()> {
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
         let (column, col_idx) = vector_column(table, index)?;
-        let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
+        let mut owned_entries = Vec::with_capacity(rows.len());
+        for (row_id, row) in rows {
+            let vector = required_vector(row_id, &table.name, column, &row[col_idx])?;
+            owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+        }
+        let entries: Vec<_> = owned_entries
+            .iter()
+            .map(|(key, vector, metadata)| (key.as_slice(), vector.as_slice(), metadata.as_slice()))
+            .collect();
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
         entry
             .index
-            .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
+            .upsert_staged_batch(&entries, &mut entry.state)
             .map_err(ExecutorError::from)?;
         entry.dirty = true;
         Ok(())
@@ -212,6 +235,9 @@ fn build_config(index: &IndexMetadata, column: &ColumnMetadata) -> Result<HnswCo
                 })?;
                 config.ef_construction = parsed;
             }
+            "ef_search" => {
+                parse_ef_search(value)?;
+            }
             other => {
                 return Err(ExecutorError::Core(CoreError::UnknownOption {
                     key: other.to_string(),
@@ -221,6 +247,22 @@ fn build_config(index: &IndexMetadata, column: &ColumnMetadata) -> Result<HnswCo
     }
 
     Ok(config)
+}
+
+fn parse_ef_search(value: &str) -> Result<usize> {
+    let parsed: usize = value.parse().map_err(|_| {
+        ExecutorError::Core(CoreError::InvalidParameter {
+            param: "ef_search".into(),
+            reason: format!("整数値に変換できません: {value}"),
+        })
+    })?;
+    if parsed == 0 {
+        return Err(ExecutorError::Core(CoreError::InvalidParameter {
+            param: "ef_search".into(),
+            reason: "must be greater than zero".into(),
+        }));
+    }
+    Ok(parsed)
 }
 
 fn extract_vector(value: &SqlValue, column: &ColumnMetadata) -> Result<Option<Vec<f32>>> {
@@ -283,5 +325,21 @@ fn vector_column<'a>(
             column: column.name.clone(),
             expected: "VECTOR".into(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_ef_search_is_parsed_and_validated() {
+        let index = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("EF_SEARCH", "256");
+        assert_eq!(HnswBridge::search_ef(&index).unwrap(), Some(256));
+
+        let invalid = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("ef_search", "0");
+        assert!(HnswBridge::search_ef(&invalid).is_err());
     }
 }

@@ -720,6 +720,12 @@ class Transaction:
             KeyError: If the key does not exist.
         """
         ...
+    def get_vectors(
+        self,
+        keys: Sequence[bytes],
+        metric: Metric,
+        zero_copy_return: bool = True,
+    ) -> List[Optional[Any]]: ...
     def upsert_to_hnsw(
         self,
         name: str,
@@ -727,6 +733,13 @@ class Transaction:
         vector: Any,
         metadata: Optional[bytes] = None,
     ) -> None: ...
+    def upsert_to_hnsw_batch(
+        self,
+        name: str,
+        keys: Sequence[bytes],
+        vectors: Any,
+        metadata: Optional[Sequence[Optional[bytes]]] = None,
+    ) -> int: ...
     def delete_from_hnsw(self, name: str, key: bytes) -> None: ...
     def commit(self) -> None: ...
     def rollback(self) -> None: ...

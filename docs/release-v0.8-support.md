@@ -92,7 +92,7 @@ source of truth.
 Before any GitHub Release, registry package, or other public artifact exists, a
 failed or cancelled tag-triggered workflow requires cancelling active workflows,
 independently verifying that no public artifact exists, and deleting every
-unpublished release tag immediately. The corrected commit must pass exact-main
+unpublished release tag immediately. The corrected commit must pass exact-candidate
 verification before it is retagged.
 
 After any public artifact exists, the release uses repair-forward only; it never

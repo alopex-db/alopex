@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.14] — 2026-09-22
+
+### Added
+
+- HNSW supports atomic batch ingestion, avoiding per-vector index callbacks
+  during bulk construction (#447).
+- Embedded Python exposes vector retrieval and batch HNSW insertion with
+  atomic duplicate-ID rejection (#450).
+
+### Fixed
+
+- Vector upserts keep lookup work independent of the already stored vector
+  count and remain visible to searches in the owning transaction (#448).
+- kNN plans use HNSW only when its cost threshold is met, and `EXPLAIN`
+  identifies the selected exact or HNSW path (#449).
+
 ## [0.8.12] — 2026-09-12
 
 ### Added

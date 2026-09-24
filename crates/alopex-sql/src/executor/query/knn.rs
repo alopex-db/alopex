@@ -14,12 +14,20 @@ use crate::catalog::{Catalog, IndexMetadata, RowIdMode, StorageType, TableMetada
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result, Row};
-use crate::planner::knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
+use crate::planner::knn_optimizer::{
+    KnnPattern, SortDirection, VectorFunction, detect_knn_pattern,
+};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
 use super::{columnar_scan, project, scan};
+
+// #449 measured exact scan as faster at 8k rows, 128 dimensions, and k=10.
+const HNSW_BASE_MIN_ROWS: usize = 8_192;
+const HNSW_BASE_DIMENSIONS: usize = 128;
+const HNSW_BASE_K: usize = 10;
+const HNSW_MINIMUM_ROWS: usize = 1_024;
 
 /// LogicalPlan が KNN 最適化パターンに合致する場合、実行に必要な情報を抽出する。
 pub fn extract_knn_context(
@@ -44,7 +52,39 @@ pub fn extract_knn_context(
     }
 }
 
-/// KNN 最適化クエリを実行する。HNSW インデックスが存在しフィルタ無しならインデックス経路、
+/// Returns the physical KNN path selected for a logical plan.
+pub fn explain_knn_path<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    plan: &LogicalPlan,
+) -> Result<Option<String>> {
+    let Some((pattern, _, filter)) = extract_knn_context(plan) else {
+        return Ok(None);
+    };
+    let Some(table) = catalog.get_table(&pattern.table) else {
+        return Ok(None);
+    };
+    let path = match selected_hnsw_index(txn, catalog, table, &pattern, filter.as_ref())? {
+        Some(index) => format_hnsw_path(&index, pattern.k, filter.is_some()),
+        None => "ExactKnnScan".to_string(),
+    };
+    Ok(Some(path))
+}
+
+fn format_hnsw_path(index: &IndexMetadata, k: u64, has_filter: bool) -> String {
+    if has_filter {
+        // A filtered approximate result can be incomplete. The executor then
+        // preserves SQL semantics with an exact fallback.
+        format!(
+            "HnswSearchPostFilter index={} k={} fallback=ExactKnnScan",
+            index.name, k
+        )
+    } else {
+        format!("HnswSearch index={} k={}", index.name, k)
+    }
+}
+
+/// KNN 最適化クエリを実行する。HNSW インデックスが存在すれば索引経路、
 /// それ以外はヒープベースの全件スキャンで Top-K を選択する。
 pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
@@ -69,18 +109,14 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     let higher_is_better = pattern.sort_direction == SortDirection::Desc;
 
-    // HNSW インデックスがあり、フィルタ無し、Row ストレージの場合のみインデックス経路を使う。
-    if filter.is_none()
-        && table_meta.storage_options.storage_type == StorageType::Row
-        && let Some(index) = find_hnsw_index(catalog, &table_meta, &pattern.column)
-    {
+    if let Some(index) = selected_hnsw_index(txn, catalog, &table_meta, pattern, filter)? {
         let mut entries = execute_hnsw_search(
             txn,
             &table_meta,
             &index,
-            vector_idx,
+            (projection, vector_idx, higher_is_better),
             pattern,
-            higher_is_better,
+            filter,
         )?;
         order_entries(&mut entries, higher_is_better);
         let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
@@ -103,32 +139,119 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     Ok(ExecutionResult::Query(projected))
 }
 
+fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    table: &TableMetadata,
+    pattern: &KnnPattern,
+    _filter: Option<&TypedExpr>,
+) -> Result<Option<IndexMetadata>> {
+    if table.storage_options.storage_type != StorageType::Row {
+        return Ok(None);
+    }
+    let Some(index) = find_hnsw_index(catalog, table, &pattern.column) else {
+        return Ok(None);
+    };
+    let dimension = vector_dimension(table, &pattern.column).unwrap_or(HNSW_BASE_DIMENSIONS);
+    let threshold = hnsw_row_threshold(pattern.k as usize, dimension);
+    Ok(table_exceeds_hnsw_threshold(txn, table, threshold)?.then_some(index))
+}
+
+fn table_exceeds_hnsw_threshold<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table: &TableMetadata,
+    threshold: usize,
+) -> Result<bool> {
+    // ponytail: bounded pre-scan; replace with persisted table cardinality when the catalog owns it.
+    let mut storage = txn.table_storage(table);
+    let mut rows = storage.range_scan(0, u64::MAX)?;
+    for _ in 0..threshold {
+        if rows.next().transpose()?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(rows.next().transpose()?.is_some())
+}
+
+fn hnsw_row_threshold(k: usize, dimension: usize) -> usize {
+    HNSW_BASE_MIN_ROWS
+        .saturating_mul(k.max(HNSW_BASE_K))
+        .saturating_div(HNSW_BASE_K)
+        .saturating_mul(HNSW_BASE_DIMENSIONS)
+        .saturating_div(dimension.max(1))
+        .max(HNSW_MINIMUM_ROWS)
+}
+
+fn vector_dimension(table: &TableMetadata, column: &str) -> Option<usize> {
+    match &table
+        .columns
+        .get(table.get_column_index(column)?)?
+        .data_type
+    {
+        crate::planner::types::ResolvedType::Vector { dimension, .. } => Some(*dimension as usize),
+        _ => None,
+    }
+}
+
 fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     index: &IndexMetadata,
-    vector_idx: usize,
+    (projection, vector_idx, higher_is_better): (&Projection, usize, bool),
     pattern: &KnnPattern,
-    higher_is_better: bool,
+    filter: Option<&TypedExpr>,
 ) -> Result<Vec<HeapEntry>> {
-    let hits = HnswBridge::search_knn(
-        txn,
-        &index.name,
-        &pattern.query_vector,
-        pattern.k as usize,
-        None,
-    )?;
-
-    let mut storage = txn.table_storage(table_meta);
-    let mut entries = Vec::with_capacity(hits.len());
-    for (row_id, _) in hits {
-        if let Some(values) = storage.get(row_id)? {
-            let row = Row::new(row_id, values);
-            let score = score_row(&row, vector_idx, pattern)?;
-            entries.push(HeapEntry::new(score, row, higher_is_better));
-        }
+    let mut requested = pattern.k as usize;
+    if filter.is_some() {
+        requested = requested.saturating_mul(4).max(64);
     }
-    Ok(entries)
+    let ef_search = HnswBridge::search_ef(index)?;
+
+    loop {
+        let hits = HnswBridge::search_knn(
+            txn,
+            &index.name,
+            &pattern.query_vector,
+            requested,
+            ef_search,
+        )?;
+        let exhausted = hits.len() < requested;
+        let mut storage = txn.table_storage(table_meta);
+        let mut entries = Vec::with_capacity(hits.len());
+        for (row_id, _) in hits {
+            if let Some(values) = storage.get(row_id)? {
+                let row = Row::new(row_id, values);
+                if let Some(predicate) = filter
+                    && !evaluate_filter(predicate, &row)?
+                {
+                    continue;
+                }
+                let score = score_row(&row, vector_idx, pattern)?;
+                entries.push(HeapEntry::new(score, row, higher_is_better));
+            }
+        }
+        if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
+            if filter.is_some() && entries.len() < pattern.k as usize {
+                return execute_heap_scan(
+                    txn,
+                    table_meta,
+                    projection,
+                    filter,
+                    pattern,
+                    vector_idx,
+                    higher_is_better,
+                );
+            }
+            order_entries(&mut entries, higher_is_better);
+            entries.truncate(pattern.k as usize);
+            return Ok(entries);
+        }
+        let next = requested.saturating_mul(2);
+        if next == requested {
+            return Ok(entries);
+        }
+        requested = next;
+    }
 }
 
 fn execute_heap_scan<'txn, S: KVStore + 'txn>(
@@ -210,12 +333,19 @@ fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> 
         }
     };
 
-    crate::executor::evaluator::vector_ops::vector_similarity(
-        vector,
-        &pattern.query_vector,
-        pattern.metric,
-    )
-    .map_err(|e| ExecutorError::Evaluation(e.into()))
+    let score = match pattern.function {
+        VectorFunction::Similarity => crate::executor::evaluator::vector_ops::vector_similarity(
+            vector,
+            &pattern.query_vector,
+            pattern.metric,
+        ),
+        VectorFunction::Distance => crate::executor::evaluator::vector_ops::vector_distance(
+            vector,
+            &pattern.query_vector,
+            pattern.metric,
+        ),
+    };
+    score.map_err(|e| ExecutorError::Evaluation(e.into()))
 }
 
 fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {
@@ -566,6 +696,14 @@ mod tests {
     use crate::storage::{SqlTransaction, TxnBridge};
     use alopex_core::kv::memory::MemoryKV;
 
+    #[test]
+    fn hnsw_threshold_scales_with_k_and_vector_dimension() {
+        assert_eq!(hnsw_row_threshold(10, 128), 8_192);
+        assert_eq!(hnsw_row_threshold(20, 128), 16_384);
+        assert_eq!(hnsw_row_threshold(10, 256), 4_096);
+        assert_eq!(hnsw_row_threshold(10, usize::MAX), HNSW_MINIMUM_ROWS);
+    }
+
     fn setup_table() -> (TxnBridge<MemoryKV>, MemoryCatalog, TableMetadata) {
         let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
         let mut catalog = MemoryCatalog::new();
@@ -620,6 +758,7 @@ mod tests {
             column: "embedding".to_string(),
             query_vector: vec![1.0, 0.0],
             metric: VectorMetric::Cosine,
+            function: VectorFunction::Similarity,
             k,
             sort_direction: SortDirection::Desc,
         }
@@ -738,5 +877,85 @@ mod tests {
             }
             other => panic!("unexpected result {other:?}"),
         }
+    }
+
+    #[test]
+    fn hnsw_post_filter_falls_back_to_exact_when_candidates_are_insufficient() {
+        let (bridge, mut catalog, _) = setup_table();
+        let mut values = vec![[1.0, 0.0]; 65];
+        values[64] = [-1.0, 0.0];
+        let mut insert_txn = bridge.begin_write().unwrap();
+        insert_rows(&mut insert_txn, &catalog, &values);
+        insert_txn.commit().unwrap();
+
+        let mut ddl_txn = bridge.begin_write().unwrap();
+        execute_create_index(
+            &mut ddl_txn,
+            &mut catalog,
+            IndexMetadata::new(0, "idx_items_embedding", "items", vec!["embedding".into()])
+                .with_method(IndexMethod::Hnsw),
+            false,
+        )
+        .unwrap();
+        ddl_txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let table = catalog.get_table("items").unwrap().clone();
+        let filter = TypedExpr::binary_op(
+            TypedExpr::column_ref(
+                "items".into(),
+                "id".into(),
+                0,
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            BinaryOp::Eq,
+            TypedExpr::literal(
+                Literal::Number("64".into()),
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            ResolvedType::Boolean,
+            Span::empty(),
+        );
+        let index = catalog.get_index("idx_items_embedding").unwrap().clone();
+        assert!(
+            scan::execute_scan(&mut txn, &table)
+                .unwrap()
+                .iter()
+                .any(|row| row.values[0] == SqlValue::Integer(64))
+        );
+        let entries = execute_hnsw_search(
+            &mut txn,
+            &table,
+            &index,
+            (
+                &Projection::All(
+                    table
+                        .column_names()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                1,
+                true,
+            ),
+            &base_pattern(1),
+            Some(&filter),
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].row.values[0], SqlValue::Integer(64));
+    }
+
+    #[test]
+    fn filtered_hnsw_explain_discloses_exact_fallback() {
+        let index = IndexMetadata::new(0, "idx_items_embedding", "items", vec!["embedding".into()])
+            .with_method(IndexMethod::Hnsw);
+        assert_eq!(
+            format_hnsw_path(&index, 10, true),
+            "HnswSearchPostFilter index=idx_items_embedding k=10 fallback=ExactKnnScan"
+        );
     }
 }

@@ -32,7 +32,7 @@ class ReleaseContractTests(unittest.TestCase):
         for checkpoint in (
             "Checkpoint 0 — tracker and candidate",
             "Checkpoint 1 — implementation and review",
-            "Checkpoint 2 — main and pre-tag verification",
+            "Checkpoint 2 — immutable candidate and RC qualification",
             "Checkpoint 3 — publication",
             "Checkpoint 4 — public verification and close",
         ):
@@ -65,7 +65,7 @@ class ReleaseContractTests(unittest.TestCase):
 
         self.assertIn("scripts/release/type_capability_gate.py", surface_gate)
         self.assertIn(
-            'type_capability_gate.py --release-version "${RELEASE_TAG_NAME#v}"',
+            'type_capability_gate.py --release-version "${version%-rc.*}"',
             release,
         )
 
@@ -247,7 +247,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
         self.assertIn('core_run_id=${GITHUB_RUN_ID}', dispatch)
         self.assertIn('--event workflow_dispatch', dispatch)
-        self.assertIn('git merge-base --is-ancestor "${core_sha}" HEAD', tagger)
+        self.assertIn('test "${core_sha}" = "${candidate_sha}"', tagger)
+        self.assertNotIn("origin/main", tagger)
         self.assertIn('gh run list --workflow ci.yml --commit "${candidate_sha}"', tagger)
         self.assertIn('git tag -a "${python_tag}" "${candidate_sha}"', tagger)
 
@@ -255,40 +256,40 @@ class ReleaseContractTests(unittest.TestCase):
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
+        package = release.split("  package-crates:", maxsplit=1)[1].split(
+            "  qualify-python:", maxsplit=1
+        )[0]
         publish = release.split("  publish-crate:", maxsplit=1)[1].split(
-            "  dispatch-python-release:", maxsplit=1
+            "  create-stable-release:", maxsplit=1
         )[0]
 
         self.assertNotIn(
             "NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser",
-            publish,
+            package,
         )
         self.assertIn(
-            "env -u NIM_SQL_PARSER_LIB_DIR cargo publish", publish
+            "Create exact source staging with candidate parser assets", package
         )
         self.assertIn(
-            "Bind crate source staging to freshly built parser assets", publish
+            '--vendor-dir "${stage}/crates/alopex-sql/nim-sql-parser/vendor"',
+            package,
         )
+        self.assertIn("parser library digest mismatch", package)
+        self.assertIn("package_candidate_crates.py", package)
+        self.assertNotIn("cargo publish", publish)
         self.assertIn(
-            '--vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor"',
-            publish,
+            "python scripts/release/retarget_python_parser_source.py", package
         )
-        self.assertIn("parser library digest mismatch", publish)
-        self.assertIn(
-            "unknown or ambiguous parser vendor manifest layout", publish
-        )
-        self.assertIn(
-            "python scripts/release/retarget_python_parser_source.py", publish
-        )
+        self.assertIn("publish_crate_archive.py upload", publish)
 
     def test_crate_publish_parser_staging_python_is_valid(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
         staging = release.split(
-            "- name: Bind crate source staging to freshly built parser assets",
+            "- name: Create exact source staging with candidate parser assets",
             maxsplit=1,
-        )[1].split("- name: Create publish helper", maxsplit=1)[0]
+        )[1].split("- name: Package and bind every published crate once", maxsplit=1)[0]
         script = staging.split("python - <<'PY'\n", maxsplit=1)[1].split(
             "\n          PY", maxsplit=1
         )[0]
@@ -318,7 +319,7 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertNotIn("needs:", header)
         join = workflow.split("  final-release-join:", maxsplit=1)[1]
         self.assertIn("needs: [publish-pypi, github-release]", join)
-        self.assertIn('git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}"', join)
+        self.assertIn('test "${core_tag_sha}" = "${python_tag_sha}"', join)
 
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")

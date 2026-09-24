@@ -10,8 +10,16 @@ pub struct KnnPattern {
     pub column: String,
     pub query_vector: Vec<f32>,
     pub metric: VectorMetric,
+    pub function: VectorFunction,
     pub k: u64,
     pub sort_direction: SortDirection,
+}
+
+/// ベクトル関数が返すスコアの意味。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFunction {
+    Distance,
+    Similarity,
 }
 
 /// ソート方向（ASC / DESC）。
@@ -42,9 +50,11 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
         _ => return None,
     };
 
-    if func_name != "vector_similarity" && func_name != "vector_distance" {
-        return None;
-    }
+    let function = match func_name.as_str() {
+        "vector_similarity" => VectorFunction::Similarity,
+        "vector_distance" => VectorFunction::Distance,
+        _ => return None,
+    };
 
     if args.len() != 3 {
         return None;
@@ -54,7 +64,7 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
     let query_vector = extract_query_vector(&args[1])?;
     let metric = extract_metric(&args[2])?;
 
-    if !is_valid_knn_direction(metric, sort_direction) {
+    if !is_valid_knn_direction(function, sort_direction) {
         return None;
     }
 
@@ -63,6 +73,7 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
         column: column_name,
         query_vector,
         metric,
+        function,
         k,
         sort_direction,
     })
@@ -138,12 +149,11 @@ fn extract_metric(expr: &crate::planner::typed_expr::TypedExpr) -> Option<Vector
     }
 }
 
-fn is_valid_knn_direction(metric: VectorMetric, dir: SortDirection) -> bool {
+fn is_valid_knn_direction(function: VectorFunction, dir: SortDirection) -> bool {
     matches!(
-        (metric, dir),
-        (VectorMetric::Cosine, SortDirection::Desc)
-            | (VectorMetric::Inner, SortDirection::Desc)
-            | (VectorMetric::L2, SortDirection::Asc)
+        (function, dir),
+        (VectorFunction::Distance, SortDirection::Asc)
+            | (VectorFunction::Similarity, SortDirection::Desc)
     )
 }
 
@@ -163,10 +173,15 @@ mod tests {
         }
     }
 
-    fn build_plan(order_asc: bool, metric_literal: &str, offset: Option<u64>) -> LogicalPlan {
+    fn build_plan(
+        function: &str,
+        order_asc: bool,
+        metric_literal: &str,
+        offset: Option<u64>,
+    ) -> LogicalPlan {
         let span = Span::empty();
         let vector_expr = TypedExpr::function_call(
-            "vector_similarity".to_string(),
+            function.to_string(),
             vec![
                 TypedExpr::column_ref(
                     "items".to_string(),
@@ -205,20 +220,33 @@ mod tests {
 
     #[test]
     fn detect_knn_pattern_cosine_desc() {
-        let plan = build_plan(false, "cosine", None);
+        let plan = build_plan("vector_similarity", false, "cosine", None);
         let pattern = detect_knn_pattern(&plan).expect("should detect pattern");
         assert_eq!(pattern.table, "items");
         assert_eq!(pattern.column, "embedding");
         assert_eq!(pattern.k, 2);
         assert_eq!(pattern.metric, VectorMetric::Cosine);
+        assert_eq!(pattern.function, VectorFunction::Similarity);
         assert_eq!(pattern.sort_direction, SortDirection::Desc);
         assert_eq!(pattern.query_vector, vec![1.0, 0.0]);
     }
 
     #[test]
     fn reject_invalid_direction() {
-        let plan = build_plan(true, "cosine", None);
-        assert!(detect_knn_pattern(&plan).is_none());
+        for metric in ["cosine", "l2", "inner"] {
+            let plan = build_plan("vector_similarity", true, metric, None);
+            assert!(detect_knn_pattern(&plan).is_none(), "{metric}");
+
+            let plan = build_plan("vector_distance", false, metric, None);
+            assert!(detect_knn_pattern(&plan).is_none(), "{metric}");
+
+            let plan = build_plan("vector_distance", true, metric, None);
+            assert_eq!(
+                detect_knn_pattern(&plan).unwrap().function,
+                VectorFunction::Distance,
+                "{metric}"
+            );
+        }
     }
 
     #[test]
@@ -232,13 +260,13 @@ mod tests {
         };
         assert!(detect_knn_pattern(&plan_no_limit).is_none());
 
-        let plan_with_offset = build_plan(false, "cosine", Some(1));
+        let plan_with_offset = build_plan("vector_similarity", false, "cosine", Some(1));
         assert!(detect_knn_pattern(&plan_with_offset).is_none());
     }
 
     #[test]
     fn reject_unknown_metric() {
-        let plan = build_plan(false, "unknown", None);
+        let plan = build_plan("vector_similarity", false, "unknown", None);
         assert!(detect_knn_pattern(&plan).is_none());
     }
 
@@ -246,7 +274,7 @@ mod tests {
     fn reject_with_ties_limit() {
         // FETCH ... WITH TIES needs the exact peer set of the boundary row,
         // so the KNN index shortcut must not fire (issue #152, D14).
-        let plan = build_plan(false, "cosine", None);
+        let plan = build_plan("vector_similarity", false, "cosine", None);
         let LogicalPlan::Limit {
             input,
             limit,

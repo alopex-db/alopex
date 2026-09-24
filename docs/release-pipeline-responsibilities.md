@@ -19,7 +19,7 @@ correctness.
 | behavior, execution path, fast resource/performance policy | Development CI | change the commit |
 | broad compatibility, stress, durability, statistical performance | Extended Verification | change the commit or versioned policy |
 | archive/package/install/manifest/digest qualification | RC Qualification | create a new immutable RC after a fix |
-| failed or cancelled publication before any public artifact exists | Stable Delivery | cancel active workflows, verify no public artifact exists, delete every unpublished release tag immediately, then return to corrected-main tagging |
+| failed or cancelled publication before any public artifact exists | Stable Delivery | cancel active workflows, verify no public artifact exists, delete every unpublished release tag immediately, then return to corrected-candidate tagging |
 | publication or public reachability after any public artifact exists | Stable Delivery | retry or repair-forward the same stable release |
 
 ## Workflow job inventory
@@ -41,12 +41,10 @@ job's owner.
 | `alopex-py-release.yml:macos` | RC Qualification | qualified macOS wheels |
 | `alopex-py-release.yml:windows` | RC Qualification | qualified Windows wheels |
 | `alopex-py-release.yml:sdist` | RC Qualification | qualified source distribution |
-| `alopex-py-release.yml:publish-testpypi` | RC Qualification | isolated package-index staging |
-| `alopex-py-release.yml:verify-testpypi` | RC Qualification | installed candidate smoke result |
+| `alopex-py-release.yml:candidate-release` | RC Qualification | immutable qualified wheel/sdist attachment |
 | `alopex-py-release.yml:publish-pypi` | Stable Delivery | exact wheel/sdist publication |
 | `alopex-py-release.yml:github-release` | Stable Delivery | exact wheel/sdist promotion |
 | `alopex-py-release.yml:final-release-join` | Stable Delivery | publication identity join |
-| `alopex-py-release.yml:verify-public-release` | Stable Delivery | public package reachability result |
 | `alopex-py.yml:rust-check` | Development CI | exact-SHA binding lint result |
 | `alopex-py.yml:test` | Development CI | exact-SHA binding behavior result |
 | `alopex-py.yml:polars-test` | Development CI | exact-SHA Polars compatibility result |
@@ -81,10 +79,15 @@ job's owner.
 | `public-release-verification.yml:notify-scheduled-failure` | Stable Delivery | scheduled reachability notification |
 | `release-process.yml:contract` | Development CI | workflow contract tests |
 | `release-process.yml:state-model` | Development CI | legal transition model result |
-| `release.yml:ci-gate` | Stable Delivery | approved RC identity check |
-| `release.yml:build-release` | RC Qualification | moved to `release-candidate.yml` |
-| `release.yml:create-release` | Stable Delivery | exact candidate asset promotion |
+| `release.yml:ci-gate` | Stable Delivery | immutable tag and exact-SHA CI identity check |
+| `release.yml:build-release` | RC Qualification | qualified CLI and parser assets |
+| `release.yml:create-release` | RC Qualification | immutable RC GitHub asset attachment |
+| `release.yml:package-crates` | RC Qualification | exact `.crate` archives and API metadata |
+| `release.yml:qualify-python` | RC Qualification | immutable Python artifact qualification dispatch |
+| `release.yml:record-candidate-manifest` | RC Qualification | full candidate artifact digest manifest |
+| `release.yml:promote-release` | Stable Delivery | RC-manifest identity verification |
 | `release.yml:publish-crate` | Stable Delivery | exact crate-byte publication |
+| `release.yml:create-stable-release` | Stable Delivery | exact candidate-byte GitHub Release promotion |
 | `release.yml:dispatch-python-release` | Stable Delivery | exact Python artifact publication dispatch |
 | `stress-tests.yml:stress-tests` | Extended Verification | exact-SHA stress result |
 | `stress-tests.yml:sanitizer-lane` | Extended Verification | exact-SHA sanitizer result |

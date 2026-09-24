@@ -653,7 +653,9 @@ fn pick_ports() -> Result<(u16, u16, u16)> {
 
 fn wait_for_server(port: u16) -> Result<()> {
     let addr = format!("127.0.0.1:{port}");
-    for _ in 0..80 {
+    // Server startup competes with the workspace's first test build on loaded
+    // CI workers; keep a finite bound while allowing that cold-start work.
+    for _ in 0..300 {
         if let Ok(mut stream) = TcpStream::connect(&addr) {
             let request =
                 b"GET /api/admin/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";

@@ -28,6 +28,21 @@ def test_upsert_vector_and_search_similar():
 
 
 @pytest.mark.requires_numpy
+def test_get_vectors_preserves_input_order_and_missing_entries():
+    import numpy as np
+
+    db = Database.new()
+    with db.begin(TxnMode.READ_WRITE) as txn:
+        txn.upsert_vector(b"a", None, np.array([1.0, 0.0], dtype=np.float32), Metric.COSINE)
+        txn.upsert_vector(b"b", None, np.array([0.0, 1.0], dtype=np.float32), Metric.COSINE)
+        vectors = txn.get_vectors([b"b", b"missing", b"a"], Metric.COSINE)
+
+    assert vectors[1] is None
+    np.testing.assert_array_equal(vectors[0], [0.0, 1.0])
+    np.testing.assert_array_equal(vectors[2], [1.0, 0.0])
+
+
+@pytest.mark.requires_numpy
 @pytest.mark.parametrize(
     "query_factory",
     [

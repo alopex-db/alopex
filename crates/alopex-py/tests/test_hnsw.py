@@ -28,6 +28,39 @@ def test_hnsw_create_search_delete():
 
 
 @pytest.mark.requires_numpy
+def test_hnsw_batch_upsert_rejects_duplicate_keys_atomically():
+    import numpy as np
+
+    db = Database.new()
+    db.create_hnsw_index("idx", HnswConfig(2))
+    vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    with db.begin(TxnMode.READ_WRITE) as txn:
+        assert txn.upsert_to_hnsw_batch("idx", [b"a", b"b"], vectors) == 2
+        with pytest.raises(Exception, match="duplicate key"):
+            txn.upsert_to_hnsw_batch("idx", [b"dup", b"dup"], vectors)
+        txn.commit()
+
+    results, _ = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 10)
+    assert {result.key for result in results} == {b"a", b"b"}
+
+
+@pytest.mark.requires_numpy
+def test_hnsw_batch_upsert_rejects_mismatched_lengths_atomically():
+    import numpy as np
+
+    db = Database.new()
+    db.create_hnsw_index("idx", HnswConfig(2))
+    vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    with db.begin(TxnMode.READ_WRITE) as txn:
+        with pytest.raises(Exception, match="same length"):
+            txn.upsert_to_hnsw_batch("idx", [b"valid"], vectors)
+        txn.commit()
+
+    results, _ = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 10)
+    assert results == []
+
+
+@pytest.mark.requires_numpy
 def test_hnsw_multithreaded_search_releases_gil():
     import time
     import threading

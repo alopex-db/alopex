@@ -58,6 +58,9 @@ pub use search::{
     KeyPattern, KeySearchCancellation, KeySearchEntry, KeySearchPage, KeySearchRequest,
 };
 
+/// One buffered write and its value before the transaction's first mutation.
+pub type JournalPendingWrite = (Key, Option<Value>, Option<Value>);
+
 #[cfg(feature = "s3")]
 pub use s3::{S3Config, S3KV};
 
@@ -144,6 +147,15 @@ pub trait KVTransaction<'a> {
             request,
             cancellation,
         )
+    }
+
+    /// Returns the transaction's buffered writes together with each key's
+    /// value before its first write, when the backend can provide that view.
+    /// This lets durable change journals scale with mutations rather than the
+    /// complete keyspace. Backends that cannot prove the before-image return
+    /// `None` and callers retain their snapshot-based fallback.
+    fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
+        None
     }
 
     /// Commits the transaction, applying all buffered writes.

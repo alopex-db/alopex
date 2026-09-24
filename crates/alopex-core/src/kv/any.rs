@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 use crate::error::{Error, Result};
 use crate::kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
 use crate::kv::{
-    KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest, OwnedKVScan,
-    OwnedKVStore, OwnedKVTransaction, OwnedKVTransactionAdapter, ReadAtCapability, ReadAtPoint,
-    ReadAtResult,
+    JournalPendingWrite, KVStore, KVTransaction, KeySearchCancellation, KeySearchPage,
+    KeySearchRequest, OwnedKVScan, OwnedKVStore, OwnedKVTransaction, OwnedKVTransactionAdapter,
+    ReadAtCapability, ReadAtPoint, ReadAtResult,
 };
 use crate::lsm::sstable::{SSTableCursor, SSTableEntry};
 use crate::lsm::{
@@ -702,6 +702,14 @@ impl<'a> KVTransaction<'a> for AnyKVTransaction<'a> {
             Self::Memory(tx) => tx.search_keys_with_cancellation(request, cancellation),
             Self::Lsm(tx) => tx.search_keys_with_cancellation(request, cancellation),
             Self::Owned(tx) => tx.search_keys_with_cancellation(request, cancellation),
+        }
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
+        match self {
+            Self::Memory(tx) => tx.journal_pending_writes(),
+            Self::Lsm(tx) => tx.journal_pending_writes(),
+            Self::Owned(tx) => tx.journal_pending_writes(),
         }
     }
 

@@ -48,6 +48,8 @@ class ReleaseHnswEvidenceTests(unittest.TestCase):
                     "recall_at_10",
                     "tie_aware_recall_at_10",
                     "queries_per_second",
+                ],
+                "build_metrics": [
                     "build_time_seconds",
                     "index_size_bytes",
                     "peak_rss_bytes",
@@ -94,6 +96,17 @@ class ReleaseHnswEvidenceTests(unittest.TestCase):
                 "limits": [
                     {"dataset_size": 200_000, "reason": "configured limit"},
                     {"dataset_size": 1_000_000, "reason": "configured limit"},
+                ],
+                "build_results": [
+                    {
+                        "dataset_size": size,
+                        "engine": engine,
+                        "build_time_seconds": 1.0,
+                        "index_size_bytes": 1024,
+                        "peak_rss_bytes": 2048,
+                    }
+                    for size in (10_000, 50_000)
+                    for engine in ("alopex-hnsw", "hnswlib", "faiss-hnsw", "flat")
                 ],
                 "results": [
                     {

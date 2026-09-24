@@ -840,6 +840,7 @@ pub struct MemoryTransaction<'a> {
     state: TxnState,
     start_version: u64,
     writes: BTreeMap<Key, Option<Value>>,
+    journal_before: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
 }
 
@@ -852,6 +853,7 @@ impl<'a> MemoryTransaction<'a> {
             state: TxnState::Active,
             start_version,
             writes: BTreeMap::new(),
+            journal_before: BTreeMap::new(),
             read_set: HashMap::new(),
         }
     }
@@ -859,6 +861,14 @@ impl<'a> MemoryTransaction<'a> {
     fn ensure_active(&self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+
+    fn record_journal_before_write(&mut self, key: &Key) -> Result<()> {
+        if !self.journal_before.contains_key(key) {
+            let before = self.get(key)?;
+            self.journal_before.insert(key.clone(), before);
         }
         Ok(())
     }
@@ -892,6 +902,7 @@ impl<'a> MemoryTransaction<'a> {
             None,
             Some(end_vec),
             self.start_version,
+            self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
         )
     }
@@ -912,6 +923,7 @@ impl<'a> MemoryTransaction<'a> {
             Some(prefix_vec),
             None,
             self.start_version,
+            self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
         )
     }
@@ -932,6 +944,7 @@ impl<'a> MemoryTransaction<'a> {
             None,
             None,
             self.start_version,
+            self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
         )
     }
@@ -961,14 +974,18 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         };
 
         if let Some((v, version)) = result {
-            self.read_set.insert(key.clone(), version);
+            if self.mode != TxnMode::ReadOnly {
+                self.read_set.insert(key.clone(), version);
+            }
             return Ok(Some(v));
         }
 
         // Read-through to SSTable if not found in memory.
         if let Some(value) = self.manager.sstable_get(key)? {
             let version = self.manager.state.commit_version.load(Ordering::Acquire);
-            self.read_set.insert(key.clone(), version);
+            if self.mode != TxnMode::ReadOnly {
+                self.read_set.insert(key.clone(), version);
+            }
             return Ok(Some(value));
         }
 
@@ -982,6 +999,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.record_journal_before_write(&key)?;
         self.writes.insert(key, Some(value));
         Ok(())
     }
@@ -993,6 +1011,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.record_journal_before_write(&key)?;
         self.writes.insert(key, None);
         Ok(())
     }
@@ -1026,6 +1045,21 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             .scan_from_internal(start)
             .filter_map(|(key, value)| value.map(|value| (key, value)));
         Ok(Box::new(iter))
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<super::JournalPendingWrite>> {
+        Some(
+            self.writes
+                .iter()
+                .map(|(key, after)| {
+                    (
+                        key.clone(),
+                        self.journal_before.get(key).cloned().flatten(),
+                        after.clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn commit_self(mut self) -> Result<()> {
@@ -1127,6 +1161,7 @@ struct OwnedMemoryTransactionState {
     state: TxnState,
     start_version: u64,
     writes: BTreeMap<Key, Option<Value>>,
+    journal_before: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
     next_savepoint_id: u64,
     savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>)>,
@@ -1145,6 +1180,7 @@ impl OwnedMemoryTransaction {
                 state: TxnState::Active,
                 start_version,
                 writes: BTreeMap::new(),
+                journal_before: BTreeMap::new(),
                 read_set: HashMap::new(),
                 next_savepoint_id: 1,
                 savepoints: Vec::new(),
@@ -1186,6 +1222,37 @@ impl OwnedMemoryTransaction {
         }
         Ok(())
     }
+
+    fn ensure_writable(state: &OwnedMemoryTransactionState) -> Result<()> {
+        Self::ensure_active(state)?;
+        if state.mode == TxnMode::ReadOnly {
+            return Err(Error::TxnReadOnly);
+        }
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+
+    fn record_journal_before_write(&mut self, key: &Key) -> Result<()> {
+        if self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned")
+            .journal_before
+            .contains_key(key)
+        {
+            return Ok(());
+        }
+        let before = self.get(key)?;
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        state.journal_before.entry(key.clone()).or_insert(before);
+        Ok(())
+    }
 }
 
 impl OwnedKVTransaction for OwnedMemoryTransaction {
@@ -1219,7 +1286,9 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
         };
         if let Some((value, version)) = result {
             if version <= state.start_version {
-                state.read_set.insert(key.clone(), version);
+                if state.mode != TxnMode::ReadOnly {
+                    state.read_set.insert(key.clone(), version);
+                }
                 return Ok(Some(value));
             }
             return Ok(None);
@@ -1227,40 +1296,46 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
 
         if let Some(value) = self.manager.sstable_get(key)? {
             let start_version = state.start_version;
-            state.read_set.insert(key.clone(), start_version);
+            if state.mode != TxnMode::ReadOnly {
+                state.read_set.insert(key.clone(), start_version);
+            }
             return Ok(Some(value));
         }
         Ok(None)
     }
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
+        {
+            let state = self
+                .state
+                .lock()
+                .expect("owned memory transaction mutex poisoned");
+            Self::ensure_writable(&state)?;
+        }
+        self.record_journal_before_write(&key)?;
         let mut state = self
             .state
             .lock()
             .expect("owned memory transaction mutex poisoned");
-        Self::ensure_active(&state)?;
-        if state.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnReadOnly);
-        }
-        if state.cursor_open {
-            return Err(Error::TxnClosed);
-        }
+        Self::ensure_writable(&state)?;
         state.writes.insert(key, Some(value));
         Ok(())
     }
 
     fn delete(&mut self, key: Key) -> Result<()> {
+        {
+            let state = self
+                .state
+                .lock()
+                .expect("owned memory transaction mutex poisoned");
+            Self::ensure_writable(&state)?;
+        }
+        self.record_journal_before_write(&key)?;
         let mut state = self
             .state
             .lock()
             .expect("owned memory transaction mutex poisoned");
-        Self::ensure_active(&state)?;
-        if state.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnReadOnly);
-        }
-        if state.cursor_open {
-            return Err(Error::TxnClosed);
-        }
+        Self::ensure_writable(&state)?;
         state.writes.insert(key, None);
         Ok(())
     }
@@ -1341,6 +1416,26 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
 
     fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
         self.open_cursor(Some(start.to_vec()), None, None)
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<crate::kv::JournalPendingWrite>> {
+        let state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Some(
+            state
+                .writes
+                .iter()
+                .map(|(key, after)| {
+                    (
+                        key.clone(),
+                        state.journal_before.get(key).cloned().flatten(),
+                        after.clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
@@ -1425,6 +1520,7 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
             return Err(Error::TxnClosed);
         }
         state.writes.clear();
+        state.journal_before.clear();
         state.state = TxnState::RolledBack;
         Ok(())
     }
@@ -1498,7 +1594,9 @@ impl OwnedMemoryCursor {
         if transaction.state != TxnState::Active || !transaction.cursor_open {
             return Err(Error::TxnClosed);
         }
-        transaction.read_set.insert(key, version);
+        if transaction.mode != TxnMode::ReadOnly {
+            transaction.read_set.insert(key, version);
+        }
         Ok(())
     }
 
@@ -1576,6 +1674,7 @@ struct MergedScanIter<'a> {
     prefix: Option<Vec<u8>>,
     end: Option<Key>,
     start_version: u64,
+    track_reads: bool,
     read_set: &'a mut HashMap<Key, u64>,
 }
 
@@ -1588,6 +1687,7 @@ impl<'a> MergedScanIter<'a> {
         prefix: Option<Vec<u8>>,
         end: Option<Key>,
         start_version: u64,
+        track_reads: bool,
         read_set: &'a mut HashMap<Key, u64>,
     ) -> Self {
         let mut iter = Self {
@@ -1599,6 +1699,7 @@ impl<'a> MergedScanIter<'a> {
             prefix,
             end,
             start_version,
+            track_reads,
             read_set,
         };
         iter.advance_data();
@@ -1643,6 +1744,12 @@ impl<'a> MergedScanIter<'a> {
             self.write_peek = Some((k, v));
         }
     }
+
+    fn record_read(&mut self, key: Key, version: u64) {
+        if self.track_reads {
+            self.read_set.insert(key, version);
+        }
+    }
 }
 
 impl<'a> Iterator for MergedScanIter<'a> {
@@ -1657,13 +1764,13 @@ impl<'a> Iterator for MergedScanIter<'a> {
                 if dk == wk {
                     let (_, (_, ver)) = self.data_peek.take().unwrap();
                     let (_, write_val) = self.write_peek.take().unwrap();
-                    self.read_set.insert(dk.clone(), ver);
+                    self.record_read(dk.clone(), ver);
                     self.advance_data();
                     self.advance_write();
                     Some((dk, write_val))
                 } else if dk < wk {
                     let (k, (v, ver)) = self.data_peek.take().unwrap();
-                    self.read_set.insert(k.clone(), ver);
+                    self.record_read(k.clone(), ver);
                     self.advance_data();
                     Some((k, Some(v)))
                 } else {
@@ -1674,7 +1781,7 @@ impl<'a> Iterator for MergedScanIter<'a> {
             }
             (Some(_), None) => {
                 let (k, (v, ver)) = self.data_peek.take().unwrap();
-                self.read_set.insert(k.clone(), ver);
+                self.record_read(k.clone(), ver);
                 self.advance_data();
                 Some((k, Some(v)))
             }
@@ -2047,6 +2154,24 @@ mod tests {
     }
 
     #[test]
+    fn read_only_reads_do_not_track_write_conflicts() {
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+
+        let mut seed = manager.begin(TxnMode::ReadWrite).unwrap();
+        seed.put(key("k1"), value("v1")).unwrap();
+        manager.commit(seed).unwrap();
+
+        let mut reader = manager.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(&key("k1")).unwrap(), Some(value("v1")));
+        assert_eq!(
+            reader.scan_range(b"k0", b"kz").unwrap().collect::<Vec<_>>(),
+            vec![(key("k1"), value("v1"))]
+        );
+        assert!(reader.read_set.is_empty());
+    }
+
+    #[test]
     fn owned_memory_transaction_merges_incremental_cursor_and_commits_once() {
         use crate::kv::OwnedSessionFactory;
 
@@ -2119,6 +2244,43 @@ mod tests {
         lease
             .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
             .unwrap();
+    }
+
+    #[test]
+    fn owned_memory_transaction_exposes_journal_before_images() {
+        use crate::kv::{OwnedKVTransactionAdapter, OwnedSessionFactory};
+
+        let store = Arc::new(MemoryKV::new());
+        let manager = store.txn_manager();
+        let mut seed = manager.begin(TxnMode::ReadWrite).unwrap();
+        seed.put(key("existing"), value("before")).unwrap();
+        manager.commit(seed).unwrap();
+
+        let session = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let lease = session.acquire_lease().unwrap();
+        lease
+            .with_transaction(|transaction| {
+                let mut transaction = OwnedKVTransactionAdapter::new(transaction);
+                transaction.put(key("new"), value("after"))?;
+                transaction.delete(key("existing"))?;
+
+                assert_eq!(
+                    transaction.journal_pending_writes(),
+                    Some(vec![
+                        (key("existing"), Some(value("before")), None),
+                        (key("new"), None, Some(value("after"))),
+                    ])
+                );
+                Ok(())
+            })
+            .unwrap();
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+        session.rollback().unwrap();
     }
 
     #[test]

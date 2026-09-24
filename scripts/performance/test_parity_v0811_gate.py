@@ -1,13 +1,55 @@
+import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.performance.parity_v0811_gate import evaluate, percentile, validate_document
-from scripts.performance.parity_v0811_measure import normalize_hnsw, summarize_latencies
+from scripts.performance.parity_v0811_measure import (
+    _environment,
+    normalize_hnsw,
+    summarize_latencies,
+)
 
 
 class PerformanceParityGateTests(unittest.TestCase):
+    def test_measurement_environment_ignores_untracked_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "source.py").write_text("source\n", encoding="utf-8")
+            (root / ".venv").mkdir()
+            original_cwd = Path.cwd()
+
+            def git_run(command, **_kwargs):
+                if command[1:3] == ["rev-parse", "HEAD"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="revision\n")
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=b"source.py\0.venv\0"
+                )
+
+            try:
+                os.chdir(root)
+                with (
+                    patch(
+                        "scripts.performance.parity_v0811_measure.subprocess.run",
+                        side_effect=git_run,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.importlib.metadata.version",
+                        return_value="0.8.14",
+                    ),
+                ):
+                    environment = _environment()
+            finally:
+                os.chdir(original_cwd)
+
+        expected = hashlib.sha256()
+        expected.update(b"source.py\0source\n\0")
+        self.assertEqual(environment["alopex_tree_sha256"], expected.hexdigest())
+
     def test_measurement_summary_reports_percentiles_and_throughput(self):
         summary = summarize_latencies([0.001, 0.002, 0.004, 0.003], rows=100)
         self.assertEqual(summary["latency_p50_ms"], 2.0)

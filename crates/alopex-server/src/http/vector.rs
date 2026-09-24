@@ -216,18 +216,14 @@ pub(crate) async fn search_impl(
             }
         };
     let vector_literal = format_vector_literal(&request.vector);
-    let score_expr = format!(
-        "vector_similarity({}, {}, '{}')",
+    let distance_expr = format!(
+        "vector_distance({}, {}, '{}')",
         quote_ident(&vector_col),
         vector_literal,
         metric_to_string(metric)
     );
-    let order = match metric {
-        alopex_sql::ast::ddl::VectorMetric::L2 => "ASC",
-        _ => "DESC",
-    };
     let sql = format!(
-        "SELECT *, {score_expr} AS score FROM {} ORDER BY {score_expr} {order} LIMIT {}",
+        "SELECT *, {distance_expr} AS score FROM {} ORDER BY {distance_expr} ASC LIMIT {}",
         quote_ident(&table_meta.name),
         request.k
     );

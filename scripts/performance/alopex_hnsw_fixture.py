@@ -43,8 +43,9 @@ def prepare(dataset: Path, output: Path, size: int, commit: str) -> dict[str, ob
     )
     try:
         with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-            for index, vector in enumerate(vectors):
-                transaction.upsert_to_hnsw(name, str(index).encode(), vector, None)
+            transaction.upsert_to_hnsw_batch(
+                name, [str(index).encode() for index in range(len(vectors))], vectors
+            )
             transaction.commit()
         db.flush()
         stats = db.get_hnsw_stats(name)

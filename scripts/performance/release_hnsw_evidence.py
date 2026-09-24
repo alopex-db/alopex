@@ -122,7 +122,12 @@ def validate_public_pair(
     ):
         raise ValueError("benchmark measurement contract does not match")
     metrics = contract.get("metrics")
-    if not isinstance(metrics, list) or not REQUIRED_METRICS.issubset(metrics):
+    build_metrics = contract.get("build_metrics")
+    if (
+        not isinstance(metrics, list)
+        or not isinstance(build_metrics, list)
+        or not REQUIRED_METRICS.issubset(set(metrics) | set(build_metrics))
+    ):
         raise ValueError("benchmark metrics are incomplete")
     builds = payload.get("builds")
     engines = (
@@ -171,21 +176,33 @@ def validate_public_pair(
         for row in scale["results"]
         if isinstance(row, dict)
     }
+    scale_builds = scale.get("build_results")
+    scale_build_matrix = {
+        (row.get("dataset_size"), row.get("engine"))
+        for row in scale_builds
+        if isinstance(row, dict)
+    } if isinstance(scale_builds, list) else set()
     if scale_matrix != {
         (size, engine) for size in SCALE_SIZES for engine in SCALE_ENGINES
-    }:
+    } or scale_build_matrix != scale_matrix:
         raise ValueError("scale comparison matrix is incomplete")
     if not _complete_rows(
         scale["results"],
         {
             "dataset_size",
             "engine",
-            "build_time_seconds",
-            "index_size_bytes",
-            "peak_rss_bytes",
             "qps_at_recall_095",
             "ef_search_at_recall_095",
             "recall_at_selected_setting",
+        },
+    ) or not _complete_rows(
+        scale_builds,
+        {
+            "dataset_size",
+            "engine",
+            "build_time_seconds",
+            "index_size_bytes",
+            "peak_rss_bytes",
         },
     ):
         raise ValueError("scale measurements are incomplete")

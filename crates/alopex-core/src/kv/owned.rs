@@ -9,7 +9,10 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
-use crate::kv::{search, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest};
+use crate::kv::{
+    search, JournalPendingWrite, KVTransaction, KeySearchCancellation, KeySearchPage,
+    KeySearchRequest,
+};
 use crate::txn::{OwnedLeaseOutcome, OwnedReadSessionStatus, OwnedTransactionSessionStatus};
 use crate::types::{Key, TxnId, TxnMode, Value};
 
@@ -121,6 +124,13 @@ pub trait OwnedKVTransaction: Send {
         }
     }
 
+    /// Returns buffered writes with their first visible values when the backend can provide
+    /// them. This lets the embedded SQL change journal avoid snapshotting an owned transaction's
+    /// complete keyspace.
+    fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
+        None
+    }
+
     /// Commit once.  The caller cannot use this transaction afterwards.
     fn commit(self: Box<Self>) -> Result<()>;
 
@@ -203,6 +213,10 @@ impl<'a> KVTransaction<'a> for OwnedKVTransactionAdapter<'a> {
     ) -> Result<KeySearchPage> {
         self.transaction
             .search_keys_with_cancellation(request, cancellation)
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
+        self.transaction.journal_pending_writes()
     }
 
     fn commit_self(self) -> Result<()> {

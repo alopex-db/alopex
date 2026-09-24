@@ -57,6 +57,31 @@ fn vector_similarity_and_distance_end_to_end() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn distance_and_similarity_have_stable_sql_meanings() {
+    let sql = r#"
+        CREATE TABLE dummy (id INT);
+        INSERT INTO dummy (id) VALUES (1);
+        SELECT vector_distance([1.0, 0.0], [1.0, 0.0], 'cosine'),
+               vector_similarity([1.0, 0.0], [1.0, 0.0], 'cosine'),
+               vector_distance([1.0, 0.0], [-1.0, 0.0], 'inner'),
+               vector_similarity([1.0, 0.0], [-1.0, 0.0], 'inner')
+        FROM dummy;
+    "#;
+    let results = run_sql(sql);
+    let ExecutionResult::Query(query) = &results[2] else {
+        panic!("unexpected result");
+    };
+    assert_eq!(query.rows[0][0], alopex_sql::storage::SqlValue::Double(0.0));
+    assert_eq!(query.rows[0][1], alopex_sql::storage::SqlValue::Double(1.0));
+    assert_eq!(query.rows[0][2], alopex_sql::storage::SqlValue::Double(1.0));
+    assert_eq!(
+        query.rows[0][3],
+        alopex_sql::storage::SqlValue::Double(-1.0)
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn vector_dims_and_norm_end_to_end() {
     let sql = r#"
         CREATE TABLE dummy (id INT);

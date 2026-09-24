@@ -26,11 +26,11 @@ env:
   RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}
 
 jobs:
-  # Implementation correctness belongs to local tests and the normal CI lane.
-  # Release only binds this immutable tag to already-approved CI evidence.
   ci-gate:
     name: Approved source evidence
     runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.identity.outputs.kind }}
     permissions:
       actions: read
       contents: read
@@ -39,22 +39,26 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
-      - name: Verify SQL type capability contract
-        shell: bash
-        run: python scripts/release/type_capability_gate.py --release-version "${RELEASE_TAG_NAME#v}"
       - name: Verify immutable tag and approved CI evidence
+        id: identity
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${RELEASE_TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "${RELEASE_TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]]; then
+            echo "kind=rc" >> "${GITHUB_OUTPUT}"
+          elif [[ "${RELEASE_TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "kind=stable" >> "${GITHUB_OUTPUT}"
+          else
+            echo "release tag must be vX.Y.Z or vX.Y.Z-rc.N" >&2
+            exit 1
+          fi
           [[ "${RELEASE_TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git cat-file -t "${RELEASE_TAG_NAME}")" == "tag" ]]
           test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
-          git fetch origin main
-          git merge-base --is-ancestor "${RELEASE_TARGET_SHA}" origin/main
+          # The immutable tag, not branch membership, selects the release candidate.
           approved=false
           for attempt in $(seq 1 30); do
             if gh run list --workflow ci.yml --commit "${RELEASE_TARGET_SHA}" \
@@ -67,10 +71,17 @@ jobs:
             sleep 10
           done
           test "${approved}" = true
+      - name: Verify SQL type capability contract
+        if: ${{ steps.identity.outputs.kind == 'rc' }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG_NAME#v}"
+          python scripts/release/type_capability_gate.py --release-version "${version%-rc.*}"
 
   build-release:
     name: Build Release (${{ matrix.target }})
     needs: [ci-gate]
+    if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -180,8 +191,9 @@ jobs:
             artifacts/parser/*.tar.gz
 
   create-release:
-    name: Create GitHub Release
-    needs: build-release
+    name: Create RC GitHub Release
+    needs: [ci-gate, build-release]
+    if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -232,7 +244,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${RELEASE_TAG_NAME#v}"
-          test "${RELEASE_TAG_NAME}" = "v${version}"
+          version="${version%-rc.*}"
           manifest="artifacts/parser-vendor-manifest-v${version}.json"
           envelope="artifacts/parser-assets-v${version}.json"
           mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
@@ -254,58 +266,37 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
           files: artifacts/*
           generate_release_notes: true
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-crate:
-    name: Publish to crates.io
-    needs: [build-release, create-release]
-    if: ${{ needs.build-release.result == 'success' && needs.create-release.result == 'success' }}
+  package-crates:
+    name: Package qualified crate archives
+    needs: [ci-gate, create-release]
+    if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG_NAME: ${{ inputs.release_tag }}
-      RELEASE_TARGET_SHA: ${{ inputs.target_sha }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
       - uses: dtolnay/rust-toolchain@1.90.0
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Verify peeled release tag and create clean source staging
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --force --tags origin
-          release_tag="${RELEASE_TAG_NAME:-${GITHUB_REF_NAME}}"
-          release_target_sha="${RELEASE_TARGET_SHA:-${GITHUB_SHA}}"
-          # The release commit carries both the core and Python tags.  Select
-          # the requested tag explicitly instead of relying on git describe's
-          # arbitrary choice among multiple exact-match tags.
-          git tag --points-at HEAD | grep -Fxq "${release_tag}"
-          test "$(git rev-parse HEAD)" = "${release_target_sha}"
-          RELEASE_TAG_NAME="${release_tag}"
-          RELEASE_TARGET_SHA="${release_target_sha}"
-          test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
-          test -z "$(git status --porcelain)"
-          stage="${RUNNER_TEMP}/alopex-release-source"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          git archive --format=tar "${RELEASE_TAG_NAME}^{commit}" | tar -xf - -C "$stage"
-          test -z "$(git -C "$stage" status --porcelain 2>/dev/null || true)"
-          echo "RELEASE_TAG_NAME=${RELEASE_TAG_NAME}" >> "$GITHUB_ENV"
-          echo "RELEASE_TARGET_SHA=${RELEASE_TARGET_SHA}" >> "$GITHUB_ENV"
-          echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
-
-      - name: Bind crate source staging to freshly built parser assets
+      - name: Create exact source staging with candidate parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           version="${RELEASE_TAG_NAME#v}"
-          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${version%-rc.*}"
+          git fetch --force --tags origin
+          test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
+          stage="${RUNNER_TEMP}/alopex-release-source"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          git archive --format=tar "${RELEASE_TAG_NAME}^{commit}" | tar -xf - -C "$stage"
           asset_dir="${RUNNER_TEMP}/alopex-release-parser-assets"
           rm -rf "${asset_dir}"
           mkdir -p "${asset_dir}"
@@ -314,9 +305,9 @@ jobs:
             --pattern "alopex-parser-v${version}-contract-0.25.0-*.tar.gz" \
             --dir "${asset_dir}" --clobber
           manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
-          python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
+          python "${stage}/scripts/release/parser_asset_manifest.py" verify-manifest \
             --manifest "${manifest}" --asset-dir "${asset_dir}"
-          RELEASE_STAGE="${RELEASE_STAGE}" MANIFEST="${manifest}" ASSET_DIR="${asset_dir}" \
+          RELEASE_STAGE="${stage}" MANIFEST="${manifest}" ASSET_DIR="${asset_dir}" \
             python - <<'PY'
           import hashlib
           import json
@@ -331,16 +322,12 @@ jobs:
           vendor = stage / "crates/alopex-sql/nim-sql-parser/vendor"
           for asset in manifest["assets"]:
               archive = asset_dir / asset["archive"]["filename"]
-              library_path = PurePosixPath(asset["library"]["path"])
-              if library_path.is_absolute() or ".." in library_path.parts:
-                  raise SystemExit(f"unsafe parser library path: {library_path}")
               with tarfile.open(archive, "r:gz") as handle:
                   def read_asset(identity):
                       path = PurePosixPath(identity["path"])
                       if path.is_absolute() or ".." in path.parts:
                           raise SystemExit(f"unsafe parser library path: {path}")
-                      member = handle.getmember(str(path))
-                      source = handle.extractfile(member)
+                      source = handle.extractfile(handle.getmember(str(path)))
                       if source is None:
                           raise SystemExit(f"parser library is not a file: {path}")
                       data = source.read()
@@ -349,130 +336,289 @@ jobs:
                       return path.name, data
                   dynamic_name, library = read_asset(asset["library"])
                   static_name, static_library = read_asset(asset["static_library"])
-              expected = asset["library"]["sha256"]
               target_dir = vendor / asset["target"]
               target_dir.mkdir(parents=True, exist_ok=True)
               (target_dir / dynamic_name).write_bytes(library)
               (target_dir / static_name).write_bytes(static_library)
               (target_dir / "CONTRACT_VERSION").write_bytes(b"0.25.0\n")
               (target_dir / "SHA256SUMS").write_bytes(
-                  f"{expected}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
+                  f"{asset['library']['sha256']}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
               )
-          fixed_manifest = vendor / "parser-vendor-manifest.json"
-          versioned_manifests = sorted(vendor.glob("parser-vendor-manifest-v*.json"))
-          if fixed_manifest.is_file() and not versioned_manifests:
-              destination_manifest = fixed_manifest
-          elif not fixed_manifest.exists() and len(versioned_manifests) == 1:
-              destination_manifest = versioned_manifests[0]
-          else:
-              raise SystemExit(
-                  "unknown or ambiguous parser vendor manifest layout in release staging"
-              )
+          destination_manifest = vendor / "parser-vendor-manifest.json"
           destination_manifest.write_bytes(manifest_path.read_bytes())
           PY
           python scripts/release/retarget_python_parser_source.py \
             --manifest "${manifest}" \
-            --vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor" \
-            --build-support "${RELEASE_STAGE}/crates/alopex-sql/build_support.rs"
-          staged_manifest="${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json"
-          if [[ ! -f "${staged_manifest}" ]]; then
-            mapfile -t historical_manifests < <(find \
-              "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor" \
-              -maxdepth 1 -name 'parser-vendor-manifest-v*.json' -type f | sort)
-            test "${#historical_manifests[@]}" -eq 1
-            staged_manifest="${historical_manifests[0]}"
-          fi
-          python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
-            --manifest "${staged_manifest}" \
-            --asset-dir "${asset_dir}"
-
-      - name: Create publish helper
+            --vendor-dir "${stage}/crates/alopex-sql/nim-sql-parser/vendor" \
+            --build-support "${stage}/crates/alopex-sql/build_support.rs"
+          mkdir -p "${RUNNER_TEMP}/alopex-crate-assets"
+          echo "RELEASE_STAGE=${stage}" >> "$GITHUB_ENV"
+          echo "CRATE_ASSETS=${RUNNER_TEMP}/alopex-crate-assets" >> "$GITHUB_ENV"
+      - name: Package and bind every published crate once
+        shell: bash
         run: |
-          cat > publish-crate.sh <<'EOF'
-          #!/usr/bin/env bash
           set -euo pipefail
-          crate="$1"
-          version="$(python - "$crate" "$RELEASE_STAGE" <<'PY'
+          python "${RELEASE_STAGE}/scripts/release/package_candidate_crates.py" \
+            --manifest "${RELEASE_STAGE}/Cargo.toml" --output "${CRATE_ASSETS}" \
+            --target-dir "${RUNNER_TEMP}/alopex-release-package-target"
+      - name: Attach qualified crate archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${RELEASE_TAG_NAME}" "${CRATE_ASSETS}"/* --clobber
+
+  qualify-python:
+    name: Qualify Python candidate artifacts
+    needs: [ci-gate, create-release]
+    if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Dispatch and require Python artifact qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run alopex-py-release.yml --ref "${RELEASE_TAG_NAME}" \
+            -f "core_run_id=${GITHUB_RUN_ID}" \
+            -f "source_ref=${RELEASE_TAG_NAME}" \
+            -f "core_tag=${RELEASE_TAG_NAME}" \
+            -f "mode=qualification"
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list --workflow alopex-py-release.yml \
+              --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
+              --jq ".[] | select(.headSha == \"${RELEASE_TARGET_SHA}\" and .createdAt >= \"${started_at}\") | .databaseId" | head -1)"
+            [[ -n "${run_id}" ]] && break
+            sleep 10
+          done
+          [[ -n "${run_id}" ]]
+          gh run watch "${run_id}" --exit-status
+
+  record-candidate-manifest:
+    name: Record qualified candidate manifest
+    needs: [ci-gate, qualify-python, package-crates]
+    if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Bind candidate assets and source evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          version="${version%-rc.*}"
+          candidate_dir="${RUNNER_TEMP}/alopex-candidate-assets"
+          mkdir -p "${candidate_dir}"
+          gh release download "${RELEASE_TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --dir "${candidate_dir}" --clobber
+          ci_run_id="$(gh run list --workflow ci.yml --commit "${RELEASE_TARGET_SHA}" \
+            --json databaseId,status,conclusion --limit 20 \
+            --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId' | head -1)"
+          [[ "${ci_run_id}" =~ ^[1-9][0-9]*$ ]]
+          verification="${RUNNER_TEMP}/candidate-verification.json"
+          python - "${verification}" "${RELEASE_TARGET_SHA}" "${ci_run_id}" <<'PY'
           import json
-          from pathlib import Path
-          import subprocess
           import sys
-          name = sys.argv[1]
-          stage = Path(sys.argv[2])
-          data = json.loads(subprocess.check_output([
-              "cargo", "metadata", "--manifest-path", str(stage / "Cargo.toml"),
-              "--no-deps", "--format-version", "1"
-          ]))
-          for pkg in data["packages"]:
-              if pkg["name"] == name:
-                  print(pkg["version"])
-                  sys.exit(0)
-          sys.exit(1)
+
+          path, commit_sha, run_id = sys.argv[1:]
+          with open(path, "w", encoding="utf-8") as handle:
+              json.dump(
+                  {
+                      "commit_sha": commit_sha,
+                      "runs": [
+                          {
+                              "name": "Development CI",
+                              "run_id": int(run_id),
+                              "conclusion": "success",
+                          }
+                      ],
+                  },
+                  handle,
+              )
           PY
-          )"
-          status="$(curl -sS --retry 5 --retry-connrefused --retry-delay 2 \
-            -H "User-Agent: alopex-release/${GITHUB_RUN_ID:-local}" \
-            -H "Accept: application/json" \
-            -o /dev/null -w "%{http_code}" \
-            "https://crates.io/api/v1/crates/${crate}/${version}")"
-          if [[ "$status" == "200" ]]; then
-            echo "skip: ${crate}@${version} already published"
-            exit 0
-          fi
-          if [[ "$status" != "404" ]]; then
-            echo "unexpected crates.io status ${status} for ${crate}@${version}" >&2
-            exit 1
-          fi
-          env -u NIM_SQL_PARSER_LIB_DIR cargo publish \
-            --manifest-path "${RELEASE_STAGE}/Cargo.toml" -p "${crate}"
-          EOF
-          chmod +x publish-crate.sh
+          manifest="${RUNNER_TEMP}/candidate-manifest-v${version}.json"
+          python scripts/release/candidate_manifest.py build \
+            --version "${version}" --rc-tag "${RELEASE_TAG_NAME}" \
+            --commit-sha "${RELEASE_TARGET_SHA}" --artifact-dir "${candidate_dir}" \
+            --verification "${verification}" --output "${manifest}"
+          python scripts/release/candidate_manifest.py verify \
+            --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
+            --stable-tag "v${version}" --stable-sha "${RELEASE_TARGET_SHA}"
+          gh release upload "${RELEASE_TAG_NAME}" "${manifest}" --clobber
 
-      - name: Publish alopex-core
-        run: ./publish-crate.sh alopex-core
+  promote-release:
+    name: Promote qualified candidate artifacts
+    needs: [ci-gate]
+    if: ${{ needs.ci-gate.outputs.kind == 'stable' }}
+    runs-on: ubuntu-latest
+    outputs:
+      rc_tag: ${{ steps.candidate.outputs.rc_tag }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Verify candidate manifest and immutable artifact bytes
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          git fetch --force --tags origin
+          mapfile -t rc_tags < <(git tag --points-at "${RELEASE_TARGET_SHA}" \
+            --list "v${version}-rc.*" --sort=-v:refname)
+          test "${#rc_tags[@]}" -gt 0
+          rc_tag="${rc_tags[0]}"
+          candidate_dir="${RUNNER_TEMP}/alopex-candidate-assets"
+          mkdir -p "${candidate_dir}"
+          gh release download "${rc_tag}" --repo "${GITHUB_REPOSITORY}" \
+            --dir "${candidate_dir}" --clobber
+          manifest_name="candidate-manifest-v${version}.json"
+          manifest="${RUNNER_TEMP}/${manifest_name}"
+          mv "${candidate_dir}/${manifest_name}" "${manifest}"
+          python scripts/release/candidate_manifest.py verify \
+            --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
+            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}"
+          mv "${manifest}" "${candidate_dir}/${manifest_name}"
+          echo "rc_tag=${rc_tag}" >> "${GITHUB_OUTPUT}"
+  publish-crate:
+    name: Publish qualified crate archives to crates.io
+    needs: [ci-gate, promote-release]
+    if: ${{ needs.ci-gate.outputs.kind == 'stable' && needs.promote-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Verify and publish exact qualified crate bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ needs.promote-release.outputs.rc_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          candidate_dir="${RUNNER_TEMP}/alopex-candidate-crates"
+          mkdir -p "${candidate_dir}"
+          gh release download "${RC_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "*.crate" --pattern "*-publish-metadata.json" \
+            --pattern "candidate-manifest-v${version}.json" \
+            --dir "${candidate_dir}" --clobber
+          manifest="${RUNNER_TEMP}/candidate-manifest-v${version}.json"
+          mv "${candidate_dir}/$(basename "${manifest}")" "${manifest}"
+          # This delivery job downloads only crate assets, so validate their digests
+          # against the full manifest entries before the registry upload.
+          python - "${manifest}" "${candidate_dir}" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
 
-      - name: Wait for crates.io index update
-        run: sleep 30
+          manifest_path, artifact_dir = map(Path, sys.argv[1:])
+          expected = {
+              item["name"]: item
+              for item in json.loads(manifest_path.read_text(encoding="utf-8"))["artifacts"]
+              if item["name"].endswith(".crate") or item["name"].endswith("-publish-metadata.json")
+          }
+          actual = {path.name for path in artifact_dir.iterdir() if path.is_file()}
+          if actual != set(expected):
+              raise SystemExit("candidate crate asset inventory differs from manifest")
+          for name, item in expected.items():
+              path = artifact_dir / name
+              if path.stat().st_size != item["size"]:
+                  raise SystemExit(f"candidate crate asset size mismatch: {name}")
+              if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+                  raise SystemExit(f"candidate crate asset digest mismatch: {name}")
+          PY
+          for crate in alopex-core alopex-sql alopex-dataframe alopex-cluster alopex-embedded alopex-server alopex-cli; do
+            archive="${candidate_dir}/${crate}-${version}.crate"
+            metadata="${candidate_dir}/${crate}-publish-metadata.json"
+            test -f "${archive}" && test -f "${metadata}"
+            status="$(curl -sS --retry 5 --retry-connrefused --retry-delay 2 \
+              -H "User-Agent: alopex-release/${GITHUB_RUN_ID}" -o /dev/null -w "%{http_code}" \
+              "https://crates.io/api/v1/crates/${crate}/${version}")"
+            case "${status}" in
+              404) python scripts/release/publish_crate_archive.py upload --archive "${archive}" --metadata "${metadata}" ;;
+              200) ;;
+              *) echo "unexpected crates.io status ${status} for ${crate}@${version}" >&2; exit 1 ;;
+            esac
+            published=false
+            for attempt in $(seq 1 120); do
+              if python scripts/release/publish_crate_archive.py verify-published --archive "${archive}"; then
+                published=true
+                break
+              fi
+              sleep 10
+            done
+            test "${published}" = true
+          done
 
-      - name: Publish alopex-sql
-        run: ./publish-crate.sh alopex-sql
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-dataframe
-        run: ./publish-crate.sh alopex-dataframe
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      # alopex-embedded depends on alopex-cluster at the same release
-      # version, so cluster must be visible on crates.io first.
-      - name: Publish alopex-cluster
-        run: ./publish-crate.sh alopex-cluster
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-embedded
-        run: ./publish-crate.sh alopex-embedded
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-server
-        run: ./publish-crate.sh alopex-server
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-cli
-        run: ./publish-crate.sh alopex-cli
+  create-stable-release:
+    name: Create stable GitHub Release
+    needs: [ci-gate, promote-release, publish-crate]
+    if: ${{ needs.ci-gate.outputs.kind == 'stable' && needs.publish-crate.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Verify qualified bytes for stable delivery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ needs.promote-release.outputs.rc_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          candidate_dir="${RUNNER_TEMP}/alopex-candidate-assets"
+          mkdir -p "${candidate_dir}"
+          gh release download "${RC_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --dir "${candidate_dir}" --clobber
+          manifest_name="candidate-manifest-v${version}.json"
+          manifest="${RUNNER_TEMP}/${manifest_name}"
+          mv "${candidate_dir}/${manifest_name}" "${manifest}"
+          python scripts/release/candidate_manifest.py verify \
+            --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
+            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}"
+          mv "${manifest}" "${candidate_dir}/${manifest_name}"
+      - name: Create stable GitHub Release from qualified bytes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG_NAME }}
+          files: ${{ runner.temp }}/alopex-candidate-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dispatch-python-release:
     name: Publish Python and require public demos
-    needs: [publish-crate]
-    if: ${{ needs.publish-crate.result == 'success' }}
+    needs: [create-stable-release, promote-release]
+    if: ${{ needs.create-stable-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -500,7 +646,11 @@ jobs:
           python_workflow_ref="${python_tag}"
           expected_workflow_sha="$(git rev-parse "${python_tag}^{commit}")"
           gh workflow run alopex-py-release.yml --ref "${python_workflow_ref}" \
-            -f "core_run_id=${GITHUB_RUN_ID}"
+            -f "core_run_id=${GITHUB_RUN_ID}" \
+            -f "source_ref=${python_tag}" \
+            -f "core_tag=${RELEASE_TAG_NAME}" \
+            -f "candidate_tag=${{ needs.promote-release.outputs.rc_tag }}" \
+            -f "mode=promotion"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
           echo "workflow_sha=${expected_workflow_sha}" >> "${GITHUB_OUTPUT}"
           echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"

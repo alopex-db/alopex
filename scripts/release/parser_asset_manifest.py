@@ -1405,7 +1405,7 @@ def release_envelope(args: argparse.Namespace) -> None:
     tag_sha = require_string(args.tag_sha, "tag SHA")
     if not re.fullmatch(r"[0-9a-f]{40}", tag_sha):
         raise ParserAssetError("tag SHA must be a 40-character lowercase hex value")
-    if tag != f"v{REQUIRED_ALOPEX_VERSION}":
+    if re.fullmatch(rf"v{re.escape(REQUIRED_ALOPEX_VERSION)}(?:-rc\.[1-9][0-9]*)?", tag) is None:
         raise ParserAssetError("release envelope tag does not match Alopex version")
     asset_dir = Path(args.asset_dir)
     assets: list[dict[str, Any]] = []

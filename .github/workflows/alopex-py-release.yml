@@ -1,17 +1,32 @@
 name: alopex-py-release
 
 on:
-  # The core release dispatches this workflow on the immutable Python tag.
+  # The core release dispatches this workflow; RC qualification builds and stable delivery promotes.
   workflow_dispatch:
     inputs:
       core_run_id:
-        description: "Core release workflow run that published crates and assets"
+        description: "Core workflow run bound to this release"
         required: true
         type: string
       source_ref:
-        description: "Immutable Python release tag to build"
+        description: "Immutable tag to check out"
         required: false
         default: ""
+        type: string
+      core_tag:
+        description: "Core RC or stable tag holding parser assets"
+        required: false
+        default: ""
+        type: string
+      candidate_tag:
+        description: "Qualified RC tag whose Python artifacts are promoted"
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "qualification builds artifacts; promotion publishes qualified artifacts"
+        required: true
+        default: "promotion"
         type: string
 
 defaults:
@@ -24,6 +39,7 @@ env:
 jobs:
   linux:
     name: linux (${{ matrix.target }})
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -46,7 +62,8 @@ jobs:
           version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
-          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
           echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
       - name: Stage exact Alopex parser assets
         env:
@@ -77,7 +94,7 @@ jobs:
           root = Path('.core-parser-assets')
           version = os.environ['ALOPEX_VERSION']
           envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
-          assert envelope['source']['tag'] == f'v{version}'
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
           manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           asset = next(item for item in manifest['assets'] if item['target'] == 'x86_64-unknown-linux-gnu')
           archive = root / asset['archive']['filename']
@@ -164,6 +181,7 @@ jobs:
 
   macos:
     name: macos (${{ matrix.target }})
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -189,7 +207,8 @@ jobs:
           version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
-          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
           echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
       - name: Stage exact Alopex parser assets
         env:
@@ -219,7 +238,7 @@ jobs:
           root = Path('.core-parser-assets')
           version = os.environ['ALOPEX_VERSION']
           envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
-          assert envelope['source']['tag'] == f'v{version}'
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
           manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           target = os.environ['TARGET_TRIPLE']
           asset = next(item for item in manifest['assets'] if item['target'] == target)
@@ -297,6 +316,7 @@ jobs:
 
   windows:
     name: windows (x86_64)
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -310,7 +330,8 @@ jobs:
           version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
-          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
           echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
       - name: Stage exact Alopex parser assets
         env:
@@ -339,7 +360,7 @@ jobs:
           root = Path('.core-parser-assets')
           version = os.environ['ALOPEX_VERSION']
           envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
-          assert envelope['source']['tag'] == f'v{version}'
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
           manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           target = 'x86_64-pc-windows-msvc'
           asset = next(item for item in manifest['assets'] if item['target'] == target)
@@ -422,6 +443,7 @@ jobs:
 
   sdist:
     name: sdist
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -452,70 +474,52 @@ jobs:
           name: sdist
           path: dist/*
 
-  publish-testpypi:
-    name: publish-testpypi
+  candidate-release:
+    name: Attach qualified Python artifacts
     runs-on: ubuntu-latest
     needs: [linux, macos, windows, sdist]
-    environment: testpypi
+    if: ${{ inputs.mode == 'qualification' }}
     permissions:
-      id-token: write
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
       - name: Flatten dist directory
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           mkdir -p wheels
           find dist -name "*.whl" -exec cp {} wheels/ \;
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
-          ls -la wheels/
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: wheels/
-          skip-existing: true
-
-  verify-testpypi:
-    name: verify-testpypi
-    runs-on: ubuntu-latest
-    needs: [publish-testpypi]
-    steps:
-      - name: Wait for TestPyPI indexing
-        run: sleep 60
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install from TestPyPI
-        run: |
-          pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            alopex
-      - name: Verify import
-        run: |
-          python -c "from alopex import Database; print('Database import OK')"
-          python -c "from alopex import Transaction; print('Transaction import OK')"
+          test -n "${{ inputs.core_tag }}"
+          gh release upload --repo "${GITHUB_REPOSITORY}" "${{ inputs.core_tag }}" wheels/* --clobber
 
   publish-pypi:
     name: publish-pypi
     runs-on: ubuntu-latest
-    needs: [verify-testpypi]
+    if: ${{ inputs.mode == 'promotion' }}
     environment: pypi
     permissions:
       id-token: write
+      contents: read
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-      - name: Flatten dist directory
+      - name: Download qualified candidate artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CORE_TAG: ${{ inputs.core_tag }}
         run: |
+          set -euo pipefail
+          test -n "${CANDIDATE_TAG}"
+          version="${CORE_TAG#v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p wheels
-          find dist -name "*.whl" -exec cp {} wheels/ \;
-          find dist -name "*.tar.gz" -exec cp {} wheels/ \;
-          ls -la wheels/
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "alopex-${version}-*.whl" --pattern "alopex-${version}.tar.gz" \
+            --dir wheels --clobber
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -525,25 +529,35 @@ jobs:
   github-release:
     name: github-release
     runs-on: ubuntu-latest
-    needs: [linux, macos, windows, sdist]
+    if: ${{ inputs.mode == 'promotion' }}
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
+      - name: Download qualified candidate artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CORE_TAG: ${{ inputs.core_tag }}
+        run: |
+          set -euo pipefail
+          test -n "${CANDIDATE_TAG}"
+          version="${CORE_TAG#v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p wheels
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "alopex-${version}-*.whl" --pattern "alopex-${version}.tar.gz" \
+            --dir wheels --clobber
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.source_ref || github.ref_name }}
-          files: dist/**/*
+          files: wheels/*
 
   final-release-join:
     name: final-release-join
     runs-on: ubuntu-latest
     needs: [publish-pypi, github-release]
-    if: ${{ always() && needs.publish-pypi.result == 'success' && needs.github-release.result == 'success' }}
+    if: ${{ inputs.mode == 'promotion' && always() && needs.publish-pypi.result == 'success' && needs.github-release.result == 'success' }}
     permissions:
       contents: read
       actions: read
@@ -583,14 +597,10 @@ jobs:
             echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
             exit 1
           }
-          git fetch --force origin main "refs/tags/${core_tag}:refs/tags/${core_tag}" \
+          git fetch --force origin "refs/tags/${core_tag}:refs/tags/${core_tag}" \
             "refs/tags/${PYTHON_TAG_NAME}:refs/tags/${PYTHON_TAG_NAME}"
-          git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}" || {
-            echo "Python tag must descend from the Core tag" >&2
-            exit 1
-          }
-          git merge-base --is-ancestor "${python_tag_sha}" origin/main || {
-            echo "Python tag is not merged to main" >&2
+          test "${core_tag_sha}" = "${python_tag_sha}" || {
+            echo "Python tag must point to the exact Core tag SHA" >&2
             exit 1
           }
           version_at_tag="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
@@ -610,9 +620,9 @@ jobs:
 
           jobs = json.loads(os.environ["JOBS"])["jobs"]
           conclusions = {job["name"]: job.get("conclusion") for job in jobs}
-          if conclusions.get("Publish to crates.io") != "success":
+          if conclusions.get("Publish qualified crate archives to crates.io") != "success":
               raise SystemExit("bound core run has not successfully published crates")
-          if conclusions.get("Create GitHub Release") != "success":
+          if conclusions.get("Create stable GitHub Release") != "success":
               raise SystemExit("bound core run has not successfully created the release")
           PY
           core_run_id="${CORE_RUN_ID}"

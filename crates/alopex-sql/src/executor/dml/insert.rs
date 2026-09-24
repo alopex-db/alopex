@@ -628,9 +628,7 @@ fn populate_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
     for index in indexes {
-        for (row_id, row) in rows {
-            HnswBridge::on_insert(txn, table, index, *row_id, row)?;
-        }
+        HnswBridge::on_insert_batch(txn, table, index, rows)?;
     }
     Ok(())
 }

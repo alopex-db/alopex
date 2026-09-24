@@ -8,10 +8,16 @@ use crate::executor::evaluator::EvalContext;
 use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
 use crate::planner::logical_plan::{LogicalPlan, RecursiveCteLimits, SetOperator};
-use crate::planner::typed_expr::{Projection, SortExpr};
+use crate::planner::typed_expr::{Projection, SortExpr, TypedExprKind};
 use crate::storage::{SqlTxn, SqlValue};
 
 use super::{ColumnInfo, Row};
+
+type Pipeline = (
+    Box<dyn RowIterator>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+);
 
 pub mod aggregate;
 pub mod columnar_scan;
@@ -27,6 +33,7 @@ pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{
     DistinctOnIterator, FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator,
 };
+pub use knn::explain_knn_path;
 pub use project::{project_row_values, projected_columns};
 pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
@@ -512,6 +519,102 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
     )
 }
 
+/// Build a primary-key range path for the precise shape where an index already
+/// supplies both the WHERE order and the requested `ORDER BY ... LIMIT` order.
+///
+/// This path intentionally remains narrow: it accepts a simple lower-bound
+/// predicate, one ascending primary-key sort expression, and a plain finite
+/// LIMIT. The normal filter is retained after the index scan, so the index
+/// supplies candidates and never supplies SQL truth semantics.
+fn build_primary_key_ordered_limit<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    plan: &LogicalPlan,
+) -> Result<Option<Pipeline>>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
+    let LogicalPlan::Limit {
+        input,
+        limit: Some(limit),
+        offset,
+        ties: None,
+    } = plan
+    else {
+        return Ok(None);
+    };
+    let LogicalPlan::Sort { input, order_by } = input.as_ref() else {
+        return Ok(None);
+    };
+    let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+        return Ok(None);
+    };
+    let LogicalPlan::Scan { table, projection } = input.as_ref() else {
+        return Ok(None);
+    };
+    let Some(table_meta) = catalog.get_table(table) else {
+        return Ok(None);
+    };
+    if table_meta.storage_options.storage_type != StorageType::Row {
+        return Ok(None);
+    }
+    let Some(primary_key) = table_meta
+        .primary_key
+        .as_ref()
+        .filter(|keys| keys.len() == 1)
+    else {
+        return Ok(None);
+    };
+    let Some(primary_key_index) = table_meta.get_column_index(&primary_key[0]) else {
+        return Ok(None);
+    };
+    let [sort] = order_by.as_slice() else {
+        return Ok(None);
+    };
+    if !sort.asc
+        || sort.nulls_first
+        || !matches!(
+            &sort.expr.kind,
+            TypedExprKind::ColumnRef {
+                table: sort_table,
+                column_index,
+                ..
+            } if sort_table == table && *column_index == primary_key_index
+        )
+    {
+        return Ok(None);
+    }
+    let Some((lower_bound, inclusive)) =
+        crate::executor::dml::primary_key_lower_bound(table_meta, predicate)?
+    else {
+        return Ok(None);
+    };
+    let Some(max_rows) = limit
+        .checked_add(offset.unwrap_or(0))
+        .and_then(|count| usize::try_from(count).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(rows) = crate::executor::dml::scan_primary_key_from(
+        txn,
+        catalog,
+        table_meta,
+        &lower_bound,
+        inclusive,
+        max_rows,
+    )?
+    else {
+        return Ok(None);
+    };
+    let schema = table_meta.columns.clone();
+    let scan = iterator::VecIterator::new(rows, schema.clone());
+    let filter = FilterIterator::new(scan, predicate.clone());
+    let iter = LimitIterator::new(filter, Some(*limit), *offset);
+    Ok(Some((Box::new(iter), projection.clone(), schema)))
+}
+
 fn build_iterator_pipeline_with_outer<
     'txn,
     S: KVStore + 'txn,
@@ -529,6 +632,11 @@ fn build_iterator_pipeline_with_outer<
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
+    if outer.is_none()
+        && let Some(result) = build_primary_key_ordered_limit(txn, catalog, &plan)?
+    {
+        return Ok(result);
+    }
     match plan {
         LogicalPlan::RecursiveReference { name, schema } => {
             let table = context.recursive_tables.get(&name).ok_or_else(|| {
@@ -667,6 +775,22 @@ fn build_iterator_pipeline_with_outer<
                 }
                 let iter = iterator::VecIterator::new(kept, schema.clone());
                 return Ok((Box::new(iter), projection, schema));
+            }
+            if outer.is_none()
+                && !subquery::contains_subquery(&predicate)
+                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let Some(table_meta) = catalog.get_table(table)
+                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                    txn, catalog, table_meta, &predicate,
+                )?
+            {
+                let schema = table_meta.columns.clone();
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((
+                    Box::new(FilterIterator::new(iter, predicate)),
+                    projection.clone(),
+                    schema,
+                ));
             }
             let (mut input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
@@ -1315,6 +1439,21 @@ fn build_streaming_pipeline_inner<
                 let iter =
                     columnar_scan::create_columnar_scan_iterator(txn, table_meta, &columnar_scan)?;
                 return Ok((Box::new(iter), projection.clone(), schema));
+            }
+            if !subquery::contains_subquery(&predicate)
+                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let Some(table_meta) = catalog.get_table(table)
+                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                    txn, catalog, table_meta, &predicate,
+                )?
+            {
+                let schema = table_meta.columns.clone();
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((
+                    Box::new(FilterIterator::new(iter, predicate)),
+                    projection.clone(),
+                    schema,
+                ));
             }
             let (input_iter, projection, schema) =
                 build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;

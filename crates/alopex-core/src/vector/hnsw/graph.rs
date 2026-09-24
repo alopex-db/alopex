@@ -56,10 +56,34 @@ impl HnswGraph {
         })
     }
 
+    pub(crate) fn validate_vector(&self, vector: &[f32]) -> Result<()> {
+        validate_dimensions(self.config.dimension, vector.len())?;
+        validate_hnsw_vector(self.config.metric, vector)
+    }
+
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        validate_dimensions(self.config.dimension, vector.len())?;
-        validate_hnsw_vector(self.config.metric, vector)?;
+        self.insert_with_pruning(key, vector, metadata, true)
+    }
+
+    /// Inserts a vector while deferring reverse-edge pruning to the bulk owner.
+    pub(crate) fn insert_unpruned(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+    ) -> Result<u32> {
+        self.insert_with_pruning(key, vector, metadata, false)
+    }
+
+    fn insert_with_pruning(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+        prune_reverse_edges: bool,
+    ) -> Result<u32> {
+        self.validate_vector(vector)?;
 
         if self.key_to_node.contains_key(key) {
             return Err(Error::InvalidParameter {
@@ -138,14 +162,11 @@ impl HnswGraph {
             let selected = self.select_neighbors_heuristic(&candidates, max_conn);
             self.connect_new_node(node_id, &selected, l);
 
-            // Prune neighbor lists to maintain degree constraints.
-            for &n in &selected {
-                let neighbor_max = if l == 0 {
-                    self.config.m * 2
-                } else {
-                    self.config.m
-                };
-                self.prune_neighbors(n, l, neighbor_max);
+            if prune_reverse_edges {
+                // Prune neighbor lists to maintain degree constraints.
+                for &n in &selected {
+                    self.prune_neighbors(n, l, max_conn);
+                }
             }
 
             if let Some(&first) = selected.first() {
@@ -177,8 +198,7 @@ impl HnswGraph {
     /// 既存キーならベクトルとメタデータを更新し、無ければ挿入する。
     /// 既存ノードが deleted の場合は再有効化する。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        validate_dimensions(self.config.dimension, vector.len())?;
-        validate_hnsw_vector(self.config.metric, vector)?;
+        self.validate_vector(vector)?;
         if let Some(node_id) = self.find_node_id(key) {
             let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
             for other in self.nodes.iter_mut().flatten() {
@@ -308,6 +328,7 @@ impl HnswGraph {
             .into_iter()
             .filter_map(|c| self.node(c.node_id).map(|n| (c, n)))
             .filter(|(_, n)| !n.deleted)
+            .take(k)
             .map(|(c, n)| {
                 (
                     c.score,
@@ -323,9 +344,6 @@ impl HnswGraph {
         scored_results.sort_by(|(a_score, a), (b_score, b)| {
             b_score.total_cmp(a_score).then_with(|| a.key.cmp(&b.key))
         });
-        if scored_results.len() > k {
-            scored_results.truncate(k);
-        }
         let results = scored_results
             .into_iter()
             .map(|(_, result)| result)
@@ -479,7 +497,9 @@ impl HnswGraph {
         ef: usize,
         mut stats: Option<&mut SearchStats>,
     ) -> Vec<ScoredEntry> {
-        let mut visited = HashSet::new();
+        // HNSW traversals address nodes by a dense internal id.  A marker array avoids
+        // hashing and per-entry allocation on the search hot path.
+        let mut visited = vec![false; self.nodes.len()];
         let mut candidates = BinaryHeap::new();
         let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::new();
 
@@ -494,7 +514,7 @@ impl HnswGraph {
             node_id: entry_point,
             score: entry_score,
         };
-        visited.insert(entry_point);
+        visited[entry_point as usize] = true;
         candidates.push(entry.clone());
         best.push(Reverse(entry));
 
@@ -507,9 +527,13 @@ impl HnswGraph {
             if let Some(node) = self.node(candidate.node_id) {
                 if let Some(neighbors) = node.neighbors.get(level) {
                     for &n in neighbors {
-                        if !visited.insert(n) {
+                        let Some(seen) = visited.get_mut(n as usize) else {
+                            continue;
+                        };
+                        if *seen {
                             continue;
                         }
+                        *seen = true;
                         let s = self.distance(query, n, stats_ref);
                         let should_add =
                             best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
@@ -533,7 +557,7 @@ impl HnswGraph {
         results.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
+                .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         results
     }
@@ -543,7 +567,7 @@ impl HnswGraph {
         sorted.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| self.node_key(a.node_id).cmp(&self.node_key(b.node_id)))
+                .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         let mut selected = Vec::with_capacity(max);
         for candidate in sorted {
@@ -551,15 +575,7 @@ impl HnswGraph {
                 break;
             }
             let diverse = selected.iter().all(|&chosen| {
-                let similarity = self
-                    .node(chosen)
-                    .map(|node| {
-                        self.distance_raw(
-                            self.node(candidate.node_id).map_or(&[][..], |n| &n.vector),
-                            &node.vector,
-                        )
-                    })
-                    .unwrap_or(f32::NEG_INFINITY);
+                let similarity = self.node_similarity(candidate.node_id, chosen);
                 similarity < candidate.score
             });
             if diverse || selected.is_empty() {
@@ -597,24 +613,23 @@ impl HnswGraph {
     }
 
     pub(crate) fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
-        let (neighbors_snapshot, query_vec) = {
+        let neighbors_snapshot = {
             let Some(node) = self.node(node_id) else {
                 return;
             };
             if level >= node.neighbors.len() || node.neighbors[level].len() <= max_degree {
                 return;
             }
-            (node.neighbors[level].clone(), node.vector.clone())
+            node.neighbors[level].clone()
         };
 
         let selected: Vec<ScoredEntry> = neighbors_snapshot
             .iter()
             .copied()
-            .filter_map(|n| {
-                self.node(n).map(|other| ScoredEntry {
-                    node_id: n,
-                    score: self.distance_raw(&query_vec, &other.vector),
-                })
+            .filter(|&n| self.node(n).is_some())
+            .map(|neighbor_id| ScoredEntry {
+                node_id: neighbor_id,
+                score: self.node_similarity(node_id, neighbor_id),
             })
             .collect();
 
@@ -627,6 +642,24 @@ impl HnswGraph {
         {
             if level < node.neighbors.len() {
                 node.neighbors[level] = selected;
+            }
+        }
+    }
+
+    /// Restores degree limits after a bulk construction chunk.
+    pub(crate) fn prune_overfull_neighbors(&mut self) {
+        for node_id in 0..self.nodes.len() as u32 {
+            let level_count = self
+                .node(node_id)
+                .map(|node| node.neighbors.len())
+                .unwrap_or_default();
+            for level in 0..level_count {
+                let max_degree = if level == 0 {
+                    self.config.m * 2
+                } else {
+                    self.config.m
+                };
+                self.prune_neighbors(node_id, level, max_degree);
             }
         }
     }
@@ -707,8 +740,28 @@ impl HnswGraph {
         self.nodes.get(id as usize).and_then(|n| n.as_ref())
     }
 
-    fn node_key(&self, id: u32) -> Vec<u8> {
-        self.node(id).map(|n| n.key.clone()).unwrap_or_default()
+    fn node_key(&self, id: u32) -> &[u8] {
+        self.node(id).map_or(&[], |node| node.key.as_slice())
+    }
+
+    /// Scores two existing nodes with the same metric used by HNSW wiring.
+    /// Cosine similarity reuses the norms stored at insertion time.
+    pub(crate) fn node_similarity(&self, left_id: u32, right_id: u32) -> f32 {
+        let (Some(left), Some(right)) = (self.node(left_id), self.node(right_id)) else {
+            return f32::NEG_INFINITY;
+        };
+        match self.config.metric {
+            Metric::Cosine => {
+                if left.norm == 0.0 || right.norm == 0.0 {
+                    0.0
+                } else {
+                    self.kernel.inner_product(&left.vector, &right.vector)
+                        / (left.norm * right.norm)
+                }
+            }
+            Metric::L2 => self.kernel.l2(&left.vector, &right.vector),
+            Metric::InnerProduct => self.kernel.inner_product(&left.vector, &right.vector),
+        }
     }
 
     fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f32 {

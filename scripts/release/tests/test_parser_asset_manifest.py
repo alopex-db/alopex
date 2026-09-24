@@ -833,6 +833,36 @@ print(matches[0])
         self.assertEqual(len(parsed["assets"]), 4)
         self.assertEqual(envelope.read_bytes(), MANIFEST.canonical_json_bytes(parsed))
 
+    def test_release_envelope_accepts_an_immutable_rc_tag(self) -> None:
+        records = [
+            self.pack(target=target, output=self.output)[0]
+            for target in TARGET_LIBRARIES
+        ]
+        manifest = self.root / "vendor.json"
+        arguments = ["assemble-manifest"]
+        for record in records:
+            arguments.extend(("--record", str(record)))
+        arguments.extend(("--asset-dir", str(self.output), "--output", str(manifest)))
+        self.run_cli(*arguments)
+        envelope = self.root / "parser-assets-rc.json"
+        self.run_cli(
+            "release-envelope",
+            "--manifest",
+            str(manifest),
+            "--asset-dir",
+            str(self.output),
+            "--tag",
+            f"v{MANIFEST.REQUIRED_ALOPEX_VERSION}-rc.1",
+            "--tag-sha",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--output",
+            str(envelope),
+        )
+        self.assertEqual(
+            json.loads(envelope.read_text(encoding="utf-8"))["source"]["tag"],
+            f"v{MANIFEST.REQUIRED_ALOPEX_VERSION}-rc.1",
+        )
+
     def test_build_script_names_exact_builder_and_archive_contract(self) -> None:
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
         self.assertIn('REQUIRED_NIM_VERSION="2.2.10"', text)
@@ -1066,7 +1096,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_publish_does_not_create_a_synthetic_git_commit(self) -> None:
         self.assertNotIn("git add \"${NIM_SQL_PARSER_DIR}/vendor\"", self.workflow)
         self.assertNotIn("Commit vendored libraries locally", self.workflow)
-        self.assertNotIn("--allow-dirty", self.workflow)
+        self.assertNotIn("cargo publish", self.workflow)
+        self.assertIn("package_candidate_crates.py", self.workflow)
         self.assertIn("git archive", self.workflow)
 
     def test_release_build_verifies_archive_and_native_smoke_before_upload(self) -> None:
@@ -1078,12 +1109,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
         self.assertIn("git rev-parse", self.workflow)
-        self.assertIn('git tag --points-at HEAD | grep -Fxq "${release_tag}"', self.workflow)
+        self.assertIn(
+            'test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"',
+            self.workflow,
+        )
         self.assertIn("release-envelope", self.workflow)
 
     def test_python_release_consumes_public_core_assets_without_nim_rebuild(self) -> None:
         workflow = PY_RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn('echo "CORE_TAG=v${version}"', workflow)
+        self.assertIn('echo "CORE_TAG=${core_tag:-v${version}}"', workflow)
         self.assertIn("seq 1 30", workflow)
         self.assertIn('parser-assets-v${ALOPEX_VERSION}.json', workflow)
         self.assertIn("parser_asset_manifest.py verify-manifest", workflow)

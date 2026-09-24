@@ -59,7 +59,7 @@ pub use alopex_core::{HnswConfig, HnswSearchResult, HnswStats, MemoryStats, Metr
 /// Streaming query row iterator for FR-7 compliance.
 pub use alopex_sql::executor::QueryRowIterator;
 use alopex_sql::storage::LocalRangeChangeJournal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -897,6 +897,8 @@ impl Database {
             vector_cache_updates: HashMap::new(),
             vector_cache_deletes: Vec::new(),
             vector_cache_invalidated: false,
+            vector_index: None,
+            vector_index_dirty: false,
             catalog_modified: false,
             journal,
         })
@@ -918,6 +920,8 @@ pub struct Transaction<'a> {
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
     vector_cache_invalidated: bool,
+    vector_index: Option<VectorKeyIndex>,
+    vector_index_dirty: bool,
     /// Whether DDL operations were performed in this transaction.
     pub(crate) catalog_modified: bool,
     /// SQL row/index state captured before a read-write local transaction.
@@ -935,7 +939,37 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
+pub(crate) const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
+
+/// Transaction-local vector key order plus constant-time membership checks.
+#[derive(Clone)]
+pub(crate) struct VectorKeyIndex {
+    keys: Vec<Key>,
+    members: HashSet<Key>,
+}
+
+impl VectorKeyIndex {
+    pub(crate) fn from_keys(keys: Vec<Key>) -> Self {
+        Self {
+            members: keys.iter().cloned().collect(),
+            keys,
+        }
+    }
+
+    pub(crate) fn keys(&self) -> &[Key] {
+        &self.keys
+    }
+
+    /// Returns whether this call added a previously unseen key.
+    pub(crate) fn insert(&mut self, key: Key) -> bool {
+        if self.members.insert(key.clone()) {
+            self.keys.push(key);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 impl<'a> Transaction<'a> {
     pub(crate) fn catalog_overlay(&self) -> &alopex_sql::catalog::CatalogOverlay {
@@ -1012,6 +1046,49 @@ impl<'a> Transaction<'a> {
             .map_err(Error::Core)
     }
 
+    /// Stage a batch of HNSW vectors, rejecting duplicate keys before any mutation.
+    pub fn upsert_to_hnsw_batch(
+        &mut self,
+        index_name: &str,
+        keys: &[Key],
+        vectors: &[&[f32]],
+        metadata: Option<&[Option<Vec<u8>>]>,
+    ) -> Result<usize> {
+        self.ensure_write_txn()?;
+        if keys.is_empty() {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "keys".into(),
+                reason: "batch cannot be empty".into(),
+            }));
+        }
+        if keys.len() != vectors.len() || metadata.is_some_and(|values| values.len() != keys.len())
+        {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "batch".into(),
+                reason: "keys, vectors, and metadata must have the same length".into(),
+            }));
+        }
+        let payloads: Vec<Vec<u8>> = (0..keys.len())
+            .map(|index| {
+                metadata
+                    .and_then(|values| values[index].as_ref())
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect();
+        let entries: Vec<_> = keys
+            .iter()
+            .zip(vectors)
+            .zip(&payloads)
+            .map(|((key, vector), payload)| (key.as_slice(), *vector, payload.as_slice()))
+            .collect();
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index
+            .upsert_staged_batch(&entries, state)
+            .map_err(Error::Core)?;
+        Ok(entries.len())
+    }
+
     /// HNSW からキーをステージング削除する。
     pub fn delete_from_hnsw(&mut self, index_name: &str, key: &[u8]) -> Result<bool> {
         self.ensure_write_txn()?;
@@ -1041,10 +1118,9 @@ impl<'a> Transaction<'a> {
         let txn = self.inner_mut()?;
         txn.put(key.to_vec(), payload).map_err(Error::Core)?;
 
-        let mut keys = self.load_vector_index()?;
-        if !keys.iter().any(|k| k == key) {
-            keys.push(key.to_vec());
-            self.persist_vector_index(&keys)?;
+        let keys = self.vector_index_mut()?;
+        if keys.insert(key.to_vec()) {
+            self.vector_index_dirty = true;
         }
 
         let cached = cached_vector_from_entry(metric, metadata.to_vec(), vector.to_vec());
@@ -1323,6 +1399,9 @@ impl<'a> Transaction<'a> {
     }
 
     fn load_vector_index(&mut self) -> Result<Vec<Key>> {
+        if let Some(index) = &self.vector_index {
+            return Ok(index.keys().to_vec());
+        }
         let txn = self.inner_mut()?;
         let Some(raw) = txn.get(&VECTOR_INDEX_KEY.to_vec()).map_err(Error::Core)? else {
             return Ok(Vec::new());
@@ -1330,17 +1409,31 @@ impl<'a> Transaction<'a> {
         decode_index(&raw).map_err(Error::Core)
     }
 
-    fn persist_vector_index(&mut self, keys: &[Key]) -> Result<()> {
-        let txn = self.inner_mut()?;
-        let encoded = encode_index(keys)?;
-        txn.put(VECTOR_INDEX_KEY.to_vec(), encoded)
-            .map_err(Error::Core)
+    fn vector_index_mut(&mut self) -> Result<&mut VectorKeyIndex> {
+        if self.vector_index.is_none() {
+            let txn = self.inner_mut()?;
+            let keys = match txn.get(&VECTOR_INDEX_KEY.to_vec()).map_err(Error::Core)? {
+                Some(raw) => decode_index(&raw).map_err(Error::Core)?,
+                None => Vec::new(),
+            };
+            self.vector_index = Some(VectorKeyIndex::from_keys(keys));
+        }
+        Ok(self
+            .vector_index
+            .as_mut()
+            .expect("vector index initialized above"))
     }
 
     /// Commits the transaction, applying all changes.
     pub fn commit(mut self) -> Result<()> {
         {
             let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+            if self.vector_index_dirty {
+                let keys: &[Key] = self.vector_index.as_ref().map_or(&[], VectorKeyIndex::keys);
+                let encoded = encode_index(keys)?;
+                txn.put(VECTOR_INDEX_KEY.to_vec(), encoded)
+                    .map_err(Error::Core)?;
+            }
             for (index, state) in self.hnsw_indices.values_mut() {
                 index.commit_staged(txn, state).map_err(Error::Core)?;
             }
@@ -1496,17 +1589,28 @@ impl OwnedEmbeddedTransaction {
         self.session
             .with_transaction(|transaction| {
                 transaction.put(key.clone(), payload)?;
-                let mut keys = match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
-                    Some(raw) => decode_index(&raw)?,
-                    None => Vec::new(),
-                };
-                if !keys.iter().any(|entry| entry == &key) {
-                    keys.push(key.clone());
-                    transaction.put(VECTOR_INDEX_KEY.to_vec(), encode_index(&keys)?)?;
-                }
                 Ok(())
             })
             .map_err(Error::Core)?;
+        if self.vector_index.is_none() {
+            let keys = self
+                .session
+                .with_transaction(|transaction| {
+                    match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
+                        Some(raw) => decode_index(&raw),
+                        None => Ok(Vec::new()),
+                    }
+                })
+                .map_err(Error::Core)?;
+            self.vector_index = Some(VectorKeyIndex::from_keys(keys));
+        }
+        let keys = self
+            .vector_index
+            .as_mut()
+            .expect("vector index initialized above");
+        if keys.insert(key) {
+            self.vector_index_dirty = true;
+        }
         self.vector_cache_invalidated = true;
         Ok(())
     }
@@ -1571,15 +1675,18 @@ impl OwnedEmbeddedTransaction {
         };
         let keys = match filter_keys {
             Some(keys) => keys.to_vec(),
-            None => self
-                .session
-                .with_transaction(|transaction| {
-                    match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
-                        Some(raw) => decode_index(&raw),
-                        None => Ok(Vec::new()),
-                    }
-                })
-                .map_err(Error::Core)?,
+            None => match self.vector_index.as_ref() {
+                Some(index) => index.keys().to_vec(),
+                None => self
+                    .session
+                    .with_transaction(|transaction| {
+                        match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
+                            Some(raw) => decode_index(&raw),
+                            None => Ok(Vec::new()),
+                        }
+                    })
+                    .map_err(Error::Core)?,
+            },
         };
         let mut rows = self
             .session
@@ -1638,6 +1745,49 @@ impl OwnedEmbeddedTransaction {
         index
             .upsert_staged(key, vector, metadata, state)
             .map_err(Error::Core)
+    }
+
+    /// Stage a batch of HNSW vectors, rejecting duplicate keys before any mutation.
+    pub fn upsert_to_hnsw_batch(
+        &mut self,
+        index_name: &str,
+        keys: &[Key],
+        vectors: &[&[f32]],
+        metadata: Option<&[Option<Vec<u8>>]>,
+    ) -> Result<usize> {
+        self.ensure_owned_write_transaction()?;
+        if keys.is_empty() {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "keys".into(),
+                reason: "batch cannot be empty".into(),
+            }));
+        }
+        if keys.len() != vectors.len() || metadata.is_some_and(|values| values.len() != keys.len())
+        {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "batch".into(),
+                reason: "keys, vectors, and metadata must have the same length".into(),
+            }));
+        }
+        let payloads: Vec<Vec<u8>> = (0..keys.len())
+            .map(|index| {
+                metadata
+                    .and_then(|values| values[index].as_ref())
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect();
+        let entries: Vec<_> = keys
+            .iter()
+            .zip(vectors)
+            .zip(&payloads)
+            .map(|((key, vector), payload)| (key.as_slice(), *vector, payload.as_slice()))
+            .collect();
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index
+            .upsert_staged_batch(&entries, state)
+            .map_err(Error::Core)?;
+        Ok(entries.len())
     }
 
     /// Stage an HNSW deletion in this owned transaction.
@@ -1982,7 +2132,7 @@ fn score_from_bytes(
     Ok(score)
 }
 
-fn encode_index(keys: &[Key]) -> result::Result<Vec<u8>, alopex_core::Error> {
+pub(crate) fn encode_index(keys: &[Key]) -> result::Result<Vec<u8>, alopex_core::Error> {
     let mut buf = Vec::new();
     let count = keys.len() as u32;
     buf.extend_from_slice(&count.to_le_bytes());
@@ -2027,6 +2177,15 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;
+
+    #[test]
+    fn vector_key_index_deduplicates_and_preserves_order() {
+        let mut index = VectorKeyIndex::from_keys(vec![b"existing".to_vec()]);
+
+        assert!(!index.insert(b"existing".to_vec()));
+        assert!(index.insert(b"new".to_vec()));
+        assert_eq!(index.keys(), [b"existing".to_vec(), b"new".to_vec()]);
+    }
 
     #[test]
     fn test_open_and_crud() {
