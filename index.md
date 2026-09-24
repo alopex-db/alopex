@@ -5,6 +5,7 @@ Only records with identical environment and workload fingerprints are compared.
 
 | Measured at | Commit | Profile | Environment | Workload | scan_overhead_ms | read_overhead_pct | write_overhead_pct |
 |---|---|---|---|---|---:|---:|---:|
+| 2026-09-24T08:31:27.101894+00:00 | `075fba0578c4` | `gha-ubuntu-24.04-x64-single-core-v1` | `d56d34aaac792ebd` | `597abb463084` | 0.0010 | 0.5228 | 0.5507 |
 | 2026-09-24T08:09:57.505056+00:00 | `e18e6b5779cd` | `gha-ubuntu-24.04-x64-single-core-v1` | `5085be655afe9b76` | `597abb463084` | 0.0048 | 0.4832 | 0.6690 |
 | 2026-09-24T07:39:44.766532+00:00 | `dbbf438fa2a5` | `gha-ubuntu-24.04-x64-single-core-v1` | `d56d34aaac792ebd` | `597abb463084` | 0.0013 | 0.2652 | 0.4054 |
 | 2026-09-24T06:32:51.372305+00:00 | `dbbf438fa2a5` | `gha-ubuntu-24.04-x64-single-core-v1` | `a948901164b4352b` | `597abb463084` | -0.0008 | 0.4438 | 0.2879 |
