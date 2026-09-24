@@ -1,0 +1,100 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+    "environment_fingerprint": "9b7f3b00fd14b2d5",
+    "has_regressions": false,
+    "metrics": {
+      "read_overhead_pct": {
+        "current": 0.7867732357081771,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "current": -0.0019078000036643057,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "current": 0.48282703661278964,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "insufficient_history",
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  },
+  "record": {
+    "commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+    "dependencies": {
+      "alopex": "0.8.15",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.21.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "cpu_governor": "unavailable",
+      "fingerprint": "9b7f3b00fd14b2d5",
+      "kernel": "6.17.0-1022-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "unavailable"
+    },
+    "lock_hash": "3e577768e87dff98375809b810bbfb1138cdb44c528ea91f6450748a87502e77",
+    "measured_at": "2026-09-24T16:09:34.834092+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.7867732357081771
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": -0.0019078000036643057
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.48282703661278964
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/v0.8.15",
+    "schema_version": 1,
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  }
+}
