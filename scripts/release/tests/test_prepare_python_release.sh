@@ -40,13 +40,13 @@ git -C "${TEMP_ROOT}/repo" add Cargo.toml file
 git -C "${TEMP_ROOT}/repo" commit -m release >/dev/null
 git -C "${TEMP_ROOT}/repo" remote add origin "${TEMP_ROOT}/origin.git"
 git -C "${TEMP_ROOT}/repo" push origin main >/dev/null
-CORE_SHA="$(git -C "${TEMP_ROOT}/repo" rev-parse HEAD)"
-git -C "${TEMP_ROOT}/repo" tag -a v0.8.5 "${CORE_SHA}" -m 'Release v0.8.5'
-git -C "${TEMP_ROOT}/repo" push origin v0.8.5 >/dev/null
 printf 'python release tooling\n' >>"${TEMP_ROOT}/repo/file"
-git -C "${TEMP_ROOT}/repo" commit -am 'prepare python release' >/dev/null
-git -C "${TEMP_ROOT}/repo" push origin main >/dev/null
+git -C "${TEMP_ROOT}/repo" switch -c candidate >/dev/null
+git -C "${TEMP_ROOT}/repo" commit -am 'prepare python release candidate' >/dev/null
+git -C "${TEMP_ROOT}/repo" push origin candidate >/dev/null
 CANDIDATE_SHA="$(git -C "${TEMP_ROOT}/repo" rev-parse HEAD)"
+git -C "${TEMP_ROOT}/repo" tag -a v0.8.5 "${CANDIDATE_SHA}" -m 'Release v0.8.5'
+git -C "${TEMP_ROOT}/repo" push origin v0.8.5 >/dev/null
 
 mkdir -p "${TEMP_ROOT}/bin"
 cat >"${TEMP_ROOT}/bin/gh" <<'EOF'

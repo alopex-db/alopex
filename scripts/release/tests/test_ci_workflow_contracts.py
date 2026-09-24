@@ -179,7 +179,8 @@ class CiWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("Approved source evidence", approval)
         self.assertIn("gh run list --workflow ci.yml", approval)
-        self.assertIn("git merge-base --is-ancestor", approval)
+        self.assertNotIn("origin/main", approval)
+        self.assertNotIn("git merge-base --is-ancestor", approval)
         for forbidden in (
             "cargo test",
             "cargo clippy",

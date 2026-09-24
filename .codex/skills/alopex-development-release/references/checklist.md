@@ -28,24 +28,27 @@ performance result is a required CI, pre-tag, tag, publication, or release-track
 - [ ] On failure, keep the tracker open, create or reopen the owning implementation issue, fix it, and rerun focused, full, and remote checks.
 - [ ] Confirm that no target-version implementation issue remains open.
 
-## Checkpoint 2 — main and pre-tag verification
+## Checkpoint 2 — immutable candidate and RC qualification
 
-- [ ] Merge the approved pull request and record the exact main SHA.
-- [ ] Require all required CI checks on that exact main SHA.
+- [ ] Record the exact candidate SHA; do not use branch membership as release eligibility.
+- [ ] Require all required CI checks on that exact candidate SHA.
 - [ ] Run candidate verification, formatting, clippy, release checks, and `safe-tag.sh`.
+- [ ] Create `v<version>-rc.N` at that SHA and record its artifact-qualification evidence.
+- [ ] Verify that the future stable tag will target the same peeled SHA as the approved RC tag.
 - [ ] Confirm that the target tags and registry versions do not already exist.
 - [ ] Confirm explicit user authorization before creating or publishing a tag.
 
 ## Checkpoint 3 — publication
 
-- [ ] Create and push the annotated Rust tag at its recorded, CI-approved main SHA; let `prepare-python-release.sh` create the independent Python tag from the separately recorded descendant SHA with the same version.
+- [ ] Create and push the annotated Rust tag at the recorded RC-qualified SHA; let `prepare-python-release.sh` create the independent Python tag at that same SHA.
 - [ ] Record both workflow URLs and require every publish job to succeed.
 - [ ] Verify GitHub Release assets, all crates.io packages, and PyPI wheels/sdist independently.
-- [ ] If publication fails or is cancelled before any public artifact exists, cancel active workflows, independently verify that no public artifact exists, delete every unpublished release tag immediately, record the rollback, then return to the corrected-main tagging step.
+- [ ] If publication fails or is cancelled before any public artifact exists, cancel active workflows, independently verify that no public artifact exists, delete every unpublished release tag immediately, record the rollback, then return to the corrected-candidate tagging step.
 
 ## Checkpoint 4 — public verification and close
 
 - [ ] Record tag SHAs, workflow conclusions, registry evidence, and public verifier evidence.
+- [ ] Merge the approved PR only after Stable Delivery and public verification; do not retarget a release tag during that integration.
 - [ ] Verify worktree/branch state, generated-artifact cleanup, and the 50 GiB limit.
 - [ ] Record remaining post-release work in separate issues.
 - [ ] Close the release tracker only after every preceding item has evidence.

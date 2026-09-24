@@ -18,7 +18,8 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("actions: read", block)
         self.assertIn('actions/runs/${CORE_RUN_ID}', block)
         self.assertIn('actions/runs/${CORE_RUN_ID}/jobs?per_page=100', block)
-        self.assertIn("Publish to crates.io", block)
+        self.assertIn("Publish qualified crate archives to crates.io", block)
+        self.assertIn("Create stable GitHub Release", block)
         self.assertIn("CORE_RUN_HEAD_SHA", block)
         self.assertIn("CORE_RUN_ID: ${{ inputs.core_run_id }}", block)
         self.assertIn("bash scripts/release/verify-release/run.sh --verify-join", block)
@@ -26,8 +27,8 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn('parser-vendor-manifest-v${VERSION}.json', block)
         self.assertIn('f"parser-assets-v{version}.json"', block)
         self.assertIn('f"parser-vendor-manifest-v{version}.json"', block)
-        self.assertIn('git merge-base --is-ancestor "${core_tag_sha}" "${python_tag_sha}"', block)
-        self.assertIn('git merge-base --is-ancestor "${python_tag_sha}" origin/main', block)
+        self.assertIn('test "${core_tag_sha}" = "${python_tag_sha}"', block)
+        self.assertNotIn("origin/main", block)
 
     def test_join_does_not_use_unbound_latest_run_or_rebuild(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -116,7 +117,8 @@ class FinalJoinWorkflowTests(unittest.TestCase):
             text,
         )
         self.assertEqual(text.count("name: Resolve source release version"), 3)
-        self.assertEqual(text.count('echo "CORE_TAG=v${version}"'), 3)
+        self.assertEqual(text.count('core_tag="${{ inputs.core_tag }}"'), 3)
+        self.assertEqual(text.count('echo "CORE_TAG=${core_tag:-v${version}}"'), 3)
         self.assertGreaterEqual(
             text.count('parser-vendor-manifest-v${ALOPEX_VERSION}.json'), 3
         )
@@ -131,7 +133,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
 
     def test_sdist_stages_source_without_native_vendor_directories(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  sdist:", maxsplit=1)[1].split("  publish-testpypi:", maxsplit=1)[0]
+        block = text.split("  sdist:", maxsplit=1)[1].split("  candidate-release:", maxsplit=1)[0]
         self.assertIn("Remove native parser vendor files from sdist staging", block)
         self.assertIn("find crates/alopex-sql/nim-sql-parser/vendor", block)
         self.assertIn("-type d -exec rm -rf {} +", block)
