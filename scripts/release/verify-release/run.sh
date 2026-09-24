@@ -315,7 +315,11 @@ run_step "コンテナイメージビルド" \
 # で使い回す)、以降のデモ実行では PATH に加えるだけにする。独立crateには
 # lockfileを同梱し、read-onlyでマウントした検証対象ソースへCargoが書き込ま
 # ないようにする。
+# The helper is built by container root for rootless-Podman bind-mount
+# compatibility, then executed by the image's non-root user. mktemp creates
+# mode 0700, which prevents that user from traversing the parent directory.
 TOOLS_TARGET_DIR="$(mktemp -d)"
+chmod 755 "${TOOLS_TARGET_DIR}"
 
 # /tools-target/release (verify-release-embedded のビルド出力) を PATH に
 # 追加する。イメージの ENV PATH は Dockerfile 側で維持されるので、ここでは
@@ -333,9 +337,22 @@ run_in_container() {
         "$@"
 }
 
+build_tools_in_container() {
+    docker run --rm \
+        --user 0:0 -e HOME=/tmp/verify-home \
+        -v "${REPO_ROOT}":/workspace:ro \
+        -v "${TOOLS_TARGET_DIR}":/tools-target \
+        -w /workspace \
+        -e "ALOPEX_BINARY_SOURCE=released" \
+        -e "ALOPEX_VERSION=${ALOPEX_VERSION}" \
+        -e "ALOPEX_EXTRA_PATH=/tools-target/release" \
+        "${IMAGE_TAG}" \
+        "$@"
+}
+
 run_step "verify-release-embedded ビルド" \
     "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
-    -- run_in_container bash -c '
+    -- build_tools_in_container bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT

@@ -24,6 +24,7 @@ jobs:
           bash scripts/release/tests/test_safe_tag.sh
           bash scripts/release/tests/test_prepare_python_release.sh
           bash scripts/release/tests/test_verify_release_reporting.sh
+          bash scripts/release/tests/test_verify_release_rootless_mount.sh
           bash scripts/release/tests/test_verify_release_join.sh
 
   state-model:
