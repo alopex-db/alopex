@@ -1,0 +1,100 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "dbbf438fa2a5257f1b52398033eda89e2032cf1f",
+    "environment_fingerprint": "d56d34aaac792ebd",
+    "has_regressions": false,
+    "metrics": {
+      "read_overhead_pct": {
+        "current": 0.26520766159233866,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 4,
+        "status": "insufficient_history",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "current": 0.0012856000466854305,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 4,
+        "status": "insufficient_history",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "current": 0.40540923260424583,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 4,
+        "status": "insufficient_history",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "insufficient_history",
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  },
+  "record": {
+    "commit": "dbbf438fa2a5257f1b52398033eda89e2032cf1f",
+    "dependencies": {
+      "alopex": "0.8.14",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.21.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+      "cpu_governor": "performance",
+      "fingerprint": "d56d34aaac792ebd",
+      "kernel": "6.17.0-1022-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "no_turbo=0"
+    },
+    "lock_hash": "1322dad9ae6e2aa8dd345edb183e13cdb8426dec63636ac41efac05b487ff6f2",
+    "measured_at": "2026-09-24T07:39:44.766532+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.26520766159233866
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": 0.0012856000466854305
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.40540923260424583
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/v0.8.14",
+    "schema_version": 1,
+    "workload_signature": "597abb463084432c55db143a75c98ce3f203c44e8b7b3db2adeb300a894565cf"
+  }
+}
