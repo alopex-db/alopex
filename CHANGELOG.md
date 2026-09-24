@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.15] — 2026-09-24
+
+### Fixed
+
+- Corrected the stale server COPY parity contract so the public inventory
+  reflects transactional server COPY support (#456).
+- Public wheel verification now records the resolved release version rather
+  than retaining the v0.8.14 scenario label.
+
 ## [0.8.14] — 2026-09-22
 
 ### Added
