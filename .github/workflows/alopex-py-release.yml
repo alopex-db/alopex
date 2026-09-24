@@ -495,7 +495,7 @@ jobs:
           find dist -name "*.whl" -exec cp {} wheels/ \;
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
           test -n "${{ inputs.core_tag }}"
-          gh release upload "${{ inputs.core_tag }}" wheels/* --clobber
+          gh release upload --repo "${GITHUB_REPOSITORY}" "${{ inputs.core_tag }}" wheels/* --clobber
 
   publish-pypi:
     name: publish-pypi
