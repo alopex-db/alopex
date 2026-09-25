@@ -981,6 +981,15 @@ fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<boo
             StatementKind::Values(values) => {
                 annotate_values_natural_joins(values, &mut natural_markers, &mut consumed);
             }
+            StatementKind::Explain { statement, .. } => match &mut statement.kind {
+                StatementKind::Select(select) => {
+                    annotate_select_natural_joins(select, &mut natural_markers, &mut consumed);
+                }
+                StatementKind::Values(values) => {
+                    annotate_values_natural_joins(values, &mut natural_markers, &mut consumed);
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -1346,6 +1355,21 @@ fn parse_nim_line_col(message: &str) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod input_preflight_tests {
     use super::*;
+
+    #[test]
+    fn explain_join_consumes_natural_join_markers() {
+        for sql in [
+            "EXPLAIN SELECT * FROM orders JOIN products ON orders.pid = products.id",
+            "EXPLAIN SELECT * FROM orders LEFT JOIN products ON orders.pid = products.id",
+            "EXPLAIN SELECT * FROM orders FULL OUTER JOIN products ON orders.pid = products.id",
+            "EXPLAIN SELECT * FROM orders JOIN products USING (id)",
+            "EXPLAIN SELECT * FROM orders NATURAL JOIN products",
+            "EXPLAIN SELECT * FROM orders JOIN products ON orders.pid = products.id JOIN categories ON products.cid = categories.id",
+        ] {
+            let statements = parse_sql(sql).expect("EXPLAIN with JOIN must parse");
+            assert!(matches!(statements[0].kind, StatementKind::Explain { .. }));
+        }
+    }
 
     #[test]
     fn relabeled_v040_parser_is_rejected_by_exported_contract_before_decode() {
