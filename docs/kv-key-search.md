@@ -47,6 +47,31 @@ Rust callers use `KeySearchRequest` with `KVTransaction::search_keys`,
 `OwnedKVTransaction::search_keys`, or `AsyncKVTransaction::async_search_keys`.
 Embedded callers use `Transaction::search_keys`.
 
+Python embedded callers use `Transaction.scan_prefix`, `Transaction.scan_range`,
+and `Transaction.search_keys`. The scan methods return iterators of `(key, value)`
+byte pairs. `search_keys` returns a page dictionary with `entries`, `next_cursor`,
+and `scanned`:
+
+```python
+from alopex import Database, TxnMode
+
+db = Database.new()
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.put(b"cart:42:open", b"item")
+    assert list(txn.scan_prefix(b"cart:42:")) == [(b"cart:42:open", b"item")]
+
+    page = txn.search_keys(b"cart:*", limit=100)
+    assert page["entries"] == [(b"cart:42:open", b"item")]
+    # Pass page["next_cursor"] as cursor= to resume when it is not None.
+
+    regex_page = txn.search_keys(r"^cart:[0-9]+:", mode="regex", limit=100)
+    assert regex_page["entries"] == [(b"cart:42:open", b"item")]
+```
+
+Glob patterns are `bytes`; regex patterns are `str`. Python defaults to a
+100-entry page, a 10,000-candidate scan budget, and the shared 16 MiB response
+budget; callers can lower or raise these within the contract limits.
+
 HTTP accepts `POST /kv/search`:
 
 ```json
