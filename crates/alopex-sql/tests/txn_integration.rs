@@ -11,7 +11,10 @@ use alopex_sql::ast::expr::Literal;
 use alopex_sql::catalog::{
     Catalog, CatalogOverlay, PersistentCatalog, TableMetadata, TxnCatalogView,
 };
+use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
+use alopex_sql::parser::Parser;
+use alopex_sql::planner::Planner;
 use alopex_sql::planner::logical_plan::LogicalPlan;
 use alopex_sql::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
@@ -25,6 +28,23 @@ fn executor_with_persistent_catalog(
 ) -> (PersistentExecutor, PersistentCatalogHandle) {
     let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
     (Executor::new(store, catalog.clone()), catalog)
+}
+
+fn execute_sql_persistent(
+    executor: &mut PersistentExecutor,
+    catalog: &PersistentCatalogHandle,
+    sql: &str,
+) -> Result<Vec<ExecutionResult>, ExecutorError> {
+    Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse SQL")
+        .into_iter()
+        .map(|statement| {
+            let plan = Planner::new(&*catalog.read().expect("catalog lock poisoned"))
+                .plan(&statement)
+                .expect("plan SQL");
+            executor.execute(plan)
+        })
+        .collect()
 }
 
 fn wrap_external<'a, 'b>(
@@ -205,6 +225,70 @@ fn persistent_create_table_registers_unique_constraint_indexes() {
     let index = view.get_index("users_email_key").expect("unique index");
     assert!(index.unique);
     assert_eq!(index.columns, vec!["email"]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistent_unique_constraints_survive_catalog_reload() {
+    let store = Arc::new(MemoryKV::new());
+    let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    execute_sql_persistent(
+        &mut executor,
+        &catalog,
+        "
+        CREATE TABLE users (id INT PRIMARY KEY, code TEXT UNIQUE, token TEXT);
+        INSERT INTO users (id, code, token) VALUES (1, 'a', 'x'), (2, NULL, 'y');
+        CREATE UNIQUE INDEX users_token_key ON users (token);
+        ",
+    )
+    .expect("create persistent unique constraints");
+    drop(executor);
+    drop(catalog);
+
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store).unwrap()));
+    let mut executor = Executor::new(catalog.read().unwrap().store().clone(), catalog.clone());
+
+    assert!(
+        execute_sql_persistent(
+            &mut executor,
+            &catalog,
+            "INSERT INTO users (id, code, token) VALUES (3, 'a', 'z');",
+        )
+        .is_err()
+    );
+    assert!(
+        execute_sql_persistent(
+            &mut executor,
+            &catalog,
+            "INSERT INTO users (id, code, token) VALUES (3, 'b', 'x');",
+        )
+        .is_err()
+    );
+    assert!(
+        execute_sql_persistent(
+            &mut executor,
+            &catalog,
+            "UPDATE users SET code = 'a' WHERE id = 2;",
+        )
+        .is_err()
+    );
+
+    let results = execute_sql_persistent(
+        &mut executor,
+        &catalog,
+        "
+        INSERT INTO users (id, code, token) VALUES (3, 'a', 'z') ON CONFLICT (code) DO NOTHING;
+        INSERT INTO users (id, code, token) VALUES (3, NULL, NULL);
+        SELECT id FROM users ORDER BY id;
+        ",
+    )
+    .expect("execute persistent unique checks");
+    assert_eq!(results[0], ExecutionResult::RowsAffected(0));
+    assert_eq!(results[1], ExecutionResult::RowsAffected(1));
+    let ExecutionResult::Query(query) = &results[2] else {
+        panic!("expected users query");
+    };
+    assert_eq!(query.rows.len(), 3);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

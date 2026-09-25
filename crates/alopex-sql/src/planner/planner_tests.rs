@@ -430,6 +430,7 @@ fn test_plan_create_index() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: true,
         name: "idx_users_name".to_string(),
         table: "users".to_string(),
         column: "name".to_string(),
@@ -450,6 +451,7 @@ fn test_plan_create_index() {
         assert_eq!(index.table, "users");
         assert_eq!(index.first_column(), Some("name"));
         assert_eq!(index.method, Some(IndexMethod::BTree));
+        assert!(index.unique);
         assert!(!if_not_exists);
     } else {
         panic!("Expected CreateIndex plan");
@@ -463,6 +465,7 @@ fn test_plan_create_index_column_not_found() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: false,
         name: "idx_users_foo".to_string(),
         table: "users".to_string(),
         column: "nonexistent".to_string(),
