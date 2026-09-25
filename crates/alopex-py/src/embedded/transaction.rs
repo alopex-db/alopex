@@ -28,8 +28,6 @@ pub(crate) struct PyTransactionInner {
 
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
-    #[allow(dead_code)]
-    pub(crate) db: Arc<alopex_embedded::Database>,
     pub(crate) control: Arc<DatabaseControl>,
     pub(crate) streams: Arc<StreamLeaseRegistry>,
     #[allow(dead_code)]
@@ -46,7 +44,7 @@ impl PyTransaction {
         streams: Arc<StreamLeaseRegistry>,
     ) -> PyResult<Self> {
         control.ensure_open()?;
-        let txn = Arc::clone(&db)
+        let txn = db
             .begin_owned_embedded_transaction(mode)
             .map_err(error::embedded_err)?;
         let inner = PyTransactionInner {
@@ -54,7 +52,6 @@ impl PyTransaction {
             state: Mutex::new(TxnState::Active),
         };
         Ok(Self {
-            db,
             control,
             streams,
             inner: Arc::new(inner),
@@ -768,6 +765,7 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn transaction(
         database: Arc<alopex_embedded::Database>,
@@ -872,6 +870,22 @@ mod tests {
             txn.commit(py).expect("commit");
         });
         assert!(txn.get(b"key").is_err());
+    }
+
+    #[test]
+    fn committed_transaction_does_not_keep_database_locked() {
+        pyo3::Python::initialize();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("locked.alopex");
+        let db = Arc::new(alopex_embedded::Database::open(&path).expect("open"));
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+        drop(db);
+
+        Python::attach(|py| txn.commit(py).expect("commit"));
+
+        let reopened = alopex_embedded::Database::open(&path)
+            .expect("a committed transaction must not keep the database locked");
+        drop(reopened);
     }
 
     #[test]

@@ -718,11 +718,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::PyDatabase;
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
     use pyo3::IntoPyObjectExt;
-
-    use super::PyDatabase;
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();

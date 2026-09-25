@@ -125,6 +125,52 @@ fn persistence_test_data_survives_restart_with_flush() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn persistence_test_default_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("default_restart.wal");
+
+    {
+        let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+        run_sql_in_txn(
+            store.clone(),
+            catalog,
+            TxnMode::ReadWrite,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 0); \
+             INSERT INTO users (id) VALUES (1);",
+        );
+        store.flush().unwrap();
+    }
+
+    let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "INSERT INTO users (id) VALUES (2);",
+    );
+    let result = run_sql_in_txn(
+        store,
+        catalog,
+        TxnMode::ReadOnly,
+        "SELECT id, qty FROM users ORDER BY id;",
+    );
+
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(0)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(0)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn persistence_test_catalog_survives_restart_wal_only() {
     let dir = tempfile::tempdir().unwrap();
     let wal_path = dir.path().join("catalog_wal_only.wal");

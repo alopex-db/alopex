@@ -4,7 +4,8 @@
 //! 永続化することができない。そこで、本モジュールでは永続化用 DTO を定義し、KV ストアへ
 //! bincode で保存する。
 //!
-//! 注意: 現状は `ColumnMetadata.default`（DEFAULT 式）を永続化しない。復元時は `None` となる。
+//! `ColumnMetadata.default`（DEFAULT 式）は、DTO のバイナリ互換性を維持するため、テーブル
+//! properties 内の JSON として永続化する。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,6 +32,7 @@ pub const INDEXES_PREFIX: &[u8] = b"__catalog__/indexes/";
 pub const META_KEY: &[u8] = b"__catalog__/meta";
 
 const CATALOG_VERSION: u32 = 2;
+const COLUMN_DEFAULTS_PROPERTY: &str = "alopex.column.defaults";
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -475,11 +477,28 @@ struct PersistedTableMetaV1 {
 impl From<&TableMetadata> for PersistedTableMeta {
     fn from(value: &TableMetadata) -> Self {
         let mut properties = value.properties.clone();
+        properties.remove(COLUMN_DEFAULTS_PROPERTY);
         if !value.constraints.is_empty() {
             properties.insert(
                 crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
                 serde_json::to_string(&value.constraints)
                     .expect("relational constraints must serialize"),
+            );
+        }
+        let defaults: HashMap<_, _> = value
+            .columns
+            .iter()
+            .filter_map(|column| {
+                column
+                    .default
+                    .as_ref()
+                    .map(|default| (column.name.clone(), default))
+            })
+            .collect();
+        if !defaults.is_empty() {
+            properties.insert(
+                COLUMN_DEFAULTS_PROPERTY.to_string(),
+                serde_json::to_string(&defaults).expect("column defaults must serialize"),
             );
         }
         Self {
@@ -505,6 +524,11 @@ impl From<&TableMetadata> for PersistedTableMeta {
 
 impl From<PersistedTableMeta> for TableMetadata {
     fn from(value: PersistedTableMeta) -> Self {
+        let defaults: HashMap<String, crate::ast::expr::Expr> = value
+            .properties
+            .get(COLUMN_DEFAULTS_PROPERTY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
         let mut table = TableMetadata::new(
             value.name,
             value
@@ -528,6 +552,11 @@ impl From<PersistedTableMeta> for TableMetadata {
             .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
+        for column in &mut table.columns {
+            if let Some(default) = defaults.get(&column.name) {
+                column.default = Some(default.clone());
+            }
+        }
         table
     }
 }
