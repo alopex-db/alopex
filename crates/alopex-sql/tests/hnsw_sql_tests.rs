@@ -59,6 +59,84 @@ fn create_insert_and_search_hnsw_index() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn null_vectors_are_skipped_and_distances_sort_last() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+
+    let results = run_sql(
+        &mut executor,
+        &catalog,
+        "
+        CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+        INSERT INTO items (id, embedding) VALUES
+            (1, [0.0, 0.0]),
+            (2, NULL),
+            (3, [2.0, 0.0]);
+        SELECT id, vector_distance(embedding, [0.0, 0.0], 'l2')
+        FROM items
+        ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2');
+        SELECT id
+        FROM items
+        ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2')
+        LIMIT 3;
+        CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;
+        INSERT INTO items (id, embedding) VALUES (4, NULL);
+        UPDATE items SET embedding = NULL WHERE id = 1;
+        UPDATE items SET embedding = [1.0, 0.0] WHERE id = 2;
+    ",
+    );
+
+    let ExecutionResult::Query(query) = &results[2] else {
+        panic!("expected distance query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                alopex_sql::storage::SqlValue::Integer(1),
+                alopex_sql::storage::SqlValue::Double(0.0),
+            ],
+            vec![
+                alopex_sql::storage::SqlValue::Integer(3),
+                alopex_sql::storage::SqlValue::Double(2.0),
+            ],
+            vec![
+                alopex_sql::storage::SqlValue::Integer(2),
+                alopex_sql::storage::SqlValue::Null,
+            ],
+        ]
+    );
+
+    let ExecutionResult::Query(query) = &results[3] else {
+        panic!("expected kNN query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![alopex_sql::storage::SqlValue::Integer(1)],
+            vec![alopex_sql::storage::SqlValue::Integer(3)],
+            vec![alopex_sql::storage::SqlValue::Integer(2)],
+        ]
+    );
+
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+    let (hits, _) = index.search(&[0.0, 0.0], 4, Some(8)).unwrap();
+    txn.commit_self().unwrap();
+    let keys: Vec<u64> = hits
+        .iter()
+        .map(|hit| u64::from_be_bytes(hit.key.as_slice().try_into().unwrap()))
+        .collect();
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&2));
+    assert!(keys.contains(&3));
+    assert!(!keys.contains(&1));
+    assert!(!keys.contains(&4));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn truncate_recreates_an_empty_hnsw_index_for_future_inserts() {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));

@@ -41,8 +41,9 @@ impl HnswBridge {
             let mut entries = Vec::new();
             for entry in storage.range_scan(0, u64::MAX)? {
                 let (row_id, row) = entry.map_err(ExecutorError::Storage)?;
-                let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
-                entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                    entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                }
             }
             entries
         };
@@ -80,8 +81,9 @@ impl HnswBridge {
         let (column, col_idx) = vector_column(table, index)?;
         let mut owned_entries = Vec::with_capacity(rows.len());
         for (row_id, row) in rows {
-            let vector = required_vector(row_id, &table.name, column, &row[col_idx])?;
-            owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            }
         }
         let entries: Vec<_> = owned_entries
             .iter()
@@ -135,14 +137,22 @@ impl HnswBridge {
             return Ok(());
         }
 
-        let vector = required_vector(&row_id, &table.name, column, &new_row[col_idx])?;
+        let vector = extract_vector(&new_row[col_idx], column)?;
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
-        entry
-            .index
-            .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
-            .map_err(ExecutorError::from)?;
+        match vector {
+            Some(vector) => entry
+                .index
+                .upsert_staged(&row_id.to_be_bytes(), &vector, &[], &mut entry.state)
+                .map_err(ExecutorError::from)?,
+            None => {
+                entry
+                    .index
+                    .delete_staged(&row_id.to_be_bytes(), &mut entry.state)
+                    .map_err(ExecutorError::from)?;
+            }
+        }
         entry.dirty = true;
         Ok(())
     }
@@ -286,24 +296,6 @@ fn extract_vector(value: &SqlValue, column: &ColumnMetadata) -> Result<Option<Ve
     }
 }
 
-fn required_vector(
-    row_id: &u64,
-    table: &str,
-    column: &ColumnMetadata,
-    value: &SqlValue,
-) -> Result<Vec<f32>> {
-    match extract_vector(value, column)? {
-        Some(vec) => Ok(vec),
-        None => Err(ExecutorError::InvalidOperation {
-            operation: "HNSW index".into(),
-            reason: format!(
-                "HNSW index target column {} on table {table} contains NULL (row_id={row_id})",
-                column.name
-            ),
-        }),
-    }
-}
-
 fn vector_column<'a>(
     table: &'a TableMetadata,
     index: &IndexMetadata,
@@ -344,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn null_vector_error_is_english() {
+    fn null_vector_is_skipped() {
         let column = ColumnMetadata::new(
             "embedding",
             ResolvedType::Vector {
@@ -352,12 +344,6 @@ mod tests {
                 metric: VectorMetric::L2,
             },
         );
-        let error = required_vector(&7, "items", &column, &SqlValue::Null).unwrap_err();
-
-        assert!(matches!(
-            error,
-            ExecutorError::InvalidOperation { reason, .. }
-                if reason == "HNSW index target column embedding on table items contains NULL (row_id=7)"
-        ));
+        assert_eq!(extract_vector(&SqlValue::Null, &column).unwrap(), None);
     }
 }

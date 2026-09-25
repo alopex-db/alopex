@@ -226,8 +226,9 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
                 {
                     continue;
                 }
-                let score = score_row(&row, vector_idx, pattern)?;
-                entries.push(HeapEntry::new(score, row, higher_is_better));
+                if let Some(score) = score_row(&row, vector_idx, pattern)? {
+                    entries.push(HeapEntry::new(Some(score), row, higher_is_better));
+                }
             }
         }
         if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
@@ -241,6 +242,16 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
                     vector_idx,
                     higher_is_better,
                 );
+            }
+            if filter.is_none() && exhausted && entries.len() < pattern.k as usize {
+                append_null_vector_rows(
+                    txn,
+                    table_meta,
+                    vector_idx,
+                    &mut entries,
+                    pattern.k as usize,
+                    higher_is_better,
+                )?;
             }
             order_entries(&mut entries, higher_is_better);
             entries.truncate(pattern.k as usize);
@@ -316,13 +327,39 @@ fn columnar_rows<'txn, S: KVStore + 'txn>(
     columnar_scan::execute_columnar_scan(txn, table_meta, &scan)
 }
 
-fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> {
+fn append_null_vector_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table_meta: &TableMetadata,
+    vector_idx: usize,
+    entries: &mut Vec<HeapEntry>,
+    limit: usize,
+    higher_is_better: bool,
+) -> Result<()> {
+    let mut storage = txn.table_storage(table_meta);
+    for entry in storage.range_scan(0, u64::MAX)? {
+        let (row_id, values) = entry?;
+        if values.get(vector_idx).is_some_and(SqlValue::is_null) {
+            entries.push(HeapEntry::new(
+                None,
+                Row::new(row_id, values),
+                higher_is_better,
+            ));
+            if entries.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<Option<f64>> {
     let value = row.values.get(vector_idx).ok_or(ExecutorError::Evaluation(
         crate::executor::EvaluationError::InvalidColumnRef { index: vector_idx },
     ))?;
 
     let vector = match value {
         SqlValue::Vector(v) => v,
+        SqlValue::Null => return Ok(None),
         other => {
             return Err(ExecutorError::Evaluation(
                 crate::executor::EvaluationError::TypeMismatch {
@@ -345,17 +382,13 @@ fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> 
             pattern.metric,
         ),
     };
-    score.map_err(|e| ExecutorError::Evaluation(e.into()))
+    score
+        .map(Some)
+        .map_err(|e| ExecutorError::Evaluation(e.into()))
 }
 
 fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {
-    entries.sort_by(|a, b| {
-        if higher_is_better {
-            b.score.total_cmp(&a.score)
-        } else {
-            a.score.total_cmp(&b.score)
-        }
-    });
+    entries.sort_by(|a, b| compare_scores(a.score, b.score, higher_is_better));
 }
 
 fn materialize_rows_by_id<'txn, S: KVStore + 'txn>(
@@ -638,13 +671,13 @@ fn find_hnsw_index<C: Catalog + ?Sized>(
 
 #[derive(Debug)]
 struct HeapEntry {
-    score: f64,
+    score: Option<f64>,
     row: Row,
     higher_is_better: bool,
 }
 
 impl HeapEntry {
-    fn new(score: f64, row: Row, higher_is_better: bool) -> Self {
+    fn new(score: Option<f64>, row: Row, higher_is_better: bool) -> Self {
         Self {
             score,
             row,
@@ -656,7 +689,7 @@ impl HeapEntry {
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.higher_is_better == other.higher_is_better
-            && self.score.total_cmp(&other.score) == Ordering::Equal
+            && compare_scores(self.score, other.score, self.higher_is_better) == Ordering::Equal
     }
 }
 
@@ -670,11 +703,17 @@ impl PartialOrd for HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.higher_is_better {
-            other.score.total_cmp(&self.score)
-        } else {
-            self.score.total_cmp(&other.score)
-        }
+        compare_scores(self.score, other.score, self.higher_is_better)
+    }
+}
+
+fn compare_scores(left: Option<f64>, right: Option<f64>, higher_is_better: bool) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) if higher_is_better => right.total_cmp(&left),
+        (Some(left), Some(right)) => left.total_cmp(&right),
     }
 }
 

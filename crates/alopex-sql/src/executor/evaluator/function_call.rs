@@ -87,6 +87,9 @@ fn eval_vector_values(values: &[SqlValue], kind: VectorFn) -> Result<SqlValue> {
             },
         )));
     }
+    if values.iter().any(SqlValue::is_null) {
+        return Ok(SqlValue::Null);
+    }
     let column = match &values[0] {
         SqlValue::Vector(v) => v,
         _ => {
