@@ -3,8 +3,9 @@ use alopex_core::sql::stream::ByteSized;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::LITERAL_TABLE;
+use crate::ast::expr::BinaryOp;
 use crate::catalog::{Catalog, StorageType};
-use crate::executor::evaluator::EvalContext;
+use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
 use crate::planner::logical_plan::{LogicalPlan, RecursiveCteLimits, SetOperator};
@@ -38,6 +39,157 @@ pub use project::{project_row_values, projected_columns};
 pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
 };
+
+#[derive(Debug)]
+enum IndexPredicate {
+    Equality(SqlValue),
+    Range {
+        start: Option<SqlValue>,
+        end: Option<SqlValue>,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    },
+}
+
+fn index_predicate(
+    predicate: &crate::planner::typed_expr::TypedExpr,
+) -> Option<(usize, IndexPredicate)> {
+    let TypedExprKind::BinaryOp { left, op, right } = &predicate.kind else {
+        return None;
+    };
+
+    let (column, value, reversed) = match (&left.kind, &right.kind) {
+        (
+            TypedExprKind::ColumnRef { column_index, .. },
+            TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
+        ) => (
+            *column_index,
+            evaluate(right, &EvalContext::new(&[])).ok()?,
+            false,
+        ),
+        (
+            TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
+            TypedExprKind::ColumnRef { column_index, .. },
+        ) => (
+            *column_index,
+            evaluate(left, &EvalContext::new(&[])).ok()?,
+            true,
+        ),
+        _ => return None,
+    };
+
+    let predicate = match (op, reversed) {
+        (BinaryOp::Eq, _) => IndexPredicate::Equality(value),
+        (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => IndexPredicate::Range {
+            start: Some(value),
+            end: None,
+            start_inclusive: false,
+            end_inclusive: false,
+        },
+        (BinaryOp::GtEq, false) | (BinaryOp::LtEq, true) => IndexPredicate::Range {
+            start: Some(value),
+            end: None,
+            start_inclusive: true,
+            end_inclusive: false,
+        },
+        (BinaryOp::Lt, false) | (BinaryOp::Gt, true) => IndexPredicate::Range {
+            start: None,
+            end: Some(value),
+            start_inclusive: false,
+            end_inclusive: false,
+        },
+        (BinaryOp::LtEq, false) | (BinaryOp::GtEq, true) => IndexPredicate::Range {
+            start: None,
+            end: Some(value),
+            start_inclusive: false,
+            end_inclusive: true,
+        },
+        _ => return None,
+    };
+    Some((column, predicate))
+}
+
+fn execute_index_scan<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table_meta: &crate::catalog::TableMetadata,
+    index: &crate::catalog::IndexMetadata,
+    predicate: IndexPredicate,
+) -> Result<Vec<Row>> {
+    let row_ids = match predicate {
+        IndexPredicate::Equality(value) => {
+            if value.is_null() {
+                return Ok(Vec::new());
+            }
+            txn.with_index(
+                index.index_id,
+                index.unique,
+                index.column_indices.clone(),
+                |storage| storage.lookup(&value),
+            )?
+        }
+        IndexPredicate::Range {
+            start,
+            end,
+            start_inclusive,
+            end_inclusive,
+        } => txn.with_index(
+            index.index_id,
+            index.unique,
+            index.column_indices.clone(),
+            |storage| {
+                storage
+                    .range_scan(start.as_ref(), end.as_ref(), start_inclusive, end_inclusive)?
+                    .collect()
+            },
+        )?,
+    };
+    let mut row_ids = row_ids;
+    row_ids.sort_unstable();
+    Ok(txn.with_table(table_meta, |storage| {
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row_id in row_ids {
+            if let Some(values) = storage.get(row_id)? {
+                rows.push(Row::new(row_id, values));
+            }
+        }
+        Ok(rows)
+    })?)
+}
+
+fn matching_btree_index<C: Catalog + ?Sized>(
+    catalog: &C,
+    table: &str,
+    column: usize,
+) -> Option<crate::catalog::IndexMetadata> {
+    catalog
+        .get_indexes_for_table(table)
+        .into_iter()
+        .find(|index| {
+            index.column_indices == [column]
+                && matches!(
+                    index.method,
+                    None | Some(crate::ast::ddl::IndexMethod::BTree)
+                )
+        })
+        .cloned()
+}
+
+pub(crate) fn selected_btree_index_name<C: Catalog + ?Sized>(
+    plan: &LogicalPlan,
+    catalog: &C,
+) -> Option<String> {
+    let LogicalPlan::Filter { input, predicate } = plan else {
+        return None;
+    };
+    let LogicalPlan::Scan { table, .. } = input.as_ref() else {
+        return None;
+    };
+    if catalog.get_table(table)?.storage_options.storage_type != StorageType::Row {
+        return None;
+    }
+    let (column, _) = index_predicate(predicate)?;
+    matching_btree_index(catalog, table, column).map(|index| index.name)
+}
 
 #[derive(Clone)]
 struct RecursiveWorkingTable {
@@ -775,6 +927,20 @@ fn build_iterator_pipeline_with_outer<
                 }
                 let iter = iterator::VecIterator::new(kept, schema.clone());
                 return Ok((Box::new(iter), projection, schema));
+            }
+            if outer.is_none()
+                && !subquery::contains_subquery(&predicate)
+                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let Some(table_meta) = catalog.get_table(table)
+                && table_meta.storage_options.storage_type == StorageType::Row
+                && let Some((column, index_predicate)) = index_predicate(&predicate)
+                && let Some(index) = matching_btree_index(catalog, table, column)
+            {
+                let schema = table_meta.columns.clone();
+                let rows = execute_index_scan(txn, table_meta, &index, index_predicate)?;
+                let input_iter = iterator::VecIterator::new(rows, schema.clone());
+                let filter_iter = FilterIterator::new(input_iter, predicate);
+                return Ok((Box::new(filter_iter), projection.clone(), schema));
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
