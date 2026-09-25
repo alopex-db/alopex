@@ -67,6 +67,7 @@ pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
     system::is_store_direct_plan(plan)
 }
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::KVStore;
@@ -1086,31 +1087,46 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         table.storage_options = ddl::create_table::parse_storage_options(&with_options)?;
 
-        let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
-            let column_indices = pk_columns
+        let mut unique_columns = Vec::new();
+        if let Some(columns) = table.primary_key.clone() {
+            unique_columns.push((ddl::create_pk_index_name(&table.name), columns));
+        }
+        for (position, constraint) in table.constraints.iter().enumerate() {
+            if let crate::ast::ddl::TableConstraint::Unique { name, columns, .. } = constraint {
+                unique_columns.push((
+                    name.clone()
+                        .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
+                    columns.clone(),
+                ));
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut unique_indexes = Vec::new();
+        for (name, columns) in unique_columns {
+            if !seen.insert(columns.clone()) {
+                continue;
+            }
+            let column_indices = columns
                 .iter()
-                .map(|name| {
+                .map(|column| {
                     table
-                        .get_column_index(name)
-                        .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
+                        .get_column_index(column)
+                        .ok_or_else(|| ExecutorError::ColumnNotFound(column.clone()))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let index_id = catalog.next_index_id();
-            let index_name = ddl::create_pk_index_name(&table.name);
+            ddl::create_index::ensure_indexable_columns(&table, &column_indices, "UNIQUE")?;
             let mut index = crate::catalog::IndexMetadata::new(
-                index_id,
-                index_name,
+                catalog.next_index_id(),
+                name,
                 table.name.clone(),
-                pk_columns,
+                columns,
             )
             .with_column_indices(column_indices)
             .with_unique(true);
             index.catalog_name = table.catalog_name.clone();
             index.namespace_name = table.namespace_name.clone();
-            Some(index)
-        } else {
-            None
-        };
+            unique_indexes.push(index);
+        }
 
         let table_id = catalog.next_table_id();
         table = table.with_table_id(table_id);
@@ -1136,7 +1152,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 )?;
             }
         }
-        if let Some(index) = &pk_index {
+        for index in &unique_indexes {
             catalog
                 .persist_create_index(txn.inner_mut(), index)
                 .map_err(Self::map_catalog_error)?;
@@ -1144,7 +1160,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         // オーバーレイに反映（ベースカタログはコミットまで不変）
         overlay.add_table(TableFqn::from(&table), table);
-        if let Some(index) = pk_index {
+        for index in unique_indexes {
             overlay.add_index(IndexFqn::from(&index), index);
         }
 
