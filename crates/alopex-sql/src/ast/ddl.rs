@@ -284,6 +284,8 @@ pub struct Truncate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateIndex {
     pub if_not_exists: bool,
+    #[serde(default)]
+    pub unique: bool,
     pub name: String,
     pub table: String,
     pub column: String,

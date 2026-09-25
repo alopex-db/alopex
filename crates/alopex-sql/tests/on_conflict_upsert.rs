@@ -87,3 +87,59 @@ fn duplicate_ids_in_one_upsert_are_rejected_atomically() {
         vec![vec![SqlValue::Integer(1), SqlValue::Vector(vec![0.0, 0.0]),]]
     );
 }
+
+#[test]
+fn unique_index_enforces_conflicts_and_allows_multiple_nulls() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "
+        CREATE TABLE users (id INT PRIMARY KEY, code TEXT);
+        INSERT INTO users (id, code) VALUES (1, 'a'), (2, NULL);
+        CREATE UNIQUE INDEX users_code_key ON users (code);
+        INSERT INTO users (id, code) VALUES (3, NULL);
+        ",
+    )
+    .expect("create unique index");
+
+    assert!(
+        execute_sql_on(
+            &mut executor,
+            &catalog,
+            "INSERT INTO users (id, code) VALUES (4, 'a');",
+        )
+        .is_err()
+    );
+    assert!(
+        execute_sql_on(
+            &mut executor,
+            &catalog,
+            "UPDATE users SET code = 'a' WHERE id = 2;",
+        )
+        .is_err()
+    );
+
+    let results = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "
+        INSERT INTO users (id, code) VALUES (5, 'a') ON CONFLICT (code) DO NOTHING;
+        SELECT id, code FROM users ORDER BY id;
+        ",
+    )
+    .expect("execute ON CONFLICT");
+    assert_eq!(results[0], ExecutionResult::RowsAffected(0));
+    let ExecutionResult::Query(query) = &results[1] else {
+        panic!("expected users query");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(2), SqlValue::Null],
+            vec![SqlValue::Integer(3), SqlValue::Null],
+        ]
+    );
+}

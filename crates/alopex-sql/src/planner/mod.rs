@@ -2151,7 +2151,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             stmt.name.clone(),
             stmt.table.clone(),
             vec![stmt.column.clone()],
-        );
+        )
+        .with_unique(stmt.unique);
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);

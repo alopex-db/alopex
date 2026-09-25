@@ -1831,10 +1831,14 @@ proc writeTruncateKind(s: Stream; node: SqlNode) =
 
 proc writeCreateIndexKind(s: Stream; node: SqlNode) =
   var idx = 0
-  let ifNotExistsFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
-    node.children[0].strVal == "IF NOT EXISTS"
-  if ifNotExistsFlag:
+  let uniqueFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
+    node.children[0].strVal == "UNIQUE"
+  if uniqueFlag:
     idx = 1
+  let ifNotExistsFlag = node.children.len > idx and node.children[idx].kind == nkIdentifier and
+    node.children[idx].strVal == "IF NOT EXISTS"
+  if ifNotExistsFlag:
+    inc idx
   let optionsIdx = node.children.len - 1
   var optionsNode: SqlNode = nil
   if optionsIdx >= idx and node.children[optionsIdx].kind == nkWithOptions:
@@ -1843,11 +1847,13 @@ proc writeCreateIndexKind(s: Stream; node: SqlNode) =
   if node.children.len > idx + 3 and node.children[idx + 3].kind == nkIdentifier:
     methodName = normalizedIndexMethod(node.children[idx + 3].strVal)
 
-  s.pack_map(8)
+  s.pack_map(9)
   s.writeKey("variant")
   s.pack_type("CreateIndex")
   s.writeKey("if_not_exists")
   s.pack_type(ifNotExistsFlag)
+  s.writeKey("unique")
+  s.pack_type(uniqueFlag)
   s.writeKey("name")
   s.pack_type(node.children[idx].firstIdent())
   s.writeKey("table")
