@@ -445,6 +445,12 @@ pub struct ColumnChunkOffset {
     pub length: u64,
     /// カラムチャンクの非圧縮サイズ。
     pub uncompressed_length: u64,
+    /// RowGroup 固有のエンコーディング。旧形式では未記録。
+    #[serde(default)]
+    pub encoding: Option<EncodingV2>,
+    /// RowGroup 固有の圧縮方式。旧形式では未記録。
+    #[serde(default)]
+    pub compression: Option<CompressionV2>,
     /// チャンクチェックサム (checksum_scope = Chunk の場合)。
     pub checksum: Option<u32>,
 }
@@ -810,6 +816,8 @@ impl SegmentWriterV2 {
                     offset: chunk_relative,
                     length: chunk_len,
                     uncompressed_length: uncompressed_len,
+                    encoding: Some(encoding),
+                    compression: Some(self.config.compression),
                     checksum: chunk_checksum,
                 });
 
@@ -1038,11 +1046,13 @@ impl SegmentReaderV2 {
                 }
             }
 
-            let decoder: Box<dyn Decoder> = create_decoder(desc.encoding);
-            let decompressed = if let CompressionV2::None = desc.compression {
+            let encoding = chunk_meta.encoding.unwrap_or(desc.encoding);
+            let compression = chunk_meta.compression.unwrap_or(desc.compression);
+            let decoder: Box<dyn Decoder> = create_decoder(encoding);
+            let decompressed = if let CompressionV2::None = compression {
                 chunk_bytes
             } else {
-                let compressor = create_compressor(desc.compression)
+                let compressor = create_compressor(compression)
                     .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
                 compressor
                     .decompress(&chunk_bytes, chunk_meta.uncompressed_length as usize)
@@ -1239,6 +1249,54 @@ mod tests {
         } else {
             panic!("expected int64");
         }
+    }
+
+    #[test]
+    fn test_binary_columns_keep_their_row_group_encoding() {
+        let schema = Schema {
+            columns: vec![ColumnSchema {
+                name: "value".into(),
+                logical_type: LogicalType::Binary,
+                nullable: false,
+                fixed_len: None,
+            }],
+        };
+        let batch = RecordBatch::new(
+            schema,
+            vec![Column::Binary(vec![
+                b"apple".to_vec(),
+                b"apricot".to_vec(),
+                b"zebra".to_vec(),
+                b"yak".to_vec(),
+            ])],
+            vec![None],
+        );
+        let reader = write_and_read(
+            SegmentConfigV2 {
+                row_group_size: 2,
+                ..Default::default()
+            },
+            vec![batch],
+        )
+        .unwrap();
+
+        let batches = reader.read_columns(&[0]).unwrap();
+        let values = batches
+            .into_iter()
+            .flat_map(|batch| match batch.columns.into_iter().next().unwrap() {
+                Column::Binary(values) => values,
+                other => panic!("expected binary column, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                b"apple".to_vec(),
+                b"apricot".to_vec(),
+                b"zebra".to_vec(),
+                b"yak".to_vec(),
+            ]
+        );
     }
 
     #[test]
