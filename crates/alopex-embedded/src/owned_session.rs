@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alopex_core::kv::{
-    AnyKV, KVTransaction, OwnedKVTransactionAdapter, OwnedReadOptions, OwnedReadSession,
-    OwnedSessionFactory as CoreOwnedSessionFactory, OwnedTransactionSession,
+    AnyKV, KVTransaction, KeySearchPage, KeySearchRequest, OwnedKVTransactionAdapter,
+    OwnedReadOptions, OwnedReadSession, OwnedSessionFactory as CoreOwnedSessionFactory,
+    OwnedTransactionSession,
 };
 use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
 use alopex_core::TxnMode;
@@ -169,6 +170,50 @@ impl OwnedEmbeddedTransaction {
         self.vector_cache_invalidated = true;
         self.session
             .with_transaction(|transaction| transaction.delete(key.to_vec()))
+            .map_err(Error::Core)
+    }
+
+    /// Collect key-value pairs whose keys start with `prefix`.
+    pub fn scan_prefix(&mut self, prefix: &[u8]) -> Result<Vec<(alopex_core::Key, Vec<u8>)>> {
+        let prefix = prefix.to_vec();
+        self.session
+            .with_transaction(|transaction| {
+                let mut scan = transaction.scan_prefix(&prefix)?;
+                let mut entries = Vec::new();
+                while let Some(entry) = scan.next_entry()? {
+                    entries.push(entry);
+                }
+                scan.close()?;
+                Ok(entries)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Collect key-value pairs in the half-open range `[start, end)`.
+    pub fn scan_range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(alopex_core::Key, Vec<u8>)>> {
+        let start = start.to_vec();
+        let end = end.to_vec();
+        self.session
+            .with_transaction(|transaction| {
+                let mut scan = transaction.scan_range(&start, &end)?;
+                let mut entries = Vec::new();
+                while let Some(entry) = scan.next_entry()? {
+                    entries.push(entry);
+                }
+                scan.close()?;
+                Ok(entries)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Search opaque keys with the shared bounded search contract.
+    pub fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
+        self.session
+            .with_transaction(|transaction| transaction.search_keys(request))
             .map_err(Error::Core)
     }
 

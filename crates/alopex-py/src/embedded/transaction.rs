@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -190,6 +191,66 @@ impl PyTransaction {
 
     fn delete(&self, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete(key))
+    }
+
+    fn scan_prefix(&self, py: Python<'_>, prefix: &[u8]) -> PyResult<Py<PyAny>> {
+        let prefix = prefix.to_vec();
+        let entries = py.detach(move || self.with_txn_mut(|txn| txn.scan_prefix(&prefix)))?;
+        Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
+    }
+
+    fn scan_range(&self, py: Python<'_>, start: &[u8], end: &[u8]) -> PyResult<Py<PyAny>> {
+        let start = start.to_vec();
+        let end = end.to_vec();
+        let entries = py.detach(move || self.with_txn_mut(|txn| txn.scan_range(&start, &end)))?;
+        Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
+    }
+
+    #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_keys(
+        &self,
+        py: Python<'_>,
+        pattern: Bound<'_, PyAny>,
+        mode: &str,
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+    ) -> PyResult<Py<PyDict>> {
+        let pattern = match mode {
+            "glob" => alopex_embedded::KeyPattern::glob(pattern.extract::<Vec<u8>>()?),
+            "regex" => alopex_embedded::KeyPattern::regex(pattern.extract::<String>()?),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "mode must be either 'glob' or 'regex'",
+                ));
+            }
+        };
+        let request = alopex_embedded::KeySearchRequest {
+            pattern,
+            cursor,
+            limit,
+            scan_budget,
+            max_bytes,
+        };
+        let page = py.detach(move || self.with_txn_mut(|txn| txn.search_keys(&request)))?;
+        let alopex_embedded::KeySearchPage {
+            entries,
+            next_cursor,
+            scanned,
+        } = page;
+        let response = PyDict::new(py);
+        response.set_item(
+            "entries",
+            entries
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect::<Vec<_>>(),
+        )?;
+        response.set_item("next_cursor", next_cursor)?;
+        response.set_item("scanned", scanned)?;
+        Ok(response.unbind())
     }
 
     fn upsert_vector(

@@ -1,5 +1,5 @@
 from builtins import str as _str
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union, overload
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -684,6 +684,28 @@ class Transaction:
     def get(self, key: bytes) -> Optional[bytes]: ...
     def put(self, key: bytes, value: bytes) -> None: ...
     def delete(self, key: bytes) -> None: ...
+    def scan_prefix(self, prefix: bytes) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_range(self, start: bytes, end: bytes) -> Iterator[Tuple[bytes, bytes]]: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: bytes,
+        mode: Literal["glob"] = "glob",
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+    ) -> Dict[str, Any]: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: str,
+        mode: Literal["regex"],
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+    ) -> Dict[str, Any]: ...
     def upsert_vector(
         self,
         key: bytes,
