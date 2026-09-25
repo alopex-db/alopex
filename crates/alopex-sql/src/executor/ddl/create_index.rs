@@ -85,7 +85,7 @@ pub(crate) fn build_fts_index_for_existing_rows<'txn, S: KVStore + 'txn>(
     }
 }
 
-pub(super) fn ensure_indexable_columns(
+pub(crate) fn ensure_indexable_columns(
     table: &TableMetadata,
     column_indices: &[usize],
     operation: &str,

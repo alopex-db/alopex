@@ -6,7 +6,7 @@ use alopex_core::types::TxnMode;
 use alopex_core::vector::hnsw::HnswIndex;
 
 use alopex_sql::Span;
-use alopex_sql::ast::ddl::{IndexMethod, VectorMetric};
+use alopex_sql::ast::ddl::{IndexMethod, TableConstraint, VectorMetric};
 use alopex_sql::ast::expr::Literal;
 use alopex_sql::catalog::{
     Catalog, CatalogOverlay, PersistentCatalog, TableMetadata, TxnCatalogView,
@@ -163,6 +163,48 @@ fn overlay_visible_in_same_txn() {
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
         executor.execute_in_txn(plan, &mut borrowed).unwrap();
     }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistent_create_table_registers_unique_constraint_indexes() {
+    let store = Arc::new(MemoryKV::new());
+    let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    let mut overlay = CatalogOverlay::new();
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut table = TableMetadata::new(
+        "users",
+        vec![
+            alopex_sql::catalog::ColumnMetadata::new("id", ResolvedType::Integer)
+                .with_primary_key(true),
+            alopex_sql::catalog::ColumnMetadata::new("email", ResolvedType::Text),
+        ],
+    )
+    .with_primary_key(vec!["id".to_string()]);
+    table.constraints.push(TableConstraint::Unique {
+        name: Some("users_email_key".to_string()),
+        columns: vec!["email".to_string()],
+        span: Span::default(),
+    });
+
+    let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+    executor
+        .execute_in_txn(
+            LogicalPlan::CreateTable {
+                table,
+                if_not_exists: false,
+                with_options: vec![],
+            },
+            &mut borrowed,
+        )
+        .unwrap();
+    drop(borrowed);
+
+    let catalog = catalog.read().expect("catalog lock poisoned");
+    let view = TxnCatalogView::new(&*catalog, &overlay);
+    let index = view.get_index("users_email_key").expect("unique index");
+    assert!(index.unique);
+    assert_eq!(index.columns, vec!["email"]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
