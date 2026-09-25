@@ -444,6 +444,77 @@ fn create_table_with_options_applies_storage() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn columnar_dml_is_rejected() {
+    let (mut executor, _catalog) = create_executor();
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "col_tbl",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                    ColumnMetadata::new("value", ResolvedType::Integer),
+                ],
+            )
+            .with_primary_key(vec!["id".into()]),
+            if_not_exists: false,
+            with_options: vec![("storage".into(), "columnar".into())],
+        })
+        .unwrap();
+
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(alopex_sql::ast::expr::Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    let plans = [
+        (
+            "INSERT",
+            LogicalPlan::Insert {
+                table: "col_tbl".into(),
+                columns: vec!["id".into(), "value".into()],
+                values: vec![vec![number(1), number(10)]],
+                conflict: None,
+                returning: None,
+            },
+        ),
+        (
+            "UPDATE",
+            LogicalPlan::Update {
+                table: "col_tbl".into(),
+                assignments: vec![TypedAssignment {
+                    column: "value".into(),
+                    column_index: 1,
+                    value: number(20),
+                }],
+                filter: None,
+                join_source: None,
+                returning: None,
+            },
+        ),
+        (
+            "DELETE",
+            LogicalPlan::Delete {
+                table: "col_tbl".into(),
+                filter: None,
+                join_source: None,
+                returning: None,
+            },
+        ),
+    ];
+
+    for (operation, plan) in plans {
+        let error = executor.execute(plan).expect_err("columnar DML must fail");
+        assert!(matches!(
+            error,
+            ExecutorError::UnsupportedOperation(message)
+                if message.starts_with(operation) && message.contains("columnar")
+        ));
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn create_table_with_duplicate_option_errors() {
     let (mut executor, _catalog) = create_executor();
 

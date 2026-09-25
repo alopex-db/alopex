@@ -12,9 +12,9 @@ mod update;
 use alopex_core::kv::KVStore;
 
 use crate::ast::expr::BinaryOp;
-use crate::catalog::{Catalog, TableMetadata};
+use crate::catalog::{Catalog, StorageType, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
-use crate::executor::{Result, Row};
+use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
 use crate::storage::{SqlTxn, SqlValue};
 
@@ -28,6 +28,15 @@ pub use insert::{
 pub use merge::execute_merge;
 #[allow(unused_imports)]
 pub use update::{execute_update, execute_update_with_returning};
+
+pub(super) fn reject_columnar_dml(table: &TableMetadata, operation: &str) -> Result<()> {
+    if table.storage_options.storage_type == StorageType::Columnar {
+        return Err(ExecutorError::UnsupportedOperation(format!(
+            "{operation} is not supported for columnar tables; use COPY to load data"
+        )));
+    }
+    Ok(())
+}
 
 /// Resolve a single-column PRIMARY KEY equality against its implicit B-tree.
 ///
