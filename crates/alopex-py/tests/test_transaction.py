@@ -37,3 +37,22 @@ def test_context_manager_rolls_back():
 
     txn2 = db.begin(TxnMode.READ_ONLY)
     assert txn2.get(b"key") is None
+
+
+def test_savepoint_rolls_back_sql_work_and_auto_commit_guides_begin():
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.execute_sql("INSERT INTO items (id) VALUES (1)")
+        txn.savepoint("optional_item")
+        txn.execute_sql("INSERT INTO items (id) VALUES (2)")
+        txn.rollback_to("optional_item")
+        txn.release("optional_item")
+        txn.commit()
+
+        assert db.execute_sql("SELECT id FROM items ORDER BY id") == [{"id": 1}]
+        with pytest.raises(AlopexError, match=r"db\.begin\(\)"):
+            db.execute_sql("BEGIN")
+    finally:
+        db.close()

@@ -576,6 +576,21 @@ impl PyTransaction {
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
+    /// Create a named savepoint within this transaction.
+    fn savepoint(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.create_savepoint(name))
+    }
+
+    /// Roll back changes made after the latest matching savepoint.
+    fn rollback_to(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.rollback_to_savepoint(name))
+    }
+
+    /// Release the latest matching savepoint and its descendants.
+    fn release(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.release_savepoint(name))
+    }
+
     /// Open a local SELECT stream within this explicit transaction.
     ///
     /// Preflight runs before a transaction lease is acquired.  The returned stream shares the
@@ -892,6 +907,28 @@ mod tests {
         });
         txn.rollback().expect("rollback");
         assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
+    }
+
+    #[test]
+    fn savepoint_rollback_to_and_release_preserve_prior_sql_work() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (1)", None)
+                .expect("first insert");
+            txn.savepoint("retry").expect("savepoint");
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (2)", None)
+                .expect("second insert");
+            txn.rollback_to("retry").expect("rollback to savepoint");
+            txn.release("retry").expect("release savepoint");
+            txn.commit(py).expect("commit");
+        });
+
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 1);
     }
 
     #[test]

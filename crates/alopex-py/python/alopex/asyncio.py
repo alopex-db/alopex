@@ -150,6 +150,15 @@ class AsyncTransaction(_AsyncLocalHandle):
     ) -> Union[list[dict[str, Any]], int, None]:
         return self._handle.execute_sql(sql, params)
 
+    async def savepoint(self, name: str) -> None:
+        self._handle.savepoint(name)
+
+    async def rollback_to(self, name: str) -> None:
+        self._handle.rollback_to(name)
+
+    async def release(self, name: str) -> None:
+        self._handle.release(name)
+
     async def execute_sql_stream(
         self,
         sql: str,
