@@ -92,6 +92,25 @@ fn write_csv(path: &Path) {
     writeln!(f, "4,delta").unwrap();
 }
 
+fn query(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> Vec<Vec<SqlValue>> {
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let plan = {
+        let guard = catalog.read().unwrap();
+        Planner::new(&*guard).plan(&stmt).unwrap()
+    };
+    let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+        panic!("expected query result");
+    };
+    result.rows
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn copy_and_select_columnar_with_pruning_and_projection() {
@@ -150,6 +169,94 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
         }
         other => panic!("unexpected result {other:?}"),
     }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn copy_columnar_text_across_row_groups_remains_queryable() {
+    let (_store, bridge, catalog, mut executor) = create_executor();
+    let table = TableMetadata::new(
+        "reviews",
+        vec![
+            ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+            ColumnMetadata::new("reviewer", ResolvedType::Text),
+            ColumnMetadata::new("title", ResolvedType::Text),
+            ColumnMetadata::new("body", ResolvedType::Text),
+        ],
+    );
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table,
+            if_not_exists: false,
+            with_options: vec![
+                ("storage".into(), "columnar".into()),
+                ("row_group_size".into(), "1000".into()),
+            ],
+        })
+        .unwrap();
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut csv = File::create(file.path()).unwrap();
+    writeln!(csv, "id,reviewer,title,body").unwrap();
+    for id in 1..=1_000 {
+        writeln!(csv, "{id},reviewer-{id:04},title-{id:04},body-{id:04}").unwrap();
+    }
+    for id in (1_001..=2_000).rev() {
+        writeln!(csv, "{id},reviewer-{id:04},title-{id:04},body-{id:04}").unwrap();
+    }
+
+    {
+        let guard = catalog.read().unwrap();
+        let mut copy_txn = bridge.begin_write().unwrap();
+        let result = execute_copy(
+            &mut copy_txn,
+            &*guard,
+            "reviews",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        copy_txn.commit().unwrap();
+        assert_eq!(result, ExecutionResult::RowsAffected(2_000));
+    }
+
+    assert_eq!(
+        query(&mut executor, &catalog, "SELECT COUNT(*) FROM reviews"),
+        vec![vec![SqlValue::BigInt(2_000)]]
+    );
+    let rows = query(
+        &mut executor,
+        &catalog,
+        "SELECT id, reviewer, title, body FROM reviews ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2_000);
+    for id in 1..=2_000 {
+        assert_eq!(
+            rows[(id - 1) as usize],
+            vec![
+                SqlValue::Integer(id),
+                SqlValue::Text(format!("reviewer-{id:04}")),
+                SqlValue::Text(format!("title-{id:04}")),
+                SqlValue::Text(format!("body-{id:04}")),
+            ]
+        );
+    }
+    assert_eq!(
+        query(
+            &mut executor,
+            &catalog,
+            "SELECT l.id, r.body FROM reviews l JOIN reviews r ON l.id = r.id \
+             WHERE l.id IN (1, 1000, 1001, 2000) ORDER BY l.id",
+        ),
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("body-0001".into())],
+            vec![SqlValue::Integer(1000), SqlValue::Text("body-1000".into())],
+            vec![SqlValue::Integer(1001), SqlValue::Text("body-1001".into())],
+            vec![SqlValue::Integer(2000), SqlValue::Text("body-2000".into())],
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
