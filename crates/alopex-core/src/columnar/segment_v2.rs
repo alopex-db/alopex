@@ -23,6 +23,9 @@ use crate::storage::compression::{create_compressor, CompressionV2};
 pub const SEGMENT_MAGIC: &[u8; 4] = b"ALXC";
 /// Segment V2 のフォーマットバージョン。
 pub const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
+/// RowGroup 固有メタデータを記録するセグメントフォーマットバージョン。
+pub const SEGMENT_FORMAT_VERSION_V3: u16 = 3;
+const CURRENT_SEGMENT_FORMAT_VERSION: u16 = SEGMENT_FORMAT_VERSION_V3;
 /// ヘッダの固定長（24バイト）。
 pub const SEGMENT_HEADER_SIZE: usize = 24;
 /// RowID のセグメントID割り当てビット数（上位 20bit）。
@@ -118,7 +121,7 @@ impl SegmentHeader {
     ) -> Self {
         Self {
             magic: *SEGMENT_MAGIC,
-            format_version: SEGMENT_FORMAT_VERSION_V2,
+            format_version: CURRENT_SEGMENT_FORMAT_VERSION,
             column_count,
             row_count,
             row_group_size,
@@ -492,6 +495,71 @@ pub struct SegmentFooter {
     pub row_group_table: RowGroupTable,
     /// カラムディスクリプタ。
     pub column_descriptors: ColumnDescriptors,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyColumnChunkOffsetV2 {
+    column_idx: u16,
+    offset: u64,
+    length: u64,
+    uncompressed_length: u64,
+    checksum: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyRowGroupTableEntryV2 {
+    row_start: u64,
+    row_count: u64,
+    data_offset: u64,
+    compressed_size: u64,
+    column_chunk_offsets: Vec<LegacyColumnChunkOffsetV2>,
+    checksum: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyRowGroupTableV2 {
+    entries: Vec<LegacyRowGroupTableEntryV2>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacySegmentFooterV2 {
+    row_group_table: LegacyRowGroupTableV2,
+    column_descriptors: ColumnDescriptors,
+}
+
+impl From<LegacySegmentFooterV2> for SegmentFooter {
+    fn from(legacy: LegacySegmentFooterV2) -> Self {
+        Self {
+            row_group_table: RowGroupTable {
+                entries: legacy
+                    .row_group_table
+                    .entries
+                    .into_iter()
+                    .map(|entry| RowGroupTableEntry {
+                        row_start: entry.row_start,
+                        row_count: entry.row_count,
+                        data_offset: entry.data_offset,
+                        compressed_size: entry.compressed_size,
+                        column_chunk_offsets: entry
+                            .column_chunk_offsets
+                            .into_iter()
+                            .map(|chunk| ColumnChunkOffset {
+                                column_idx: chunk.column_idx,
+                                offset: chunk.offset,
+                                length: chunk.length,
+                                uncompressed_length: chunk.uncompressed_length,
+                                encoding: None,
+                                compression: None,
+                                checksum: chunk.checksum,
+                            })
+                            .collect(),
+                        checksum: entry.checksum,
+                    })
+                    .collect(),
+            },
+            column_descriptors: legacy.column_descriptors,
+        }
+    }
 }
 
 /// レコードバッチ（単純な Schema + Column + null bitmap の組）。
@@ -940,6 +1008,17 @@ impl SegmentReaderV2 {
             return Err(ColumnarError::InvalidFormat("segment too small".into()));
         }
 
+        let header_bytes = source.read_range(0, SEGMENT_HEADER_SIZE as u64)?;
+        let header = read_header(&header_bytes)?;
+        if header.format_version != SEGMENT_FORMAT_VERSION_V2
+            && header.format_version != SEGMENT_FORMAT_VERSION_V3
+        {
+            return Err(ColumnarError::UnsupportedFormatVersion {
+                found: header.format_version,
+                expected: CURRENT_SEGMENT_FORMAT_VERSION,
+            });
+        }
+
         // フッターサイズとチェックサムを取得
         let trailer = source.read_range(total_size - 8, 8)?;
         let footer_size = u32::from_le_bytes(trailer[0..4].try_into().unwrap()) as u64;
@@ -958,18 +1037,14 @@ impl SegmentReaderV2 {
             return Err(ColumnarError::ChecksumMismatch);
         }
 
-        let footer: SegmentFooter = bincode::deserialize(&footer_bytes)
-            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
-
-        // ヘッダとスキーマ読み込み
-        let header_bytes = source.read_range(0, SEGMENT_HEADER_SIZE as u64)?;
-        let header = read_header(&header_bytes)?;
-        if header.format_version != SEGMENT_FORMAT_VERSION_V2 {
-            return Err(ColumnarError::UnsupportedFormatVersion {
-                found: header.format_version,
-                expected: SEGMENT_FORMAT_VERSION_V2,
-            });
-        }
+        let footer = if header.format_version == SEGMENT_FORMAT_VERSION_V2 {
+            bincode::deserialize::<LegacySegmentFooterV2>(&footer_bytes)
+                .map(SegmentFooter::from)
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
+        } else {
+            bincode::deserialize(&footer_bytes)
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
+        };
 
         let schema_len_bytes = source.read_range(SEGMENT_HEADER_SIZE as u64, 4)?;
         let schema_len = u32::from_le_bytes(schema_len_bytes.try_into().unwrap()) as u64;
@@ -1297,6 +1372,85 @@ mod tests {
                 b"yak".to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn legacy_footer_defaults_row_group_encoding_metadata() {
+        let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
+            row_group_size: 2,
+            ..Default::default()
+        });
+        writer
+            .write_batch(make_batch(&[(1, 10), (2, 20), (3, 30)]))
+            .unwrap();
+        let mut segment = writer.finish().unwrap();
+        assert_eq!(segment.header.format_version, SEGMENT_FORMAT_VERSION_V3);
+        let current =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .unwrap();
+        let legacy_footer = LegacySegmentFooterV2 {
+            row_group_table: LegacyRowGroupTableV2 {
+                entries: current
+                    .footer
+                    .row_group_table
+                    .entries
+                    .iter()
+                    .map(|entry| LegacyRowGroupTableEntryV2 {
+                        row_start: entry.row_start,
+                        row_count: entry.row_count,
+                        data_offset: entry.data_offset,
+                        compressed_size: entry.compressed_size,
+                        column_chunk_offsets: entry
+                            .column_chunk_offsets
+                            .iter()
+                            .map(|chunk| LegacyColumnChunkOffsetV2 {
+                                column_idx: chunk.column_idx,
+                                offset: chunk.offset,
+                                length: chunk.length,
+                                uncompressed_length: chunk.uncompressed_length,
+                                checksum: chunk.checksum,
+                            })
+                            .collect(),
+                        checksum: entry.checksum,
+                    })
+                    .collect(),
+            },
+            column_descriptors: current.footer.column_descriptors.clone(),
+        };
+        let legacy_footer_bytes = bincode::serialize(&legacy_footer).unwrap();
+        let current_footer_size = u32::from_le_bytes(
+            segment.data[segment.data.len() - 8..segment.data.len() - 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        segment
+            .data
+            .truncate(segment.data.len() - 8 - current_footer_size);
+        segment.data.extend_from_slice(&legacy_footer_bytes);
+        segment
+            .data
+            .extend_from_slice(&(legacy_footer_bytes.len() as u32).to_le_bytes());
+        let mut hasher = Hasher::new();
+        hasher.update(&legacy_footer_bytes);
+        segment
+            .data
+            .extend_from_slice(&hasher.finalize().to_le_bytes());
+        segment.data[4..6].copy_from_slice(&SEGMENT_FORMAT_VERSION_V2.to_le_bytes());
+
+        let restored =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data))).unwrap();
+        assert_eq!(restored.header.format_version, SEGMENT_FORMAT_VERSION_V2);
+        assert!(restored
+            .footer
+            .row_group_table
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.column_chunk_offsets)
+            .all(|chunk| chunk.encoding.is_none() && chunk.compression.is_none()));
+        let batches = restored.read_columns(&[0, 1]).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert!(matches!(batches[0].columns[0], Column::Int64(ref values) if values == &[1, 2]));
+        assert!(matches!(batches[1].columns[1], Column::Int64(ref values) if values == &[30]));
     }
 
     #[test]
