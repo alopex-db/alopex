@@ -1060,6 +1060,46 @@ impl SegmentReaderV2 {
         })
     }
 
+    /// V2 footerに記録されないRowGroup固有メタデータを保存済みsegmentから補完する。
+    pub fn with_legacy_row_group_metadata(mut self, row_groups: &[RowGroupMeta]) -> Result<Self> {
+        if self.header.format_version != SEGMENT_FORMAT_VERSION_V2 {
+            return Ok(self);
+        }
+
+        let entries = &mut self.footer.row_group_table.entries;
+        if entries.len() != row_groups.len() {
+            return Err(ColumnarError::InvalidFormat(
+                "legacy row group metadata count mismatch".into(),
+            ));
+        }
+
+        for (row_group_index, (entry, row_group)) in entries.iter_mut().zip(row_groups).enumerate()
+        {
+            if entry.row_start != row_group.row_start || entry.row_count != row_group.row_count {
+                return Err(ColumnarError::InvalidFormat(format!(
+                    "legacy row group metadata range mismatch at index {row_group_index}"
+                )));
+            }
+
+            for chunk in &mut entry.column_chunk_offsets {
+                let metadata = row_group
+                    .column_chunks
+                    .iter()
+                    .find(|metadata| metadata.column_index == chunk.column_idx)
+                    .ok_or_else(|| {
+                        ColumnarError::InvalidFormat(format!(
+                            "legacy row group metadata missing column {} at index {row_group_index}",
+                            chunk.column_idx
+                        ))
+                    })?;
+                chunk.encoding = Some(metadata.encoding);
+                chunk.compression = Some(metadata.compression);
+            }
+        }
+
+        Ok(self)
+    }
+
     /// カラムの一部だけを読み取る（カラムプルーニング）。
     pub fn read_columns(&self, columns: &[usize]) -> Result<Vec<RecordBatch>> {
         let mut batches = Vec::new();
@@ -1215,6 +1255,30 @@ mod tests {
         )
     }
 
+    fn mixed_binary_values() -> Vec<Vec<u8>> {
+        vec![
+            b"apple".to_vec(),
+            b"apricot".to_vec(),
+            b"zebra".to_vec(),
+            b"yak".to_vec(),
+        ]
+    }
+
+    fn mixed_binary_batch() -> RecordBatch {
+        RecordBatch::new(
+            Schema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    logical_type: LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: None,
+                }],
+            },
+            vec![Column::Binary(mixed_binary_values())],
+            vec![None],
+        )
+    }
+
     fn write_and_read(
         config: SegmentConfigV2,
         batches: Vec<RecordBatch>,
@@ -1328,30 +1392,12 @@ mod tests {
 
     #[test]
     fn test_binary_columns_keep_their_row_group_encoding() {
-        let schema = Schema {
-            columns: vec![ColumnSchema {
-                name: "value".into(),
-                logical_type: LogicalType::Binary,
-                nullable: false,
-                fixed_len: None,
-            }],
-        };
-        let batch = RecordBatch::new(
-            schema,
-            vec![Column::Binary(vec![
-                b"apple".to_vec(),
-                b"apricot".to_vec(),
-                b"zebra".to_vec(),
-                b"yak".to_vec(),
-            ])],
-            vec![None],
-        );
         let reader = write_and_read(
             SegmentConfigV2 {
                 row_group_size: 2,
                 ..Default::default()
             },
-            vec![batch],
+            vec![mixed_binary_batch()],
         )
         .unwrap();
 
@@ -1363,15 +1409,7 @@ mod tests {
                 other => panic!("expected binary column, got {other:?}"),
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            values,
-            vec![
-                b"apple".to_vec(),
-                b"apricot".to_vec(),
-                b"zebra".to_vec(),
-                b"yak".to_vec(),
-            ]
-        );
+        assert_eq!(values, mixed_binary_values());
     }
 
     #[test]
@@ -1380,9 +1418,7 @@ mod tests {
             row_group_size: 2,
             ..Default::default()
         });
-        writer
-            .write_batch(make_batch(&[(1, 10), (2, 20), (3, 30)]))
-            .unwrap();
+        writer.write_batch(mixed_binary_batch()).unwrap();
         let mut segment = writer.finish().unwrap();
         assert_eq!(segment.header.format_version, SEGMENT_FORMAT_VERSION_V3);
         let current =
@@ -1436,21 +1472,29 @@ mod tests {
             .data
             .extend_from_slice(&hasher.finalize().to_le_bytes());
         segment.data[4..6].copy_from_slice(&SEGMENT_FORMAT_VERSION_V2.to_le_bytes());
+        let legacy_row_groups = segment.meta.row_groups.clone();
+        let legacy_data = segment.data;
 
-        let restored =
-            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data))).unwrap();
+        let uncorrected =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(legacy_data.clone())))
+                .unwrap();
+        assert!(uncorrected.read_columns(&[0]).is_err());
+
+        let restored = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(legacy_data)))
+            .unwrap()
+            .with_legacy_row_group_metadata(&legacy_row_groups)
+            .unwrap();
         assert_eq!(restored.header.format_version, SEGMENT_FORMAT_VERSION_V2);
-        assert!(restored
-            .footer
-            .row_group_table
-            .entries
-            .iter()
-            .flat_map(|entry| &entry.column_chunk_offsets)
-            .all(|chunk| chunk.encoding.is_none() && chunk.compression.is_none()));
-        let batches = restored.read_columns(&[0, 1]).unwrap();
-        assert_eq!(batches.len(), 2);
-        assert!(matches!(batches[0].columns[0], Column::Int64(ref values) if values == &[1, 2]));
-        assert!(matches!(batches[1].columns[1], Column::Int64(ref values) if values == &[30]));
+        let values = restored
+            .read_columns(&[0])
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| match batch.columns.into_iter().next().unwrap() {
+                Column::Binary(values) => values,
+                other => panic!("expected binary column, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, mixed_binary_values());
     }
 
     #[test]

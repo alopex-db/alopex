@@ -441,6 +441,7 @@ pub fn create_columnar_scan_iterator<'txn, S: KVStore + 'txn>(
         let segment = load_segment(txn, table_meta.table_id, segment_id)?;
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
         let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
 
@@ -500,6 +501,7 @@ pub fn execute_columnar_scan<'txn, S: KVStore + 'txn>(
         let segment = load_segment(txn, table_meta.table_id, segment_id)?;
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
 
         let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
@@ -590,6 +592,7 @@ pub fn execute_columnar_row_ids<'txn, S: KVStore + 'txn>(
         let segment = load_segment(txn, table_meta.table_id, segment_id)?;
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
 
         let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
