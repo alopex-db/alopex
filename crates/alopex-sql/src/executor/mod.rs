@@ -96,7 +96,11 @@ fn explain_result(
         ExplainFormat::Text => {
             let mut text = plan.explain_text(elapsed_ns, rows);
             if let Some(path) = hnsw_path {
-                text = format!("{path}\n{text}");
+                text = if path.starts_with("HnswSearch") {
+                    explain_hnsw_text(plan, &path, elapsed_ns, rows)
+                } else {
+                    format!("{path}\n{text}")
+                };
             }
             if let Some(index_name) = btree_index {
                 text = text.replacen(
@@ -128,6 +132,39 @@ fn explain_result(
         vec![ColumnInfo::new(column, ResolvedType::Text)],
         vec![vec![SqlValue::Text(value)]],
     ))
+}
+
+fn explain_hnsw_text(
+    plan: &LogicalPlan,
+    path: &str,
+    elapsed_ns: Option<u64>,
+    rows: Option<u64>,
+) -> String {
+    let logical_text = plan.explain_text(elapsed_ns, rows);
+    let mut physical_text = String::new();
+    let mut omitted_sort = false;
+
+    for line in logical_text.lines() {
+        if line.starts_with("  Sort table=") {
+            omitted_sort = true;
+            continue;
+        }
+        if omitted_sort && let Some(line) = line.strip_prefix("  ") {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("Scan table=") {
+                physical_text.push_str(&line[..line.len() - trimmed.len()]);
+                physical_text.push_str(path);
+                physical_text.push('\n');
+                continue;
+            }
+            physical_text.push_str(line);
+            physical_text.push('\n');
+            continue;
+        }
+        physical_text.push_str(line);
+        physical_text.push('\n');
+    }
+    physical_text
 }
 
 fn result_rows(result: &ExecutionResult) -> u64 {
