@@ -243,3 +243,78 @@ fn explain_hnsw_replaces_logical_sort_and_scan_nodes() {
     assert!(exact.contains("Sort table=items"), "{exact}");
     assert!(exact.contains("Scan table=items"), "{exact}");
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
+    const ROWS: u64 = 8_193;
+    const DIMENSIONS: usize = 128;
+    const BATCH_SIZE: u64 = 256;
+
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2));");
+    let vector = format!(
+        "[{}]",
+        std::iter::repeat_n("0.0", DIMENSIONS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS);
+        let values = (start..=end)
+            .map(|id| format!("({id}, {vector})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql(
+            &mut executor,
+            &catalog,
+            &format!("INSERT INTO items (id, embedding) VALUES {values};"),
+        );
+    }
+    execute_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64);",
+    );
+
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
+    let indexed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(
+        indexed.contains("HnswSearch index=idx_items_embedding k=10\n    nodes_visited="),
+        "{indexed}"
+    );
+    assert!(indexed.contains("distance_computations="), "{indexed}");
+    assert!(indexed.contains("search_time_us="), "{indexed}");
+    assert!(indexed.contains("ef_search=64 fallback=none"), "{indexed}");
+    assert!(!indexed.contains("nodes_visited=0"), "{indexed}");
+
+    let post_filter = explain_text(
+        &mut executor,
+        &catalog,
+        &format!(
+            "EXPLAIN ANALYZE SELECT id FROM items WHERE id = 0 ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+        ),
+    );
+    assert!(
+        post_filter.contains(
+            "HnswSearchPostFilter index=idx_items_embedding k=10 fallback=ExactKnnScan\n      nodes_visited="
+        ),
+        "{post_filter}"
+    );
+    assert!(
+        post_filter.contains("ef_search=64 fallback=ExactKnnScan"),
+        "{post_filter}"
+    );
+
+    execute_sql(&mut executor, &catalog, "DROP INDEX idx_items_embedding;");
+    let exact = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(exact.starts_with("ExactKnnScan\n"), "{exact}");
+    assert!(
+        exact.contains(
+            "nodes_visited=0 distance_computations=0 search_time_us=0 ef_search=none fallback=none"
+        ),
+        "{exact}"
+    );
+}
