@@ -22,8 +22,6 @@ target-wasm-pack
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 dhat-heap.json
-.cargo/config.toml
-
 # act (local GitHub Actions testing)
 .act-artifacts/
 .secrets

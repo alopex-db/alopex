@@ -19,6 +19,8 @@ Usage: scripts/test-nim-parser.sh [--backend host] [--controlled-failure]
 Runs the Nim SQL parser tests with the exact host Nim 2.2.10 and Nimble
 0.22.3 toolchain. ALOPEX_NIMBLE_SEED_DIR or ALOPEX_NIMBLE_DIR must point to a
 job-owned dependency seed containing npeg 1.3.0 and msgpack4nim 0.4.4.
+Registry snapshots are not locked inputs for local parser tests. If offline
+testing is required, Nimble may still need a disposable local registry cache.
 
 --controlled-failure selects the Task 1.1 harness fixture and intentionally
 returns non-zero. CI must inspect the step outcome; this script never converts
@@ -137,6 +139,27 @@ if [[ "$(basename "${NIMBLE_BIN_DIR}")" == "shim" ]]; then
 fi
 [[ -x "${NIMBLE_BIN}" ]] || { echo "resolved Nimble is not executable: ${NIMBLE_BIN}" >&2; exit 1; }
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  host_arch="$(uname -m)"
+  case "${host_arch}" in
+    arm64|aarch64) expected_arch="arm64" ;;
+    x86_64|amd64) expected_arch="x86_64" ;;
+    *) echo "unsupported native macOS architecture: ${host_arch}" >&2; exit 2 ;;
+  esac
+  nim_file_info="$(file -b "${NIM_BIN}")"
+  nimble_file_info="$(file -b "${NIMBLE_BIN}")"
+  grep -Eq "${expected_arch}" <<<"${nim_file_info}" || {
+    echo "Nim architecture does not match macOS host ${host_arch}: ${NIM_BIN}" >&2
+    echo "${nim_file_info}" >&2
+    exit 2
+  }
+  grep -Eq "${expected_arch}" <<<"${nimble_file_info}" || {
+    echo "Nimble architecture does not match macOS host ${host_arch}: ${NIMBLE_BIN}" >&2
+    echo "${nimble_file_info}" >&2
+    exit 2
+  }
+fi
+
 SEED_DIR="$(to_posix_path "${SEED_DIR}")"
 SEED_DIR="$(cd "${SEED_DIR}" && pwd -P)"
 TEST_BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/alopex-nim-parser-tests.XXXXXX")"
@@ -189,13 +212,15 @@ NPEG_SEED="$(find_seeded_package "npeg 1.3.0" "npeg-1.3.0-*")"
 MSGPACK_SEED="$(find_seeded_package "msgpack4nim 0.4.4" "msgpack4nim-0.4.4-*")"
 cp -R "${NPEG_SEED}" "${NIMBLE_DIR_OWNED}/pkgs2/"
 cp -R "${MSGPACK_SEED}" "${NIMBLE_DIR_OWNED}/pkgs2/"
+# Nimble's test command refreshes its local cache even in offline mode. These
+# files are a disposable runtime cache, not locked release inputs: use them
+# when supplied, but do not validate or require a particular registry size or
+# revision for local tests.
 for metadata_name in packages_official.json packages_temp.json \
   official-nim-releases.json; do
-  if [[ ! -f "${SEED_DIR}/${metadata_name}" ]]; then
-    echo "dependency seed is missing ${metadata_name}" >&2
-    exit 2
+  if [[ -f "${SEED_DIR}/${metadata_name}" ]]; then
+    cp "${SEED_DIR}/${metadata_name}" "${NIMBLE_DIR_OWNED}/"
   fi
-  cp "${SEED_DIR}/${metadata_name}" "${NIMBLE_DIR_OWNED}/"
 done
 cat >"${NIMBLE_DIR_OWNED}/nimbledata2.json" <<'EOF'
 {

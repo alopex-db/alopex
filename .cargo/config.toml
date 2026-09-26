@@ -1,0 +1,7 @@
+# Codex development checks. These aliases stay package/file scoped so an
+# interactive verification does not accidentally fan out to the workspace.
+[alias]
+codex-test-core = "test -p alopex-core --all-features"
+codex-test-sql = "test -p alopex-sql --all-features"
+codex-mutants-row-key = "mutants --package alopex-core --file crates/alopex-core/src/row_key_range.rs --re RowKeyRange::contains --jobs 2 --timeout 180 -- --lib row_key_range"
+codex-coupling-sql = "coupling --summary --json crates/alopex-sql"

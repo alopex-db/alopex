@@ -1131,7 +1131,11 @@ def pack_target(args: argparse.Namespace) -> None:
 
 def verify_inputs(args: argparse.Namespace) -> None:
     package_identities(args.package)
-    metadata_identities(args.registry_metadata)
+    # Local host builds only need the exact vendored package trees. Registry
+    # snapshots are release-provenance inputs and are intentionally optional
+    # here; pack-target still requires and validates both snapshots.
+    if args.registry_metadata:
+        metadata_identities(args.registry_metadata)
     print("locked parser dependency inputs verified")
 
 

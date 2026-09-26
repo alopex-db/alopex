@@ -16,7 +16,11 @@ bash scripts/test-nim-parser.sh
 `auto` uses a host Nim/Nimble installation when both are available and falls
 back to Docker. Exact host builds require Nim 2.2.10, Nimble 0.22.3 at commit
 `42ef70c2102a942c46f13eb76872326edd525cec`, and an offline dependency seed in
-`ALOPEX_NIMBLE_SEED_DIR` (or `ALOPEX_NIMBLE_DIR`). To select a backend
+`ALOPEX_NIMBLE_SEED_DIR` (or `ALOPEX_NIMBLE_DIR`) containing only the locked
+`npeg` and `msgpack4nim` package trees. Registry metadata is not a locked input
+for local builds or tests; Nimble may use a disposable cache for offline test
+runs. It is required only for `--archive-dir`, where it records release
+provenance. To select a backend
 explicitly:
 
 ```sh

@@ -62,7 +62,8 @@ Options:
 
 Host builds require exact Nim 2.2.10, Nimble 0.22.3 from release commit
 42ef70c2102a942c46f13eb76872326edd525cec, and ALOPEX_NIMBLE_SEED_DIR or
-ALOPEX_NIMBLE_DIR containing the exact offline dependencies and metadata.
+ALOPEX_NIMBLE_DIR containing the exact offline dependencies. Registry metadata
+is required only when --archive-dir is used for a deterministic release archive.
 Deterministic archives require an explicit native --target and the host backend.
 EOF
 }
@@ -196,6 +197,35 @@ resolve_host_tools() {
     exit 1
   }
 
+  # Never let a host build silently use an x86 tool on Apple Silicon (or
+  # produce an artifact for the wrong host). The resulting parser dylib is
+  # loaded by Cargo test binaries, so an architecture mismatch is otherwise
+  # discovered much later as a linker/loader failure.
+  if [[ "${RUNNER_IS_WINDOWS}" == "0" && "$(uname -s)" == "Darwin" ]]; then
+    local host_arch
+    local expected_arch
+    local nim_file_info
+    local nimble_file_info
+    host_arch="$(uname -m)"
+    case "${host_arch}" in
+      arm64|aarch64) expected_arch="arm64" ;;
+      x86_64|amd64) expected_arch="x86_64" ;;
+      *) echo "unsupported native macOS architecture: ${host_arch}" >&2; exit 2 ;;
+    esac
+    nim_file_info="$(file -b "${NIM_BIN}")"
+    nimble_file_info="$(file -b "${NIMBLE_BIN}")"
+    grep -Eq "${expected_arch}" <<<"${nim_file_info}" || {
+      echo "Nim architecture does not match macOS host ${host_arch}: ${NIM_BIN}" >&2
+      echo "${nim_file_info}" >&2
+      exit 2
+    }
+    grep -Eq "${expected_arch}" <<<"${nimble_file_info}" || {
+      echo "Nimble architecture does not match macOS host ${host_arch}: ${NIMBLE_BIN}" >&2
+      echo "${nimble_file_info}" >&2
+      exit 2
+    }
+  fi
+
   python_candidate="$(command -v python3 || command -v python || true)"
   [[ -n "${python_candidate}" ]] || {
     echo "Python 3 is required to produce parser archives" >&2
@@ -264,6 +294,7 @@ build_host() (
   local manifest_tool_arg
   local packages_official_arg
   local packages_temp_arg
+  local registry_metadata_required=0
   local python_bin
   local original_status
   local cleanup_status
@@ -284,6 +315,9 @@ build_host() (
   if [[ -n "${TARGET}" && "${TARGET}" != "${HOST_TARGET}" ]]; then
     echo "target ${TARGET} does not match native host ${HOST_TARGET}" >&2
     exit 2
+  fi
+  if [[ -n "${ARCHIVE_DIR}" ]]; then
+    registry_metadata_required=1
   fi
 
   # Nim derives private RTTI identities from dependency source paths. A random
@@ -364,13 +398,15 @@ build_host() (
   cp -R "${msgpack_seed}" "${nimble_dir_owned}/pkgs2/"
   npeg_owned="${nimble_dir_owned}/pkgs2/$(basename "${npeg_seed}")"
   msgpack_owned="${nimble_dir_owned}/pkgs2/$(basename "${msgpack_seed}")"
-  for metadata_name in packages_official.json packages_temp.json; do
-    if [[ ! -f "${SEED_DIR}/${metadata_name}" ]]; then
-      echo "dependency seed is missing ${metadata_name}" >&2
-      exit 2
-    fi
-    cp "${SEED_DIR}/${metadata_name}" "${nimble_dir_owned}/"
-  done
+  if [[ "${registry_metadata_required}" == "1" ]]; then
+    for metadata_name in packages_official.json packages_temp.json; do
+      if [[ ! -f "${SEED_DIR}/${metadata_name}" ]]; then
+        echo "release archive seed is missing ${metadata_name}" >&2
+        exit 2
+      fi
+      cp "${SEED_DIR}/${metadata_name}" "${nimble_dir_owned}/"
+    done
+  fi
   cat >"${nimble_dir_owned}/nimbledata2.json" <<'EOF'
 {
   "version": 1,
@@ -440,13 +476,19 @@ EOF
   manifest_tool_arg="$(to_native_path "${MANIFEST_TOOL}")"
   npeg_arg="$(to_native_path "${npeg_owned}")"
   msgpack_arg="$(to_native_path "${msgpack_owned}")"
-  packages_official_arg="$(to_native_path "${nimble_dir_owned}/packages_official.json")"
-  packages_temp_arg="$(to_native_path "${nimble_dir_owned}/packages_temp.json")"
-  "${python_bin}" "${manifest_tool_arg}" verify-inputs \
-    --package "npeg=1.3.0=${npeg_arg}" \
-    --package "msgpack4nim=0.4.4=${msgpack_arg}" \
-    --registry-metadata "packages_official.json=${packages_official_arg}" \
-    --registry-metadata "packages_temp.json=${packages_temp_arg}"
+  if [[ "${registry_metadata_required}" == "1" ]]; then
+    packages_official_arg="$(to_native_path "${nimble_dir_owned}/packages_official.json")"
+    packages_temp_arg="$(to_native_path "${nimble_dir_owned}/packages_temp.json")"
+    "${python_bin}" "${manifest_tool_arg}" verify-inputs \
+      --package "npeg=1.3.0=${npeg_arg}" \
+      --package "msgpack4nim=0.4.4=${msgpack_arg}" \
+      --registry-metadata "packages_official.json=${packages_official_arg}" \
+      --registry-metadata "packages_temp.json=${packages_temp_arg}"
+  else
+    "${python_bin}" "${manifest_tool_arg}" verify-inputs \
+      --package "npeg=1.3.0=${npeg_arg}" \
+      --package "msgpack4nim=0.4.4=${msgpack_arg}"
+  fi
 
   rm -f -- "${OUTPUT}"
   (
@@ -483,6 +525,28 @@ EOF
     echo "Nim parser output not found: ${OUTPUT}" >&2
     exit 1
   }
+
+  if [[ "${HOST_TARGET}" == "aarch64-apple-darwin" || "${HOST_TARGET}" == "x86_64-apple-darwin" ]]; then
+    command -v install_name_tool >/dev/null 2>&1 || {
+      echo "install_name_tool is required for macOS parser builds" >&2
+      exit 1
+    }
+    command -v otool >/dev/null 2>&1 || {
+      echo "otool is required for macOS parser builds" >&2
+      exit 1
+    }
+    # Nim/clang otherwise embeds the build machine's absolute path in the
+    # dylib install name. That path is not portable to a Cargo worktree and
+    # makes tests fail before they start. @rpath is paired with Cargo's
+    # rustc-link-arg emitted by crates/alopex-sql/build.rs.
+    install_name_tool -id "@rpath/$(basename "${OUTPUT}")" "${OUTPUT}"
+    expected_install_name="@rpath/$(basename "${OUTPUT}")"
+    actual_install_name="$(otool -D "${OUTPUT}" | tail -n 1)"
+    [[ "${actual_install_name}" == "${expected_install_name}" ]] || {
+      echo "unexpected macOS parser install name: ${actual_install_name}" >&2
+      exit 1
+    }
+  fi
 
   if [[ -n "${ARCHIVE_DIR}" ]]; then
     archive_dir_arg="$(to_native_path "$(to_posix_path "${ARCHIVE_DIR}")")"
@@ -537,7 +601,12 @@ write_identity_sidecars() (
   checksum_tmp="${output_dir}/.SHA256SUMS.$$"
   trap 'rm -f -- "${contract_tmp}" "${checksum_tmp}"' EXIT
 
-  if command -v sha256sum >/dev/null 2>&1; then
+  # macOS installations may expose an incompatible x86_64 sha256sum first in
+  # PATH. Prefer the native system implementation on macOS.
+  if [[ "$(uname -s)" == "Darwin" ]] && [[ -x /usr/bin/shasum ]]; then
+    output_sha="$(/usr/bin/shasum -a 256 "${OUTPUT}")"
+    output_sha="${output_sha%% *}"
+  elif command -v sha256sum >/dev/null 2>&1; then
     output_sha="$(sha256sum "${OUTPUT}")"
     output_sha="${output_sha%% *}"
   elif command -v shasum >/dev/null 2>&1; then
