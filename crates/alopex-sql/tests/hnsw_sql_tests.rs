@@ -84,6 +84,10 @@ fn null_vectors_are_skipped_and_distances_sort_last() {
         INSERT INTO items (id, embedding) VALUES (4, NULL);
         UPDATE items SET embedding = NULL WHERE id = 1;
         UPDATE items SET embedding = [1.0, 0.0] WHERE id = 2;
+        SELECT id
+        FROM items
+        ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2')
+        LIMIT 2;
     ",
     );
 
@@ -120,6 +124,18 @@ fn null_vectors_are_skipped_and_distances_sort_last() {
         ]
     );
 
+    let ExecutionResult::Query(query) = &results[8] else {
+        panic!("expected kNN baseline query result");
+    };
+    let expected_keys = query
+        .rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [alopex_sql::storage::SqlValue::Integer(id)] => *id as u64,
+            value => panic!("unexpected kNN baseline row {value:?}"),
+        })
+        .collect::<Vec<_>>();
+
     let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
     let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
     let (hits, _) = index.search(&[0.0, 0.0], 4, Some(8)).unwrap();
@@ -128,11 +144,7 @@ fn null_vectors_are_skipped_and_distances_sort_last() {
         .iter()
         .map(|hit| u64::from_be_bytes(hit.key.as_slice().try_into().unwrap()))
         .collect();
-    assert_eq!(keys.len(), 2);
-    assert!(keys.contains(&2));
-    assert!(keys.contains(&3));
-    assert!(!keys.contains(&1));
-    assert!(!keys.contains(&4));
+    assert_eq!(keys, expected_keys);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
