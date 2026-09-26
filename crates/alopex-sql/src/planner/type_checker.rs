@@ -1389,10 +1389,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         // is undefined after deduplication.
         if distinct && !typed_order_by.is_empty() {
             for sort in &typed_order_by {
-                let key = super::distinct_on_expr_signature(&sort.expr);
+                let key = super::structural_expr_signature(&sort.expr);
                 let appears = typed_args
                     .iter()
-                    .any(|arg| super::distinct_on_expr_signature(arg) == key);
+                    .any(|arg| super::structural_expr_signature(arg) == key);
                 if !appears {
                     return Err(PlannerError::invalid_expression(
                         "in an aggregate with DISTINCT, ORDER BY expressions must appear in \

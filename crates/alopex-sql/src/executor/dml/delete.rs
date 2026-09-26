@@ -8,6 +8,7 @@ use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::subquery::evaluate_expr_with_subqueries;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::Projection;
@@ -77,7 +78,7 @@ pub fn execute_delete_with_returning<
                     values
                 },
             );
-            if !predicate_matches(&filter, &eval_row)? {
+            if !predicate_matches(txn, catalog, &filter, row_id, &eval_row)? {
                 continue;
             }
 
@@ -206,10 +207,16 @@ fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     Ok(batch)
 }
 
-fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
+fn predicate_matches<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    filter: &Option<TypedExpr>,
+    row_id: u64,
+    row: &[SqlValue],
+) -> Result<bool> {
     if let Some(expr) = filter {
-        let ctx = EvalContext::new(row);
-        let value = evaluate(expr, &ctx)?;
+        let value =
+            evaluate_expr_with_subqueries(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
         Ok(matches!(value, SqlValue::Boolean(true)))
     } else {
         Ok(true)

@@ -73,3 +73,27 @@ fn insert_select_inserts_rows_with_and_without_explicit_columns() {
         ]
     );
 }
+
+#[test]
+fn create_table_as_select_materializes_source_rows() {
+    let results = execute_sql(
+        "
+        CREATE TABLE p (id INT, cat TEXT);
+        INSERT INTO p VALUES (1, 'a'), (2, 'b');
+        CREATE TABLE p2 AS SELECT * FROM p;
+        SELECT id, cat FROM p2 ORDER BY id;
+        ",
+    )
+    .expect("CREATE TABLE AS SELECT executes");
+
+    let ExecutionResult::Query(query) = results.last().expect("select result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+        ]
+    );
+}

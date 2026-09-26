@@ -80,19 +80,66 @@ fn invalid_group_by_column_returns_error() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn group_by_expression_not_supported() {
+fn group_by_supports_expressions_aliases_and_positions() {
     let mut harness = TestHarness::new();
-    harness.execute_sql("CREATE TABLE items (value INT);");
+    harness.execute_sql("CREATE TABLE items (value INT); INSERT INTO items VALUES (1), (1), (2);");
 
-    let stmt = "SELECT value, COUNT(*) FROM items GROUP BY value + 1";
-    let err = {
-        let dialect = alopex_sql::dialect::AlopexDialect;
-        let statements = alopex_sql::parser::Parser::parse_sql(&dialect, stmt).unwrap();
-        let guard = harness.catalog().read().unwrap();
-        let planner = alopex_sql::planner::Planner::new(&*guard);
-        planner.plan(&statements[0]).unwrap_err()
-    };
-    assert!(matches!(err, PlannerError::InvalidExpression { .. }));
+    for group_by in ["value + 1", "bucket", "1"] {
+        let result = harness.query_sql(&format!(
+            "SELECT value + 1 AS bucket, COUNT(*) FROM items GROUP BY {group_by} ORDER BY bucket"
+        ));
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::BigInt(2)],
+                vec![SqlValue::Integer(3), SqlValue::BigInt(1)],
+            ]
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn group_by_supports_case_and_date_trunc() {
+    let mut harness = TestHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE events (value INT, happened_at TEXT); \
+         INSERT INTO events VALUES \
+         (1, '2025-01-15 10:30:45'), (2, '2025-01-15 12:00:00'), (3, '2025-01-16 09:00:00');",
+    );
+
+    assert_eq!(
+        harness
+            .query_sql(
+                "SELECT CASE WHEN value < 3 THEN 0 ELSE 1 END AS bucket, COUNT(*) \
+                 FROM events GROUP BY CASE WHEN value < 3 THEN 0 ELSE 1 END ORDER BY bucket",
+            )
+            .rows,
+        vec![
+            vec![SqlValue::Integer(0), SqlValue::BigInt(2)],
+            vec![SqlValue::Integer(1), SqlValue::BigInt(1)],
+        ]
+    );
+
+    assert_eq!(
+        harness
+            .query_sql(
+                "SELECT DATE_TRUNC('day', CAST(happened_at AS TIMESTAMP)) AS day, COUNT(*) \
+                 FROM events \
+                 GROUP BY DATE_TRUNC('day', CAST(happened_at AS TIMESTAMP)) ORDER BY day",
+            )
+            .rows,
+        vec![
+            vec![
+                SqlValue::Timestamp(1_736_899_200_000_000),
+                SqlValue::BigInt(2)
+            ],
+            vec![
+                SqlValue::Timestamp(1_736_985_600_000_000),
+                SqlValue::BigInt(1)
+            ],
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

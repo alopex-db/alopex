@@ -404,10 +404,10 @@ fn coerce_boolean(value: SqlValue) -> Result<SqlValue> {
 
 /// Coerce the documented TIMESTAMP input forms into epoch microseconds.
 ///
-/// Alopex v0.8.2 accepts the space-separated UTC literal form with optional
-/// fractional seconds, or a numeric value that is exactly an i64 microsecond
-/// count. Time-zone suffixes and offsets are intentionally rejected because
-/// the dialect has no time-zone type or conversion rules.
+/// Alopex accepts a date-only literal or the space-separated UTC literal form
+/// with optional fractional seconds, or a numeric value that is exactly an i64
+/// microsecond count. Time-zone suffixes and offsets are intentionally rejected
+/// because the dialect has no time-zone type or conversion rules.
 pub(crate) fn coerce_timestamp(value: SqlValue) -> Result<SqlValue> {
     match value {
         SqlValue::Null => Ok(SqlValue::Null),
@@ -430,10 +430,16 @@ pub(crate) fn coerce_timestamp(value: SqlValue) -> Result<SqlValue> {
 }
 
 fn parse_timestamp(value: &str) -> Result<i64> {
-    match NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f") {
-        Ok(timestamp) => Ok(timestamp.and_utc().timestamp_micros()),
-        Err(_) => cast_failure("Text", &ResolvedType::Timestamp, "invalid timestamp text"),
+    if let Ok(timestamp) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f") {
+        return Ok(timestamp.and_utc().timestamp_micros());
     }
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| cast_error_from("Text", &ResolvedType::Timestamp, "invalid timestamp text"))?;
+    Ok(date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is valid")
+        .and_utc()
+        .timestamp_micros())
 }
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
