@@ -157,6 +157,8 @@ pub enum TableFunctionKind {
     JsonTree,
     /// `FTS_SEARCH(table, column, query [, config])` — ranked full-text matches.
     FtsSearch,
+    /// `READ_PARQUET(path)` — rows from a local Parquet file.
+    ReadParquet,
 }
 
 impl TableFunctionKind {
@@ -168,6 +170,7 @@ impl TableFunctionKind {
             "JSON_EACH" => Some(Self::JsonEach),
             "JSON_TREE" => Some(Self::JsonTree),
             "FTS_SEARCH" => Some(Self::FtsSearch),
+            "READ_PARQUET" => Some(Self::ReadParquet),
             _ => None,
         }
     }
@@ -180,6 +183,7 @@ impl TableFunctionKind {
             Self::JsonEach => "JSON_EACH",
             Self::JsonTree => "JSON_TREE",
             Self::FtsSearch => "FTS_SEARCH",
+            Self::ReadParquet => "READ_PARQUET",
         }
     }
 
@@ -192,6 +196,7 @@ impl TableFunctionKind {
             Self::JsonEach => "json_each",
             Self::JsonTree => "json_tree",
             Self::FtsSearch => "fts_search",
+            Self::ReadParquet => "read_parquet",
         }
     }
 }
