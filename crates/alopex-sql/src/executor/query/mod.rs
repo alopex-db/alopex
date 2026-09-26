@@ -34,6 +34,7 @@ pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{
     DistinctOnIterator, FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator,
 };
+pub(crate) use knn::KnnExecutionStats;
 pub use knn::explain_knn_path;
 pub use project::{project_row_values, projected_columns};
 pub use scan::{
@@ -289,6 +290,23 @@ pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'tx
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
     execute_query_with_policy(txn, catalog, plan, None)
+}
+
+pub(crate) fn execute_query_with_knn_stats<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: &LogicalPlan,
+) -> Result<Option<(ExecutionResult, KnnExecutionStats)>> {
+    let Some((pattern, projection, filter)) = knn::extract_knn_context(plan) else {
+        return Ok(None);
+    };
+    knn::execute_knn_query_with_stats(txn, catalog, &pattern, &projection, filter.as_ref())
+        .map(Some)
 }
 
 pub fn execute_query_with_policy<

@@ -7,6 +7,7 @@ use alopex_core::columnar::kvs_bridge::key_layout;
 use alopex_core::columnar::segment_v2::{ColumnSegmentV2, InMemorySegmentSource, SegmentReaderV2};
 use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::storage::format::bincode_config;
+use alopex_core::vector::hnsw::SearchStats as HnswSearchStats;
 use bincode::Options;
 
 use crate::ast::ddl::IndexMethod;
@@ -28,6 +29,13 @@ const HNSW_BASE_MIN_ROWS: usize = 8_192;
 const HNSW_BASE_DIMENSIONS: usize = 128;
 const HNSW_BASE_K: usize = 10;
 const HNSW_MINIMUM_ROWS: usize = 1_024;
+
+#[derive(Debug, Default)]
+pub(crate) struct KnnExecutionStats {
+    pub(crate) hnsw_stats: Option<HnswSearchStats>,
+    pub(crate) ef_search: Option<usize>,
+    pub(crate) fallback: bool,
+}
 
 /// LogicalPlan が KNN 最適化パターンに合致する場合、実行に必要な情報を抽出する。
 pub fn extract_knn_context(
@@ -93,6 +101,17 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     projection: &Projection,
     filter: Option<&TypedExpr>,
 ) -> Result<ExecutionResult> {
+    execute_knn_query_with_stats(txn, catalog, pattern, projection, filter)
+        .map(|(result, _)| result)
+}
+
+pub(crate) fn execute_knn_query_with_stats<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    catalog: &C,
+    pattern: &KnnPattern,
+    projection: &Projection,
+    filter: Option<&TypedExpr>,
+) -> Result<(ExecutionResult, KnnExecutionStats)> {
     let table_meta = catalog
         .get_table(&pattern.table)
         .cloned()
@@ -100,7 +119,7 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     if pattern.k == 0 {
         let empty = project::execute_project(Vec::new(), projection, &table_meta.columns)?;
-        return Ok(ExecutionResult::Query(empty));
+        return Ok((ExecutionResult::Query(empty), KnnExecutionStats::default()));
     }
 
     let vector_idx = table_meta
@@ -110,7 +129,7 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     let higher_is_better = pattern.sort_direction == SortDirection::Desc;
 
     if let Some(index) = selected_hnsw_index(txn, catalog, &table_meta, pattern, filter)? {
-        let mut entries = execute_hnsw_search(
+        let (mut entries, stats) = execute_hnsw_search_with_stats(
             txn,
             &table_meta,
             &index,
@@ -121,7 +140,7 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         order_entries(&mut entries, higher_is_better);
         let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
         let projected = project::execute_project(rows, projection, &table_meta.columns)?;
-        return Ok(ExecutionResult::Query(projected));
+        return Ok((ExecutionResult::Query(projected), stats));
     }
 
     let mut entries = execute_heap_scan(
@@ -136,7 +155,10 @@ pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     order_entries(&mut entries, higher_is_better);
     let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
     let projected = project::execute_project(rows, projection, &table_meta.columns)?;
-    Ok(ExecutionResult::Query(projected))
+    Ok((
+        ExecutionResult::Query(projected),
+        KnnExecutionStats::default(),
+    ))
 }
 
 fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
@@ -193,6 +215,7 @@ fn vector_dimension(table: &TableMetadata, column: &str) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
     txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
@@ -201,20 +224,52 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
     pattern: &KnnPattern,
     filter: Option<&TypedExpr>,
 ) -> Result<Vec<HeapEntry>> {
+    execute_hnsw_search_with_stats(
+        txn,
+        table_meta,
+        index,
+        (projection, vector_idx, higher_is_better),
+        pattern,
+        filter,
+    )
+    .map(|(entries, _)| entries)
+}
+
+fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table_meta: &TableMetadata,
+    index: &IndexMetadata,
+    (projection, vector_idx, higher_is_better): (&Projection, usize, bool),
+    pattern: &KnnPattern,
+    filter: Option<&TypedExpr>,
+) -> Result<(Vec<HeapEntry>, KnnExecutionStats)> {
     let mut requested = pattern.k as usize;
     if filter.is_some() {
         requested = requested.saturating_mul(4).max(64);
     }
-    let ef_search = HnswBridge::search_ef(index)?;
+    let configured_ef_search = HnswBridge::search_ef(index)?;
+    let mut hnsw_stats = HnswSearchStats::default();
+    let mut effective_ef_search = 0;
 
     loop {
-        let hits = HnswBridge::search_knn(
+        let ef_search = configured_ef_search.unwrap_or_else(|| requested.max(50));
+        effective_ef_search = effective_ef_search.max(ef_search);
+        let (hits, search_stats) = HnswBridge::search_knn(
             txn,
             &index.name,
             &pattern.query_vector,
             requested,
-            ef_search,
+            Some(ef_search),
         )?;
+        hnsw_stats.nodes_visited = hnsw_stats
+            .nodes_visited
+            .saturating_add(search_stats.nodes_visited);
+        hnsw_stats.distance_computations = hnsw_stats
+            .distance_computations
+            .saturating_add(search_stats.distance_computations);
+        hnsw_stats.search_time_us = hnsw_stats
+            .search_time_us
+            .saturating_add(search_stats.search_time_us);
         let exhausted = hits.len() < requested;
         let mut storage = txn.table_storage(table_meta);
         let mut entries = Vec::with_capacity(hits.len());
@@ -233,7 +288,7 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
         }
         if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
             if filter.is_some() && entries.len() < pattern.k as usize {
-                return execute_heap_scan(
+                let entries = execute_heap_scan(
                     txn,
                     table_meta,
                     projection,
@@ -241,7 +296,15 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
                     pattern,
                     vector_idx,
                     higher_is_better,
-                );
+                )?;
+                return Ok((
+                    entries,
+                    KnnExecutionStats {
+                        hnsw_stats: Some(hnsw_stats),
+                        ef_search: Some(effective_ef_search),
+                        fallback: true,
+                    },
+                ));
             }
             if filter.is_none() && exhausted && entries.len() < pattern.k as usize {
                 append_null_vector_rows(
@@ -255,11 +318,25 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
             }
             order_entries(&mut entries, higher_is_better);
             entries.truncate(pattern.k as usize);
-            return Ok(entries);
+            return Ok((
+                entries,
+                KnnExecutionStats {
+                    hnsw_stats: Some(hnsw_stats),
+                    ef_search: Some(effective_ef_search),
+                    fallback: false,
+                },
+            ));
         }
         let next = requested.saturating_mul(2);
         if next == requested {
-            return Ok(entries);
+            return Ok((
+                entries,
+                KnnExecutionStats {
+                    hnsw_stats: Some(hnsw_stats),
+                    ef_search: Some(effective_ef_search),
+                    fallback: false,
+                },
+            ));
         }
         requested = next;
     }

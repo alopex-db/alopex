@@ -1,6 +1,6 @@
 use alopex_core::Error as CoreError;
 use alopex_core::kv::KVStore;
-use alopex_core::vector::hnsw::{HnswConfig, HnswIndex};
+use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, SearchStats};
 use alopex_core::vector::{Metric, validate_dimensions};
 
 use crate::ast::ddl::VectorMetric;
@@ -165,25 +165,25 @@ impl HnswBridge {
         query: &[f32],
         k: usize,
         ef_search: Option<usize>,
-    ) -> Result<Vec<(u64, f32)>> {
+    ) -> Result<(Vec<(u64, f32)>, SearchStats)> {
         let index = txn.hnsw_entry(index_name).map_err(ExecutorError::from)?;
-        let (results, _) = index
+        let (results, stats) = index
             .search(query, k, ef_search)
             .map_err(ExecutorError::from)?;
-        results
-            .into_iter()
-            .map(|res| {
-                let key: [u8; 8] =
-                    res.key
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| ExecutorError::InvalidOperation {
+        let results =
+            results
+                .into_iter()
+                .map(|res| {
+                    let key: [u8; 8] = res.key.as_slice().try_into().map_err(|_| {
+                        ExecutorError::InvalidOperation {
                             operation: "HNSW search".into(),
                             reason: format!("RowID フォーマットが不正です: {:?}", res.key),
-                        })?;
-                Ok((u64::from_be_bytes(key), res.distance))
-            })
-            .collect()
+                        }
+                    })?;
+                    Ok((u64::from_be_bytes(key), res.distance))
+                })
+                .collect::<Result<Vec<_>>>()?;
+        Ok((results, stats))
     }
 
     /// HNSW インデックスの存在確認。
