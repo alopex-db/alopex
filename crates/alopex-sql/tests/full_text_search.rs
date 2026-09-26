@@ -215,7 +215,8 @@ fn ts_match_operator_matches_ts_rank() {
          INSERT INTO docs VALUES
            (1, 'the quick brown fox'),
            (2, 'quick database search'),
-           (3, 'unrelated text')",
+           (3, 'unrelated text');
+         CREATE INDEX docs_body_fts ON docs(body) USING FTS",
     )
     .unwrap();
 
@@ -242,5 +243,23 @@ fn ts_match_operator_matches_ts_rank() {
     assert_eq!(
         matches.rows,
         vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+
+    let row_dependent_query = run(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM docs
+         WHERE TO_TSVECTOR(body) @@ PLAINTO_TSQUERY(body)
+         ORDER BY id",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        row_dependent_query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+        ]
     );
 }
