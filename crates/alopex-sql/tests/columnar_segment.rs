@@ -105,7 +105,10 @@ fn query(
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+    let ExecutionResult::Query(result) = executor
+        .execute(plan)
+        .unwrap_or_else(|error| panic!("query {sql:?} failed: {error}"))
+    else {
         panic!("expected query result");
     };
     result.rows
@@ -226,11 +229,7 @@ fn copy_columnar_text_across_row_groups_remains_queryable() {
         query(&mut executor, &catalog, "SELECT COUNT(*) FROM reviews"),
         vec![vec![SqlValue::BigInt(2_000)]]
     );
-    let rows = query(
-        &mut executor,
-        &catalog,
-        "SELECT id, reviewer, title, body FROM reviews ORDER BY id",
-    );
+    let rows = query(&mut executor, &catalog, "SELECT * FROM reviews ORDER BY id");
     assert_eq!(rows.len(), 2_000);
     for id in 1..=2_000 {
         assert_eq!(
