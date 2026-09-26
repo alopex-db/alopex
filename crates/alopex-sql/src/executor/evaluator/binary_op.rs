@@ -43,6 +43,7 @@ fn eval_binary_values_with_type(
         BinaryOp::And => logical_and(l, r),
         BinaryOp::Or => logical_or(l, r),
         BinaryOp::StringConcat => string_concat(l, r),
+        BinaryOp::TsMatch => super::fts::eval_ts_match(&l, &r),
         BinaryOp::BitAnd => bitwise(l, r, |a, b| a & b),
         BinaryOp::BitOr => bitwise(l, r, |a, b| a | b),
         BinaryOp::BitXor => bitwise(l, r, |a, b| a ^ b),
