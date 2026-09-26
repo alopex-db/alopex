@@ -711,6 +711,7 @@ where
         limit: Some(limit),
         offset,
         ties: None,
+        ..
     } = plan
     else {
         return Ok(None);
@@ -1330,6 +1331,7 @@ fn build_iterator_pipeline_with_outer<
             limit,
             offset,
             ties,
+            ..
         } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
@@ -1823,6 +1825,7 @@ fn build_streaming_pipeline_inner<
             limit,
             offset,
             ties,
+            ..
         } => {
             let (input_iter, projection, schema) =
                 build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;

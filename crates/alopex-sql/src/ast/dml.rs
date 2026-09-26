@@ -1,3 +1,4 @@
+use super::ddl::IndexOption;
 use super::expr::Expr;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,9 @@ pub struct Select {
     /// under the ORDER BY sort key (issue #152, contract 0.10.0).
     #[serde(default)]
     pub limit_with_ties: bool,
+    /// Per-query HNSW controls attached to a KNN `LIMIT` query.
+    #[serde(default)]
+    pub knn_options: Vec<IndexOption>,
     #[serde(default)]
     pub span: Span,
 }

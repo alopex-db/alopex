@@ -861,7 +861,14 @@ fn validate_plan(
             limit,
             offset,
             ties,
+            knn_options,
         } => {
+            if !knn_options.is_empty() {
+                return Err(RemoteReadRejection::local_only(
+                    "knn_query_options_local_only",
+                    "per-query HNSW controls are not in the v0.8 remote-read catalog",
+                ));
+            }
             if ties.is_some() {
                 return Err(RemoteReadRejection::local_only(
                     "fetch_with_ties_local_only",
@@ -1353,6 +1360,7 @@ mod tests {
             limit: Some(2),
             offset: None,
             ties,
+            knn_options: crate::planner::logical_plan::KnnQueryOptions::default(),
         };
         assert!(matches!(
             classify(&plan, &references()),
