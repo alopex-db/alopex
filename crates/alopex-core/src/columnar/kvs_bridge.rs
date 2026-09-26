@@ -305,6 +305,7 @@ impl ColumnarKvsBridge {
     pub fn open_segment_reader(&self, table_id: u32, segment_id: u64) -> Result<SegmentReaderV2> {
         let segment = self.read_segment_raw(table_id, segment_id)?;
         SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
+            .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
     }
 
     /// セグメントメタデータのみ取得する（統計用）。
