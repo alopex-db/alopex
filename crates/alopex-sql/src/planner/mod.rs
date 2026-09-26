@@ -1097,6 +1097,21 @@ impl TableReferenceExtractor {
                 root_access,
                 TableReferenceSource::LogicalPlanDdlTarget,
             ),
+            LogicalPlan::CreateTableAs { table, source, .. } => {
+                push_table_reference(
+                    references,
+                    &table.name,
+                    root_access,
+                    TableReferenceSource::LogicalPlanDdlTarget,
+                );
+                self.extract_plan(
+                    source,
+                    TableReferenceAccess::Read,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
+            }
             LogicalPlan::DropTable { name, .. } => push_table_reference(
                 references,
                 name,
@@ -1800,9 +1815,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             return Err(PlannerError::table_already_exists(&stmt.name));
         }
 
-        // Convert column definitions to metadata
-        let mut columns: Vec<ColumnMetadata> =
-            stmt.columns.iter().map(column_metadata_from_def).collect();
+        let source = stmt
+            .query
+            .as_ref()
+            .map(|query| self.plan_select_relation(query, &[], &CtePlans::new()))
+            .transpose()?;
+
+        // CTAS keeps only the output names and types. It does not implicitly
+        // copy source defaults, generated columns, or constraints.
+        let mut columns: Vec<ColumnMetadata> = match &source {
+            Some(source) => source
+                .schema
+                .iter()
+                .map(|column| ColumnMetadata::new(column.name.clone(), column.data_type.clone()))
+                .collect(),
+            None => stmt.columns.iter().map(column_metadata_from_def).collect(),
+        };
         for column in &mut columns {
             if column.generated_sequence.is_some() {
                 column.generated_sequence = Some(crate::executor::ddl::sequence::generated_name(
@@ -1847,15 +1875,25 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         table.data_source_format = DataSourceFormat::Alopex;
         table.properties = HashMap::new();
 
-        Ok(LogicalPlan::CreateTable {
-            table,
-            if_not_exists: stmt.if_not_exists,
-            with_options: stmt
-                .with_options
-                .iter()
-                .map(|opt| (opt.key.clone(), opt.value.clone()))
-                .collect(),
-        })
+        let with_options = stmt
+            .with_options
+            .iter()
+            .map(|opt| (opt.key.clone(), opt.value.clone()))
+            .collect();
+        if let Some(source) = source {
+            Ok(LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists: stmt.if_not_exists,
+                with_options,
+                source: Box::new(source.plan),
+            })
+        } else {
+            Ok(LogicalPlan::CreateTable {
+                table,
+                if_not_exists: stmt.if_not_exists,
+                with_options,
+            })
+        }
     }
 
     /// Extract primary key columns from table constraints.

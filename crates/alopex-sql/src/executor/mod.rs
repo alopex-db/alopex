@@ -281,6 +281,12 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 if_not_exists,
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => self.execute_create_table_as(table, with_options, if_not_exists, *source),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
             LogicalPlan::CreateView {
                 table,
@@ -466,6 +472,54 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 with_options,
                 if_not_exists,
+            )
+        })
+    }
+
+    fn execute_create_table_as(
+        &mut self,
+        table: crate::catalog::TableMetadata,
+        with_options: Vec<(String, String)>,
+        if_not_exists: bool,
+        source: LogicalPlan,
+    ) -> Result<ExecutionResult> {
+        let table_name = table.name.clone();
+        let columns = table
+            .column_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            if catalog.table_exists(&table_name) {
+                return if if_not_exists {
+                    Ok(ExecutionResult::Success)
+                } else {
+                    Err(ExecutorError::TableAlreadyExists(table_name))
+                };
+            }
+            let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "CREATE TABLE AS".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *catalog,
+                table,
+                with_options,
+                false,
+            )?;
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*catalog,
+                &table_name,
+                columns,
+                result.rows,
+                None,
+                None,
             )
         })
     }
@@ -726,6 +780,56 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 with_options,
                 if_not_exists,
             ),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => {
+                let table_name = table.name.clone();
+                let columns = table
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                if catalog.table_exists_in_txn(&table_name, overlay) {
+                    return if if_not_exists {
+                        Ok(ExecutionResult::Success)
+                    } else {
+                        Err(ExecutorError::TableAlreadyExists(table_name))
+                    };
+                }
+                let result = {
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    let ExecutionResult::Query(result) =
+                        query::execute_query(&mut sql_txn, &view, *source)?
+                    else {
+                        return Err(ExecutorError::InvalidOperation {
+                            operation: "CREATE TABLE AS".into(),
+                            reason: "SELECT source did not return query rows".into(),
+                        });
+                    };
+                    result
+                };
+                self.execute_create_table_in_txn(
+                    &mut *catalog,
+                    &mut sql_txn,
+                    overlay,
+                    table,
+                    with_options,
+                    false,
+                )?;
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                dml::execute_insert_rows_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table_name,
+                    columns,
+                    result.rows,
+                    None,
+                    None,
+                )
+            }
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table_in_txn(
                 &mut *catalog,
                 &mut sql_txn,

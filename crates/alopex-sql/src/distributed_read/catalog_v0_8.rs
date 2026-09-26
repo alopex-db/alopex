@@ -730,6 +730,7 @@ fn validate_plan(
             "DML is outside the read-only remote-read catalog",
         )),
         LogicalPlan::CreateTable { .. }
+        | LogicalPlan::CreateTableAs { .. }
         | LogicalPlan::DropTable { .. }
         | LogicalPlan::CreateView { .. }
         | LogicalPlan::DropView { .. }

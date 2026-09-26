@@ -513,6 +513,18 @@ pub enum LogicalPlan {
         with_options: Vec<(String, String)>,
     },
 
+    /// CREATE TABLE AS SELECT operation.
+    CreateTableAs {
+        /// Table metadata derived from the SELECT schema.
+        table: TableMetadata,
+        /// If true, don't error if table already exists.
+        if_not_exists: bool,
+        /// Raw WITH options to be validated during execution.
+        with_options: Vec<(String, String)>,
+        /// Query that produces the rows for the new table.
+        source: Box<LogicalPlan>,
+    },
+
     /// DROP TABLE operation.
     ///
     /// Drops an existing table.
@@ -724,6 +736,7 @@ impl LogicalPlan {
             LogicalPlan::Merge { .. } => "MERGE",
             LogicalPlan::Copy { .. } => "COPY",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
+            LogicalPlan::CreateTableAs { .. } => "CREATE TABLE AS",
             LogicalPlan::DropTable { .. } => "DROP TABLE",
             LogicalPlan::CreateView { .. } => "CREATE VIEW",
             LogicalPlan::DropView { .. } => "DROP VIEW",
@@ -917,6 +930,7 @@ impl LogicalPlan {
             LogicalPlan::AlterSequence(_) => "AlterSequence",
             LogicalPlan::DropSequence(_) => "DropSequence",
             LogicalPlan::CreateTable { .. } => "CreateTable",
+            LogicalPlan::CreateTableAs { .. } => "CreateTableAs",
             LogicalPlan::DropTable { .. } => "DropTable",
             LogicalPlan::CreateView { .. } => "CreateView",
             LogicalPlan::DropView { .. } => "DropView",
@@ -968,6 +982,7 @@ impl LogicalPlan {
         matches!(
             self,
             LogicalPlan::CreateTable { .. }
+                | LogicalPlan::CreateTableAs { .. }
                 | LogicalPlan::DropTable { .. }
                 | LogicalPlan::CreateView { .. }
                 | LogicalPlan::DropView { .. }
@@ -1023,7 +1038,9 @@ impl LogicalPlan {
             LogicalPlan::CreateSequence(_)
             | LogicalPlan::AlterSequence(_)
             | LogicalPlan::DropSequence(_) => None,
-            LogicalPlan::CreateTable { table, .. } => Some(&table.name),
+            LogicalPlan::CreateTable { table, .. } | LogicalPlan::CreateTableAs { table, .. } => {
+                Some(&table.name)
+            }
             LogicalPlan::DropTable { name, .. } => Some(name),
             LogicalPlan::CreateView { table, .. } => Some(&table.name),
             LogicalPlan::DropView { name, .. }

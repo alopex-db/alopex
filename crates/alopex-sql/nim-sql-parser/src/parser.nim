@@ -2105,6 +2105,16 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
     result.children.add(newIdent("IF NOT EXISTS"))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
+  if p.check(tkAs):
+    discard p.advance()
+    if not p.check(tkSelect):
+      p.error("expected SELECT query after AS")
+    p.enterNesting()
+    defer: p.leaveNesting()
+    let query = p.parseSelectStmt()
+    result.children.add(query)
+    result.span = spanThrough(tokenSpan(start), query.span)
+    return
   discard p.expect(tkLParen)
   result.children.add(p.parseColumnDef())
   while p.check(tkComma):
