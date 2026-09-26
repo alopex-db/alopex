@@ -90,6 +90,7 @@ fn continuous_aggregate_statement() -> Statement {
                 limit: None,
                 offset: None,
                 limit_with_ties: false,
+                knn_options: Vec::new(),
                 span: span(),
             },
             options: vec![],
@@ -588,6 +589,7 @@ fn test_plan_select_wildcard() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -643,6 +645,7 @@ fn test_plan_select_columns() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -688,6 +691,7 @@ fn test_plan_select_with_where() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -741,6 +745,7 @@ fn test_plan_select_with_order_by() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -785,6 +790,7 @@ fn test_plan_select_with_limit() {
         limit: Some(int_lit(10)),
         offset: Some(int_lit(5)),
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -796,6 +802,7 @@ fn test_plan_select_with_limit() {
         limit,
         offset,
         ties,
+        ..
     } = result.unwrap()
     {
         assert!(matches!(*input, LogicalPlan::Scan { .. }));
@@ -839,6 +846,7 @@ fn test_plan_select_combined() {
         limit: Some(int_lit(10)),
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -888,6 +896,7 @@ fn test_plan_select_table_not_found() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -1319,6 +1328,7 @@ fn distinct_on_select(
         limit,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     }))
 }

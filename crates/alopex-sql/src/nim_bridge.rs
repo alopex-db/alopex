@@ -174,6 +174,9 @@ pub(crate) mod continuous_aggregate_select_wire {
             // The staged wire payload is frozen and cannot carry WITH TIES;
             // the Nim staging validator rejects it before encoding.
             limit_with_ties: false,
+            // The staged wire payload is frozen and cannot carry per-query
+            // HNSW controls; its validator rejects the trailing WITH clause.
+            knn_options: Vec::new(),
             span: wire.span,
         })
     }
