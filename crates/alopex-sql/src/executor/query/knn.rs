@@ -154,23 +154,8 @@ fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     };
     let dimension = vector_dimension(table, &pattern.column).unwrap_or(HNSW_BASE_DIMENSIONS);
     let threshold = hnsw_row_threshold(pattern.k as usize, dimension);
-    Ok(table_exceeds_hnsw_threshold(txn, table, threshold)?.then_some(index))
-}
-
-fn table_exceeds_hnsw_threshold<'txn, S: KVStore + 'txn>(
-    txn: &mut impl SqlTxn<'txn, S>,
-    table: &TableMetadata,
-    threshold: usize,
-) -> Result<bool> {
-    // ponytail: bounded pre-scan; replace with persisted table cardinality when the catalog owns it.
-    let mut storage = txn.table_storage(table);
-    let mut rows = storage.range_scan(0, u64::MAX)?;
-    for _ in 0..threshold {
-        if rows.next().transpose()?.is_none() {
-            return Ok(false);
-        }
-    }
-    Ok(rows.next().transpose()?.is_some())
+    let indexed_rows = txn.hnsw_entry(&index.name)?.stats().node_count;
+    Ok((indexed_rows > threshold as u64).then_some(index))
 }
 
 fn hnsw_row_threshold(k: usize, dimension: usize) -> usize {

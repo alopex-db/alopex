@@ -482,6 +482,16 @@ impl Database {
         let mut overlay = CatalogOverlay::new();
         let mut borrowed =
             TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+        if mode == TxnMode::ReadOnly {
+            let cached = self
+                .hnsw_cache
+                .read()
+                .expect("hnsw cache lock poisoned")
+                .iter()
+                .map(|(name, index)| (name.clone(), index.clone_for_read()))
+                .collect();
+            borrowed.seed_hnsw_read_cache(cached);
+        }
 
         let mut executor: Executor<_, _> =
             Executor::new(self.store.clone(), self.sql_catalog.clone());
@@ -508,7 +518,19 @@ impl Database {
             );
         }
 
+        let hnsw_cache_entries = if mode == TxnMode::ReadOnly {
+            borrowed.cloned_hnsw_entries()
+        } else {
+            Vec::new()
+        };
         drop(borrowed);
+
+        if !hnsw_cache_entries.is_empty() {
+            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+            for (name, index) in hnsw_cache_entries {
+                cache.entry(name).or_insert_with(|| Arc::new(index));
+            }
+        }
 
         if let Some(journal) = journal {
             journal.stage(&mut txn).map_err(Error::Core)?;
@@ -930,5 +952,38 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn auto_commit_knn_reads_reuse_the_database_hnsw_cache() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));\
+             CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;\
+             INSERT INTO items (id, embedding) VALUES (1, [0.0, 0.0]);",
+        )
+        .unwrap();
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+
+        let query = "EXPLAIN SELECT id FROM items \
+            ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1";
+        db.execute_sql(query).unwrap();
+        let first = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the first SQL kNN read must populate the cache");
+
+        db.execute_sql(query).unwrap();
+        let second = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the cached index must remain available");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

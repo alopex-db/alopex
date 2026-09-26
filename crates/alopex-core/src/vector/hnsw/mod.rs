@@ -62,6 +62,25 @@ impl HnswIndex {
         &self.name
     }
 
+    /// Creates a read-only handle that shares the immutable graph state.
+    ///
+    /// Callers must not stage writes through the returned handle. Write
+    /// transactions load an owned index so an uncommitted graph cannot leak
+    /// into a shared query cache.
+    pub fn clone_for_read(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            graph: Arc::clone(&self.graph),
+            storage: self.storage.clone(),
+            on_search: None,
+            on_insert: None,
+            stats_cache: self.stats_cache.clone(),
+            compacting: AtomicBool::new(self.compacting.load(Ordering::Relaxed)),
+            compact_condvar: Condvar::new(),
+            compact_mutex: Mutex::new(()),
+        }
+    }
+
     /// ベクトルを挿入または更新する（既存キーは上書き）。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<()> {
         self.wait_for_compaction("upsert")?;
