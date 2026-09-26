@@ -23,6 +23,9 @@ use crate::storage::compression::{create_compressor, CompressionV2};
 pub const SEGMENT_MAGIC: &[u8; 4] = b"ALXC";
 /// Segment V2 のフォーマットバージョン。
 pub const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
+/// RowGroup 固有メタデータを記録するセグメントフォーマットバージョン。
+pub const SEGMENT_FORMAT_VERSION_V3: u16 = 3;
+const CURRENT_SEGMENT_FORMAT_VERSION: u16 = SEGMENT_FORMAT_VERSION_V3;
 /// ヘッダの固定長（24バイト）。
 pub const SEGMENT_HEADER_SIZE: usize = 24;
 /// RowID のセグメントID割り当てビット数（上位 20bit）。
@@ -118,7 +121,7 @@ impl SegmentHeader {
     ) -> Self {
         Self {
             magic: *SEGMENT_MAGIC,
-            format_version: SEGMENT_FORMAT_VERSION_V2,
+            format_version: CURRENT_SEGMENT_FORMAT_VERSION,
             column_count,
             row_count,
             row_group_size,
@@ -445,6 +448,12 @@ pub struct ColumnChunkOffset {
     pub length: u64,
     /// カラムチャンクの非圧縮サイズ。
     pub uncompressed_length: u64,
+    /// RowGroup 固有のエンコーディング。旧形式では未記録。
+    #[serde(default)]
+    pub encoding: Option<EncodingV2>,
+    /// RowGroup 固有の圧縮方式。旧形式では未記録。
+    #[serde(default)]
+    pub compression: Option<CompressionV2>,
     /// チャンクチェックサム (checksum_scope = Chunk の場合)。
     pub checksum: Option<u32>,
 }
@@ -486,6 +495,71 @@ pub struct SegmentFooter {
     pub row_group_table: RowGroupTable,
     /// カラムディスクリプタ。
     pub column_descriptors: ColumnDescriptors,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyColumnChunkOffsetV2 {
+    column_idx: u16,
+    offset: u64,
+    length: u64,
+    uncompressed_length: u64,
+    checksum: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyRowGroupTableEntryV2 {
+    row_start: u64,
+    row_count: u64,
+    data_offset: u64,
+    compressed_size: u64,
+    column_chunk_offsets: Vec<LegacyColumnChunkOffsetV2>,
+    checksum: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyRowGroupTableV2 {
+    entries: Vec<LegacyRowGroupTableEntryV2>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacySegmentFooterV2 {
+    row_group_table: LegacyRowGroupTableV2,
+    column_descriptors: ColumnDescriptors,
+}
+
+impl From<LegacySegmentFooterV2> for SegmentFooter {
+    fn from(legacy: LegacySegmentFooterV2) -> Self {
+        Self {
+            row_group_table: RowGroupTable {
+                entries: legacy
+                    .row_group_table
+                    .entries
+                    .into_iter()
+                    .map(|entry| RowGroupTableEntry {
+                        row_start: entry.row_start,
+                        row_count: entry.row_count,
+                        data_offset: entry.data_offset,
+                        compressed_size: entry.compressed_size,
+                        column_chunk_offsets: entry
+                            .column_chunk_offsets
+                            .into_iter()
+                            .map(|chunk| ColumnChunkOffset {
+                                column_idx: chunk.column_idx,
+                                offset: chunk.offset,
+                                length: chunk.length,
+                                uncompressed_length: chunk.uncompressed_length,
+                                encoding: None,
+                                compression: None,
+                                checksum: chunk.checksum,
+                            })
+                            .collect(),
+                        checksum: entry.checksum,
+                    })
+                    .collect(),
+            },
+            column_descriptors: legacy.column_descriptors,
+        }
+    }
 }
 
 /// レコードバッチ（単純な Schema + Column + null bitmap の組）。
@@ -810,6 +884,8 @@ impl SegmentWriterV2 {
                     offset: chunk_relative,
                     length: chunk_len,
                     uncompressed_length: uncompressed_len,
+                    encoding: Some(encoding),
+                    compression: Some(self.config.compression),
                     checksum: chunk_checksum,
                 });
 
@@ -932,6 +1008,17 @@ impl SegmentReaderV2 {
             return Err(ColumnarError::InvalidFormat("segment too small".into()));
         }
 
+        let header_bytes = source.read_range(0, SEGMENT_HEADER_SIZE as u64)?;
+        let header = read_header(&header_bytes)?;
+        if header.format_version != SEGMENT_FORMAT_VERSION_V2
+            && header.format_version != SEGMENT_FORMAT_VERSION_V3
+        {
+            return Err(ColumnarError::UnsupportedFormatVersion {
+                found: header.format_version,
+                expected: CURRENT_SEGMENT_FORMAT_VERSION,
+            });
+        }
+
         // フッターサイズとチェックサムを取得
         let trailer = source.read_range(total_size - 8, 8)?;
         let footer_size = u32::from_le_bytes(trailer[0..4].try_into().unwrap()) as u64;
@@ -950,18 +1037,14 @@ impl SegmentReaderV2 {
             return Err(ColumnarError::ChecksumMismatch);
         }
 
-        let footer: SegmentFooter = bincode::deserialize(&footer_bytes)
-            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
-
-        // ヘッダとスキーマ読み込み
-        let header_bytes = source.read_range(0, SEGMENT_HEADER_SIZE as u64)?;
-        let header = read_header(&header_bytes)?;
-        if header.format_version != SEGMENT_FORMAT_VERSION_V2 {
-            return Err(ColumnarError::UnsupportedFormatVersion {
-                found: header.format_version,
-                expected: SEGMENT_FORMAT_VERSION_V2,
-            });
-        }
+        let footer = if header.format_version == SEGMENT_FORMAT_VERSION_V2 {
+            bincode::deserialize::<LegacySegmentFooterV2>(&footer_bytes)
+                .map(SegmentFooter::from)
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
+        } else {
+            bincode::deserialize(&footer_bytes)
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
+        };
 
         let schema_len_bytes = source.read_range(SEGMENT_HEADER_SIZE as u64, 4)?;
         let schema_len = u32::from_le_bytes(schema_len_bytes.try_into().unwrap()) as u64;
@@ -975,6 +1058,46 @@ impl SegmentReaderV2 {
             footer,
             source,
         })
+    }
+
+    /// V2 footerに記録されないRowGroup固有メタデータを保存済みsegmentから補完する。
+    pub fn with_legacy_row_group_metadata(mut self, row_groups: &[RowGroupMeta]) -> Result<Self> {
+        if self.header.format_version != SEGMENT_FORMAT_VERSION_V2 {
+            return Ok(self);
+        }
+
+        let entries = &mut self.footer.row_group_table.entries;
+        if entries.len() != row_groups.len() {
+            return Err(ColumnarError::InvalidFormat(
+                "legacy row group metadata count mismatch".into(),
+            ));
+        }
+
+        for (row_group_index, (entry, row_group)) in entries.iter_mut().zip(row_groups).enumerate()
+        {
+            if entry.row_start != row_group.row_start || entry.row_count != row_group.row_count {
+                return Err(ColumnarError::InvalidFormat(format!(
+                    "legacy row group metadata range mismatch at index {row_group_index}"
+                )));
+            }
+
+            for chunk in &mut entry.column_chunk_offsets {
+                let metadata = row_group
+                    .column_chunks
+                    .iter()
+                    .find(|metadata| metadata.column_index == chunk.column_idx)
+                    .ok_or_else(|| {
+                        ColumnarError::InvalidFormat(format!(
+                            "legacy row group metadata missing column {} at index {row_group_index}",
+                            chunk.column_idx
+                        ))
+                    })?;
+                chunk.encoding = Some(metadata.encoding);
+                chunk.compression = Some(metadata.compression);
+            }
+        }
+
+        Ok(self)
     }
 
     /// カラムの一部だけを読み取る（カラムプルーニング）。
@@ -1038,11 +1161,13 @@ impl SegmentReaderV2 {
                 }
             }
 
-            let decoder: Box<dyn Decoder> = create_decoder(desc.encoding);
-            let decompressed = if let CompressionV2::None = desc.compression {
+            let encoding = chunk_meta.encoding.unwrap_or(desc.encoding);
+            let compression = chunk_meta.compression.unwrap_or(desc.compression);
+            let decoder: Box<dyn Decoder> = create_decoder(encoding);
+            let decompressed = if let CompressionV2::None = compression {
                 chunk_bytes
             } else {
-                let compressor = create_compressor(desc.compression)
+                let compressor = create_compressor(compression)
                     .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
                 compressor
                     .decompress(&chunk_bytes, chunk_meta.uncompressed_length as usize)
@@ -1127,6 +1252,30 @@ mod tests {
             simple_schema(),
             vec![Column::Int64(ids), Column::Int64(vals)],
             vec![None, None],
+        )
+    }
+
+    fn mixed_binary_values() -> Vec<Vec<u8>> {
+        vec![
+            b"apple".to_vec(),
+            b"apricot".to_vec(),
+            b"zebra".to_vec(),
+            b"yak".to_vec(),
+        ]
+    }
+
+    fn mixed_binary_batch() -> RecordBatch {
+        RecordBatch::new(
+            Schema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    logical_type: LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: None,
+                }],
+            },
+            vec![Column::Binary(mixed_binary_values())],
+            vec![None],
         )
     }
 
@@ -1239,6 +1388,113 @@ mod tests {
         } else {
             panic!("expected int64");
         }
+    }
+
+    #[test]
+    fn test_binary_columns_keep_their_row_group_encoding() {
+        let reader = write_and_read(
+            SegmentConfigV2 {
+                row_group_size: 2,
+                ..Default::default()
+            },
+            vec![mixed_binary_batch()],
+        )
+        .unwrap();
+
+        let batches = reader.read_columns(&[0]).unwrap();
+        let values = batches
+            .into_iter()
+            .flat_map(|batch| match batch.columns.into_iter().next().unwrap() {
+                Column::Binary(values) => values,
+                other => panic!("expected binary column, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, mixed_binary_values());
+    }
+
+    #[test]
+    fn legacy_footer_defaults_row_group_encoding_metadata() {
+        let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
+            row_group_size: 2,
+            ..Default::default()
+        });
+        writer.write_batch(mixed_binary_batch()).unwrap();
+        let mut segment = writer.finish().unwrap();
+        assert_eq!(segment.header.format_version, SEGMENT_FORMAT_VERSION_V3);
+        let current =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .unwrap();
+        let legacy_footer = LegacySegmentFooterV2 {
+            row_group_table: LegacyRowGroupTableV2 {
+                entries: current
+                    .footer
+                    .row_group_table
+                    .entries
+                    .iter()
+                    .map(|entry| LegacyRowGroupTableEntryV2 {
+                        row_start: entry.row_start,
+                        row_count: entry.row_count,
+                        data_offset: entry.data_offset,
+                        compressed_size: entry.compressed_size,
+                        column_chunk_offsets: entry
+                            .column_chunk_offsets
+                            .iter()
+                            .map(|chunk| LegacyColumnChunkOffsetV2 {
+                                column_idx: chunk.column_idx,
+                                offset: chunk.offset,
+                                length: chunk.length,
+                                uncompressed_length: chunk.uncompressed_length,
+                                checksum: chunk.checksum,
+                            })
+                            .collect(),
+                        checksum: entry.checksum,
+                    })
+                    .collect(),
+            },
+            column_descriptors: current.footer.column_descriptors.clone(),
+        };
+        let legacy_footer_bytes = bincode::serialize(&legacy_footer).unwrap();
+        let current_footer_size = u32::from_le_bytes(
+            segment.data[segment.data.len() - 8..segment.data.len() - 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        segment
+            .data
+            .truncate(segment.data.len() - 8 - current_footer_size);
+        segment.data.extend_from_slice(&legacy_footer_bytes);
+        segment
+            .data
+            .extend_from_slice(&(legacy_footer_bytes.len() as u32).to_le_bytes());
+        let mut hasher = Hasher::new();
+        hasher.update(&legacy_footer_bytes);
+        segment
+            .data
+            .extend_from_slice(&hasher.finalize().to_le_bytes());
+        segment.data[4..6].copy_from_slice(&SEGMENT_FORMAT_VERSION_V2.to_le_bytes());
+        let legacy_row_groups = segment.meta.row_groups.clone();
+        let legacy_data = segment.data;
+
+        let uncorrected =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(legacy_data.clone())))
+                .unwrap();
+        assert!(uncorrected.read_columns(&[0]).is_err());
+
+        let restored = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(legacy_data)))
+            .unwrap()
+            .with_legacy_row_group_metadata(&legacy_row_groups)
+            .unwrap();
+        assert_eq!(restored.header.format_version, SEGMENT_FORMAT_VERSION_V2);
+        let values = restored
+            .read_columns(&[0])
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| match batch.columns.into_iter().next().unwrap() {
+                Column::Binary(values) => values,
+                other => panic!("expected binary column, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, mixed_binary_values());
     }
 
     #[test]

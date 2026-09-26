@@ -409,6 +409,7 @@ fn fetch_columnar_rows_by_id<'txn, S: KVStore + 'txn>(
             .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
 
         let mut by_row_group: BTreeMap<usize, Vec<(usize, u64, usize)>> = BTreeMap::new();
