@@ -89,7 +89,7 @@ pub enum ExecutorError {
     UnsupportedFormat(String),
 
     /// Schema mismatch between input and table.
-    #[error("schema mismatch: expected {expected} columns, got {actual} - {reason}")]
+    #[error("schema mismatch: {reason}")]
     SchemaMismatch {
         expected: usize,
         actual: usize,
