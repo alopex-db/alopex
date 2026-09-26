@@ -136,7 +136,8 @@ fn persistence_test_default_survives_restart() {
             store.clone(),
             catalog,
             TxnMode::ReadWrite,
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 0); \
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 0, \
+             created_at TIMESTAMP NOT NULL DEFAULT NOW()); \
              INSERT INTO users (id) VALUES (1);",
         );
         store.flush().unwrap();
@@ -154,19 +155,19 @@ fn persistence_test_default_survives_restart() {
         store,
         catalog,
         TxnMode::ReadOnly,
-        "SELECT id, qty FROM users ORDER BY id;",
+        "SELECT id, qty, created_at FROM users ORDER BY id;",
     );
 
     let ExecutionResult::Query(query) = result else {
         panic!("expected query result");
     };
-    assert_eq!(
-        query.rows,
-        vec![
-            vec![SqlValue::Integer(1), SqlValue::Integer(0)],
-            vec![SqlValue::Integer(2), SqlValue::Integer(0)],
-        ]
-    );
+    assert_eq!(query.rows.len(), 2);
+    assert_eq!(query.rows[0][0], SqlValue::Integer(1));
+    assert_eq!(query.rows[0][1], SqlValue::Integer(0));
+    assert_eq!(query.rows[1][0], SqlValue::Integer(2));
+    assert_eq!(query.rows[1][1], SqlValue::Integer(0));
+    assert!(matches!(query.rows[0][2], SqlValue::Timestamp(_)));
+    assert!(matches!(query.rows[1][2], SqlValue::Timestamp(_)));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
