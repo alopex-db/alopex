@@ -798,9 +798,12 @@ fn build_iterator_pipeline_with_outer<
                 && !subquery::contains_subquery(&predicate)
                 && let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
-                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                && let Some(rows) = (crate::executor::dml::lookup_primary_key_equality(
                     txn, catalog, table_meta, &predicate,
-                )?
+                )?)
+                .or(crate::executor::dml::lookup_fts_match(
+                    txn, catalog, table_meta, &predicate,
+                )?)
             {
                 let schema = table_meta.columns.clone();
                 let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1461,9 +1464,12 @@ fn build_streaming_pipeline_inner<
             if !subquery::contains_subquery(&predicate)
                 && let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
-                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                && let Some(rows) = (crate::executor::dml::lookup_primary_key_equality(
                     txn, catalog, table_meta, &predicate,
-                )?
+                )?)
+                .or(crate::executor::dml::lookup_fts_match(
+                    txn, catalog, table_meta, &predicate,
+                )?)
             {
                 let schema = table_meta.columns.clone();
                 let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1895,17 +1901,7 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     })?;
 
     let candidates = if let Some(index) = index {
-        let mut terms = std::collections::BTreeSet::new();
-        if crate::fts::index_terms(&query, &mut terms) {
-            let mut ids = std::collections::BTreeSet::new();
-            let mut storage = txn.index_storage(index.index_id, false, vec![column]);
-            for term in terms {
-                ids.extend(storage.lookup(&SqlValue::Text(term))?);
-            }
-            Some(ids)
-        } else {
-            None
-        }
+        crate::executor::fts_bridge::lookup_query(txn, index, &query)?
     } else {
         None
     };
