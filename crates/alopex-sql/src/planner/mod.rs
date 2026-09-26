@@ -6206,6 +6206,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Process assignments
         let mut typed_assignments = Vec::new();
+        let scope = [ScopedTable::new(table.clone(), 0)];
+        let ctes = CtePlans::default();
 
         for assignment in &stmt.assignments {
             // Resolve the column
@@ -6215,7 +6217,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             let column_index = table.get_column_index(&assignment.column).unwrap();
 
             // Type-check the value expression
-            let typed_value = self.type_checker.infer_type(&assignment.value, table)?;
+            let typed_value = self.infer_expr_with_scope(&assignment.value, &scope, &ctes)?;
 
             // Check NOT NULL constraint
             if column_meta.not_null
@@ -6249,7 +6251,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Process optional WHERE clause
         let filter = if let Some(ref selection) = stmt.selection {
-            let predicate = self.type_checker.infer_type(selection, table)?;
+            let predicate = self.infer_expr_with_scope(selection, &scope, &ctes)?;
 
             // Verify predicate returns Boolean
             if predicate.resolved_type != ResolvedType::Boolean {
@@ -6492,8 +6494,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Process optional WHERE clause
+        let scope = [ScopedTable::new(table.clone(), 0)];
+        let ctes = CtePlans::default();
         let filter = if let Some(ref selection) = stmt.selection {
-            let predicate = self.type_checker.infer_type(selection, table)?;
+            let predicate = self.infer_expr_with_scope(selection, &scope, &ctes)?;
 
             // Verify predicate returns Boolean
             if predicate.resolved_type != ResolvedType::Boolean {

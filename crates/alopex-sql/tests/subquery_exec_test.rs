@@ -110,6 +110,39 @@ fn in_any_all_and_derived_subqueries_execute() {
 }
 
 #[test]
+fn update_and_delete_subqueries_execute() {
+    let results = execute_sql(
+        "CREATE TABLE p (id INT PRIMARY KEY, cat TEXT); \
+         CREATE TABLE o (id INT PRIMARY KEY); \
+         INSERT INTO p VALUES (1, 'a'), (2, 'b'), (3, 'c'); \
+         INSERT INTO o VALUES (1), (3); \
+         UPDATE p SET cat = 'z' WHERE id IN (SELECT id FROM o); \
+         SELECT id, cat FROM p ORDER BY id; \
+         DELETE FROM p WHERE EXISTS (SELECT 1 FROM o WHERE o.id = p.id); \
+         SELECT id FROM p ORDER BY id;",
+    )
+    .expect("execute DML subqueries");
+
+    assert!(matches!(results[4], ExecutionResult::RowsAffected(2)));
+    let ExecutionResult::Query(updated) = &results[5] else {
+        panic!("UPDATE verification must return rows");
+    };
+    assert_eq!(
+        updated.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("z".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+            vec![SqlValue::Integer(3), SqlValue::Text("z".into())],
+        ]
+    );
+    assert!(matches!(results[6], ExecutionResult::RowsAffected(2)));
+    let ExecutionResult::Query(remaining) = &results[7] else {
+        panic!("DELETE verification must return rows");
+    };
+    assert_eq!(remaining.rows, vec![vec![SqlValue::Integer(2)]]);
+}
+
+#[test]
 fn scalar_subquery_rejects_multiple_rows() {
     let err = execute_sql(&setup_sql(
         "SELECT (SELECT orders.total FROM orders) AS total FROM users",
