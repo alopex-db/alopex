@@ -15,7 +15,7 @@ Catalog API (polars) を使う場合:
 pip install alopex[polars]
 ```
 
-開発中は maturin を利用できます。
+開発テストでは、ファイル名と行番号を保つ軽量デバッグ情報のdev profileで maturin を利用できます。
 
 ```bash
 maturin develop -m crates/alopex-py/pyproject.toml
