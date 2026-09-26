@@ -133,7 +133,7 @@ type
     opAnd, opOr
     opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
     opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs,
-    opBitAnd, opBitOr, opBitXor, opShiftLeft, opShiftRight
+    opBitAnd, opBitOr, opBitXor, opShiftLeft, opShiftRight, opTsMatch
 
   UnaryOpKind* = enum
     opNot, opNeg, opIsNull, opIsNotNull, opBitNot

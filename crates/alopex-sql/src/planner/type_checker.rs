@@ -868,6 +868,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 self.check_string_concat_op(left, right, span)?;
                 Ok(Text)
             }
+
+            TsMatch => {
+                if matches!(left, Text | Null) && matches!(right, Text | Null) {
+                    Ok(Boolean)
+                } else {
+                    Err(PlannerError::InvalidOperator {
+                        op: "@@".into(),
+                        type_name: format!("{} and {}", left.type_name(), right.type_name()),
+                        line: span.start.line,
+                        column: span.start.column,
+                    })
+                }
+            }
         }
     }
 

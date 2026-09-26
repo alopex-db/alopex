@@ -91,7 +91,7 @@ fn fts_index_and_scan_paths_remain_equivalent_across_lifecycle() {
     .unwrap();
 
     let query = "SELECT row_id, document, rank FROM
-                 FTS_SEARCH('docs', 'body', 'quick') AS f(row_id, document, rank, headline)
+                 FTS_SEARCH('docs', 'body', 'quick') AS f
                  ORDER BY row_id";
     let scan_rows = run(&mut executor, &catalog, query).unwrap().unwrap().rows;
 
@@ -164,5 +164,102 @@ fn fts_index_and_scan_paths_remain_equivalent_across_lifecycle() {
     assert_eq!(
         run(&mut executor, &catalog, english).unwrap().unwrap().rows,
         scan_rows
+    );
+}
+
+#[test]
+fn fts_search_exposes_composite_primary_key_for_duplicate_documents() {
+    let (mut executor, catalog) = setup();
+    run(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE reviews (
+             review_id INTEGER,
+             source TEXT,
+             body TEXT,
+             PRIMARY KEY (review_id, source)
+         );
+         INSERT INTO reviews VALUES (10, 'market', 'recomendo'), (10, 'store', 'recomendo');
+         CREATE INDEX reviews_body_fts ON reviews(body) USING FTS",
+    )
+    .unwrap();
+
+    let result = run(
+        &mut executor,
+        &catalog,
+        "SELECT r.review_id, r.source
+         FROM FTS_SEARCH('reviews', 'body', 'recomendo')
+              AS f(row_id, document, rank, headline)
+         JOIN reviews AS r ON r.review_id = f.review_id AND r.source = f.source
+         ORDER BY r.source",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(10), SqlValue::Text("market".into())],
+            vec![SqlValue::Integer(10), SqlValue::Text("store".into())],
+        ]
+    );
+}
+
+#[test]
+fn ts_match_operator_matches_ts_rank() {
+    let (mut executor, catalog) = setup();
+    run(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);
+         INSERT INTO docs VALUES
+           (1, 'the quick brown fox'),
+           (2, 'quick database search'),
+           (3, 'unrelated text');
+         CREATE INDEX docs_body_fts ON docs(body) USING FTS",
+    )
+    .unwrap();
+
+    let matches = run(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM docs
+         WHERE TO_TSVECTOR(body) @@ PLAINTO_TSQUERY('quick')
+         ORDER BY id",
+    )
+    .unwrap()
+    .unwrap();
+    let ranked = run(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM docs
+         WHERE TS_RANK(TO_TSVECTOR(body), PLAINTO_TSQUERY('quick')) > 0
+         ORDER BY id",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(matches.rows, ranked.rows);
+    assert_eq!(
+        matches.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+
+    let row_dependent_query = run(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM docs
+         WHERE TO_TSVECTOR(body) @@ PLAINTO_TSQUERY(body)
+         ORDER BY id",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        row_dependent_query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+        ]
     );
 }
