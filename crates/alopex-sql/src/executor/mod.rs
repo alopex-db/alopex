@@ -82,29 +82,45 @@ use crate::storage::{
 use crate::{ExplainFormat, ResolvedType};
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
+struct ExplainAnalysis<'a> {
+    knn_stats: Option<&'a query::KnnExecutionStats>,
+    elapsed_ns: u64,
+    rows: u64,
+}
+
 fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
-    analyze: bool,
     format: ExplainFormat,
-    elapsed_ns: Option<u64>,
-    rows: Option<u64>,
+    analysis: Option<ExplainAnalysis<'_>>,
 ) -> ExecutionResult {
+    let elapsed_ns = analysis.map(|analysis| analysis.elapsed_ns);
+    let rows = analysis.map(|analysis| analysis.rows);
+    let knn_stats = analysis.and_then(|analysis| analysis.knn_stats);
     let (column, value) = match format {
         ExplainFormat::Text => {
             let mut text = plan.explain_text(elapsed_ns, rows);
-            if let Some(path) = hnsw_path {
+            if let Some(path) = hnsw_path.as_deref() {
                 text = if path.starts_with("HnswSearch") {
-                    explain_hnsw_text(plan, &path, elapsed_ns, rows)
+                    explain_hnsw_text(plan, path, knn_stats, elapsed_ns, rows)
                 } else {
                     format!("{path}\n{text}")
                 };
+            }
+            if hnsw_path
+                .as_deref()
+                .is_none_or(|path| !path.starts_with("HnswSearch"))
+                && let Some(stats) = knn_stats
+            {
+                text.push('\n');
+                text.push_str(&explain_knn_stats_text(stats));
             }
             ("QUERY PLAN", text)
         }
         ExplainFormat::Json => {
             let mut document: serde_json::Value =
-                serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
+                serde_json::from_str(&plan.explain_json(analysis.is_some(), elapsed_ns, rows))
                     .expect("logical plan must render valid JSON");
             if let Some(selected_path) = hnsw_path {
                 document["physical_plan"]["selected_path"] =
@@ -122,6 +138,7 @@ fn explain_result(
 fn explain_hnsw_text(
     plan: &LogicalPlan,
     path: &str,
+    stats: Option<&query::KnnExecutionStats>,
     elapsed_ns: Option<u64>,
     rows: Option<u64>,
 ) -> String {
@@ -137,9 +154,16 @@ fn explain_hnsw_text(
         if omitted_sort && let Some(line) = line.strip_prefix("  ") {
             let trimmed = line.trim_start();
             if trimmed.starts_with("Scan table=") {
-                physical_text.push_str(&line[..line.len() - trimmed.len()]);
+                let indent = &line[..line.len() - trimmed.len()];
+                physical_text.push_str(indent);
                 physical_text.push_str(path);
                 physical_text.push('\n');
+                if let Some(stats) = stats {
+                    physical_text.push_str(indent);
+                    physical_text.push_str("  ");
+                    physical_text.push_str(&explain_knn_stats_text(stats));
+                    physical_text.push('\n');
+                }
                 continue;
             }
             physical_text.push_str(line);
@@ -150,6 +174,32 @@ fn explain_hnsw_text(
         physical_text.push('\n');
     }
     physical_text
+}
+
+fn explain_knn_stats_text(stats: &query::KnnExecutionStats) -> String {
+    let (nodes_visited, distance_computations, search_time_us) = stats
+        .hnsw_stats
+        .as_ref()
+        .map(|stats| {
+            (
+                stats.nodes_visited,
+                stats.distance_computations,
+                stats.search_time_us,
+            )
+        })
+        .unwrap_or_default();
+    let ef_search = stats
+        .ef_search
+        .map(|ef_search| ef_search.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let fallback = if stats.fallback {
+        "ExactKnnScan"
+    } else {
+        "none"
+    };
+    format!(
+        "nodes_visited={nodes_visited} distance_computations={distance_computations} search_time_us={search_time_us} ef_search={ef_search} fallback={fallback}"
+    )
 }
 
 fn result_rows(result: &ExecutionResult) -> u64 {
@@ -291,18 +341,32 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     query::explain_knn_path(txn, &*catalog, &input)
                 })?;
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(&input, hnsw_path, format, None));
                 }
                 let started = Instant::now();
-                let result = self.execute((*input).clone())?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = self.run_in_write_txn(|txn| {
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        query::execute_query_with_knn_stats(txn, &*catalog, &input)
+                    })?;
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute((*input).clone())?, None),
+                    }
+                } else {
+                    (self.execute((*input).clone())?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
@@ -704,18 +768,33 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
                 };
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(&input, hnsw_path, format, None));
                 }
                 let started = Instant::now();
-                let result = self.execute_in_txn((*input).clone(), txn)?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = {
+                        let (mut sql_txn, _) = txn.split_parts();
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        query::execute_query_with_knn_stats(&mut sql_txn, &*catalog, &input)?
+                    };
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute_in_txn((*input).clone(), txn)?, None),
+                    }
+                } else {
+                    (self.execute_in_txn((*input).clone(), txn)?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
