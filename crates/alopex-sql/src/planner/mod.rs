@@ -2805,9 +2805,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
         }
 
-        // SELECT-list aliases are visible to HAVING, QUALIFY, and ORDER BY.
-        // `expr_scope` above stays alias-free so that WHERE and GROUP BY keep
-        // resolving against the FROM-derived base relations.
+        // SELECT-list aliases are visible to GROUP BY, HAVING, QUALIFY, and
+        // ORDER BY. `expr_scope` remains alias-free so WHERE continues to
+        // resolve only against the FROM-derived base relations.
         let projection_aliases = collect_projection_aliases(&stmt.projection);
 
         let final_projection = self.build_projection_with_scope(
@@ -2970,7 +2970,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
                 (group_keys, None, projected)
             } else {
-                let expanded = self.expand_group_by_items(stmt, &expr_scope, &ctes)?;
+                let expanded =
+                    self.expand_group_by_items(stmt, &expr_scope, &projection_aliases, &ctes)?;
                 let projected = self.build_projected_columns_for_aggregate_with_scope(
                     &stmt.projection,
                     &expr_scope,
@@ -3110,7 +3111,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             for key in &stmt.distinct_on {
                 let source = substitute_projection_aliases(key, &projection_aliases);
                 let typed = self.infer_expr_with_scope(&source, &expr_scope, &ctes)?;
-                if key_signatures.insert(distinct_on_expr_signature(&typed)) {
+                if key_signatures.insert(structural_expr_signature(&typed)) {
                     key_exprs.push(typed);
                 }
             }
@@ -3188,7 +3189,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
         mut plan: LogicalPlan,
     ) -> Result<PlannedRelation, PlannerError> {
-        let expanded = self.expand_group_by_items(stmt, expr_scope, ctes)?;
+        let expanded = self.expand_group_by_items(stmt, expr_scope, projection_aliases, ctes)?;
         let group_keys = expanded.group_keys;
         let grouping_sets = expanded.grouping_sets;
         let projected = self.build_projected_columns_for_aggregate_with_scope(
@@ -4424,11 +4425,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         "GROUP BY cannot contain aggregate functions".to_string(),
                     ));
                 }
-                if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
-                    return Err(PlannerError::invalid_expression(
-                        "GROUP BY expressions must be column references".to_string(),
-                    ));
-                }
                 keys.push(typed);
             }
         }
@@ -4440,17 +4436,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         expr: &Expr,
         scope: &[ScopedTable],
+        projection_aliases: &HashMap<String, Expr>,
+        projection: &[SelectItem],
         ctes: &CtePlans,
     ) -> Result<TypedExpr, PlannerError> {
-        let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
+        let source = resolve_group_by_expression(expr, projection_aliases, projection)?;
+        let typed = self.infer_expr_with_scope(&source, scope, ctes)?;
         if typed_expr_contains_aggregate(&typed) {
             return Err(PlannerError::invalid_expression(
                 "GROUP BY cannot contain aggregate functions".to_string(),
-            ));
-        }
-        if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
-            return Err(PlannerError::invalid_expression(
-                "GROUP BY expressions must be column references".to_string(),
             ));
         }
         Ok(typed)
@@ -4467,6 +4461,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         stmt: &Select,
         scope: &[ScopedTable],
+        projection_aliases: &HashMap<String, Expr>,
         ctes: &CtePlans,
     ) -> Result<ExpandedGroupBy, PlannerError> {
         let Some(items) = &stmt.group_by else {
@@ -4484,7 +4479,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             let mut keys = Vec::new();
             for item in items {
                 if let GroupByItem::Expr { expr } = item {
-                    keys.push(self.type_group_key_with_scope(expr, scope, ctes)?);
+                    keys.push(self.type_group_key_with_scope(
+                        expr,
+                        scope,
+                        projection_aliases,
+                        &stmt.projection,
+                        ctes,
+                    )?);
                 }
             }
             return Ok(ExpandedGroupBy {
@@ -4496,8 +4497,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let mut keys: Vec<TypedExpr> = Vec::new();
         let mut key_index: HashMap<String, usize> = HashMap::new();
         let mut add_key = |planner: &Self, expr: &Expr| -> Result<usize, PlannerError> {
-            let typed = planner.type_group_key_with_scope(expr, scope, ctes)?;
-            let signature = expr_key(&typed);
+            let typed = planner.type_group_key_with_scope(
+                expr,
+                scope,
+                projection_aliases,
+                &stmt.projection,
+                ctes,
+            )?;
+            let signature = structural_expr_signature(&typed);
             if let Some(&index) = key_index.get(&signature) {
                 return Ok(index);
             }
@@ -6532,12 +6539,11 @@ struct AggregateSignature {
     order_key: Option<String>,
 }
 
-/// Collect the SELECT-list aliases that ORDER BY / HAVING may reference.
+/// Collect the SELECT-list aliases that GROUP BY, HAVING, QUALIFY, and ORDER
+/// BY may reference.
 ///
-/// Per the SQL standard, aliases introduced by the projection are visible to
-/// HAVING and ORDER BY (which are logically evaluated after the projection),
-/// but not to WHERE / GROUP BY. Only `SelectItem::Expr` carries an alias;
-/// wildcards contribute nothing.
+/// Aliases introduced by the projection never apply to WHERE. Only
+/// `SelectItem::Expr` carries an alias; wildcards contribute nothing.
 ///
 /// When the same alias is declared twice the first declaration wins, which
 /// keeps the substitution deterministic instead of depending on map ordering.
@@ -6556,7 +6562,8 @@ fn collect_projection_aliases(items: &[SelectItem]) -> HashMap<String, crate::as
     aliases
 }
 
-/// Substitute projection aliases inside an ORDER BY / HAVING expression.
+/// Substitute projection aliases inside a GROUP BY, HAVING, QUALIFY, or ORDER
+/// BY expression.
 ///
 /// An unqualified `ColumnRef` whose name matches a projection alias is replaced
 /// by the aliased source expression, so everything downstream (type inference,
@@ -6754,6 +6761,33 @@ fn substitute_projection_aliases(
         kind,
         span: expr.span,
     }
+}
+
+fn resolve_group_by_expression(
+    expr: &Expr,
+    projection_aliases: &HashMap<String, Expr>,
+    projection: &[SelectItem],
+) -> Result<Expr, PlannerError> {
+    let ExprKind::Literal {
+        literal: Literal::Number(number),
+    } = &expr.kind
+    else {
+        return Ok(substitute_projection_aliases(expr, projection_aliases));
+    };
+    let Ok(position) = number.parse::<usize>() else {
+        return Ok(expr.clone());
+    };
+    let index = position.checked_sub(1).ok_or_else(|| {
+        PlannerError::invalid_expression("GROUP BY position must be positive".to_string())
+    })?;
+    let Some(SelectItem::Expr { expr: source, .. }) = projection.get(index) else {
+        return Err(PlannerError::invalid_expression(format!(
+            "GROUP BY position {position} does not reference a SELECT expression"
+        )));
+    };
+    let mut source = source.clone();
+    source.span = expr.span;
+    Ok(source)
 }
 
 fn build_offset_window_function(
@@ -7600,16 +7634,16 @@ fn expr_key(expr: &TypedExpr) -> String {
     format!("{:?}", expr.kind)
 }
 
-/// Structural signature for DISTINCT ON key matching (D2).
+/// Structural signature for expressions matched across source locations.
 ///
 /// `expr_key` embeds the source spans of nested sub-expressions, so the same
-/// compound expression written once in the ON list and once in ORDER BY would
-/// never compare equal. This signature erases every rendered
+/// compound expression written in different clauses would never compare
+/// equal. This signature erases every rendered
 /// `span: Span { .. }` segment first. The eraser only rewrites segments that
 /// match the exact derived-Debug shape (digits and fixed punctuation), so a
 /// string literal that happens to contain the marker text is left untouched
 /// and still compares consistently on both sides.
-fn distinct_on_expr_signature(expr: &TypedExpr) -> String {
+fn structural_expr_signature(expr: &TypedExpr) -> String {
     const MARKER: &str = "span: Span { start: Location { line: ";
     let rendered = format!("{:?}", expr.kind);
     let mut result = String::with_capacity(rendered.len());
@@ -7690,13 +7724,13 @@ fn build_distinct_on_sort_spec(
     base_schema: &[ColumnMetadata],
     fallback_span: crate::ast::Span,
 ) -> Result<(usize, Vec<SortExpr>), PlannerError> {
-    let key_signatures: Vec<String> = key_exprs.iter().map(distinct_on_expr_signature).collect();
+    let key_signatures: Vec<String> = key_exprs.iter().map(structural_expr_signature).collect();
     let mut consumed = vec![false; key_exprs.len()];
     let mut prefix: Vec<SortExpr> = Vec::new();
     let mut tail: Vec<SortExpr> = Vec::new();
     let mut prefix_ended = false;
     for sort in user_order_by {
-        let signature = distinct_on_expr_signature(&sort.expr);
+        let signature = structural_expr_signature(&sort.expr);
         if let Some(index) = key_signatures
             .iter()
             .position(|candidate| candidate == &signature)
@@ -7817,7 +7851,7 @@ fn canonical_aggregate_name(name: &str) -> String {
 fn build_group_key_map(group_keys: &[TypedExpr]) -> HashMap<String, usize> {
     let mut map = HashMap::new();
     for (idx, key) in group_keys.iter().enumerate() {
-        map.insert(expr_key(key), idx);
+        map.insert(structural_expr_signature(key), idx);
     }
     map
 }
@@ -7998,7 +8032,7 @@ impl GroupingRewrite {
         let key_index = group_keys
             .iter()
             .enumerate()
-            .map(|(index, key)| (expr_key(key), index))
+            .map(|(index, key)| (structural_expr_signature(key), index))
             .collect();
         Self {
             key_index,
@@ -8224,7 +8258,7 @@ fn lower_grouping_call(
     }
     let mut key_positions = Vec::with_capacity(args.len());
     for arg in args {
-        let Some(&position) = context.key_index.get(&expr_key(arg)) else {
+        let Some(&position) = context.key_index.get(&structural_expr_signature(arg)) else {
             return Err(PlannerError::invalid_expression(
                 "arguments to GROUPING must be grouping expressions of the query".to_string(),
             ));
@@ -8515,7 +8549,7 @@ fn rewrite_expr_with_maps(
     output_names: &[String],
 ) -> Result<TypedExpr, PlannerError> {
     let group_key_count = output_names.len().saturating_sub(aggregate_map.len());
-    let key = expr_key(expr);
+    let key = structural_expr_signature(expr);
     if let Some(idx) = group_key_map.get(&key) {
         return Ok(make_output_column_ref(
             *idx,
