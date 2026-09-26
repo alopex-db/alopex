@@ -4049,12 +4049,34 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     }
                     typed.push(value);
                 }
-                let schema = vec![
+                let table_name = match &typed[0].kind {
+                    TypedExprKind::Literal(Literal::String(table_name)) => table_name,
+                    _ => {
+                        return Err(PlannerError::invalid_expression(
+                            "FTS_SEARCH table name must be a string literal",
+                        ));
+                    }
+                };
+                let table = self
+                    .catalog
+                    .get_table(table_name)
+                    .ok_or_else(|| PlannerError::table_not_found(table_name, args[0].span))?;
+                let mut schema = vec![
                     ColumnMetadata::new("row_id", ResolvedType::BigInt),
                     ColumnMetadata::new("document", ResolvedType::Text),
                     ColumnMetadata::new("rank", ResolvedType::Double),
                     ColumnMetadata::new("headline", ResolvedType::Text),
                 ];
+                if let Some(primary_key) = &table.primary_key {
+                    for name in primary_key {
+                        let column = table.get_column(name).ok_or_else(|| {
+                            PlannerError::invalid_expression(format!(
+                                "FTS_SEARCH table '{table_name}' has unknown primary key column '{name}'"
+                            ))
+                        })?;
+                        schema.push(column.clone());
+                    }
+                }
                 (typed, schema)
             }
         };
@@ -4062,7 +4084,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let relation_name = alias
             .map(str::to_string)
             .unwrap_or_else(|| function.default_relation_name().to_string());
-        apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+        if function == TableFunctionKind::FtsSearch && columns.len() == 4 && schema.len() > 4 {
+            // FTS_SEARCH historically exposed four columns. Keep a legacy alias list
+            // positional while exposing appended primary keys by their table names.
+            apply_alias_columns(&relation_name, columns, &mut schema[..4], span)?;
+        } else {
+            apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+        }
 
         Ok(PlannedRelation {
             plan: LogicalPlan::TableFunction {

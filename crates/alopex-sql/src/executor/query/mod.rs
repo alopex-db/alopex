@@ -1839,6 +1839,20 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
             reason: "the searched column must be TEXT".into(),
         });
     }
+    let primary_key_indices = table
+        .primary_key
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|name| {
+            table
+                .get_column_index(name)
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "FTS_SEARCH".into(),
+                    reason: format!("unknown primary key column '{name}'"),
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let index = catalog
         .get_indexes_for_table(table_name)
         .into_iter()
@@ -1926,15 +1940,14 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
                     reason: "result exceeds 100000 rows".into(),
                 });
             }
-            output.push(Row::new(
-                row_id as u64,
-                vec![
-                    SqlValue::BigInt(row_id),
-                    SqlValue::Text(document.clone()),
-                    SqlValue::Double(crate::fts::rank(&tokens, &query)),
-                    SqlValue::Text(headline),
-                ],
-            ));
+            let mut values = vec![
+                SqlValue::BigInt(row_id),
+                SqlValue::Text(document.clone()),
+                SqlValue::Double(crate::fts::rank(&tokens, &query)),
+                SqlValue::Text(headline),
+            ];
+            values.extend(primary_key_indices.iter().map(|index| row[*index].clone()));
+            output.push(Row::new(row_id as u64, values));
         }
     }
     Ok(output)
