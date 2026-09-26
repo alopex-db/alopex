@@ -1,6 +1,6 @@
 use crate::ast::expr::Literal;
 use crate::executor::evaluator::vector_ops::VectorMetric;
-use crate::planner::logical_plan::LogicalPlan;
+use crate::planner::logical_plan::{KnnQueryOptions, LogicalPlan};
 use crate::planner::typed_expr::{Projection, SortExpr, TypedExprKind};
 
 /// ORDER BY + LIMIT から抽出した KNN 最適化パターン。
@@ -13,6 +13,7 @@ pub struct KnnPattern {
     pub function: VectorFunction,
     pub k: u64,
     pub sort_direction: SortDirection,
+    pub options: KnnQueryOptions,
 }
 
 /// ベクトル関数が返すスコアの意味。
@@ -35,7 +36,7 @@ pub enum SortDirection {
 /// - ORDER BY は単一のベクトル関数呼び出しであること。
 /// - メトリクスとソート方向の整合性を満たす場合のみ Some を返す。
 pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
-    let (sort_plan, k) = extract_limit(plan)?;
+    let (sort_plan, k, options) = extract_limit(plan)?;
     let (order_expr, input_after_sort) = extract_sort(sort_plan)?;
     let sort_direction = if order_expr.asc {
         SortDirection::Asc
@@ -76,10 +77,11 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
         function,
         k,
         sort_direction,
+        options: options.clone(),
     })
 }
 
-fn extract_limit(plan: &LogicalPlan) -> Option<(&LogicalPlan, u64)> {
+fn extract_limit(plan: &LogicalPlan) -> Option<(&LogicalPlan, u64, &KnnQueryOptions)> {
     match plan {
         // WITH TIES (ties: Some) must never take the index shortcut: the
         // exact peer set of the boundary row requires the full sort.
@@ -88,7 +90,8 @@ fn extract_limit(plan: &LogicalPlan) -> Option<(&LogicalPlan, u64)> {
             limit: Some(k),
             offset,
             ties: None,
-        } if offset.unwrap_or(0) == 0 => Some((input.as_ref(), *k)),
+            knn_options,
+        } if offset.unwrap_or(0) == 0 => Some((input.as_ref(), *k, knn_options)),
         _ => None,
     }
 }
@@ -215,6 +218,7 @@ mod tests {
             limit: Some(2),
             offset,
             ties: None,
+            knn_options: KnnQueryOptions::default(),
         }
     }
 
@@ -294,6 +298,7 @@ mod tests {
             limit,
             offset,
             ties,
+            knn_options: KnnQueryOptions::default(),
         };
         assert!(detect_knn_pattern(&with_ties).is_none());
     }

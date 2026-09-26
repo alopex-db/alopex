@@ -1172,6 +1172,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
   var offsetNode: SqlNode = nil
+  var knnOptionsNode: SqlNode = nil
   var setOperations: seq[SqlNode] = @[]
 
   for child in node.children:
@@ -1204,6 +1205,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
       limitNode = child
     of nkOffsetClause:
       offsetNode = child
+    of nkWithOptions:
+      knnOptionsNode = child
     of nkSetOperation:
       setOperations.add(child)
     else:
@@ -1312,15 +1315,17 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   if includeWith:
     s.writeKey("limit_with_ties")
     s.pack_type(limitNode != nil and limitNode.limitWithTies)
+    s.writeKey("knn_options")
+    s.writeIndexOptions(knnOptionsNode)
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  # 固定 15 キー(variant/distinct/distinct_on/projection/from/selection/
+  # 固定 16 キー(variant/distinct/distinct_on/projection/from/selection/
   # group_by/having/windows/qualify/set_operations/order_by/limit/offset/
-  # limit_with_ties)に、WITH 句があれば with を加えて 16 になる。
-  var fieldCount = 15
+  # limit_with_ties/knn_options)に、WITH 句があれば with を加えて 17 になる。
+  var fieldCount = 16
   for child in node.children:
     if child.kind == nkWithClause:
-      fieldCount = 16
+      fieldCount = 17
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)

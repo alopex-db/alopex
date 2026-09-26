@@ -240,9 +240,13 @@ fn unwrap_stream_nodes(
             limit: next_limit,
             offset: next_offset,
             ties,
+            knn_options,
         } => {
             if ties.is_some() {
                 return Err(unsupported("FETCH ... WITH TIES is not streamable"));
+            }
+            if !knn_options.is_empty() {
+                return Err(unsupported("per-query HNSW controls are not streamable"));
             }
             if limit.is_some() || *offset != 0 {
                 return Err(unsupported("multiple slice nodes are not streamable"));

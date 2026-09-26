@@ -168,6 +168,9 @@ fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     pattern: &KnnPattern,
     _filter: Option<&TypedExpr>,
 ) -> Result<Option<IndexMetadata>> {
+    if pattern.options.enable_hnsw == Some(false) {
+        return Ok(None);
+    }
     if table.storage_options.storage_type != StorageType::Row {
         return Ok(None);
     }
@@ -247,7 +250,10 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
     if filter.is_some() {
         requested = requested.saturating_mul(4).max(64);
     }
-    let configured_ef_search = HnswBridge::search_ef(index)?;
+    let configured_ef_search = match pattern.options.ef_search {
+        Some(ef_search) => Some(ef_search),
+        None => HnswBridge::search_ef(index)?,
+    };
     let mut hnsw_stats = HnswSearchStats::default();
     let mut effective_ef_search = 0;
 
@@ -877,6 +883,7 @@ mod tests {
             function: VectorFunction::Similarity,
             k,
             sort_direction: SortDirection::Desc,
+            options: crate::planner::logical_plan::KnnQueryOptions::default(),
         }
     }
 

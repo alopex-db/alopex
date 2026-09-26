@@ -1306,6 +1306,7 @@ mod tests {
                     limit: None,
                     offset: None,
                     limit_with_ties: false,
+                    knn_options: vec![],
                     span: alopex_sql::ast::Span::default(),
                 },
                 options: vec![],

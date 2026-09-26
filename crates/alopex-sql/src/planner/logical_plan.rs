@@ -14,7 +14,7 @@
 //! # Examples
 //!
 //! ```
-//! use alopex_sql::planner::logical_plan::LogicalPlan;
+//! use alopex_sql::planner::logical_plan::{KnnQueryOptions, LogicalPlan};
 //! use alopex_sql::planner::{Projection, TypedExpr, TypedExprKind, SortExpr};
 //! use alopex_sql::planner::types::ResolvedType;
 //! use alopex_sql::Span;
@@ -41,6 +41,7 @@
 //!     limit: Some(10),
 //!     offset: None,
 //!     ties: None,
+//!     knn_options: KnnQueryOptions::default(),
 //! };
 //! ```
 
@@ -117,6 +118,21 @@ pub enum SetOperator {
     Union,
     Intersect,
     Except,
+}
+
+/// Per-query controls for an otherwise ordinary KNN `LIMIT` plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnnQueryOptions {
+    /// Overrides the index `ef_search` option for this query only.
+    pub ef_search: Option<usize>,
+    /// `Some(false)` bypasses HNSW and executes the exact KNN path.
+    pub enable_hnsw: Option<bool>,
+}
+
+impl KnnQueryOptions {
+    pub fn is_empty(&self) -> bool {
+        self.ef_search.is_none() && self.enable_hnsw.is_none()
+    }
 }
 
 /// Hard execution bounds for a recursive common table expression.
@@ -418,6 +434,8 @@ pub enum LogicalPlan {
         /// The keys are a copy of the `Sort` node directly beneath this
         /// Limit; `None` means plain ONLY/LIMIT semantics.
         ties: Option<Vec<SortExpr>>,
+        /// Per-query HNSW controls. Empty for normal LIMIT queries.
+        knn_options: KnnQueryOptions,
     },
 
     // === DML Plans ===
@@ -817,6 +835,7 @@ impl LogicalPlan {
             limit,
             offset,
             ties: None,
+            knn_options: KnnQueryOptions::default(),
         }
     }
 

@@ -39,7 +39,7 @@ pub use types::ResolvedType;
 
 use crate::ast::ddl::{
     AlterSequence, AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateSequence,
-    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, Truncate,
+    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, IndexOption, Truncate,
 };
 use crate::ast::dml::{
     CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
@@ -70,6 +70,56 @@ struct WindowSelectStages {
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
+
+fn parse_knn_query_options(
+    options: &[IndexOption],
+) -> Result<logical_plan::KnnQueryOptions, PlannerError> {
+    let mut parsed = logical_plan::KnnQueryOptions::default();
+    for option in options {
+        match option.key.to_ascii_lowercase().as_str() {
+            "ef_search" => {
+                let value = option
+                    .value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        PlannerError::invalid_expression(
+                            "ef_search must be a positive integer".to_string(),
+                        )
+                    })?;
+                if parsed.ef_search.replace(value).is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "ef_search may be specified only once".to_string(),
+                    ));
+                }
+            }
+            "enable_hnsw" => {
+                let value = match option.value.to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(PlannerError::invalid_expression(
+                            "enable_hnsw must be true or false".to_string(),
+                        ));
+                    }
+                };
+                if parsed.enable_hnsw.replace(value).is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "enable_hnsw may be specified only once".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(PlannerError::invalid_expression(format!(
+                    "unknown kNN query option '{}'",
+                    option.key
+                )));
+            }
+        }
+    }
+    Ok(parsed)
+}
 
 fn metadata_schema(columns: &[(&str, ResolvedType)]) -> Vec<ColumnMetadata> {
     columns
@@ -2497,6 +2547,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.limit,
             &stmt.offset,
             stmt.limit_with_ties,
+            &[],
             outer_scope,
             &ctes,
         )
@@ -2605,6 +2656,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         limit_with_ties: bool,
+        knn_options: &[IndexOption],
         outer_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
@@ -2651,7 +2703,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by,
             };
         }
-        relation.plan = self.apply_pagination(relation.plan, limit, offset, limit_with_ties)?;
+        relation.plan =
+            self.apply_pagination(relation.plan, limit, offset, limit_with_ties, knn_options)?;
         Ok(relation)
     }
 
@@ -2682,6 +2735,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             left_select.limit = None;
             left_select.offset = None;
             left_select.limit_with_ties = false;
+            left_select.knn_options.clear();
             let relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
             return self.apply_set_operations_and_tail(
@@ -2691,6 +2745,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &stmt.limit,
                 &stmt.offset,
                 stmt.limit_with_ties,
+                &stmt.knn_options,
                 outer_scope,
                 &ctes,
             );
@@ -3085,7 +3140,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 };
             }
 
-            plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
+            plan = self.apply_pagination(
+                plan,
+                &stmt.limit,
+                &stmt.offset,
+                stmt.limit_with_ties,
+                &stmt.knn_options,
+            )?;
 
             return Ok(PlannedRelation {
                 plan,
@@ -3156,6 +3217,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.offset,
             stmt.limit_with_ties,
             distinct_on_tie_keys.as_deref(),
+            &stmt.knn_options,
         )?;
 
         let output_schema = projection_schema(&final_projection, &relation.schema);
@@ -3518,7 +3580,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by: projected_order_by,
             };
         }
-        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
+        plan = self.apply_pagination(
+            plan,
+            &stmt.limit,
+            &stmt.offset,
+            stmt.limit_with_ties,
+            &stmt.knn_options,
+        )?;
         if has_hidden_order_keys {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
@@ -5757,8 +5825,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         with_ties: bool,
+        knn_options: &[IndexOption],
     ) -> Result<LogicalPlan, PlannerError> {
-        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None)
+        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None, knn_options)
     }
 
     /// Apply the pagination tail with an explicit WITH TIES peer specification.
@@ -5775,9 +5844,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         offset: &Option<Expr>,
         with_ties: bool,
         tie_keys: Option<&[SortExpr]>,
+        raw_knn_options: &[IndexOption],
     ) -> Result<LogicalPlan, PlannerError> {
-        if limit.is_none() && offset.is_none() && !with_ties {
+        if limit.is_none() && offset.is_none() && !with_ties && raw_knn_options.is_empty() {
             return Ok(plan);
+        }
+        if !raw_knn_options.is_empty() && limit.is_none() {
+            return Err(PlannerError::invalid_expression(
+                "kNN query options require LIMIT".to_string(),
+            ));
         }
         let ties = if with_ties {
             let keys = match tie_keys {
@@ -5796,12 +5871,20 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         } else {
             None
         };
-        Ok(LogicalPlan::Limit {
+        let plan = LogicalPlan::Limit {
             input: Box::new(plan),
             limit: self.resolve_pagination_count(limit, "LIMIT")?,
             offset: self.resolve_pagination_count(offset, "OFFSET")?,
             ties,
-        })
+            knn_options: parse_knn_query_options(raw_knn_options)?,
+        };
+        if !raw_knn_options.is_empty() && knn_optimizer::detect_knn_pattern(&plan).is_none() {
+            return Err(PlannerError::invalid_expression(
+                "kNN query options require ORDER BY vector_distance/vector_similarity and LIMIT"
+                    .to_string(),
+            ));
+        }
+        Ok(plan)
     }
 
     /// Plan an INSERT statement.

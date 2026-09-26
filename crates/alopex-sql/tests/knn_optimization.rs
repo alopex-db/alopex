@@ -153,6 +153,26 @@ fn explain_knn_reports_exact_scan_when_small_table_skips_hnsw() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn knn_query_options_reject_non_knn_query() {
+    let catalog = MemoryCatalog::new();
+    let stmt = Parser::parse_sql(&AlopexDialect, "SELECT 1 LIMIT 1 WITH (ef_search = 16)")
+        .expect("parse SQL")
+        .pop()
+        .expect("one statement");
+
+    let error = Planner::new(&catalog)
+        .plan(&stmt)
+        .expect_err("non-KNN query options must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("kNN query options require ORDER BY"),
+        "{error}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn hnsw_index_accepts_search_ef_default() {
     let (_executor, catalog) = run_sql(
         "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
@@ -289,6 +309,23 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     assert!(indexed.contains("search_time_us="), "{indexed}");
     assert!(indexed.contains("ef_search=64 fallback=none"), "{indexed}");
     assert!(!indexed.contains("nodes_visited=0"), "{indexed}");
+
+    let overridden = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {query} WITH (ef_search = 16)"),
+    );
+    assert!(
+        overridden.contains("ef_search=16 fallback=none"),
+        "{overridden}"
+    );
+
+    let forced_exact = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN {query} WITH (enable_hnsw = false)"),
+    );
+    assert!(forced_exact.starts_with("ExactKnnScan\n"), "{forced_exact}");
 
     let post_filter = explain_text(
         &mut executor,

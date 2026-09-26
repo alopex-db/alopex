@@ -71,6 +71,7 @@ fn dml_nodes_carry_spans() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(1, 1),
     };
     assert_eq!(select.span().start.column, 1);
