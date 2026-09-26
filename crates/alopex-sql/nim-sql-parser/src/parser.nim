@@ -546,8 +546,17 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkInterval:
     let intervalTok = p.advance()
     let valueTok = p.expect(tkString)
-    result = newIntervalLit(valueTok.value,
-      Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
+    var value = valueTok.value
+    var lastTok = valueTok
+    if p.check(tkIdent) and p.current.value.toLowerAscii in [
+        "year", "years", "month", "months", "week", "weeks", "day", "days",
+        "hour", "hours", "minute", "minutes", "second", "seconds",
+        "millisecond", "milliseconds", "microsecond", "microseconds"]:
+      let unitTok = p.advance()
+      value.add(" " & unitTok.value)
+      lastTok = unitTok
+    result = newIntervalLit(value,
+      Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(lastTok).`end`))
   of tkDecimal:
     let typeTok = p.advance()
     let valueTok = p.expect(tkString)
