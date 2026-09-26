@@ -40,6 +40,8 @@ pub struct CreateTable {
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
     pub with_options: Vec<IndexOption>,
+    #[serde(default)]
+    pub query: Option<Select>,
     pub span: Span,
 }
 

@@ -517,6 +517,53 @@ where
                     if_not_exists,
                 )?
             }
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => {
+                ensure_write(mode, op_name)?;
+                let table_name = table.name.clone();
+                let columns = table
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                let mut guard = catalog.write().expect("catalog lock poisoned");
+                if guard.table_exists(&table_name) {
+                    if if_not_exists {
+                        ExecutionResult::Success
+                    } else {
+                        return Err(ExecutorError::TableAlreadyExists(table_name));
+                    }
+                } else {
+                    let ExecutionResult::Query(result) =
+                        query::execute_query(txn, &*guard, *source)?
+                    else {
+                        return Err(ExecutorError::InvalidOperation {
+                            operation: "CREATE TABLE AS".into(),
+                            reason: "SELECT source did not return query rows".into(),
+                        });
+                    };
+                    ddl::create_table::execute_create_table(
+                        txn,
+                        &mut *guard,
+                        table,
+                        with_options,
+                        false,
+                    )?;
+                    dml::execute_insert_rows_with_plan(
+                        txn,
+                        &*guard,
+                        &table_name,
+                        columns,
+                        result.rows,
+                        None,
+                        None,
+                    )?
+                }
+            }
             LogicalPlan::DropTable { name, if_exists } => {
                 ensure_write(mode, op_name)?;
                 let mut guard = catalog.write().expect("catalog lock poisoned");
