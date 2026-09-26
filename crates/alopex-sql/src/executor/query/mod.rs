@@ -62,7 +62,7 @@ fn index_predicate(
         (
             TypedExprKind::ColumnRef { column_index, .. },
             TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
-        ) => (
+        ) if left.resolved_type == right.resolved_type => (
             *column_index,
             evaluate(right, &EvalContext::new(&[])).ok()?,
             false,
@@ -70,7 +70,7 @@ fn index_predicate(
         (
             TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
             TypedExprKind::ColumnRef { column_index, .. },
-        ) => (
+        ) if left.resolved_type == right.resolved_type => (
             *column_index,
             evaluate(left, &EvalContext::new(&[])).ok()?,
             true,
