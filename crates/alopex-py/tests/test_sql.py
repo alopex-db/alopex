@@ -650,6 +650,24 @@ def test_execute_sql_vector_param_roundtrip(db):
     assert rows == [{"embedding": [0.25, -1.5, 2.0]}]
 
 
+def test_execute_sql_vector_batch_params_do_not_expand_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    sql = "INSERT INTO docs (id, embedding) VALUES " + ", ".join(
+        "(?, ?)" for _ in range(rows)
+    )
+    params = [
+        value
+        for row in range(rows)
+        for value in (row, [0.25] * dimensions)
+    ]
+
+    assert db.execute_sql(sql, params) == rows
+
+
 def test_execute_sql_numpy_vector_param(db):
     np = pytest.importorskip("numpy")
     db.execute_sql("CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))")

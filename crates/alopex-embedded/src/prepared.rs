@@ -1,25 +1,27 @@
 use std::sync::Arc;
 
-use alopex_sql::{AlopexDialect, Parser, SqlValue};
+use alopex_sql::{AlopexDialect, Parser, SqlValue, Statement};
 
 use crate::{Database, Error, Result, SqlResult, SqlSession};
 
 #[derive(Debug)]
 struct PreparedState {
     sql: String,
+    statement: Statement,
     bindings: Vec<Option<SqlValue>>,
     finalized: bool,
 }
 
 impl PreparedState {
     fn new(sql: &str) -> Result<Self> {
-        let statements =
+        let mut statements =
             Parser::parse_sql(&AlopexDialect, sql).map_err(alopex_sql::SqlError::from)?;
         if statements.len() != 1 {
             return Err(Error::PreparedStatementRequiresSingleStatement);
         }
         Ok(Self {
             sql: sql.to_owned(),
+            statement: statements.pop().expect("prepared statement count checked"),
             bindings: vec![None; positional_parameter_count(sql)],
             finalized: false,
         })
@@ -77,6 +79,39 @@ impl PreparedState {
             Ok(())
         })?;
         Ok(rendered)
+    }
+
+    fn bound_values(&self) -> Result<Vec<SqlValue>> {
+        self.ensure_open()?;
+        let values = self
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .clone()
+                    .ok_or(Error::PreparedParameterUnbound(index + 1))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.validate_values(&values)?;
+        Ok(values)
+    }
+
+    fn validate_values(&self, values: &[SqlValue]) -> Result<()> {
+        self.ensure_open()?;
+        let count = self.parameter_count();
+        if values.len() > count {
+            return Err(Error::PreparedParameterOutOfRange {
+                index: count + 1,
+                count,
+            });
+        }
+        if values.len() < count {
+            return Err(Error::PreparedParameterUnbound(values.len() + 1));
+        }
+        values
+            .iter()
+            .try_for_each(|value| sql_literal(value).map(|_| ()))
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -142,7 +177,37 @@ impl PreparedStatement {
 
     /// Execute with the current bindings in an auto-commit transaction.
     pub fn execute(&mut self) -> Result<SqlResult> {
-        self.database.execute_sql(&self.state.render()?)
+        self.database
+            .execute_prepared_statement(&self.state.statement, &self.state.bound_values()?)
+    }
+
+    /// Execute parameter rows atomically in one transaction.
+    pub fn execute_many<I, V>(&mut self, rows: I) -> Result<Vec<SqlResult>>
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<[SqlValue]>,
+    {
+        self.state.ensure_open()?;
+        let mut rows = rows.into_iter();
+        let Some(first) = rows.next() else {
+            return Ok(Vec::new());
+        };
+        let mut session = self.database.sql_session();
+        session.execute_sql("BEGIN")?;
+        let outcome = (|| {
+            let mut results = Vec::new();
+            for row in std::iter::once(first).chain(rows) {
+                let values = row.as_ref();
+                self.state.validate_values(values)?;
+                results.push(session.execute_prepared_statement(&self.state.statement, values)?);
+            }
+            session.execute_sql("COMMIT")?;
+            Ok(results)
+        })();
+        if outcome.is_err() {
+            let _ = session.execute_sql("ROLLBACK");
+        }
+        outcome
     }
 }
 
@@ -185,7 +250,8 @@ impl PreparedSessionStatement<'_> {
 
     /// Execute with the current bindings in the borrowed SQL session.
     pub fn execute(&mut self) -> Result<SqlResult> {
-        self.session.execute_sql(&self.state.render()?)
+        self.session
+            .execute_prepared_statement(&self.state.statement, &self.state.bound_values()?)
     }
 }
 
