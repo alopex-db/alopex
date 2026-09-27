@@ -1222,8 +1222,10 @@ impl<'a> Iterator for RowGroupIter<'a> {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn rewrite_footer_as_v2_for_test(segment: &mut ColumnSegmentV2) -> Result<()> {
+/// Converts a V3 footer to the legacy V2 wire format for integration tests.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn rewrite_footer_as_v2_for_test(segment: &mut ColumnSegmentV2) -> Result<()> {
     let current =
         SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
     let legacy_footer = LegacySegmentFooterV2 {
