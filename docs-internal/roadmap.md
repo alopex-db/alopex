@@ -1,8 +1,34 @@
-# AlopexDB ストレージロードマップ（v1.x → v2.0）
+# AlopexDB ストレージロードマップ（v0.8先行実装と分散統合）
+
+## 単一ノードの実装は旧予定版を待たずv0.8系で進める
+
+2026-09-27に実装割当を変更した。公開の正本は
+[単一ノード機能のv0.8先行計画](https://github.com/alopex-db/docs/blob/main/roadmap/v08-single-node-advancement.md)、
+実行トラッカーは [#499](https://github.com/alopex-db/alopex/issues/499)。
+
+| 実装対象 | 現行milestone | 主なIssue |
+| --- | --- | --- |
+| 単体SQL・Server | [v0.8.x-SQL-Server](https://github.com/alopex-db/alopex/milestone/27) | #175/#176/#193/#194/#355/#438、#225/#226/#228、#502/#503/#504 |
+| filesystem・dispatcher | [v0.8.x-Storage-Foundation](https://github.com/alopex-db/alopex/milestone/28) | #183/#237–#240/#253–#255 |
+| manifest・local migration | [v0.8.x-Format-Migration](https://github.com/alopex-db/alopex/milestone/29) | #185/#188/#257–#264 |
+| S3・単体Kubernetes配備 | [v0.8.x-Portable-Backends](https://github.com/alopex-db/alopex/milestone/30) | #190/#241–#245/#505 |
+| memory・runtime・HTTP・incremental/CDC | [v0.8.x-Runtime-Residency](https://github.com/alopex-db/alopex/milestone/31) | #199/#205–#209と子Issue、#507–#509 |
+| local E2E | [v0.8.x-Local-Integration](https://github.com/alopex-db/alopex/milestone/32) | #265/#268/#506 |
+
+これらは実装テーマであり、一回のreleaseで全件を完了する条件ではない。
+v0.8.16のscopeは維持し、後続のv0.8.Nは受入済み機能のまとまりで決める。
+artifact/dispatcher → manifest/capability → local migrationの技術依存は維持するが、
+Chirpsのepoch/leaseやv1.xの到来は単体実装の前提にしない。
+S3・runtime・単体配備は、それぞれの技術依存が満たされれば並行して進める。
+
+分散SQL #174/#500、Multi-Raft #440、分散Changefeed #441、node間協調 #187、
+分散visibility/retry #274/#275、cluster E2E #266/#267/#501は別途追跡する。
+v2.0の全体受入 #184は維持する。以下の旧v1.x計画は要件の履歴であり、
+現行の着手順や版割当には使用しない。
 
 この文書は、GitHub Issue とマイルストーンで管理しているストレージ運用構想の実装順序と、v2.0 リリース時点で到達したい状態を整理したものです。
 
-## 方針
+## 旧方針（2026-09-27の割当に置換済み）
 
 v2.0 は「実装を開始する時期」ではなく、v1.x で段階的に実装した機能を統合し、リリース可能な状態として受け入れる最終ゴールです。
 
@@ -10,7 +36,7 @@ v2.0 は「実装を開始する時期」ではなく、v1.x で段階的に実�
 
 正本は GitHub のマイルストーンと Issue #184 です。この文書は、それらの関係と依存順を説明します。
 
-## 全体像
+## 旧全体像（順序制約としては使用しない）
 
 ```text
 v0.8.9 現行リリース修正
