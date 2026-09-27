@@ -206,6 +206,34 @@ fn fts_search_exposes_composite_primary_key_for_duplicate_documents() {
 }
 
 #[test]
+fn fts_search_disambiguates_a_row_id_primary_key() {
+    let (mut executor, catalog) = setup();
+    run(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE docs (row_id INTEGER PRIMARY KEY, body TEXT);
+         INSERT INTO docs VALUES (42, 'recomendo');
+         CREATE INDEX docs_body_fts ON docs(body) USING FTS",
+    )
+    .unwrap();
+
+    let result = run(
+        &mut executor,
+        &catalog,
+        "SELECT f.row_id, f.pk_row_id
+         FROM FTS_SEARCH('docs', 'body', 'recomendo')
+              AS f(row_id, document, rank, headline)",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        result.rows,
+        vec![vec![SqlValue::BigInt(1), SqlValue::Integer(42)]]
+    );
+}
+
+#[test]
 fn ts_match_operator_matches_ts_rank() {
     let (mut executor, catalog) = setup();
     run(
