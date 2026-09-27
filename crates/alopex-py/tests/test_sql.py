@@ -58,6 +58,24 @@ def test_parameter_binding_keeps_native_and_mixed_paths(db):
     assert db.execute_sql("SELECT id FROM mixed_params ORDER BY id") == [{"id": 1}, {"id": 2}]
 
 
+def test_prepared_execute_many_is_atomic(db):
+    db.execute_sql("CREATE TABLE batch_items (id INTEGER PRIMARY KEY, embedding VECTOR(2))")
+    statement = db.prepare("INSERT INTO batch_items VALUES (?, ?)")
+
+    assert statement.execute_many([[1, [1.0, 0.0]], [2, [0.0, 1.0]]]) == [1, 1]
+    assert db.execute_sql("SELECT id FROM batch_items ORDER BY id") == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql("DELETE FROM batch_items")
+    with pytest.raises(AlopexError):
+        statement.execute_many([[1, [1.0, 0.0]], [1, [0.0, 1.0]]])
+    assert db.execute_sql("SELECT id FROM batch_items") == []
+
+    with pytest.raises(ValueError):
+        statement.execute_many([[3]])
+    with pytest.raises(TypeError):
+        statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
+
+
 def test_execute_sql_portable_metadata_exact_rows(db):
     db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
 
