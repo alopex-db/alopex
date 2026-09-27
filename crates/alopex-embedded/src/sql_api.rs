@@ -193,9 +193,13 @@ fn plan_stmt<'a, S: KVStore>(
     catalog: &'a alopex_sql::catalog::PersistentCatalog<S>,
     overlay: &'a CatalogOverlay,
     stmt: &Statement,
+    parameters: Option<&[SqlValue]>,
 ) -> Result<alopex_sql::LogicalPlan> {
     let view = TxnCatalogView::new(catalog, overlay);
-    let planner = Planner::new(&view);
+    let planner = match parameters {
+        Some(parameters) => Planner::with_parameters(&view, parameters),
+        None => Planner::new(&view),
+    };
     planner
         .plan(stmt)
         .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
@@ -218,6 +222,26 @@ pub(crate) fn execute_sql_owned(
             return Err(error);
         }
     };
+    execute_statements_owned(transaction, &statements, None)
+}
+
+pub(crate) fn execute_prepared_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statement: &Statement,
+    parameters: &[SqlValue],
+) -> Result<SqlResult> {
+    execute_statements_owned(
+        transaction,
+        std::slice::from_ref(statement),
+        Some(parameters),
+    )
+}
+
+fn execute_statements_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statements: &[Statement],
+    parameters: Option<&[SqlValue]>,
+) -> Result<SqlResult> {
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
@@ -258,7 +282,7 @@ pub(crate) fn execute_sql_owned(
                     let plan = {
                         let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
                         let (_, overlay) = borrowed.split_parts();
-                        plan_stmt(&*catalog, &*overlay, stmt)?
+                        plan_stmt(&*catalog, &*overlay, stmt, parameters)?
                     };
 
                     {
@@ -432,6 +456,24 @@ impl Database {
     /// ```
     pub fn execute_sql_multi(&self, sql: &str) -> Result<Vec<SqlResult>> {
         let stmts = parse_sql(sql)?;
+        self.execute_statements(&stmts, None)
+    }
+
+    pub(crate) fn execute_prepared_statement(
+        &self,
+        statement: &Statement,
+        parameters: &[SqlValue],
+    ) -> Result<SqlResult> {
+        self.execute_statements(std::slice::from_ref(statement), Some(parameters))?
+            .pop()
+            .ok_or(Error::SqlSessionRequiresSingleStatement)
+    }
+
+    fn execute_statements(
+        &self,
+        stmts: &[Statement],
+        parameters: Option<&[SqlValue]>,
+    ) -> Result<Vec<SqlResult>> {
         if stmts.is_empty() {
             return Ok(Vec::new());
         }
@@ -444,7 +486,7 @@ impl Database {
             let overlay = CatalogOverlay::new();
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                plan_stmt(&*catalog, &overlay, &stmts[0])?
+                plan_stmt(&*catalog, &overlay, &stmts[0], parameters)?
             };
             if matches!(stmts[0].kind, StatementKind::Pragma { .. })
                 || alopex_sql::executor::is_store_direct_plan(&plan)
@@ -501,7 +543,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, parameters)?
             };
 
             {
@@ -615,7 +657,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay_ref) = borrowed.split_parts();
-                plan_stmt(&*catalog, overlay_ref, stmt)?
+                plan_stmt(&*catalog, overlay_ref, stmt, None)?
             };
 
             if alopex_sql::executor::is_store_direct_plan(&plan) {
@@ -762,7 +804,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             let (mut sql_txn, _overlay) = borrowed.split_parts();
@@ -865,7 +907,7 @@ impl<'a> Transaction<'a> {
             let plan = {
                 let catalog = sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             {

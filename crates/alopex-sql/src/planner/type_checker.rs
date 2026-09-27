@@ -24,6 +24,7 @@ use crate::planner::typed_expr::{
     Quantifier, SortExpr, TypedCaseWhen, TypedExpr, TypedExprKind, TypedWindowSpec,
 };
 use crate::planner::types::ResolvedType;
+use crate::storage::SqlValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -132,12 +133,22 @@ pub type SubqueryPlanner<'p> = dyn Fn(&Statement, &[ScopedTable]) -> Result<(Log
 /// ```
 pub struct TypeChecker<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
+    parameters: Option<&'a [SqlValue]>,
 }
 
 impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     /// Create a new TypeChecker with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            parameters: None,
+        }
+    }
+
+    /// Use positional parameter values while checking a prepared statement.
+    pub fn with_parameters(mut self, parameters: &'a [SqlValue]) -> Self {
+        self.parameters = Some(parameters);
+        self
     }
 
     /// Get a reference to the catalog.
@@ -163,7 +174,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let scope = [ScopedTable::new(table.clone(), 0)];
         self.infer_type_with_scope(expr, &scope, &|stmt, _outer| {
-            let planner = crate::planner::Planner::new(self.catalog);
+            let planner = match self.parameters {
+                Some(parameters) => {
+                    crate::planner::Planner::with_parameters(self.catalog, parameters)
+                }
+                None => crate::planner::Planner::new(self.catalog),
+            };
             let plan = planner.plan(stmt)?;
             Ok((plan, Vec::new()))
         })
@@ -177,9 +193,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let span = expr.span;
         match &expr.kind {
-            ExprKind::Parameter { index } => Err(PlannerError::InvalidExpression {
-                message: format!("unbound positional parameter ?{index}"),
-            }),
+            ExprKind::Parameter { index } => self.infer_parameter(*index, span),
             ExprKind::Literal { literal: lit } => self.infer_literal_type(lit, span),
 
             ExprKind::ColumnRef {
@@ -426,6 +440,45 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             resolved_type,
             span,
         })
+    }
+
+    fn infer_parameter(&self, index: usize, span: Span) -> Result<TypedExpr, PlannerError> {
+        let value = self
+            .parameters
+            .and_then(|parameters| parameters.get(index.saturating_sub(1)))
+            .ok_or_else(|| PlannerError::InvalidExpression {
+                message: format!("unbound positional parameter ?{index}"),
+            })?;
+        let literal = match value {
+            SqlValue::Null => Literal::Null,
+            SqlValue::Boolean(value) => Literal::Boolean(*value),
+            SqlValue::Integer(value) => Literal::Number(value.to_string()),
+            SqlValue::BigInt(value) => Literal::Number(value.to_string()),
+            SqlValue::Float(value) if value.is_finite() => Literal::Number(value.to_string()),
+            SqlValue::Double(value) if value.is_finite() => Literal::Number(value.to_string()),
+            SqlValue::Text(value) => Literal::String(value.clone()),
+            SqlValue::Decimal(value) => Literal::Number(value.to_string()),
+            SqlValue::Json(value) => {
+                return Ok(TypedExpr::cast(
+                    self.infer_literal_type(&Literal::String(value.as_str().to_owned()), span)?,
+                    ResolvedType::Json,
+                    span,
+                ));
+            }
+            SqlValue::Vector(values) if values.iter().all(|value| value.is_finite()) => {
+                return Ok(TypedExpr::vector_literal(
+                    values.iter().map(|value| f64::from(*value)).collect(),
+                    values.len() as u32,
+                    span,
+                ));
+            }
+            _ => {
+                return Err(PlannerError::InvalidExpression {
+                    message: format!("unsupported positional parameter ?{index}"),
+                });
+            }
+        };
+        self.infer_literal_type(&literal, span)
     }
 
     /// Infer the type of a column reference.
