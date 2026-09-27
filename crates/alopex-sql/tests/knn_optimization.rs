@@ -290,6 +290,28 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     assert!(indexed.contains("ef_search=64 fallback=none"), "{indexed}");
     assert!(!indexed.contains("nodes_visited=0"), "{indexed}");
 
+    let post_filter_without_fallback = explain_text(
+        &mut executor,
+        &catalog,
+        &format!(
+            "EXPLAIN ANALYZE SELECT id FROM items WHERE id >= 0 ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 1"
+        ),
+    );
+    assert!(
+        post_filter_without_fallback.contains(
+            "HnswSearchPostFilter index=idx_items_embedding k=1 fallback=ExactKnnScan\n      nodes_visited="
+        ),
+        "{post_filter_without_fallback}"
+    );
+    assert!(
+        post_filter_without_fallback.contains("ef_search=64 fallback=none"),
+        "{post_filter_without_fallback}"
+    );
+    assert!(
+        !post_filter_without_fallback.contains("nodes_visited=0"),
+        "{post_filter_without_fallback}"
+    );
+
     let post_filter = explain_text(
         &mut executor,
         &catalog,
