@@ -91,6 +91,15 @@ statement.reset()
 statement.finalize()
 ```
 
+組み込み`PreparedStatement.execute_many(rows)`は、`None` / bool / number / text /
+vector の行を1 transactionで実行します。各行は list または tuple にし、途中の行が
+失敗した場合は先行行も rollback されます。
+
+```python
+batch = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+assert batch.execute_many([(3, "gamma"), (4, "delta")]) == [1, 1]
+```
+
 | target | 結果 |
 | --- | --- |
 | `http://host:port` / `https://host:port` | `RemoteDatabase` |
