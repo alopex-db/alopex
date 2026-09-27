@@ -6,8 +6,9 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.25.0`, returned by `alopex_parser_version()`.
-- Contract `0.25.0` adds relational constraints, advanced DML, COPY, sequences,
+- Current contract version: `0.26.0`, returned by `alopex_parser_version()`.
+- Contract `0.26.0` adds query-level HNSW options to `Select`. Contract
+  `0.25.0` adds relational constraints, advanced DML, COPY, sequences,
   identity columns, and SERIAL types. Contract `0.24.0` added `CreateView`,
   `DropView`, `AlterTable`, and `Truncate`
   statement variants and their schema-evolution actions.
@@ -26,7 +27,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.25.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.26.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -45,13 +46,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.25.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.26.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.25.0` surface and does not retroactively change them.
+describes the current `0.26.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -100,7 +101,7 @@ from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `knn_options: [IndexOption]` |
 | `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Begin` | `isolation_level: TransactionIsolationLevel?`, `access_mode: TransactionAccessMode?` |
@@ -390,6 +391,12 @@ table functions there, and the staged validator rejects a table alias column
 list before encoding. See
 [`sql-lateral-table-functions.md`](sql-lateral-table-functions.md) for grammar,
 semantics, and the decision log.
+
+Contract `0.26.0` adds the always-written `Select.knn_options: [IndexOption]`
+field. It carries query-level `LIMIT … WITH (...)` controls such as
+`ef_search` and `enable_hnsw`; an empty array means that the query has no
+override. A `0.25.0` consumer would silently ignore those controls, so the
+producer and consumer identifiers must match at the exported-version gate.
 
 ## DDL Types
 
