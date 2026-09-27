@@ -1222,6 +1222,64 @@ impl<'a> Iterator for RowGroupIter<'a> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn rewrite_footer_as_v2_for_test(segment: &mut ColumnSegmentV2) -> Result<()> {
+    let current =
+        SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
+    let legacy_footer = LegacySegmentFooterV2 {
+        row_group_table: LegacyRowGroupTableV2 {
+            entries: current
+                .footer
+                .row_group_table
+                .entries
+                .iter()
+                .map(|entry| LegacyRowGroupTableEntryV2 {
+                    row_start: entry.row_start,
+                    row_count: entry.row_count,
+                    data_offset: entry.data_offset,
+                    compressed_size: entry.compressed_size,
+                    column_chunk_offsets: entry
+                        .column_chunk_offsets
+                        .iter()
+                        .map(|chunk| LegacyColumnChunkOffsetV2 {
+                            column_idx: chunk.column_idx,
+                            offset: chunk.offset,
+                            length: chunk.length,
+                            uncompressed_length: chunk.uncompressed_length,
+                            checksum: chunk.checksum,
+                        })
+                        .collect(),
+                    checksum: entry.checksum,
+                })
+                .collect(),
+        },
+        column_descriptors: current.footer.column_descriptors.clone(),
+    };
+    let legacy_footer_bytes = bincode::serialize(&legacy_footer)
+        .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
+    let current_footer_size = u32::from_le_bytes(
+        segment.data[segment.data.len() - 8..segment.data.len() - 4]
+            .try_into()
+            .map_err(|_| ColumnarError::InvalidFormat("invalid footer trailer".into()))?,
+    ) as usize;
+    segment
+        .data
+        .truncate(segment.data.len() - 8 - current_footer_size);
+    segment.data.extend_from_slice(&legacy_footer_bytes);
+    segment
+        .data
+        .extend_from_slice(&(legacy_footer_bytes.len() as u32).to_le_bytes());
+    let mut hasher = Hasher::new();
+    hasher.update(&legacy_footer_bytes);
+    segment
+        .data
+        .extend_from_slice(&hasher.finalize().to_le_bytes());
+    segment.data[4..6].copy_from_slice(&SEGMENT_FORMAT_VERSION_V2.to_le_bytes());
+    segment.header.format_version = SEGMENT_FORMAT_VERSION_V2;
+    segment.meta.format_version = SEGMENT_FORMAT_VERSION_V2;
+    Ok(())
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -1421,57 +1479,7 @@ mod tests {
         writer.write_batch(mixed_binary_batch()).unwrap();
         let mut segment = writer.finish().unwrap();
         assert_eq!(segment.header.format_version, SEGMENT_FORMAT_VERSION_V3);
-        let current =
-            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
-                .unwrap();
-        let legacy_footer = LegacySegmentFooterV2 {
-            row_group_table: LegacyRowGroupTableV2 {
-                entries: current
-                    .footer
-                    .row_group_table
-                    .entries
-                    .iter()
-                    .map(|entry| LegacyRowGroupTableEntryV2 {
-                        row_start: entry.row_start,
-                        row_count: entry.row_count,
-                        data_offset: entry.data_offset,
-                        compressed_size: entry.compressed_size,
-                        column_chunk_offsets: entry
-                            .column_chunk_offsets
-                            .iter()
-                            .map(|chunk| LegacyColumnChunkOffsetV2 {
-                                column_idx: chunk.column_idx,
-                                offset: chunk.offset,
-                                length: chunk.length,
-                                uncompressed_length: chunk.uncompressed_length,
-                                checksum: chunk.checksum,
-                            })
-                            .collect(),
-                        checksum: entry.checksum,
-                    })
-                    .collect(),
-            },
-            column_descriptors: current.footer.column_descriptors.clone(),
-        };
-        let legacy_footer_bytes = bincode::serialize(&legacy_footer).unwrap();
-        let current_footer_size = u32::from_le_bytes(
-            segment.data[segment.data.len() - 8..segment.data.len() - 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        segment
-            .data
-            .truncate(segment.data.len() - 8 - current_footer_size);
-        segment.data.extend_from_slice(&legacy_footer_bytes);
-        segment
-            .data
-            .extend_from_slice(&(legacy_footer_bytes.len() as u32).to_le_bytes());
-        let mut hasher = Hasher::new();
-        hasher.update(&legacy_footer_bytes);
-        segment
-            .data
-            .extend_from_slice(&hasher.finalize().to_le_bytes());
-        segment.data[4..6].copy_from_slice(&SEGMENT_FORMAT_VERSION_V2.to_le_bytes());
+        rewrite_footer_as_v2_for_test(&mut segment).unwrap();
         let legacy_row_groups = segment.meta.row_groups.clone();
         let legacy_data = segment.data;
 
