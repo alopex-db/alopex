@@ -823,6 +823,7 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use alopex_core::kv::{KVStore, decode_range_change, journal_key};
     use alopex_core::types::TxnMode;
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex};
     use std::sync::Arc;
 
     fn sample_table_meta() -> TableMetadata {
@@ -873,6 +874,25 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn seeded_hnsw_read_entry_is_used_without_reloading() {
+        let store = MemoryKV::new();
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        let mut overlay = CatalogOverlay::new();
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadOnly, &mut overlay);
+        borrowed.seed_hnsw_read_cache(vec![(
+            "cached_index".into(),
+            HnswIndex::create("cached_index", HnswConfig::default().with_dimension(2)).unwrap(),
+        )]);
+
+        let (mut sql_txn, _) = borrowed.split_parts();
+        assert_eq!(
+            sql_txn.hnsw_entry("cached_index").unwrap().name(),
+            "cached_index"
+        );
     }
 
     #[test]
