@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use alopex_sql::{AlopexDialect, Parser, SqlValue};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::IntoPyObjectExt;
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -193,6 +194,74 @@ impl PyPreparedStatement {
         };
         crate::embedded::sql::execution_result_to_py(py, result)
     }
+
+    /// Execute native parameter rows atomically in one transaction.
+    fn execute_many(&mut self, py: Python<'_>, rows: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let rows = prepared_native_rows(&rows, self.bindings.len())?;
+        let database = Arc::clone(&self.database);
+        let sql = self.sql.clone();
+        let results = py
+            .detach(move || database.prepare(&sql)?.execute_many(rows))
+            .map_err(error::embedded_err)?;
+        let values = PyList::empty(py);
+        for result in results {
+            values.append(crate::embedded::sql::execution_result_to_py(py, result)?)?;
+        }
+        values.into_py_any(py)
+    }
+}
+
+fn prepared_native_rows(
+    rows: &Bound<'_, PyAny>,
+    parameter_count: usize,
+) -> PyResult<Vec<Vec<SqlValue>>> {
+    let rows: Vec<Bound<'_, PyAny>> = if let Ok(list) = rows.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = rows.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Err(error::AlopexError::SqlParamUnsupportedType(
+            "execute_many の rows には list または tuple を指定してください".to_string(),
+        )
+        .into());
+    };
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let values: Vec<Bound<'_, PyAny>> = if let Ok(list) = row.cast::<PyList>() {
+                list.iter().collect()
+            } else if let Ok(tuple) = row.cast::<PyTuple>() {
+                tuple.iter().collect()
+            } else {
+                return Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                    "execute_many の rows[{row_index}] には list または tuple を指定してください"
+                ))
+                .into());
+            };
+            if values.len() != parameter_count {
+                return Err(error::AlopexError::SqlParamCountMismatch {
+                    expected: parameter_count,
+                    actual: values.len(),
+                }
+                .into());
+            }
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| match prepared_binding(value, index)? {
+                    PyPreparedBinding::Value { native, .. } => Ok(native),
+                    PyPreparedBinding::Rendered(_) => {
+                        Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                            "execute_many の rows[{row_index}][{index}] は native scalar または vector である必要があります"
+                        ))
+                        .into())
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn prepared_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<PyPreparedBinding> {
