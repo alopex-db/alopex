@@ -18,7 +18,7 @@ pip install alopex[polars]
 開発テストでは、ファイル名と行番号を保つ軽量デバッグ情報のdev profileで maturin を利用できます。
 
 ```bash
-maturin develop -m crates/alopex-py/pyproject.toml
+maturin develop -m crates/alopex-py/Cargo.toml
 ```
 
 オプション依存:
