@@ -8,6 +8,7 @@
 - ``Transaction.execute_sql`` も同一形状
 """
 
+import datetime as dt
 import json
 
 import pytest
@@ -32,6 +33,47 @@ def users_db(db):
 def test_execute_sql_ddl_returns_none(db):
     result = db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     assert result is None
+
+
+def test_parameter_binding_keeps_native_and_mixed_paths(db):
+    db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
+    assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1
+
+    native_statement = db.prepare("INSERT INTO native_params VALUES (?, ?)")
+    native_statement.bind(1, 11)
+    native_statement.bind(2, "prepared")
+    assert native_statement.execute() == 1
+
+    db.execute_sql("CREATE TABLE mixed_params (id INTEGER PRIMARY KEY, at TIMESTAMP)")
+    timestamp = dt.datetime(2024, 5, 4, 3, 2, 1)
+
+    assert db.execute_sql("INSERT INTO mixed_params VALUES (?, ?)", [1, timestamp]) == 1
+
+    statement = db.prepare("INSERT INTO mixed_params VALUES (?, ?)")
+    statement.bind(1, 2)
+    statement.bind(2, timestamp)
+    assert statement.execute() == 1
+
+    assert db.execute_sql("SELECT id FROM native_params ORDER BY id") == [{"id": 10}, {"id": 11}]
+    assert db.execute_sql("SELECT id FROM mixed_params ORDER BY id") == [{"id": 1}, {"id": 2}]
+
+
+def test_prepared_execute_many_is_atomic(db):
+    db.execute_sql("CREATE TABLE batch_items (id INTEGER PRIMARY KEY, embedding VECTOR(2))")
+    statement = db.prepare("INSERT INTO batch_items VALUES (?, ?)")
+
+    assert statement.execute_many([[1, [1.0, 0.0]], [2, [0.0, 1.0]]]) == [1, 1]
+    assert db.execute_sql("SELECT id FROM batch_items ORDER BY id") == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql("DELETE FROM batch_items")
+    with pytest.raises(AlopexError):
+        statement.execute_many([[1, [1.0, 0.0]], [1, [0.0, 1.0]]])
+    assert db.execute_sql("SELECT id FROM batch_items") == []
+
+    with pytest.raises(ValueError):
+        statement.execute_many([[3]])
+    with pytest.raises(TypeError):
+        statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
 
 
 def test_execute_sql_portable_metadata_exact_rows(db):
@@ -648,6 +690,24 @@ def test_execute_sql_vector_param_roundtrip(db):
     )
     rows = db.execute_sql("SELECT embedding FROM docs WHERE id = ?", [1])
     assert rows == [{"embedding": [0.25, -1.5, 2.0]}]
+
+
+def test_execute_sql_vector_batch_params_do_not_expand_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    sql = "INSERT INTO docs (id, embedding) VALUES " + ", ".join(
+        "(?, ?)" for _ in range(rows)
+    )
+    params = [
+        value
+        for row in range(rows)
+        for value in (row, [0.25] * dimensions)
+    ]
+
+    assert db.execute_sql(sql, params) == rows
 
 
 def test_execute_sql_numpy_vector_param(db):

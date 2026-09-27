@@ -3,7 +3,8 @@ use std::sync::Arc;
 use alopex_sql::{
     AlopexDialect, CommitMetadata, ExecutionResult, ExecutionStepError, ExecutionStepErrorKind,
     ExecutionStepKind, ExecutionStepOutcome, ExecutionStepResult, Parser, SharedExecutionReport,
-    SharedExecutionRequest, StatementKind, TransactionAccessMode, TransactionIsolationLevel,
+    SharedExecutionRequest, SqlValue, Statement, StatementKind, TransactionAccessMode,
+    TransactionIsolationLevel,
 };
 
 use crate::{Database, Error, OwnedEmbeddedTransaction, Result, SqlResult, TxnMode};
@@ -313,6 +314,36 @@ impl SqlSession {
                     .as_mut()
                     .expect("active SQL session owns a transaction")
                     .execute_sql(sql);
+                if result.is_err() {
+                    self.state = SqlSessionState::Failed;
+                }
+                result
+            }
+            SqlSessionState::Failed => Err(self.invalid("statement")),
+        }
+    }
+
+    pub(crate) fn execute_prepared_statement(
+        &mut self,
+        statement: &Statement,
+        parameters: &[SqlValue],
+    ) -> Result<SqlResult> {
+        match self.state {
+            SqlSessionState::Idle => self
+                .database
+                .execute_prepared_statement(statement, parameters),
+            SqlSessionState::Active => {
+                self.characteristics_locked = true;
+                if self.characteristics.access_mode == TransactionAccessMode::ReadOnly
+                    && statement.kind.requires_write()
+                {
+                    return Err(Error::TxnReadOnly);
+                }
+                let result = self
+                    .transaction
+                    .as_mut()
+                    .expect("active SQL session owns a transaction")
+                    .execute_prepared_statement(statement, parameters);
                 if result.is_err() {
                     self.state = SqlSessionState::Failed;
                 }
