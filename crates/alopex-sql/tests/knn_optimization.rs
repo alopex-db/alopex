@@ -58,6 +58,32 @@ fn explain_text(
     text.clone()
 }
 
+fn query_ids(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> Vec<i32> {
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse query")
+        .pop()
+        .expect("one query statement");
+    let plan = {
+        let guard = catalog.read().expect("catalog lock");
+        Planner::new(&*guard).plan(&stmt).expect("plan query")
+    };
+    let ExecutionResult::Query(result) = executor.execute(plan).expect("execute query") else {
+        panic!("kNN query must return a query result");
+    };
+    result
+        .rows
+        .iter()
+        .map(|row| match row.first() {
+            Some(alopex_sql::storage::SqlValue::Integer(id)) => *id,
+            value => panic!("expected integer id, got {value:?}"),
+        })
+        .collect()
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn knn_optimization_without_index() {
@@ -186,6 +212,81 @@ fn hnsw_index_accepts_search_ef_default() {
             .unwrap()
             .get_option("ef_search"),
         Some("256")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn knn_query_ef_search_changes_recall_against_exact_path() {
+    const ROWS: u64 = 8_193;
+    const DIMENSIONS: usize = 128;
+    const BATCH_SIZE: u64 = 256;
+
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2));");
+    let query_vector = format!(
+        "[{}]",
+        std::iter::repeat_n("0.0", DIMENSIONS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS);
+        let values = (start..=end)
+            .map(|id| {
+                let vector = if id == ROWS {
+                    query_vector.clone()
+                } else {
+                    format!(
+                        "[{}]",
+                        (0..DIMENSIONS)
+                            .map(|dimension| {
+                                ((id * (dimension as u64 + 17) * 31) % 1_009).to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                format!("({id}, {vector})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql(
+            &mut executor,
+            &catalog,
+            &format!("INSERT INTO items (id, embedding) VALUES {values};"),
+        );
+    }
+    execute_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64);",
+    );
+
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 10"
+    );
+    let exact = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (enable_hnsw = false)"),
+    );
+    let low = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (ef_search = 10)"),
+    );
+    let high = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (ef_search = {ROWS})"),
+    );
+
+    let low_recall = low.iter().filter(|id| exact.contains(id)).count();
+    let high_recall = high.iter().filter(|id| exact.contains(id)).count();
+    assert!(
+        high_recall > low_recall,
+        "higher ef_search must improve recall: low={low:?} high={high:?} exact={exact:?}"
     );
 }
 
