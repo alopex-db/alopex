@@ -478,14 +478,34 @@ suite "MessagePack output - stability":
           "AB64697374696E63745F6F6E90" &
           "AA70726F6A656374696F6E"
       )
-    check hexPayload("SELECT 1") == v0110Payload
+    # Contract 0.26.0 appends always-written query HNSW options.
+    let v0260Payload = v0110Payload
+      .replace("A46B696E648F", "A46B696E64DE0010")
+      .replace(
+        "AF6C696D69745F776974685F74696573C2A47370616E",
+        "AF6C696D69745F776974685F74696573C2" &
+          "AB6B6E6E5F6F7074696F6E7390A47370616E"
+      )
+    check hexPayload("SELECT 1") == v0260Payload
 
-  test "WITH select declares the exact 16-entry map header":
-    # 15 fixed keys plus `with` exceeds the fixmap range, so the Select map
-    # must switch to map16 (DE0010). A shorter declared count leaves trailing
+  test "WITH select declares the exact 17-entry map header":
+    # 16 fixed keys plus `with` uses map17 (DE0011). A shorter declared count
+    # leaves trailing
     # bytes that the Rust MessagePack preflight rejects (issue #150).
     let payload = hexPayload("WITH c AS (SELECT 1) SELECT 2")
-    check payload.startsWith("9182A46B696E64DE0010A776617269616E74A653656C656374A477697468")
+    check payload.startsWith("9182A46B696E64DE0011A776617269616E74A653656C656374A477697468")
+
+  test "SELECT emits query HNSW options with values and spans":
+    let kind = selectKind(
+      "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 1.0], 'l2') LIMIT 10 WITH (ef_search = 64, enable_hnsw = false)"
+    )
+    let options = kind["knn_options"]
+    check options.len == 2
+    check options[0]["key"].getStr() == "ef_search"
+    check options[0]["value"].getStr() == "64"
+    check options[0]["span"]["start"]["column"].getInt() > 0
+    check options[1]["key"].getStr() == "enable_hnsw"
+    check options[1]["value"].getStr() == "false"
 
 suite "MessagePack output - staged continuous aggregate contract":
 

@@ -46,7 +46,7 @@ candidate = {
         "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],
     },
     "parser": {
-        "contract": "0.25.0",
+        "contract": "0.26.0",
         "manifest_sha256": digest,
         "envelope_sha256": digest,
         "assets": [

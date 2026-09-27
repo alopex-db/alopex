@@ -58,6 +58,32 @@ fn explain_text(
     text.clone()
 }
 
+fn query_ids(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> Vec<i32> {
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse query")
+        .pop()
+        .expect("one query statement");
+    let plan = {
+        let guard = catalog.read().expect("catalog lock");
+        Planner::new(&*guard).plan(&stmt).expect("plan query")
+    };
+    let ExecutionResult::Query(result) = executor.execute(plan).expect("execute query") else {
+        panic!("kNN query must return a query result");
+    };
+    result
+        .rows
+        .iter()
+        .map(|row| match row.first() {
+            Some(alopex_sql::storage::SqlValue::Integer(id)) => *id,
+            value => panic!("expected integer id, got {value:?}"),
+        })
+        .collect()
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn knn_optimization_without_index() {
@@ -153,6 +179,26 @@ fn explain_knn_reports_exact_scan_when_small_table_skips_hnsw() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn knn_query_options_reject_non_knn_query() {
+    let catalog = MemoryCatalog::new();
+    let stmt = Parser::parse_sql(&AlopexDialect, "SELECT 1 LIMIT 1 WITH (ef_search = 16)")
+        .expect("parse SQL")
+        .pop()
+        .expect("one statement");
+
+    let error = Planner::new(&catalog)
+        .plan(&stmt)
+        .expect_err("non-KNN query options must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("kNN query options require ORDER BY"),
+        "{error}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn hnsw_index_accepts_search_ef_default() {
     let (_executor, catalog) = run_sql(
         "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
@@ -166,6 +212,81 @@ fn hnsw_index_accepts_search_ef_default() {
             .unwrap()
             .get_option("ef_search"),
         Some("256")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn knn_query_ef_search_changes_recall_against_exact_path() {
+    const ROWS: u64 = 8_193;
+    const DIMENSIONS: usize = 128;
+    const BATCH_SIZE: u64 = 256;
+
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2));");
+    let query_vector = format!(
+        "[{}]",
+        std::iter::repeat_n("0.0", DIMENSIONS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS);
+        let values = (start..=end)
+            .map(|id| {
+                let vector = if id == ROWS {
+                    query_vector.clone()
+                } else {
+                    format!(
+                        "[{}]",
+                        (0..DIMENSIONS)
+                            .map(|dimension| {
+                                ((id * (dimension as u64 + 17) * 31) % 1_009).to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                format!("({id}, {vector})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql(
+            &mut executor,
+            &catalog,
+            &format!("INSERT INTO items (id, embedding) VALUES {values};"),
+        );
+    }
+    execute_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64);",
+    );
+
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 10"
+    );
+    let exact = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (enable_hnsw = false)"),
+    );
+    let low = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (ef_search = 10)"),
+    );
+    let high = query_ids(
+        &mut executor,
+        &catalog,
+        &format!("{query} WITH (ef_search = {ROWS})"),
+    );
+
+    let low_recall = low.iter().filter(|id| exact.contains(id)).count();
+    let high_recall = high.iter().filter(|id| exact.contains(id)).count();
+    assert!(
+        high_recall > low_recall,
+        "higher ef_search must improve recall: low={low:?} high={high:?} exact={exact:?}"
     );
 }
 
@@ -289,6 +410,23 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     assert!(indexed.contains("search_time_us="), "{indexed}");
     assert!(indexed.contains("ef_search=64 fallback=none"), "{indexed}");
     assert!(!indexed.contains("nodes_visited=0"), "{indexed}");
+
+    let overridden = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {query} WITH (ef_search = 16)"),
+    );
+    assert!(
+        overridden.contains("ef_search=16 fallback=none"),
+        "{overridden}"
+    );
+
+    let forced_exact = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN {query} WITH (enable_hnsw = false)"),
+    );
+    assert!(forced_exact.starts_with("ExactKnnScan\n"), "{forced_exact}");
 
     let post_filter = explain_text(
         &mut executor,
