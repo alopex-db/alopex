@@ -44,12 +44,8 @@ pub struct PyPreparedStatement {
 }
 
 fn is_transaction_control_statement(sql: &str) -> bool {
-    let keyword = sql
-        .trim_start()
-        .split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .unwrap_or_default();
-    if ![
+    let keyword = leading_sql_keyword(sql);
+    let starts_with_transaction_control = [
         "BEGIN",
         "START",
         "SET",
@@ -59,8 +55,8 @@ fn is_transaction_control_statement(sql: &str) -> bool {
         "RELEASE",
     ]
     .iter()
-    .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
-    {
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
+    if !starts_with_transaction_control && !sql.contains(';') {
         return false;
     }
 
@@ -78,6 +74,29 @@ fn is_transaction_control_statement(sql: &str) -> bool {
             )
         })
     })
+}
+
+fn leading_sql_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(newline) = comment.find('\n') else {
+                return "";
+            };
+            sql = &comment[newline + 1..];
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return "";
+            };
+            sql = &comment[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    sql.split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
 }
 
 struct PythonReader(Py<PyAny>);

@@ -52,7 +52,14 @@ def test_savepoint_rolls_back_sql_work_and_auto_commit_guides_begin():
         txn.commit()
 
         assert db.execute_sql("SELECT id FROM items ORDER BY id") == [{"id": 1}]
-        with pytest.raises(AlopexError, match=r"db\.begin\(\)"):
-            db.execute_sql("BEGIN")
+        for sql in (
+            "BEGIN",
+            "-- retry after a transient failure\nBEGIN",
+            "/* optional item */ SAVEPOINT retry",
+            "SELECT 1; BEGIN",
+            "SELECT 1; /* optional item */ SAVEPOINT retry",
+        ):
+            with pytest.raises(AlopexError, match=r"db\.begin\(\)"):
+                db.execute_sql(sql)
     finally:
         db.close()
