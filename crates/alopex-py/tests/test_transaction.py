@@ -63,3 +63,26 @@ def test_savepoint_rolls_back_sql_work_and_auto_commit_guides_begin():
                 db.execute_sql(sql)
     finally:
         db.close()
+
+
+def test_failed_transaction_rejects_new_savepoints_but_can_roll_back_to_existing_one():
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.execute_sql("INSERT INTO items (id) VALUES (1)")
+        txn.savepoint("recover")
+
+        with pytest.raises(AlopexError):
+            txn.execute_sql("INSERT INTO missing_items (id) VALUES (2)")
+        with pytest.raises(AlopexError):
+            txn.savepoint("after_failure")
+        with pytest.raises(AlopexError):
+            txn.release("recover")
+
+        txn.rollback_to("recover")
+        txn.commit()
+
+        assert db.execute_sql("SELECT id FROM items") == [{"id": 1}]
+    finally:
+        db.close()
