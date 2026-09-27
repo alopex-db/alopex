@@ -83,6 +83,18 @@ fn eval_ts_rank(values: &[SqlValue]) -> Result<SqlValue> {
     Ok(SqlValue::Double(fts::rank(&tokens, &query)))
 }
 
+pub(crate) fn eval_ts_match(left: &SqlValue, right: &SqlValue) -> Result<SqlValue> {
+    let Some(vector) = text("@@", left)? else {
+        return Ok(SqlValue::Null);
+    };
+    let Some(query) = text("@@", right)? else {
+        return Ok(SqlValue::Null);
+    };
+    let tokens = fts::parse_tsvector(vector).map_err(|error| invalid("@@", error))?;
+    let query = fts::parse_tsquery("simple", query).map_err(|error| invalid("@@", error))?;
+    Ok(SqlValue::Boolean(fts::matches_query(&tokens, &query)))
+}
+
 fn eval_ts_headline(values: &[SqlValue]) -> Result<SqlValue> {
     let (config, document, query) = if values.len() == 2 {
         ("simple", &values[0], &values[1])

@@ -242,6 +242,7 @@ pub enum BinaryOp {
     BitXor,
     ShiftLeft,
     ShiftRight,
+    TsMatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

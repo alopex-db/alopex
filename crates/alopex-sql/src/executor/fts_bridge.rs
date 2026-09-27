@@ -91,6 +91,24 @@ impl FtsBridge {
     }
 }
 
+pub(crate) fn lookup_query<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    index: &IndexMetadata,
+    query: &fts::Query,
+) -> Result<Option<BTreeSet<u64>>> {
+    let mut terms = BTreeSet::new();
+    if !fts::index_terms(query, &mut terms) {
+        return Ok(None);
+    }
+    let column = index.column_indices[0];
+    let mut ids = BTreeSet::new();
+    let mut storage = txn.index_storage(index.index_id, false, vec![column]);
+    for term in terms {
+        ids.extend(storage.lookup(&SqlValue::Text(term))?);
+    }
+    Ok(Some(ids))
+}
+
 pub(crate) fn config(index: &IndexMetadata) -> &str {
     index
         .options

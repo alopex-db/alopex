@@ -824,6 +824,7 @@ proc comparisonOp(kind: TokenKind): BinaryOpKind =
   of tkLe: opLe
   of tkGt: opGt
   of tkGe: opGe
+  of tkTsMatch: opTsMatch
   else: opEq
 
 proc parseQuantified(p: var Parser; left: SqlNode; op: BinaryOpKind): SqlNode =
@@ -924,7 +925,7 @@ proc parseComparison(p: var Parser): SqlNode =
       discard p.expect(tkNull)
     return
 
-  if p.current.kind in {tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe}:
+  if p.current.kind in {tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe, tkTsMatch}:
     let op = comparisonOp(p.current.kind)
     discard p.advance()
     if p.current.kind in {tkAny, tkSome, tkAll}:

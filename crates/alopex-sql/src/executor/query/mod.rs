@@ -780,9 +780,12 @@ fn build_iterator_pipeline_with_outer<
                 && !subquery::contains_subquery(&predicate)
                 && let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
-                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                && let Some(rows) = (crate::executor::dml::lookup_primary_key_equality(
                     txn, catalog, table_meta, &predicate,
-                )?
+                )?)
+                .or(crate::executor::dml::lookup_fts_match(
+                    txn, catalog, table_meta, &predicate,
+                )?)
             {
                 let schema = table_meta.columns.clone();
                 let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1443,9 +1446,12 @@ fn build_streaming_pipeline_inner<
             if !subquery::contains_subquery(&predicate)
                 && let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
-                && let Some(rows) = crate::executor::dml::lookup_primary_key_equality(
+                && let Some(rows) = (crate::executor::dml::lookup_primary_key_equality(
                     txn, catalog, table_meta, &predicate,
-                )?
+                )?)
+                .or(crate::executor::dml::lookup_fts_match(
+                    txn, catalog, table_meta, &predicate,
+                )?)
             {
                 let schema = table_meta.columns.clone();
                 let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1839,6 +1845,20 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
             reason: "the searched column must be TEXT".into(),
         });
     }
+    let primary_key_indices = table
+        .primary_key
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|name| {
+            table
+                .get_column_index(name)
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "FTS_SEARCH".into(),
+                    reason: format!("unknown primary key column '{name}'"),
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let index = catalog
         .get_indexes_for_table(table_name)
         .into_iter()
@@ -1863,17 +1883,7 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     })?;
 
     let candidates = if let Some(index) = index {
-        let mut terms = std::collections::BTreeSet::new();
-        if crate::fts::index_terms(&query, &mut terms) {
-            let mut ids = std::collections::BTreeSet::new();
-            let mut storage = txn.index_storage(index.index_id, false, vec![column]);
-            for term in terms {
-                ids.extend(storage.lookup(&SqlValue::Text(term))?);
-            }
-            Some(ids)
-        } else {
-            None
-        }
+        crate::executor::fts_bridge::lookup_query(txn, index, &query)?
     } else {
         None
     };
@@ -1926,15 +1936,14 @@ fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
                     reason: "result exceeds 100000 rows".into(),
                 });
             }
-            output.push(Row::new(
-                row_id as u64,
-                vec![
-                    SqlValue::BigInt(row_id),
-                    SqlValue::Text(document.clone()),
-                    SqlValue::Double(crate::fts::rank(&tokens, &query)),
-                    SqlValue::Text(headline),
-                ],
-            ));
+            let mut values = vec![
+                SqlValue::BigInt(row_id),
+                SqlValue::Text(document.clone()),
+                SqlValue::Double(crate::fts::rank(&tokens, &query)),
+                SqlValue::Text(headline),
+            ];
+            values.extend(primary_key_indices.iter().map(|index| row[*index].clone()));
+            output.push(Row::new(row_id as u64, values));
         }
     }
     Ok(output)
