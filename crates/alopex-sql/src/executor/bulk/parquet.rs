@@ -3,8 +3,9 @@ use std::fs::File;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray, ListArray,
-    MapArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray,
+    LargeStringArray, ListArray, MapArray, StringArray, StructArray, Time64MicrosecondArray,
+    TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -22,6 +23,7 @@ pub struct ParquetReader {
     target_types: Vec<ResolvedType>,
     reader: ParquetRecordBatchReader,
     buffer: Option<Vec<Vec<SqlValue>>>,
+    row_offset: usize,
 }
 
 impl ParquetReader {
@@ -60,8 +62,53 @@ impl ParquetReader {
             target_types,
             reader,
             buffer: None,
+            row_offset: 0,
         })
     }
+}
+
+pub fn parquet_schema(path: &str) -> Result<CopySchema> {
+    let file = File::open(path)
+        .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
+        ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
+    })?;
+    builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| {
+            Ok(CopyField {
+                name: Some(field.name().clone()),
+                data_type: Some(map_arrow_type(field.data_type())?),
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|fields| CopySchema { fields })
+}
+
+pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
+    let schema = parquet_schema(path)?;
+    let columns = schema
+        .fields
+        .iter()
+        .map(|field| {
+            Ok(crate::catalog::ColumnMetadata::new(
+                field.name.clone().unwrap_or_default(),
+                field
+                    .data_type
+                    .clone()
+                    .ok_or_else(|| ExecutorError::BulkLoad("missing parquet field type".into()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let table = TableMetadata::new("read_parquet", columns);
+    let mut reader = ParquetReader::open(path, &table, false)?;
+    let mut rows = Vec::new();
+    while let Some(batch) = reader.next_batch(1024)? {
+        rows.extend(batch);
+    }
+    Ok((schema, rows))
 }
 
 impl BulkReader for ParquetReader {
@@ -99,11 +146,13 @@ impl BulkReader for ParquetReader {
                         .get(col_idx)
                         .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
                     row_idx,
+                    self.row_offset + row_idx,
                 )?;
                 row.push(value);
             }
             rows.push(row);
         }
+        self.row_offset += batch.num_rows();
 
         if rows.len() > max_rows {
             let rest = rows.split_off(max_rows);
@@ -121,7 +170,7 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
         ArrowDataType::Float32 => Ok(ResolvedType::Float),
         ArrowDataType::Float64 => Ok(ResolvedType::Double),
         ArrowDataType::Boolean => Ok(ResolvedType::Boolean),
-        ArrowDataType::Utf8 => Ok(ResolvedType::Text),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(ResolvedType::Text),
         ArrowDataType::Binary | ArrowDataType::LargeBinary => Ok(ResolvedType::Blob),
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
             Ok(ResolvedType::Timestamp)
@@ -144,6 +193,7 @@ fn arrow_value_to_sql(
     dt: &ArrowDataType,
     expected: &ResolvedType,
     row_idx: usize,
+    source_row_idx: usize,
 ) -> Result<SqlValue> {
     if array.is_null(row_idx) {
         return Ok(SqlValue::Null);
@@ -170,6 +220,19 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::BigInt(arr.value(row_idx)))
         }
+        (ArrowDataType::Int64, ResolvedType::Integer) => {
+            let value = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row_idx);
+            i32::try_from(value).map(SqlValue::Integer).map_err(|_| {
+                ExecutorError::BulkLoad(format!(
+                    "row {}: cannot convert INT64 value {value} to INTEGER (out of range)",
+                    source_row_idx + 1
+                ))
+            })
+        }
         (ArrowDataType::Int64, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
@@ -194,6 +257,10 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Ok(SqlValue::Text(arr.value(row_idx).to_string()))
         }
+        (ArrowDataType::LargeUtf8, ResolvedType::Text) => {
+            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            Ok(SqlValue::Text(arr.value(row_idx).to_string()))
+        }
         (ArrowDataType::Utf8, ResolvedType::Json) => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             crate::storage::JsonValue::parse(arr.value(row_idx))
@@ -213,7 +280,13 @@ fn arrow_value_to_sql(
             let values = arr.value(row_idx);
             (0..values.len())
                 .map(|index| {
-                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                    arrow_value_to_sql(
+                        values.as_ref(),
+                        values.data_type(),
+                        element,
+                        index,
+                        source_row_idx,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(SqlValue::Array)
@@ -223,7 +296,13 @@ fn arrow_value_to_sql(
             let values = arr.value(row_idx);
             (0..values.len())
                 .map(|index| {
-                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                    arrow_value_to_sql(
+                        values.as_ref(),
+                        values.data_type(),
+                        element,
+                        index,
+                        source_row_idx,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(SqlValue::Array)
@@ -236,8 +315,20 @@ fn arrow_value_to_sql(
             (0..entries.len())
                 .map(|index| {
                     Ok((
-                        arrow_value_to_sql(keys.as_ref(), keys.data_type(), key, index)?,
-                        arrow_value_to_sql(values.as_ref(), values.data_type(), value, index)?,
+                        arrow_value_to_sql(
+                            keys.as_ref(),
+                            keys.data_type(),
+                            key,
+                            index,
+                            source_row_idx,
+                        )?,
+                        arrow_value_to_sql(
+                            values.as_ref(),
+                            values.data_type(),
+                            value,
+                            index,
+                            source_row_idx,
+                        )?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()
@@ -264,6 +355,7 @@ fn arrow_value_to_sql(
                             arrow_fields[index].data_type(),
                             data_type,
                             row_idx,
+                            source_row_idx,
                         )?,
                     ))
                 })
@@ -342,6 +434,42 @@ mod tests {
     use crate::storage::DecimalValue;
 
     #[test]
+    fn large_utf8_and_int64_narrowing_convert_at_the_copy_boundary() {
+        let text = arrow_array::LargeStringArray::from(vec![Some("large text")]);
+        assert_eq!(
+            map_arrow_type(text.data_type()).unwrap(),
+            ResolvedType::Text
+        );
+        assert_eq!(
+            arrow_value_to_sql(&text, text.data_type(), &ResolvedType::Text, 0, 0).unwrap(),
+            SqlValue::Text("large text".into())
+        );
+
+        let integers = Int64Array::from(vec![Some(42), Some(i64::from(i32::MAX) + 1)]);
+        assert_eq!(
+            arrow_value_to_sql(
+                &integers,
+                integers.data_type(),
+                &ResolvedType::Integer,
+                0,
+                0
+            )
+            .unwrap(),
+            SqlValue::Integer(42)
+        );
+        let error = arrow_value_to_sql(
+            &integers,
+            integers.data_type(),
+            &ResolvedType::Integer,
+            1,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("row 2"), "{error}");
+    }
+
+    #[test]
     fn arrow_list_maps_to_native_array_with_null_elements() {
         let mut builder =
             arrow_array::builder::ListBuilder::new(arrow_array::builder::Int32Builder::new());
@@ -356,6 +484,7 @@ mod tests {
                 &array,
                 array.data_type(),
                 &ResolvedType::Array(Box::new(ResolvedType::Integer)),
+                0,
                 0,
             )
             .unwrap(),
@@ -388,6 +517,7 @@ mod tests {
                     precision: 10,
                     scale: 2,
                 },
+                0,
                 0,
             )
             .unwrap(),

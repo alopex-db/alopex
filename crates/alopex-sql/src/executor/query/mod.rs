@@ -1799,6 +1799,20 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
             })
         }
         TableFunctionKind::FtsSearch => execute_fts_search(txn, catalog, &values),
+        TableFunctionKind::ReadParquet => {
+            let Some(SqlValue::Text(path)) = values.first() else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "READ_PARQUET".into(),
+                    reason: "requires a TEXT path".into(),
+                });
+            };
+            crate::executor::bulk::read_parquet(path).map(|(_, rows)| {
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(index, values)| Row::new(index as u64, values))
+                    .collect()
+            })
+        }
     }
 }
 

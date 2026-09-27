@@ -41,7 +41,7 @@ mod csv;
 mod parquet;
 
 pub use csv::CsvReader;
-pub use parquet::ParquetReader;
+pub use parquet::{ParquetReader, parquet_schema, read_parquet};
 
 /// ファイル形式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,7 +743,11 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
         return Err(ExecutorError::SchemaMismatch {
             expected: table_meta.columns.len(),
             actual: schema.fields.len(),
-            reason: "column count mismatch".into(),
+            reason: format!(
+                "column count mismatch: expected {} columns, got {}",
+                table_meta.columns.len(),
+                schema.fields.len()
+            ),
         });
     }
 
@@ -1579,6 +1583,7 @@ fn is_type_compatible(file_type: &ResolvedType, table_type: &ResolvedType) -> bo
                 metric: t_metric,
             },
         ) => f_dim == t_dim && f_metric == t_metric,
+        (ResolvedType::BigInt, ResolvedType::Integer) => true,
         (ft, tt) => ft == tt || ft.can_cast_to(tt),
     }
 }
@@ -1780,7 +1785,29 @@ mod tests {
         create_table(&bridge, &mut catalog, StorageType::Row);
         let table = catalog.get_table("users").unwrap();
 
-        let schema = CopySchema {
+        let type_schema = CopySchema {
+            fields: vec![
+                CopyField {
+                    name: Some("id".into()),
+                    data_type: Some(ResolvedType::Text),
+                },
+                CopyField {
+                    name: Some("name".into()),
+                    data_type: Some(ResolvedType::Text),
+                },
+            ],
+        };
+
+        let err = validate_schema(&type_schema, table).unwrap_err();
+        assert!(matches!(err, ExecutorError::SchemaMismatch { .. }));
+        let message = err.to_string();
+        assert!(
+            message.contains("type mismatch for column 'id'"),
+            "{message}"
+        );
+        assert!(!message.contains("expected 2 columns, got 2"), "{message}");
+
+        let name_schema = CopySchema {
             fields: vec![
                 CopyField {
                     name: Some("users".into()),
@@ -1792,8 +1819,7 @@ mod tests {
                 },
             ],
         };
-
-        let err = validate_schema(&schema, table).unwrap_err();
+        let err = validate_schema(&name_schema, table).unwrap_err();
         assert!(matches!(err, ExecutorError::SchemaMismatch { .. }));
     }
 

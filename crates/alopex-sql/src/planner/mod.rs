@@ -4057,6 +4057,36 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ];
                 (typed, schema)
             }
+            TableFunctionKind::ReadParquet => {
+                if args.len() != 1 {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function READ_PARQUET takes exactly 1 argument, found {}",
+                        args.len()
+                    )));
+                }
+                let typed = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+                let TypedExprKind::Literal(Literal::String(path)) = &typed.kind else {
+                    return Err(PlannerError::invalid_expression(
+                        "READ_PARQUET requires a string literal path",
+                    ));
+                };
+                let schema = crate::executor::bulk::parquet_schema(path)
+                    .map_err(|error| PlannerError::invalid_expression(error.to_string()))?
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        Ok(ColumnMetadata::new(
+                            field.name.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field name")
+                            })?,
+                            field.data_type.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field type")
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?;
+                (vec![typed], schema)
+            }
         };
 
         let relation_name = alias
@@ -6078,8 +6108,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         match (source, target) {
             // Integer can be assigned to BigInt, Float, Double
             (Integer, BigInt) | (Integer, Float) | (Integer, Double) => true,
-            // BigInt can be assigned to Float, Double
-            (BigInt, Float) | (BigInt, Double) => true,
+            // BigInt narrowing is checked by assignment evaluation, so a
+            // Parquet INT64 can flow into an INTEGER target.
+            (BigInt, Integer | Float | Double) => true,
             // Float can be assigned to Double
             (Float, Double) => true,
             // A decimal literal is typed DOUBLE, so a FLOAT column needs this
