@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
 use alopex_core::types::TxnMode;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -655,10 +657,10 @@ impl From<PersistedIndexMeta> for IndexMetadata {
 }
 
 fn deserialize_table_meta(bytes: &[u8]) -> Result<PersistedTableMeta, CatalogError> {
-    match bincode::deserialize::<PersistedTableMeta>(bytes) {
+    match bincode_config().deserialize::<PersistedTableMeta>(bytes) {
         Ok(meta) => Ok(meta),
         Err(current_error) => {
-            if let Ok(legacy) = bincode::deserialize::<PersistedTableMetaV2>(bytes) {
+            if let Ok(legacy) = bincode_config().deserialize::<PersistedTableMetaV2>(bytes) {
                 return Ok(legacy.into());
             }
             let is_legacy = matches!(
@@ -669,7 +671,7 @@ fn deserialize_table_meta(bytes: &[u8]) -> Result<PersistedTableMeta, CatalogErr
             if !is_legacy {
                 return Err(current_error.into());
             }
-            let legacy: PersistedTableMetaV1 = bincode::deserialize(bytes)?;
+            let legacy: PersistedTableMetaV1 = bincode_config().deserialize(bytes)?;
             Ok(PersistedTableMeta {
                 table_id: legacy.table_id,
                 name: legacy.name,
@@ -2430,7 +2432,8 @@ mod tests {
             properties: HashMap::new(),
         };
 
-        let decoded = deserialize_table_meta(&bincode::serialize(&legacy).unwrap()).unwrap();
+        let bytes = bincode::serialize(&legacy).unwrap();
+        let decoded = deserialize_table_meta(&bytes).unwrap();
 
         assert_eq!(decoded.columns.len(), 2);
         assert_eq!(decoded.columns[0].name, "id");
@@ -2439,6 +2442,10 @@ mod tests {
         assert_eq!(decoded.columns[1].name, "title");
         assert!(decoded.columns[1].generated_sequence.is_none());
         assert!(decoded.columns[1].generated_sequence_options.is_none());
+
+        let mut corrupt = bytes;
+        corrupt.push(0);
+        assert!(deserialize_table_meta(&corrupt).is_err());
     }
 
     #[test]
