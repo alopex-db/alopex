@@ -883,5 +883,82 @@
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
     }
+  ],
+  "capability_matrix": [
+    {
+      "capability": "query_ef_search",
+      "surfaces": [
+        {
+          "surface": "Rust",
+          "status": "supported",
+          "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#ef_search_is_auto_corrected"
+        },
+        {
+          "surface": "embedded",
+          "status": "supported",
+          "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_upsert_reconnects_existing_key_without_duplicate_results"
+        },
+        {
+          "surface": "Python",
+          "status": "supported",
+          "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete"
+        },
+        {
+          "surface": "SQL",
+          "status": "supported",
+          "evidence": "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+        }
+      ]
+    },
+    {
+      "capability": "search_statistics",
+      "surfaces": [
+        {
+          "surface": "Rust",
+          "status": "supported",
+          "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow"
+        },
+        {
+          "surface": "embedded",
+          "status": "supported",
+          "evidence": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api"
+        },
+        {
+          "surface": "Python",
+          "status": "supported",
+          "evidence": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete"
+        },
+        {
+          "surface": "SQL",
+          "status": "supported",
+          "evidence": "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+        }
+      ]
+    },
+    {
+      "capability": "query_path_control",
+      "surfaces": [
+        {
+          "surface": "Rust",
+          "status": "not_applicable",
+          "reason": "direct HNSW search has no SQL planner path"
+        },
+        {
+          "surface": "embedded",
+          "status": "not_applicable",
+          "reason": "direct HNSW search has no SQL planner path"
+        },
+        {
+          "surface": "Python",
+          "status": "not_applicable",
+          "reason": "direct HNSW search has no SQL planner path"
+        },
+        {
+          "surface": "SQL",
+          "status": "supported",
+          "evidence": "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+        }
+      ]
+    }
   ]
 }

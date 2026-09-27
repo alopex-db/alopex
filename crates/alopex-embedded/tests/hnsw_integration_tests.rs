@@ -26,8 +26,10 @@ fn hnsw_lifecycle_via_embedded_api() {
         .unwrap();
     txn.commit().unwrap();
 
-    let (results, _) = db.search_hnsw("vec_idx", &[0.1, 0.0], 1, None).unwrap();
+    let (results, search_stats) = db.search_hnsw("vec_idx", &[0.1, 0.0], 1, None).unwrap();
     assert_eq!(results[0].key, b"a");
+    assert!(search_stats.nodes_visited > 0);
+    assert!(search_stats.distance_computations > 0);
 
     // 削除とコンパクション
     let mut del_txn = db.begin(TxnMode::ReadWrite).unwrap();
