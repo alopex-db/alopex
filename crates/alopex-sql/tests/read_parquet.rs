@@ -8,7 +8,7 @@ use alopex_sql::executor::{ExecutionResult, Executor, QueryResult};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::storage::SqlValue;
-use arrow_array::{Int64Array, LargeStringArray, RecordBatch};
+use arrow_array::{Int64Array, LargeBinaryArray, LargeStringArray, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
 
@@ -85,6 +85,38 @@ fn read_parquet_and_copy_accept_pandas_shaped_columns() {
     ];
     assert_eq!(selected.rows, expected);
     assert_eq!(copied.rows, expected);
+}
+
+#[test]
+fn read_parquet_maps_large_binary_to_blob() {
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let payload = [0x00, 0xff, b'A'];
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "payload",
+        DataType::LargeBinary,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(LargeBinaryArray::from(vec![payload.as_slice()]))],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let result = run(
+        &mut executor,
+        &catalog,
+        &format!(
+            "SELECT payload FROM read_parquet('{}')",
+            file.path().display()
+        ),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(result.rows, vec![vec![SqlValue::Blob(payload.to_vec())]]);
 }
 
 #[test]
