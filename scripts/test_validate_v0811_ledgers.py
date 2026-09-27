@@ -219,6 +219,27 @@ class LedgerContractTests(unittest.TestCase):
         )
         self.assertEqual(validate(hnsw), [])
 
+    def test_hnsw_ledger_has_generated_capability_matrix(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        matrix = {row["capability"]: row["surfaces"] for row in payload["capability_matrix"]}
+
+        self.assertEqual(set(matrix), {"query_ef_search", "query_path_control", "search_statistics"})
+        self.assertEqual(
+            {row["surface"] for row in matrix["query_ef_search"]},
+            {"Rust", "embedded", "Python", "SQL"},
+        )
+        self.assertEqual(
+            {row["surface"] for row in matrix["search_statistics"]},
+            {"Rust", "embedded", "Python", "SQL"},
+        )
+        path_control = {row["surface"]: row["status"] for row in matrix["query_path_control"]}
+        self.assertEqual(path_control["SQL"], "supported")
+        self.assertEqual(
+            {surface for surface, status in path_control.items() if status == "not_applicable"},
+            {"Rust", "embedded", "Python"},
+        )
+
     def test_sql_public_inventory_rejects_missing_and_unknown_claims(self):
         sql = next(path for path in LEDGERS if path.name.startswith("sql-"))
         payload = json.loads(sql.read_text(encoding="utf-8"))
@@ -265,6 +286,19 @@ class LedgerContractTests(unittest.TestCase):
             ledger.write_text(json.dumps(source_only), encoding="utf-8")
             self.assertTrue(
                 any("source-only HNSW evidence" in error for error in validate(ledger))
+            )
+
+    def test_hnsw_capability_matrix_rejects_stale_cells(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "hnsw.json"
+            stale = copy.deepcopy(payload)
+            stale["capability_matrix"][0]["surfaces"][0]["status"] = "not_applicable"
+            ledger.write_text(json.dumps(stale), encoding="utf-8")
+
+            self.assertTrue(
+                any("HNSW capability matrix does not match source" in error for error in validate(ledger))
             )
 
     def test_materialized_public_rows_require_test_selectors(self):
