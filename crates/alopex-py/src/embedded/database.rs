@@ -45,8 +45,18 @@ pub struct PyPreparedStatement {
 
 #[derive(Clone)]
 enum PyPreparedBinding {
-    Value(SqlValue),
+    Value { native: SqlValue, rendered: String },
     Rendered(String),
+}
+fn native_binding(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+    native: SqlValue,
+) -> PyResult<PyPreparedBinding> {
+    Ok(PyPreparedBinding::Value {
+        native,
+        rendered: crate::embedded::sql::render_param(value, index)?,
+    })
 }
 struct PythonReader(Py<PyAny>);
 
@@ -151,12 +161,12 @@ impl PyPreparedStatement {
         let sql = self.sql.clone();
         let result = if bindings
             .iter()
-            .all(|binding| matches!(binding, PyPreparedBinding::Value(_)))
+            .all(|binding| matches!(binding, PyPreparedBinding::Value { .. }))
         {
             let values = bindings
                 .into_iter()
                 .map(|binding| match binding {
-                    PyPreparedBinding::Value(value) => value,
+                    PyPreparedBinding::Value { native, .. } => native,
                     PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
                 })
                 .collect::<Vec<_>>();
@@ -172,10 +182,8 @@ impl PyPreparedStatement {
             let rendered = bindings
                 .into_iter()
                 .map(|binding| match binding {
-                    PyPreparedBinding::Value(value) => {
-                        alopex_embedded::bind_sql_parameters("?", &[value])
-                    }
-                    PyPreparedBinding::Rendered(value) => Ok(value),
+                    PyPreparedBinding::Value { rendered, .. }
+                    | PyPreparedBinding::Rendered(rendered) => Ok(rendered),
                 })
                 .collect::<alopex_embedded::Result<Vec<_>>>()
                 .map_err(error::embedded_err)?;
@@ -189,44 +197,44 @@ impl PyPreparedStatement {
 
 fn prepared_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<PyPreparedBinding> {
     if value.is_none() {
-        return Ok(PyPreparedBinding::Value(SqlValue::Null));
+        return native_binding(value, index, SqlValue::Null);
     }
     if value.is_instance_of::<pyo3::types::PyBool>() {
-        return Ok(PyPreparedBinding::Value(SqlValue::Boolean(
-            value.extract()?,
-        )));
+        return native_binding(value, index, SqlValue::Boolean(value.extract()?));
     }
     if value.is_instance_of::<pyo3::types::PyInt>() {
-        let value = value.extract::<i64>().map_err(|_| {
+        let integer = value.extract::<i64>().map_err(|_| {
             error::AlopexError::SqlParamInvalidValue(format!(
                 "params[{index}] の整数が 64bit 符号付き整数の範囲外です"
             ))
         })?;
-        return Ok(PyPreparedBinding::Value(
-            i32::try_from(value)
+        return native_binding(
+            value,
+            index,
+            i32::try_from(integer)
                 .map(SqlValue::Integer)
-                .unwrap_or(SqlValue::BigInt(value)),
-        ));
+                .unwrap_or(SqlValue::BigInt(integer)),
+        );
     }
     if value.is_instance_of::<pyo3::types::PyFloat>() {
-        let value = value.extract::<f64>()?;
-        if !value.is_finite() {
+        let number = value.extract::<f64>()?;
+        if !number.is_finite() {
             return Err(error::AlopexError::SqlParamInvalidValue(format!(
-                "params[{index}]: 有限でない浮動小数点値（{value}）は使用できません"
+                "params[{index}]: 有限でない浮動小数点値（{number}）は使用できません"
             ))
             .into());
         }
-        return Ok(PyPreparedBinding::Value(SqlValue::Double(value)));
+        return native_binding(value, index, SqlValue::Double(number));
     }
     if value.is_instance_of::<pyo3::types::PyString>() {
-        let value = value.extract::<String>()?;
-        if value.contains('\0') {
+        let text = value.extract::<String>()?;
+        if text.contains('\0') {
             return Err(error::AlopexError::SqlParamInvalidValue(format!(
                 "params[{index}]: NUL 文字を含む文字列は使用できません"
             ))
             .into());
         }
-        return Ok(PyPreparedBinding::Value(SqlValue::Text(value)));
+        return native_binding(value, index, SqlValue::Text(text));
     }
     if value.is_instance_of::<PyBytes>() || value.is_instance_of::<pyo3::types::PyByteArray>() {
         return Ok(PyPreparedBinding::Rendered(
@@ -256,7 +264,7 @@ fn prepared_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<PyPrepar
                 ))
                 .into());
             }
-            return Ok(PyPreparedBinding::Value(SqlValue::Vector(values)));
+            return native_binding(value, index, SqlValue::Vector(values));
         }
     }
     Ok(PyPreparedBinding::Rendered(
@@ -437,13 +445,13 @@ impl PyDatabase {
         let result = if !bindings.is_empty()
             && bindings
                 .iter()
-                .all(|binding| matches!(binding, PyPreparedBinding::Value(_)))
+                .all(|binding| matches!(binding, PyPreparedBinding::Value { .. }))
             && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() == 1)
         {
             let values = bindings
                 .into_iter()
                 .map(|binding| match binding {
-                    PyPreparedBinding::Value(value) => value,
+                    PyPreparedBinding::Value { native, .. } => native,
                     PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
                 })
                 .collect::<Vec<_>>();
@@ -460,10 +468,8 @@ impl PyDatabase {
             let rendered = bindings
                 .into_iter()
                 .map(|binding| match binding {
-                    PyPreparedBinding::Value(value) => {
-                        alopex_embedded::bind_sql_parameters("?", &[value])
-                    }
-                    PyPreparedBinding::Rendered(value) => Ok(value),
+                    PyPreparedBinding::Value { rendered, .. }
+                    | PyPreparedBinding::Rendered(rendered) => Ok(rendered),
                 })
                 .collect::<alopex_embedded::Result<Vec<_>>>()
                 .map_err(error::embedded_err)?;
