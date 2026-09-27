@@ -233,15 +233,13 @@ fn fts_match_parts<'a>(
         ] => (config.as_str(), column),
         _ => return None,
     };
-    let TypedExprKind::ColumnRef {
-        table: column_table,
-        column_index,
-        ..
-    } = &column.kind
-    else {
+    let TypedExprKind::ColumnRef { column_index, .. } = &column.kind else {
         return None;
     };
-    (column_table == &table.name).then_some((*column_index, config, right))
+    // This helper is called only for a direct Filter over this physical Scan.
+    // A resolved column stores the query-visible alias, not the storage table
+    // name, so validate the physical column position instead of its alias.
+    (*column_index < table.columns.len()).then_some((*column_index, config, right))
 }
 
 /// Evaluate only an FTS query expression whose value is independent of a row.
@@ -488,6 +486,56 @@ mod tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn fts_match_parts_accepts_an_aliased_scan_column() {
+        let table = TableMetadata::new(
+            "docs",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer),
+                ColumnMetadata::new("body", ResolvedType::Text),
+            ],
+        );
+        let vector = |relation: &str, column_index| {
+            TypedExpr::function_call(
+                "to_tsvector".into(),
+                vec![TypedExpr::column_ref(
+                    relation.into(),
+                    "body".into(),
+                    column_index,
+                    ResolvedType::Text,
+                    Span::default(),
+                )],
+                false,
+                false,
+                ResolvedType::Text,
+                Span::default(),
+            )
+        };
+        let query = TypedExpr::literal(
+            Literal::String("quick".into()),
+            ResolvedType::Text,
+            Span::default(),
+        );
+
+        let aliased_predicate = predicate_with_op(vector("d", 1), BinaryOp::TsMatch, query.clone());
+        let parts = fts_match_parts(&table, &aliased_predicate)
+            .expect("an alias of the direct scan column remains indexable");
+        assert_eq!(parts.0, 1);
+        assert_eq!(parts.1, "simple");
+
+        assert!(
+            fts_match_parts(
+                &table,
+                &predicate_with_op(
+                    vector("outer_docs", table.columns.len()),
+                    BinaryOp::TsMatch,
+                    query,
+                ),
+            )
+            .is_none()
         );
     }
 }
