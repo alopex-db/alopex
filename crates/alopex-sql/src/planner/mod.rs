@@ -4091,6 +4091,23 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         } else {
             apply_alias_columns(&relation_name, columns, &mut schema, span)?;
         }
+        if function == TableFunctionKind::FtsSearch && schema.len() > 4 {
+            let mut names = schema[..4]
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<HashSet<_>>();
+            for column in &mut schema[4..] {
+                if !names.insert(column.name.clone()) {
+                    let base = format!("pk_{}", column.name);
+                    let mut suffix = 2;
+                    column.name = base.clone();
+                    while !names.insert(column.name.clone()) {
+                        column.name = format!("{base}_{suffix}");
+                        suffix += 1;
+                    }
+                }
+            }
+        }
 
         Ok(PlannedRelation {
             plan: LogicalPlan::TableFunction {
