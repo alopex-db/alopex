@@ -103,6 +103,68 @@ fn prepared_parameters_work_in_limit_offset_and_fetch_expressions() {
 }
 
 #[test]
+fn prepared_vector_batch_does_not_expand_into_parser_payload() {
+    const ROWS: usize = 400;
+    const DIMENSIONS: usize = 128;
+
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))")
+        .unwrap();
+    let sql = format!(
+        "INSERT INTO items (id, embedding) VALUES {}",
+        std::iter::repeat_n("(?, ?)", ROWS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert!(
+        sql.len() < 1_048_576,
+        "prepared SQL stays below the input limit"
+    );
+
+    let mut statement = database.prepare(&sql).unwrap();
+    for row in 0..ROWS {
+        statement
+            .bind(row * 2 + 1, SqlValue::Integer(row as i32))
+            .unwrap();
+        statement
+            .bind(row * 2 + 2, SqlValue::Vector(vec![0.25; DIMENSIONS]))
+            .unwrap();
+    }
+    statement.execute().unwrap();
+
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+    else {
+        panic!("COUNT must return rows");
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::BigInt(ROWS as i64)]]);
+}
+
+#[test]
+fn prepared_execute_many_commits_once_and_rolls_back_on_error() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id) VALUES (?)")
+        .unwrap();
+
+    assert!(statement
+        .execute_many(vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]])
+        .is_err());
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap() else {
+        panic!("SELECT must return rows");
+    };
+    assert!(rows.rows.is_empty());
+
+    let results = statement
+        .execute_many(vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]])
+        .unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
 fn prepared_primary_key_query_and_update_preserve_exact_row_semantics() {
     let database = Arc::new(Database::new());
     database

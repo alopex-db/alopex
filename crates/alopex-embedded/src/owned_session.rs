@@ -180,6 +180,14 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
+    pub(crate) fn execute_prepared_statement(
+        &mut self,
+        statement: &alopex_sql::Statement,
+        parameters: &[alopex_sql::SqlValue],
+    ) -> Result<crate::SqlResult> {
+        crate::sql_api::execute_prepared_owned(self, statement, parameters)
+    }
+
     /// Create a named SQL savepoint.
     pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
