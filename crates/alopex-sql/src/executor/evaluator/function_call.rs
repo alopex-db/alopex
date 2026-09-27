@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_function_type_mismatch_first_argument() {
+    fn evaluate_function_null_first_argument_returns_null() {
         let col = TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty());
         let args = vec![
             col,
@@ -290,6 +290,25 @@ mod tests {
         ];
         let row = vec![SqlValue::Null];
         let ctx = EvalContext::new(&row);
+
+        let result =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap();
+        assert_eq!(result, SqlValue::Null);
+    }
+
+    #[test]
+    fn evaluate_function_type_mismatch_first_argument() {
+        let col = TypedExpr::literal(
+            Literal::Number("1".into()),
+            ResolvedType::Integer,
+            Span::empty(),
+        );
+        let args = vec![
+            col,
+            make_vector_literal(vec![1.0, 2.0]),
+            make_metric_expr("cosine"),
+        ];
+        let ctx = EvalContext::new(&[]);
 
         let err =
             evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
