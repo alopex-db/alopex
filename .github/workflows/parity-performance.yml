@@ -146,6 +146,13 @@ jobs:
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
+      - name: Verify SQL HNSW cost regression
+        id: sql_knn_cost
+        run: |
+          set -o pipefail
+          cargo test -p alopex-embedded --features lane_ci --test knn_index_cost \
+            sql_knn_hnsw_cost_does_not_track_table_rows -- --ignored --exact --nocapture \
+            | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
       - name: Enforce curated/full performance contracts
         id: gate
         env:

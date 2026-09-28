@@ -11,7 +11,7 @@ const SIZES: [usize; 4] = [9_600, 16_000, 20_000, 40_000];
 const RUNS: usize = 5;
 
 #[test]
-#[ignore = "run explicitly to publish the issue #461 performance evidence"]
+#[ignore = "run by parity-performance to publish issue #461 evidence"]
 fn sql_knn_hnsw_cost_does_not_track_table_rows() {
     let mut first_hnsw_ms = None;
 
