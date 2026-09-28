@@ -32,7 +32,9 @@ pub use crate::columnar_api::{
 pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
-pub use crate::prepared::{bind_sql_parameters, PreparedSessionStatement, PreparedStatement};
+pub use crate::prepared::{
+    bind_sql_parameters, render_prepared_parameter, PreparedSessionStatement, PreparedStatement,
+};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::sql_session::{SqlSession, SqlSessionState, SqlTransactionCharacteristics};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
