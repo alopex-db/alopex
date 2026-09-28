@@ -49,6 +49,13 @@ def test_parameter_binding_keeps_native_and_mixed_paths(db):
 
     assert db.execute_sql("INSERT INTO mixed_params VALUES (?, ?)", [1, timestamp]) == 1
 
+    mixed_float = db.execute_sql(
+        "SELECT ? AS value, ? AS at",
+        [2.0, timestamp],
+    )
+    assert type(mixed_float[0]["value"]) is float
+    assert mixed_float[0]["value"] == 2.0
+
     statement = db.prepare("INSERT INTO mixed_params VALUES (?, ?)")
     statement.bind(1, 2)
     statement.bind(2, timestamp)
@@ -62,7 +69,7 @@ def test_prepared_execute_many_is_atomic(db):
     db.execute_sql("CREATE TABLE batch_items (id INTEGER PRIMARY KEY, embedding VECTOR(2))")
     statement = db.prepare("INSERT INTO batch_items VALUES (?, ?)")
 
-    assert statement.execute_many([[1, [1.0, 0.0]], [2, [0.0, 1.0]]]) == [1, 1]
+    assert statement.execute_many(((1, (1.0, 0.0)), (2, (0.0, 1.0)))) == [1, 1]
     assert db.execute_sql("SELECT id FROM batch_items ORDER BY id") == [{"id": 1}, {"id": 2}]
 
     db.execute_sql("DELETE FROM batch_items")
@@ -70,8 +77,12 @@ def test_prepared_execute_many_is_atomic(db):
         statement.execute_many([[1, [1.0, 0.0]], [1, [0.0, 1.0]]])
     assert db.execute_sql("SELECT id FROM batch_items") == []
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match="プレースホルダ 2 個に対しパラメータ 1 個",
+    ) as error:
         statement.execute_many([[3]])
+    assert error.value.code == "ALOPEX-PY015"
     with pytest.raises(TypeError):
         statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
 
