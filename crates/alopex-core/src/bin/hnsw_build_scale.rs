@@ -44,8 +44,10 @@ fn main() {
     for id in 0..n {
         let end = offset + dimension * std::mem::size_of::<f32>();
         let vector: Vec<f32> = bytes[offset..end]
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
         index
             .upsert(&(id as u64).to_be_bytes(), &vector, &[])

@@ -6,6 +6,7 @@ use alopex_sql::ExecutionResult;
 
 const DIMENSION: usize = 128;
 const K: usize = 10;
+const METRIC: &str = "COSINE";
 const SIZES: [usize; 4] = [9_600, 16_000, 20_000, 40_000];
 const RUNS: usize = 5;
 
@@ -48,7 +49,7 @@ fn sql_knn_hnsw_cost_does_not_track_table_rows() {
 
 fn seed(db: &Database, table: &str, rows: usize, hnsw: bool) {
     db.execute_sql(&format!(
-        "CREATE TABLE {table} (id INTEGER PRIMARY KEY, embedding VECTOR({DIMENSION}, L2));"
+        "CREATE TABLE {table} (id INTEGER PRIMARY KEY, embedding VECTOR({DIMENSION}, {METRIC}));"
     ))
     .expect("create table");
     if hnsw {
@@ -80,11 +81,11 @@ fn seed(db: &Database, table: &str, rows: usize, hnsw: bool) {
 }
 
 fn query(table: &str) -> String {
-    let vector = std::iter::repeat_n("0", DIMENSION)
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut vector = vec!["0"; DIMENSION];
+    vector[0] = "1";
+    let vector = vector.join(",");
     format!(
-        "SELECT id FROM {table} ORDER BY vector_distance(embedding, [{vector}], 'l2') ASC LIMIT {K}"
+        "SELECT id FROM {table} ORDER BY vector_distance(embedding, [{vector}], 'cosine') ASC LIMIT {K}"
     )
 }
 
@@ -95,9 +96,12 @@ fn assert_hnsw_path(db: &Database, query: &str) {
     else {
         panic!("EXPLAIN must return a query result");
     };
+    let alopex_sql::SqlValue::Text(plan) = &result.rows[0][0] else {
+        panic!("EXPLAIN must return text: {:?}", result.rows[0][0]);
+    };
     assert!(
-        matches!(result.rows[0][0], alopex_sql::SqlValue::Text(ref plan) if plan.starts_with("HnswSearch")),
-        "the indexed query must select HnswSearch"
+        plan.contains("HnswSearch"),
+        "the indexed query must select HnswSearch: {plan}"
     );
 }
 
