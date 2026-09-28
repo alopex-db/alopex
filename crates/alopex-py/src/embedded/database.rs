@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-use alopex_sql::{AlopexDialect, Parser, SqlValue};
+use alopex_sql::{AlopexDialect, Parser, SqlValue, StatementKind};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
 use pyo3::IntoPyObjectExt;
@@ -59,6 +59,62 @@ fn render_prepared_binding(binding: PyPreparedBinding) -> alopex_embedded::Resul
         PyPreparedBinding::Native(value) => alopex_embedded::render_prepared_parameter(&value),
         PyPreparedBinding::Rendered(value) => Ok(value),
     }
+}
+
+fn is_transaction_control_statement(sql: &str) -> bool {
+    let keyword = leading_sql_keyword(sql);
+    let starts_with_transaction_control = [
+        "BEGIN",
+        "START",
+        "SET",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+    ]
+    .iter()
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
+    if !starts_with_transaction_control && !sql.contains(';') {
+        return false;
+    }
+
+    Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement.kind,
+                StatementKind::Begin { .. }
+                    | StatementKind::SetTransaction { .. }
+                    | StatementKind::Commit
+                    | StatementKind::Rollback
+                    | StatementKind::Savepoint { .. }
+                    | StatementKind::RollbackToSavepoint { .. }
+                    | StatementKind::ReleaseSavepoint { .. }
+            )
+        })
+    })
+}
+
+fn leading_sql_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(newline) = comment.find('\n') else {
+                return "";
+            };
+            sql = &comment[newline + 1..];
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return "";
+            };
+            sql = &comment[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    sql.split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
 }
 struct PythonReader(Py<PyAny>);
 
@@ -507,6 +563,11 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         let bindings = prepared_bindings(params.as_ref())?;
         crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
+        if is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
+            ));
+        }
         let result = if !bindings.is_empty()
             && bindings
                 .iter()
@@ -1135,6 +1196,22 @@ mod tests {
                 .extract()
                 .expect("code str");
             assert!(code.starts_with("ALOPEX-"), "unexpected code: {code}");
+        });
+    }
+
+    #[test]
+    fn execute_sql_guides_explicit_transaction_statements_to_begin() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            for sql in ["BEGIN", "SAVEPOINT retry", "COMMIT", "ROLLBACK"] {
+                let err = db
+                    .execute_sql(py, sql, None)
+                    .expect_err("transaction statement must be guided");
+                assert!(
+                    err.to_string().contains("db.begin()"),
+                    "{sql} did not explain the Python transaction API: {err}"
+                );
+            }
         });
     }
 
