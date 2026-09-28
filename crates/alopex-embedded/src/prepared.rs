@@ -73,7 +73,7 @@ impl PreparedState {
                         .as_ref()
                         .expect("all bindings checked above");
                     parameter += 1;
-                    rendered.push_str(&sql_literal(value)?);
+                    rendered.push_str(&render_prepared_parameter(value)?);
                 }
             }
             Ok(())
@@ -109,9 +109,11 @@ impl PreparedState {
         if values.len() < count {
             return Err(Error::PreparedParameterUnbound(values.len() + 1));
         }
-        values
-            .iter()
-            .try_for_each(|value| sql_literal(value).map(|_| ()))
+        if values.iter().all(is_supported_prepared_value) {
+            Ok(())
+        } else {
+            Err(Error::UnsupportedPreparedParameterType)
+        }
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -327,15 +329,16 @@ fn scan_sql(sql: &str, mut visit: impl FnMut(SqlChunk<'_>) -> Result<()>) -> Res
     visit(SqlChunk::Text(&sql[text_start..]))
 }
 
-fn sql_literal(value: &SqlValue) -> Result<String> {
+/// Render a supported prepared value as a SQL literal for a fallback transport path.
+pub fn render_prepared_parameter(value: &SqlValue) -> Result<String> {
     let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
     Ok(match value {
         SqlValue::Null => "NULL".into(),
         SqlValue::Boolean(value) => value.to_string().to_uppercase(),
         SqlValue::Integer(value) => value.to_string(),
         SqlValue::BigInt(value) => value.to_string(),
-        SqlValue::Float(value) if value.is_finite() => value.to_string(),
-        SqlValue::Double(value) if value.is_finite() => value.to_string(),
+        SqlValue::Float(value) if value.is_finite() => format_finite_float(value.to_string())?,
+        SqlValue::Double(value) if value.is_finite() => format_finite_float(value.to_string())?,
         SqlValue::Text(value) => quote(value),
         SqlValue::Decimal(value) => value.to_string(),
         SqlValue::Json(value) => format!("CAST({} AS JSON)", quote(value.as_str())),
@@ -343,10 +346,36 @@ fn sql_literal(value: &SqlValue) -> Result<String> {
             "[{}]",
             values
                 .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
+                .map(|value| format_finite_float(value.to_string()))
+                .collect::<Result<Vec<_>>>()?
                 .join(",")
         ),
         _ => return Err(Error::UnsupportedPreparedParameterType),
     })
+}
+
+fn format_finite_float(mut value: String) -> Result<String> {
+    if value.contains(['e', 'E']) {
+        return Err(Error::UnsupportedPreparedParameterType);
+    }
+    if !value.contains('.') {
+        value.push_str(".0");
+    }
+    Ok(value)
+}
+
+fn is_supported_prepared_value(value: &SqlValue) -> bool {
+    match value {
+        SqlValue::Null
+        | SqlValue::Boolean(_)
+        | SqlValue::Integer(_)
+        | SqlValue::BigInt(_)
+        | SqlValue::Text(_)
+        | SqlValue::Decimal(_)
+        | SqlValue::Json(_) => true,
+        SqlValue::Float(value) => value.is_finite(),
+        SqlValue::Double(value) => value.is_finite(),
+        SqlValue::Vector(values) => values.iter().all(|value| value.is_finite()),
+        _ => false,
+    }
 }

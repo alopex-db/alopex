@@ -141,6 +141,39 @@ fn prepared_vector_batch_does_not_expand_into_parser_payload() {
 }
 
 #[test]
+fn prepared_native_vector_rejects_non_finite_values() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (embedding VECTOR(1, L2))")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (embedding) VALUES (?)")
+        .unwrap();
+    statement.bind(1, SqlValue::Vector(vec![f32::NAN])).unwrap();
+
+    assert!(matches!(
+        statement.execute(),
+        Err(Error::UnsupportedPreparedParameterType)
+    ));
+}
+
+#[test]
+fn prepared_fallback_literals_preserve_float_and_text_contracts() {
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Double(2.0)).unwrap(),
+        "2.0"
+    );
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Text("O'Brien".into())).unwrap(),
+        "'O''Brien'"
+    );
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Vector(vec![2.0])).unwrap(),
+        "[2.0]"
+    );
+}
+
+#[test]
 fn prepared_execute_many_commits_once_and_rolls_back_on_error() {
     let database = Arc::new(Database::new());
     database
