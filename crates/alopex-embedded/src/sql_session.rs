@@ -353,6 +353,39 @@ impl SqlSession {
         }
     }
 
+    pub(crate) fn execute_prepared_many<I, V, F>(
+        &mut self,
+        statement: &Statement,
+        rows: I,
+        validate: F,
+    ) -> Result<Vec<SqlResult>>
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<[SqlValue]>,
+        F: FnMut(&[SqlValue]) -> Result<()>,
+    {
+        match self.state {
+            SqlSessionState::Active => {
+                self.characteristics_locked = true;
+                if self.characteristics.access_mode == TransactionAccessMode::ReadOnly
+                    && statement.kind.requires_write()
+                {
+                    return Err(Error::TxnReadOnly);
+                }
+                let result = self
+                    .transaction
+                    .as_mut()
+                    .expect("active SQL session owns a transaction")
+                    .execute_prepared_many(statement, rows, validate);
+                if result.is_err() {
+                    self.state = SqlSessionState::Failed;
+                }
+                result
+            }
+            SqlSessionState::Idle | SqlSessionState::Failed => Err(self.invalid("prepared batch")),
+        }
+    }
+
     fn invalid(&self, statement: &'static str) -> Error {
         Error::InvalidSqlTransactionTransition {
             statement,
