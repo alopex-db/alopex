@@ -1088,7 +1088,7 @@ impl SegmentReaderV2 {
                     .find(|metadata| metadata.column_index == chunk.column_idx)
                     .ok_or_else(|| {
                         ColumnarError::InvalidFormat(format!(
-                            "legacy row group metadata missing column {} at index {row_group_index}",
+                            "legacy row group metadata missing column {} at row group index {row_group_index}",
                             chunk.column_idx
                         ))
                     })?;
@@ -1505,6 +1505,28 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(values, mixed_binary_values());
+    }
+
+    #[test]
+    fn legacy_row_group_metadata_reports_missing_column_location() {
+        let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
+            row_group_size: 2,
+            ..Default::default()
+        });
+        writer.write_batch(mixed_binary_batch()).unwrap();
+        let mut segment = writer.finish().unwrap();
+        rewrite_footer_as_v2_for_test(&mut segment).unwrap();
+        let mut legacy_row_groups = segment.meta.row_groups.clone();
+        legacy_row_groups[1]
+            .column_chunks
+            .retain(|chunk| chunk.column_index != 0);
+
+        let error = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
+            .unwrap()
+            .with_legacy_row_group_metadata(&legacy_row_groups)
+            .unwrap_err();
+        assert!(matches!(error, ColumnarError::InvalidFormat(message)
+            if message.contains("column 0") && message.contains("row group index 1")));
     }
 
     #[test]
