@@ -196,16 +196,16 @@ impl PreparedStatement {
         };
         let mut session = self.database.sql_session();
         session.execute_sql("BEGIN")?;
-        let outcome = (|| {
-            let mut results = Vec::new();
-            for row in std::iter::once(first).chain(rows) {
-                let values = row.as_ref();
-                self.state.validate_values(values)?;
-                results.push(session.execute_prepared_statement(&self.state.statement, values)?);
-            }
+        let state = &self.state;
+        let outcome = session.execute_prepared_many(
+            &state.statement,
+            std::iter::once(first).chain(rows),
+            |values| state.validate_values(values),
+        );
+        let outcome = outcome.and_then(|results| {
             session.execute_sql("COMMIT")?;
             Ok(results)
-        })();
+        });
         if outcome.is_err() {
             let _ = session.execute_sql("ROLLBACK");
         }

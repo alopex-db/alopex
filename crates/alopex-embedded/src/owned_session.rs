@@ -188,6 +188,20 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_prepared_owned(self, statement, parameters)
     }
 
+    pub(crate) fn execute_prepared_many<I, V, F>(
+        &mut self,
+        statement: &alopex_sql::Statement,
+        rows: I,
+        validate: F,
+    ) -> Result<Vec<crate::SqlResult>>
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<[alopex_sql::SqlValue]>,
+        F: FnMut(&[alopex_sql::SqlValue]) -> Result<()>,
+    {
+        crate::sql_api::execute_prepared_many_owned(self, statement, rows, validate)
+    }
+
     /// Create a named SQL savepoint.
     pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
         if self.failed {

@@ -153,6 +153,14 @@ jobs:
           cargo test -p alopex-embedded --features lane_ci --test knn_index_cost \
             sql_knn_hnsw_cost_does_not_track_table_rows -- --ignored --exact --nocapture \
             | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
+      - name: Verify prepared batch throughput
+        id: prepared_batch_throughput
+        run: |
+          set -o pipefail
+          taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test prepared_statement \
+            prepared_execute_many_hnsw_throughput_matches_literal_batch \
+            -- --ignored --exact --nocapture \
+            2>&1 | tee performance-artifacts/hnsw/prepared-batch-throughput.txt
       - name: Enforce curated/full performance contracts
         id: gate
         env:
@@ -173,6 +181,7 @@ jobs:
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
           SQL_KNN_COST: ${{ steps.sql_knn_cost.outcome }}
+          PREPARED_BATCH_THROUGHPUT: ${{ steps.prepared_batch_throughput.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -181,7 +190,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "sql_knn_cost", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "sql_knn_cost", "prepared_batch_throughput", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)

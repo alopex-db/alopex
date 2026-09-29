@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use alopex_embedded::{Database, Error};
 use alopex_sql::{ExecutionResult, SqlValue};
@@ -218,6 +219,232 @@ fn prepared_execute_many_commits_once_and_rolls_back_on_error() {
         .execute_many(vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]])
         .unwrap();
     assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn prepared_execute_many_invalidates_catalog_cache_for_parameter_free_ddl() {
+    let database = Arc::new(Database::new());
+    let epoch = database.table_info_cache_epoch();
+    let mut statement = database
+        .prepare("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .unwrap();
+
+    statement
+        .execute_many(vec![Vec::<SqlValue>::new()])
+        .unwrap();
+
+    assert_eq!(database.table_info_cache_epoch(), epoch + 1);
+}
+
+#[test]
+fn prepared_execute_many_commits_hnsw_batch_once() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))")
+        .unwrap();
+    database
+        .execute_sql("CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+
+    let results = statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(2), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_row_count(&database, 2);
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        2
+    );
+}
+
+#[test]
+fn prepared_execute_many_rolls_back_hnsw_batch_on_error() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))")
+        .unwrap();
+    database
+        .execute_sql("CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+
+    assert!(statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .is_err());
+    assert_row_count(&database, 0);
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        0
+    );
+
+    statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(2), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .unwrap();
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        2
+    );
+}
+
+#[test]
+#[ignore = "run by parity-performance to publish issue #463 evidence"]
+fn prepared_execute_many_hnsw_throughput_matches_literal_batch() {
+    const ROWS: usize = 2_000;
+    const DIMENSIONS: usize = 128;
+    const LITERAL_BATCH_ROWS: usize = 200;
+    const RUNS: usize = 3;
+
+    let rows = (0..ROWS)
+        .map(|row| {
+            (
+                row as i32,
+                (0..DIMENSIONS)
+                    .map(|dimension| ((row + dimension) % 997) as f32 / 997.0)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let literal_batches = rows
+        .chunks(LITERAL_BATCH_ROWS)
+        .map(|batch| {
+            let values = batch
+                .iter()
+                .map(|(id, vector)| {
+                    let vector = vector
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("({id},[{vector}])")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("INSERT INTO items (id, embedding) VALUES {values}")
+        })
+        .collect::<Vec<_>>();
+    let prepared_rows = rows
+        .iter()
+        .map(|(id, vector)| vec![SqlValue::Integer(*id), SqlValue::Vector(vector.clone())])
+        .collect::<Vec<_>>();
+
+    let mut literal = Vec::with_capacity(RUNS);
+    let mut prepared = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let literal_first = run % 2 == 0;
+        if literal_first {
+            literal.push(record_literal_run(run, &literal_batches, ROWS));
+            prepared.push(record_prepared_run(run, &prepared_rows, ROWS));
+        } else {
+            prepared.push(record_prepared_run(run, &prepared_rows, ROWS));
+            literal.push(record_literal_run(run, &literal_batches, ROWS));
+        }
+    }
+    let literal_median = median(literal);
+    let prepared_median = median(prepared);
+    let ratio = prepared_median / literal_median;
+    eprintln!(
+        "prepared_median_rows_per_second={prepared_median:.3} literal_median_rows_per_second={literal_median:.3} ratio={ratio:.3}"
+    );
+
+    assert!(
+        ratio >= 1.0,
+        "prepared execute_many must match literal batch throughput: {ratio:.3}"
+    );
+}
+
+fn record_literal_run(run: usize, literal_batches: &[String], expected_rows: usize) -> f64 {
+    let rows_per_second = measure_literal_hnsw_insert(literal_batches, expected_rows);
+    eprintln!("literal run={run} rows_per_second={rows_per_second:.3}");
+    rows_per_second
+}
+
+fn record_prepared_run(run: usize, rows: &[Vec<SqlValue>], expected_rows: usize) -> f64 {
+    let rows_per_second = measure_prepared_hnsw_insert(rows, expected_rows);
+    eprintln!("prepared run={run} rows_per_second={rows_per_second:.3}");
+    rows_per_second
+}
+
+fn measure_literal_hnsw_insert(literal_batches: &[String], expected_rows: usize) -> f64 {
+    let database = hnsw_insert_database();
+    let start = Instant::now();
+    let mut session = database.sql_session();
+    session.execute_sql("BEGIN").unwrap();
+    for sql in literal_batches {
+        session.execute_sql(sql).unwrap();
+    }
+    session.execute_sql("COMMIT").unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    assert_row_count(&database, expected_rows);
+    expected_rows as f64 / elapsed
+}
+
+fn measure_prepared_hnsw_insert(rows: &[Vec<SqlValue>], expected_rows: usize) -> f64 {
+    let database = hnsw_insert_database();
+    let start = Instant::now();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+    let results = statement
+        .execute_many(rows.iter().map(Vec::as_slice))
+        .unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    assert_eq!(results.len(), expected_rows);
+    assert_row_count(&database, expected_rows);
+    expected_rows as f64 / elapsed
+}
+
+fn hnsw_insert_database() -> Arc<Database> {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))")
+        .unwrap();
+    database
+        .execute_sql(
+            "CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW \
+             WITH (m = 16, ef_construction = 200)",
+        )
+        .unwrap();
+    database
+}
+
+fn assert_row_count(database: &Database, expected_rows: usize) {
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+    else {
+        panic!("COUNT must return rows");
+    };
+    assert_eq!(
+        rows.rows,
+        vec![vec![SqlValue::BigInt(expected_rows as i64)]]
+    );
+}
+
+fn median(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
 }
 
 #[test]

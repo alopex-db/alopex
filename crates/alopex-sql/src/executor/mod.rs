@@ -77,7 +77,8 @@ use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
 use crate::storage::{
-    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, TxnBridge,
+    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, StorageError,
+    TxnBridge,
 };
 use crate::{ExplainFormat, ResolvedType};
 use std::time::Instant;
@@ -225,6 +226,25 @@ pub struct Executor<S: KVStore, C: Catalog> {
 
     /// Catalog for metadata operations.
     catalog: Arc<RwLock<C>>,
+}
+
+/// Executes plans inside an HNSW batch owned by [`Executor`].
+///
+/// Values of this type are only supplied to [`Executor::execute_hnsw_batch_in_txn`], which
+/// always flushes successful HNSW changes and abandons failed ones.
+pub struct HnswBatchExecutor<'a, S: KVStore> {
+    executor: &'a mut Executor<S, PersistentCatalog<S>>,
+}
+
+impl<S: KVStore> HnswBatchExecutor<'_, S> {
+    /// Execute one plan without ending the enclosing batch's HNSW changes.
+    pub fn execute<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.executor.execute_in_txn_without_hnsw_flush(plan, txn)
+    }
 }
 
 impl<S: KVStore, C: Catalog> Executor<S, C> {
@@ -756,6 +776,57 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
+        self.execute_in_txn_with_hnsw_flush(plan, txn, true)
+    }
+
+    /// Execute a bounded batch and finalize its HNSW changes before returning.
+    ///
+    /// The callback may execute several plans against the same transaction, but it cannot leave
+    /// staged HNSW changes for its caller to finalize.
+    pub fn execute_hnsw_batch_in_txn<'a, 'b, 'c, E, F, M>(
+        &mut self,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        execute: F,
+        map_flush_error: M,
+    ) -> std::result::Result<Vec<ExecutionResult>, E>
+    where
+        F: FnOnce(
+            &mut HnswBatchExecutor<'_, S>,
+            &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        ) -> std::result::Result<Vec<ExecutionResult>, E>,
+        M: FnOnce(StorageError) -> E,
+    {
+        let result = {
+            let mut batch = HnswBatchExecutor { executor: self };
+            execute(&mut batch, txn)
+        };
+        let (mut sql_txn, _) = txn.split_parts();
+        match result {
+            Ok(results) => sql_txn
+                .flush_hnsw()
+                .map_err(map_flush_error)
+                .map(|_| results),
+            Err(error) => {
+                let _ = sql_txn.abandon_hnsw();
+                Err(error)
+            }
+        }
+    }
+
+    fn execute_in_txn_without_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.execute_in_txn_with_hnsw_flush(plan, txn, false)
+    }
+
+    fn execute_in_txn_with_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        flush_hnsw: bool,
+    ) -> Result<ExecutionResult> {
         let plan = match plan {
             LogicalPlan::Explain {
                 analyze,
@@ -1116,7 +1187,9 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         match result {
             Ok(value) => {
-                sql_txn.flush_hnsw()?;
+                if flush_hnsw {
+                    sql_txn.flush_hnsw()?;
+                }
                 Ok(value)
             }
             Err(err) => {
