@@ -111,6 +111,29 @@ fn prepared_vector_batch_does_not_expand_into_parser_payload() {
     database
         .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))")
         .unwrap();
+    let vector_literal = std::iter::repeat_n("0.25", DIMENSIONS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literal_sql = format!(
+        "INSERT INTO items (id, embedding) VALUES {}",
+        (0..ROWS)
+            .map(|row| format!("({row}, [{vector_literal}])"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert!(
+        literal_sql.len() < 1_048_576,
+        "literal SQL stays below the input limit"
+    );
+    let error = database.execute_sql(&literal_sql).unwrap_err();
+    assert!(
+        matches!(&error, Error::Sql(_))
+            && error
+                .to_string()
+                .contains("MessagePack collection limit of 65536 values exceeded"),
+        "literal batch must report its actual MessagePack collection constraint: {error}"
+    );
+
     let sql = format!(
         "INSERT INTO items (id, embedding) VALUES {}",
         std::iter::repeat_n("(?, ?)", ROWS)
