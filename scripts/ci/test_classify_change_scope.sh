@@ -34,3 +34,4 @@ git -C "${fixture}" commit --quiet -m production-change
 production_sha="$(git -C "${fixture}" rev-parse HEAD)"
 [[ "$(run_classifier "${release_sha}" "${production_sha}")" == 'production=true' ]]
 [[ "$(run_classifier 0000000000000000000000000000000000000000 "${production_sha}")" == 'production=true' ]]
+[[ "$(run_classifier "${production_sha}" "${production_sha}")" == 'production=true' ]]
