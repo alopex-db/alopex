@@ -56,7 +56,7 @@ if [ ! -d "${DEFAULT_CHIRPS_DIR}" ] && [ -d "${REPO_ROOT}/../../chirps" ]; then
     DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../../chirps"
 fi
 CHIRPS_REPO_URL="${CHIRPS_REPO_URL:-https://github.com/alopex-db/alopex-chirps.git}"
-CHIRPS_REF="${CHIRPS_REF:-release/v0.5.2}"
+CHIRPS_REF="${CHIRPS_REF:-release/v0.7.0}"
 CHIRPS_DIR_WAS_EXPLICIT=0
 if [ -n "${CHIRPS_DIR:-}" ]; then
     CHIRPS_DIR_WAS_EXPLICIT=1
