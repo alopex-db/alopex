@@ -840,61 +840,47 @@ def analyze_scale(
     }
 
 
+def _sql_vector_literal(vector) -> str:
+    return "[" + ", ".join(str(float(value)) for value in vector) + "]"
+
+
+def _build_sql_only_hybrid(db, vectors):
+    dimension = int(vectors.shape[1])
+    db.execute_sql(
+        f"CREATE TABLE hybrid_rows (id INT PRIMARY KEY, bucket INT, "
+        f"embedding VECTOR({dimension}, COSINE))"
+    )
+    for start in range(0, len(vectors), 256):
+        values = ", ".join(
+            f"({index}, {index % 1000}, {_sql_vector_literal(vectors[index])})"
+            for index in range(start, min(start + 256, len(vectors)))
+        )
+        db.execute_sql(
+            "INSERT INTO hybrid_rows (id, bucket, embedding) VALUES " + values
+        )
+    db.execute_sql(
+        "CREATE INDEX idx_hybrid_embedding ON hybrid_rows (embedding) "
+        "USING HNSW WITH (m=16, ef_construction=200, ef_search=64)"
+    )
+
+    def search(query, selectivity: float, *, k: int = 10) -> list[int]:
+        threshold = max(1, round(selectivity * 1000))
+        rows = db.execute_sql(
+            "SELECT id FROM hybrid_rows "
+            f"WHERE bucket < {threshold} "
+            f"ORDER BY vector_distance(embedding, {_sql_vector_literal(query)}, 'cosine') ASC "
+            f"LIMIT {k} WITH (ef_search = {max(64, k)})"
+        )
+        return [int(row["id"]) for row in rows]
+
+    return search
+
+
 def _alopex_hybrid(vectors):
     import alopex
 
     db = alopex.Database.new()
-    db.create_hnsw_index(
-        "hybrid_vectors",
-        alopex.HnswConfig(
-            vectors.shape[1], m=16, ef_construction=200, metric=alopex.Metric.COSINE
-        ),
-    )
-    db.execute_sql("CREATE TABLE hybrid_rows (id INT PRIMARY KEY, bucket INT)")
-    started = time.perf_counter()
-    with db.begin(alopex.TxnMode.READ_WRITE) as transaction:
-        transaction.upsert_to_hnsw_batch(
-            "hybrid_vectors",
-            [str(index).encode() for index in range(len(vectors))],
-            vectors,
-        )
-        transaction.commit()
-    for start in range(0, len(vectors), 500):
-        values = ",".join(
-            f"({index},{index % 1000})"
-            for index in range(start, min(start + 500, len(vectors)))
-        )
-        db.execute_sql(f"INSERT INTO hybrid_rows VALUES {values}")
-
-    def search(query, k: int, ef_search: int) -> list[int]:
-        results, _ = db.search_hnsw(
-            "hybrid_vectors", query, k, ef_search=max(k, ef_search)
-        )
-        return [int(result.key.decode()) for result in results]
-
-    def select_ids(threshold: int) -> list[int]:
-        return [
-            int(row["id"])
-            for row in db.execute_sql(
-                f"SELECT id FROM hybrid_rows WHERE bucket < {threshold}"
-            )
-        ]
-
-    def close() -> None:
-        db.close()
-
-    return (
-        SearchEngine(
-            "alopex-hybrid",
-            time.perf_counter() - started,
-            search,
-            close,
-            0,
-            peak_rss_bytes(),
-            node_count=len(vectors),
-        ),
-        select_ids,
-    )
+    return _build_sql_only_hybrid(db, vectors), db.close
 
 
 def _sqlite_filter_catalog(row_count: int):
@@ -954,7 +940,7 @@ def measure_hybrid(
 ) -> list[dict[str, object]]:
     import numpy as np
 
-    alopex_engine, alopex_filter = _alopex_hybrid(vectors)
+    alopex_search, close_alopex = _alopex_hybrid(vectors)
     hnsw_engine = build_hnswlib(vectors)
     sqlite_connection, sqlite_filter = _sqlite_filter_catalog(len(vectors))
 
@@ -974,12 +960,10 @@ def measure_hybrid(
             arms = (
                 (
                     "alopex-sql-hnsw-postfilter",
-                    lambda query: _hybrid_search(
-                        alopex_engine.search,
-                        alopex_filter,
-                        query,
-                        selectivity,
-                        len(vectors),
+                    lambda query: (
+                        alopex_search(query, selectivity),
+                        10,
+                        len(allowed),
                     ),
                 ),
                 (
@@ -1050,7 +1034,7 @@ def measure_hybrid(
                         }
                     )
     finally:
-        alopex_engine.close()
+        close_alopex()
         hnsw_engine.close()
         sqlite_connection.close()
     return rows
@@ -1373,6 +1357,7 @@ def run_benchmark(
         "latency_decomposition": decompose_latency(base_summary, fixed_cost_us),
         "hybrid": summarize_hybrid(hybrid_runs),
         "hybrid_measurement_contract": {
+            "alopex_query_surface": "SQL",
             "query_count_minimum": min(HYBRID_QUERY_COUNT, min_queries),
             "termination": "fixed query count and run count",
             "reason": "hybrid has five selectivities and three end-to-end arms; its bounded query set isolates filter responsibility without duplicating the primary search gate",
@@ -1416,6 +1401,7 @@ def render_markdown(payload: dict[str, object]) -> str:
                 )
     recall = payload["recall_investigation"]
     hybrid = payload["hybrid"]
+    hybrid_contract = payload["hybrid_measurement_contract"]
     scale = payload["scale"]
     recall_table = [
         "| engine | ef_search | recall@10 | tie-aware recall@10 |",
@@ -1510,6 +1496,9 @@ def render_markdown(payload: dict[str, object]) -> str:
         + "\n".join(latency_table)
         + "\n\n## Hybrid\n\n"
         + "\n".join(hybrid_table)
+        + "\n\nAlopex query surface: `"
+        + str(hybrid_contract.get("alopex_query_surface", "not recorded"))
+        + "`."
         + "\n\nAlopex advantageous selectivities: `"
         + json.dumps(hybrid.get("alopex_advantageous_selectivities", []))
         + "`. Filter-aware traversal: `"
