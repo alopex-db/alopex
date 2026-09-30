@@ -841,7 +841,11 @@ def analyze_scale(
 
 
 def _sql_vector_literal(vector) -> str:
-    return "[" + ", ".join(str(float(value)) for value in vector) + "]"
+    import numpy as np
+
+    return "[" + ", ".join(
+        np.format_float_positional(value, unique=True, trim="0") for value in vector
+    ) + "]"
 
 
 def _build_sql_only_hybrid(db, vectors):

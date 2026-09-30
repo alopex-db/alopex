@@ -8,6 +8,7 @@ import numpy as np
 from scripts.performance.hnsw_v0811_contract import (
     DATASET_SIZE,
     DIMENSION,
+    _sql_vector_literal,
     _build_sql_only_hybrid,
     analyze_scale,
     decompose_latency,
@@ -25,6 +26,14 @@ from scripts.performance.hnsw_v0811_contract import (
 
 
 class HnswDiagnosticContractTests(unittest.TestCase):
+    def test_sql_vector_literal_avoids_exponent_notation(self):
+        literal = _sql_vector_literal(
+            np.asarray([1e-8, -2e-10, 1.0], dtype=np.float32)
+        )
+
+        self.assertNotRegex(literal, r"\d(?:\.\d+)?[eE][+-]?\d+")
+        self.assertEqual(literal, "[0.00000001, -0.0000000002, 1.0]")
+
     def test_sql_only_hybrid_uses_one_filtered_knn_statement(self):
         class Database:
             def __init__(self):
