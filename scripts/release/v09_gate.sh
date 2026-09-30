@@ -10,7 +10,7 @@ set -euo pipefail
 
 readonly TARGET_VERSION="0.9.0"
 readonly TARGET_PHASE="4"
-readonly CHIRPS_VERSION="0.5.2"
+readonly MIN_CHIRPS_MINOR=7
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 MANIFEST=""
@@ -236,8 +236,16 @@ check_chirps_prerequisites() {
         add_blocker "I-25: alopex-cluster Chirps manifest is missing"
         return
     fi
-    if ! grep -Fq "alopex-chirps = { version = \"${CHIRPS_VERSION}\"" "${cluster_manifest}"; then
-        add_blocker "I-25: compatible Chirps ${CHIRPS_VERSION} package/version is not declared"
+    local chirps_version chirps_major chirps_minor
+    chirps_version="$(sed -nE 's/^alopex-chirps = \{ version = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' "${cluster_manifest}" | head -n 1)"
+    if [[ ! "${chirps_version}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+        add_blocker "I-25: Chirps v0.${MIN_CHIRPS_MINOR}+ capability is not declared"
+    else
+        chirps_major="${BASH_REMATCH[1]}"
+        chirps_minor="${BASH_REMATCH[2]}"
+        if (( chirps_major == 0 && chirps_minor < MIN_CHIRPS_MINOR )); then
+            add_blocker "I-25: Chirps v0.${MIN_CHIRPS_MINOR}+ capability is not declared"
+        fi
     fi
     if ! grep -Fq 'authenticated_dispatcher' \
         "${PROJECT_ROOT}/crates/alopex-cluster/tests/changefeed_durable_preflight.rs"; then
