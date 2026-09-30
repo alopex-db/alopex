@@ -53,6 +53,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11.11"
+      - name: Prepare isolated Python environment
+        id: prepare_python
+        run: |
+          python -m venv .venv-performance
+          echo "VIRTUAL_ENV=$PWD/.venv-performance" >> "$GITHUB_ENV"
+          echo "$PWD/.venv-performance/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Install pinned reference engines
         id: dependencies
