@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0]
+
+Candidate release. Final publication remains gated by the approved v0.9 phase
+evidence and exact-SHA RC qualification.
+
+### Added
+- Multi-Raft range placement, CRDT Counter/Set, durable changefeed, and distributed transaction surfaces.
+- Chirps v0.7 integration for the v0.9 cluster and changefeed paths.
+- Immutable RC candidate manifest and same-SHA stable promotion workflow.
+
+### Changed
+- Release qualification now uses an immutable `v0.9.0-rc.N` tag, artifact digests,
+  and an independent `alopex-py-v0.9.0` tag.
+
 ## [0.8.1]
 
 Parser and release-gate reliability release.

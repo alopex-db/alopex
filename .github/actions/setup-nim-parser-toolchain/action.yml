@@ -1,0 +1,516 @@
+name: Setup exact Nim parser toolchain
+description: >-
+  Provision the exact host Nim/Nimble pair and an isolated, offline parser
+  package store for the current job. Production omits all four override inputs;
+  offline smoke tests must supply all four together as one atomic set.
+
+inputs:
+  nimble-source-dir:
+    description: >-
+      Optional pre-existing clean Nimble source checkout for offline smoke
+      tests. This is one member of the atomic four-input override set: either
+      supply all four overrides or omit all four.
+    required: false
+    default: ''
+  nimble-package-seed-dir:
+    description: >-
+      Optional pre-existing Nimble directory used only by offline smoke tests.
+      This is one member of the atomic four-input override set: either supply
+      all four overrides or omit all four.
+    required: false
+    default: ''
+  nimble-binary:
+    description: >-
+      Optional prebuilt Nimble executable used only by offline smoke tests. Its
+      version and full release SHA are verified before use. This is one member
+      of the atomic four-input override set: supply all four or omit all four.
+    required: false
+    default: ''
+  nim-binary:
+    description: >-
+      Optional exact Nim executable used only by offline smoke tests. Production
+      workflows use setup-nim-action. This is one member of the atomic
+      four-input override set: supply all four or omit all four.
+    required: false
+    default: ''
+
+outputs:
+  nim-path:
+    description: Native path to the verified Nim 2.2.10 executable.
+    value: ${{ steps.toolchain.outputs.nim-path }}
+  nimble-path:
+    description: Native path to the verified Nimble 0.22.3 executable.
+    value: ${{ steps.toolchain.outputs.nimble-path }}
+  nimble-dir:
+    description: Native path to the job-owned Nimble package store.
+    value: ${{ steps.toolchain.outputs.nimble-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install exact Nim 2.2.10
+      if: >-
+        inputs.nimble-source-dir == '' &&
+        inputs.nimble-package-seed-dir == '' &&
+        inputs.nimble-binary == '' &&
+        inputs.nim-binary == ''
+      uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec
+      with:
+        nim-version: '2.2.10'
+        repo-token: ${{ github.token }}
+
+    - name: Build and isolate exact Nimble 0.22.3
+      id: toolchain
+      shell: bash
+      env:
+        NIMBLE_SOURCE_OVERRIDE: ${{ inputs.nimble-source-dir }}
+        NIMBLE_PACKAGE_SEED_OVERRIDE: ${{ inputs.nimble-package-seed-dir }}
+        NIMBLE_BINARY_OVERRIDE: ${{ inputs.nimble-binary }}
+        NIM_BINARY_OVERRIDE: ${{ inputs.nim-binary }}
+      run: |
+        set -euo pipefail
+
+        readonly required_nim_version='2.2.10'
+        readonly required_nimble_version='0.22.3'
+        readonly required_nimble_sha='42ef70c2102a942c46f13eb76872326edd525cec'
+        readonly nimble_repository='https://github.com/nim-lang/nimble.git'
+
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        : "${GITHUB_ENV:?GITHUB_ENV is required}"
+        : "${GITHUB_PATH:?GITHUB_PATH is required}"
+        : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+
+        override_count=0
+        for override_value in "${NIMBLE_SOURCE_OVERRIDE}" \
+          "${NIMBLE_PACKAGE_SEED_OVERRIDE}" "${NIMBLE_BINARY_OVERRIDE}" \
+          "${NIM_BINARY_OVERRIDE}"; do
+          if [[ -n "${override_value}" ]]; then
+            ((override_count += 1))
+          fi
+        done
+        if [[ "${override_count}" != '0' && "${override_count}" != '4' ]]; then
+          echo 'offline smoke overrides must be supplied together or omitted together' >&2
+          exit 2
+        fi
+
+        runner_temp="${RUNNER_TEMP}"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          runner_temp="$(cygpath -u "${runner_temp}")"
+        fi
+        case "${runner_temp}" in
+          ''|'/')
+            echo "unsafe RUNNER_TEMP: ${runner_temp:-<empty>}" >&2
+            exit 2
+            ;;
+        esac
+
+        tool_root="${runner_temp%/}/alopex-nim-parser-toolchain"
+        source_dir="${tool_root}/source"
+        nimcache_dir="${tool_root}/nimcache"
+        setup_cache_dir="${tool_root}/setup-cache"
+        setup_home_dir="${tool_root}/setup-home"
+        bin_dir="${tool_root}/bin"
+        shim_dir="${tool_root}/shim"
+        nimble_dir="${tool_root}/nimble-dir"
+        source_owned=0
+
+        cleanup_ephemeral() {
+          rm -rf -- "${nimcache_dir}"
+          rm -rf -- "${setup_cache_dir}"
+          rm -rf -- "${setup_home_dir}"
+          if [[ "${source_owned}" == '1' ]]; then
+            rm -rf -- "${source_dir}"
+          fi
+        }
+        cleanup_failure() {
+          original_status=$?
+          trap - EXIT
+          set +e
+          rm -rf -- "${nimcache_dir}"
+          rm -rf -- "${setup_cache_dir}"
+          rm -rf -- "${setup_home_dir}"
+          if [[ "${source_owned}" == '1' ]]; then
+            rm -rf -- "${source_dir}"
+          fi
+          rm -rf -- "${bin_dir}"
+          rm -rf -- "${shim_dir}"
+          rm -rf -- "${nimble_dir}"
+          rmdir "${tool_root}" 2>/dev/null || true
+          exit "${original_status}"
+        }
+        trap cleanup_failure EXIT
+
+        rm -rf -- "${tool_root}"
+        mkdir -p -- "${bin_dir}" "${shim_dir}" "${nimble_dir}" \
+          "${nimcache_dir}" "${setup_cache_dir}" "${setup_home_dir}"
+        mkdir -p -- "${setup_cache_dir}/tmp"
+
+        setup_home_env="${setup_home_dir}"
+        setup_cache_env="${setup_cache_dir}"
+        setup_tmp_env="${setup_cache_dir}/tmp"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          setup_home_env="$(cygpath -w "${setup_home_dir}")"
+          setup_cache_env="$(cygpath -w "${setup_cache_dir}")"
+          setup_tmp_env="$(cygpath -w "${setup_cache_dir}/tmp")"
+        fi
+
+        nim_path="${NIM_BINARY_OVERRIDE}"
+        if [[ -n "${nim_path}" && "${RUNNER_OS:-}" == 'Windows' ]]; then
+          nim_path="$(cygpath -u "${nim_path}")"
+        fi
+        if [[ -z "${nim_path}" ]]; then
+          nim_path="$(command -v nim)"
+        fi
+        [[ -n "${nim_path}" ]] || {
+          echo 'setup-nim-action did not place Nim on PATH' >&2
+          exit 1
+        }
+
+        run_setup_nim() {
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            HOME="${setup_home_env}" USERPROFILE="${setup_home_env}" \
+              XDG_CACHE_HOME="${setup_cache_env}" \
+              TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+              TMPDIR="${setup_tmp_env}" MSYS2_ARG_CONV_EXCL='*' \
+              "${nim_path}" "$@"
+          else
+            HOME="${setup_home_env}" XDG_CACHE_HOME="${setup_cache_env}" \
+              TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+              TMPDIR="${setup_tmp_env}" "${nim_path}" "$@"
+          fi
+        }
+
+        nim_version="$(run_setup_nim --version | sed -n \
+          's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
+        if [[ "${nim_version}" != "${required_nim_version}" ]]; then
+          echo "Nim ${required_nim_version} is required, found ${nim_version:-unknown}" >&2
+          exit 2
+        fi
+
+        if [[ -n "${NIMBLE_SOURCE_OVERRIDE}" ]]; then
+          source_dir="${NIMBLE_SOURCE_OVERRIDE}"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            source_dir="$(cygpath -u "${source_dir}")"
+          fi
+          source_dir="$(cd "${source_dir}" && pwd -P)"
+        else
+          source_owned=1
+          git clone --branch v0.22.3 --depth 1 --recurse-submodules \
+            --shallow-submodules "${nimble_repository}" "${source_dir}"
+        fi
+
+        actual_nimble_sha="$(git -C "${source_dir}" rev-parse HEAD)"
+        if [[ "${actual_nimble_sha}" != "${required_nimble_sha}" ]]; then
+          echo "Nimble source must be ${required_nimble_sha}, found ${actual_nimble_sha}" >&2
+          exit 2
+        fi
+        if [[ -n "$(git -C "${source_dir}" status --porcelain \
+          --ignore-submodules=none)" ]]; then
+          echo 'Nimble source checkout is not clean' >&2
+          exit 2
+        fi
+        if git -C "${source_dir}" submodule status --recursive | \
+          grep -Eq '^[+U-]'; then
+          echo 'Nimble source submodules are missing or do not match the release commit' >&2
+          exit 2
+        fi
+
+        nimble_name='nimble'
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          nimble_name='nimble.exe'
+        fi
+        nimble_path="${bin_dir}/${nimble_name}"
+        if [[ -n "${NIMBLE_BINARY_OVERRIDE}" ]]; then
+          binary_override="${NIMBLE_BINARY_OVERRIDE}"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            binary_override="$(cygpath -u "${binary_override}")"
+          fi
+          cp "${binary_override}" "${nimble_path}"
+          chmod +x "${nimble_path}"
+        else
+          nimcache_arg="${nimcache_dir}"
+          nimble_output_arg="${nimble_path}"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            nimcache_arg="$(cygpath -w "${nimcache_dir}")"
+            nimble_output_arg="$(cygpath -w "${nimble_path}")"
+          fi
+          (
+            cd "${source_dir}"
+            run_setup_nim c -d:release --nimcache:"${nimcache_arg}" \
+              -o:"${nimble_output_arg}" src/nimble.nim
+          )
+        fi
+        [[ -x "${nimble_path}" ]] || {
+          echo "Nimble executable was not produced at ${nimble_path}" >&2
+          exit 1
+        }
+
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          nimble_identity="$(HOME="${setup_home_env}" \
+            USERPROFILE="${setup_home_env}" \
+            XDG_CACHE_HOME="${setup_cache_env}" \
+            TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+            TMPDIR="${setup_tmp_env}" \
+            MSYS2_ARG_CONV_EXCL='*' \
+            "${nimble_path}" --nimbleDir:"$(cygpath -w "${nimble_dir}")" \
+            --version)"
+        else
+          nimble_identity="$(HOME="${setup_home_env}" \
+            XDG_CACHE_HOME="${setup_cache_env}" \
+            TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+            TMPDIR="${setup_tmp_env}" \
+            "${nimble_path}" --nimbleDir:"${nimble_dir}" --version)"
+        fi
+        if ! grep -Fxq "nimble v${required_nimble_version}" \
+          <<<"$(sed -n '1p' <<<"${nimble_identity}" | cut -d' ' -f1-2)"; then
+          echo "Nimble ${required_nimble_version} is required" >&2
+          printf '%s\n' "${nimble_identity}" >&2
+          exit 2
+        fi
+        if ! grep -Fqx "git hash: ${required_nimble_sha}" \
+          <<<"${nimble_identity}"; then
+          echo "Nimble binary is not built from ${required_nimble_sha}" >&2
+          printf '%s\n' "${nimble_identity}" >&2
+          exit 2
+        fi
+
+        nim_path_native="${nim_path}"
+        nimble_path_native="${nimble_path}"
+        nimble_dir_native="${nimble_dir}"
+        shim_dir_native="${shim_dir}"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          nim_path_native="$(cygpath -w "${nim_path}")"
+          nimble_path_native="$(cygpath -w "${nimble_path}")"
+          nimble_dir_native="$(cygpath -w "${nimble_dir}")"
+          shim_dir_native="$(cygpath -w "${shim_dir}")"
+        fi
+
+        run_setup_nimble() {
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            HOME="${setup_home_env}" USERPROFILE="${setup_home_env}" \
+              XDG_CACHE_HOME="${setup_cache_env}" \
+              TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+              TMPDIR="${setup_tmp_env}" \
+              MSYS2_ARG_CONV_EXCL='*' \
+              "${nimble_path}" "$@"
+          else
+            HOME="${setup_home_env}" XDG_CACHE_HOME="${setup_cache_env}" \
+              TEMP="${setup_tmp_env}" TMP="${setup_tmp_env}" \
+              TMPDIR="${setup_tmp_env}" \
+              "${nimble_path}" "$@"
+          fi
+        }
+
+        if [[ -n "${NIMBLE_PACKAGE_SEED_OVERRIDE}" ]]; then
+          package_seed_dir="${NIMBLE_PACKAGE_SEED_OVERRIDE}"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            package_seed_dir="$(cygpath -u "${package_seed_dir}")"
+          fi
+          package_seed_dir="$(cd "${package_seed_dir}" && pwd -P)"
+          find_seeded_package() {
+            package_name="$1"
+            package_pattern="$2"
+            package_matches=()
+            for package_candidate in \
+              "${package_seed_dir}/pkgs2"/${package_pattern}; do
+              if [[ -d "${package_candidate}" ]]; then
+                package_matches+=("${package_candidate}")
+              fi
+            done
+            if [[ "${#package_matches[@]}" != '1' ]]; then
+              echo "expected one seeded ${package_name}, found ${#package_matches[@]}" >&2
+              exit 2
+            fi
+            printf '%s\n' "${package_matches[0]}"
+          }
+
+          seeded_npeg="$(find_seeded_package 'npeg 1.3.0' 'npeg-1.3.0-*')"
+          seeded_msgpack="$(find_seeded_package \
+            'msgpack4nim 0.4.4' 'msgpack4nim-0.4.4-*')"
+          mkdir -p "${nimble_dir}/pkgs2"
+          cp -R "${seeded_npeg}" "${nimble_dir}/pkgs2/"
+          cp -R "${seeded_msgpack}" "${nimble_dir}/pkgs2/"
+          for seed_metadata in packages_official.json packages_temp.json \
+            official-nim-releases.json; do
+            if [[ ! -f "${package_seed_dir}/${seed_metadata}" ]]; then
+              echo "missing seeded Nimble metadata: ${seed_metadata}" >&2
+              exit 2
+            fi
+            cp "${package_seed_dir}/${seed_metadata}" "${nimble_dir}/"
+          done
+          cat >"${nimble_dir}/nimbledata2.json" <<'EOF'
+        {
+          "version": 1,
+          "reverseDeps": {}
+        }
+        EOF
+        else
+          run_setup_nimble --nimbleDir:"${nimble_dir_native}" \
+            --nim:"${nim_path_native}" --useSystemNim install -y \
+            'npeg@1.3.0' 'msgpack4nim@0.4.4'
+          # Nimble refreshes its registry during install. Pin the registry
+          # snapshot used by the parser release after that step so a later
+          # package-list update cannot invalidate the reproducible archive
+          # identity or make one host diverge from another.
+          package_list_revision='b79eaaa3fc65fc473bc9e803445f8f7aef7112a2'
+          package_list_url="https://raw.githubusercontent.com/nim-lang/packages/${package_list_revision}/packages.json"
+          pinned_metadata="${nimble_dir}/packages_official.json"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            pinned_metadata_native="$(cygpath -w "${pinned_metadata}")"
+          else
+            pinned_metadata_native="${pinned_metadata}"
+          fi
+          curl --fail --location --retry 3 --silent --show-error \
+            "${package_list_url}" --output "${pinned_metadata_native}"
+          cp "${pinned_metadata}" "${nimble_dir}/packages_temp.json"
+        fi
+
+        npeg_path="$(run_setup_nimble --nimbleDir:"${nimble_dir_native}" \
+          --nim:"${nim_path_native}" --useSystemNim --offline path npeg)"
+        msgpack_path="$(run_setup_nimble --nimbleDir:"${nimble_dir_native}" \
+          --nim:"${nim_path_native}" --useSystemNim --offline path msgpack4nim)"
+        case "${npeg_path}" in
+          *npeg-1.3.0-*) ;;
+          *) echo "unexpected npeg package path: ${npeg_path}" >&2; exit 2 ;;
+        esac
+        case "${msgpack_path}" in
+          *msgpack4nim-0.4.4-*) ;;
+          *) echo "unexpected msgpack4nim package path: ${msgpack_path}" >&2; exit 2 ;;
+        esac
+
+        cat >"${shim_dir}/nim" <<'EOF'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        : "${ALOPEX_NIM_BIN:?ALOPEX_NIM_BIN is required}"
+        exact_nim="${ALOPEX_NIM_BIN}"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          exact_nim="$(cygpath -u "${exact_nim}")"
+        fi
+        exec "${exact_nim}" "$@"
+        EOF
+        chmod +x "${shim_dir}/nim"
+
+        cat >"${shim_dir}/nimble" <<'EOF'
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        shim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+        tool_root="$(cd "${shim_dir}/.." && pwd -P)"
+        exact_nimble="${tool_root}/bin/nimble"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          exact_nimble="${tool_root}/bin/nimble.exe"
+        fi
+        : "${ALOPEX_NIM_BIN:?ALOPEX_NIM_BIN is required}"
+        : "${ALOPEX_NIMBLE_DIR:?ALOPEX_NIMBLE_DIR is required}"
+        [[ -x "${exact_nimble}" ]] || {
+          echo "exact Nimble executable is missing: ${exact_nimble}" >&2
+          exit 1
+        }
+
+        runtime_root="${tool_root}/runtime-cache.${BASHPID:-$$}"
+        cleanup_runtime() {
+          rm -rf -- "${runtime_root}"
+        }
+        trap cleanup_runtime EXIT
+        mkdir -p -- "${runtime_root}/home" "${runtime_root}/xdg" \
+          "${runtime_root}/tmp"
+        export HOME="${runtime_root}/home"
+        export XDG_CACHE_HOME="${runtime_root}/xdg"
+        export TEMP="${runtime_root}/tmp"
+        export TMP="${runtime_root}/tmp"
+        export TMPDIR="${runtime_root}/tmp"
+        if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+          export USERPROFILE="$(cygpath -w "${runtime_root}/home")"
+          export TEMP="$(cygpath -w "${runtime_root}/tmp")"
+          export TMP="${TEMP}"
+          export TMPDIR="${TEMP}"
+          export MSYS2_ARG_CONV_EXCL='*'
+        fi
+
+        common_args=(
+          "--nimbleDir:${ALOPEX_NIMBLE_DIR}"
+          "--nim:${ALOPEX_NIM_BIN}"
+          --useSystemNim
+          --offline
+        )
+
+        run_exact_nimble() {
+          "${exact_nimble}" "${common_args[@]}" "$@"
+        }
+
+        canonical_install=0
+        if [[ "$#" == '4' ]]; then
+          if [[ "${1}" == 'install' && "${2}" == '-y' ]]; then
+            if [[ "${3}" == 'npeg@1.3.0' && \
+              "${4}" == 'msgpack4nim@0.4.4' ]]; then
+              canonical_install=1
+            elif [[ "${3}" == 'npeg' && "${4}" == 'msgpack4nim' ]]; then
+              canonical_install=1
+            fi
+          fi
+        fi
+
+        contains_install=0
+        for argument in "$@"; do
+          if [[ "${argument}" == 'install' ]]; then
+            contains_install=1
+          fi
+        done
+        if [[ "${contains_install}" == '1' && \
+          "${canonical_install}" != '1' ]]; then
+          echo 'offline parser toolchain refuses noncanonical install invocation' >&2
+          exit 2
+        fi
+
+        if [[ "${canonical_install}" == '1' ]]; then
+          npeg_path="$(run_exact_nimble path npeg)"
+          msgpack_path="$(run_exact_nimble path msgpack4nim)"
+          case "${npeg_path}" in
+            *npeg-1.3.0-*) ;;
+            *) echo "seeded npeg 1.3.0 is missing: ${npeg_path}" >&2; exit 2 ;;
+          esac
+          case "${msgpack_path}" in
+            *msgpack4nim-0.4.4-*) ;;
+            *) echo "seeded msgpack4nim 0.4.4 is missing: ${msgpack_path}" >&2; exit 2 ;;
+          esac
+          echo 'Exact parser dependencies are already available offline.'
+          exit 0
+        fi
+
+        set +e
+        run_exact_nimble "$@"
+        status=$?
+        set -e
+        exit "${status}"
+        EOF
+        chmod +x "${shim_dir}/nimble"
+
+        {
+          echo "ALOPEX_NIM_BIN=${nim_path_native}"
+          echo "ALOPEX_NIMBLE_DIR=${nimble_dir_native}"
+          echo "NIMBLE_DIR=${nimble_dir_native}"
+        } >>"${GITHUB_ENV}"
+        echo "${shim_dir_native}" >>"${GITHUB_PATH}"
+        {
+          echo "nim-path=${nim_path_native}"
+          echo "nimble-path=${nimble_path_native}"
+          echo "nimble-dir=${nimble_dir_native}"
+        } >>"${GITHUB_OUTPUT}"
+
+        PATH="${shim_dir}:${PATH}" \
+          ALOPEX_NIM_BIN="${nim_path_native}" \
+          ALOPEX_NIMBLE_DIR="${nimble_dir_native}" \
+          "${shim_dir}/nimble" --version | \
+          grep -Fqx "git hash: ${required_nimble_sha}"
+        run_setup_nim --version | \
+          grep -Fq "Nim Compiler Version ${required_nim_version}"
+
+        cleanup_ephemeral
+
+        [[ ! -e "${nimcache_dir}" ]]
+        [[ ! -e "${setup_cache_dir}" ]]
+        [[ ! -e "${setup_home_dir}" ]]
+        if [[ "${source_owned}" == '1' ]]; then
+          [[ ! -e "${source_dir}" ]]
+        fi
+        trap - EXIT

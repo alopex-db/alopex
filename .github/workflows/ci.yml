@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
-    branches: [main]
 
 env:
   RUST_BACKTRACE: 1
@@ -345,8 +343,8 @@ jobs:
             target/release/alopex-cli
             target/release/alopex-cli.exe
 
-  v08-release-gate:
-    name: v0.8 Release Gate (${{ matrix.os }})
+  v09-release-gate:
+    name: v0.9 Release Gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -374,7 +372,7 @@ jobs:
       - name: Setup Python venv
         shell: bash
         run: |
-          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v08-gate-venv"
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v09-gate-venv"
           rm -rf "$VENV_DIR"
           python -m venv "$VENV_DIR"
           VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
@@ -391,7 +389,7 @@ jobs:
           echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
           echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
           echo "ALOPEX_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
-          echo "V07_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "V09_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Python deps
@@ -424,24 +422,30 @@ jobs:
           nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
           echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
           echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
-      - name: Run v0.7 baseline gate (Linux)
+      - name: Checkout approved v0.9 specification evidence (Linux)
         if: runner.os == 'Linux'
+        uses: actions/checkout@v4
+        with:
+          repository: alopex-db/alopex-spec-workflow
+          path: alopex-spec-workflow
+      - name: Run v0.9 target-version candidate gate (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash scripts/release/v07_gate.sh
-      - name: Build Python extension for v0.8 gate (Windows)
+          CHIRPS_DIR: ${{ github.workspace }}/../chirps
+          V09_SPECS_DIR: ${{ github.workspace }}/alopex-spec-workflow
+        run: bash scripts/release/verify-release/run.sh 0.9.0 --v09-candidate-gate --no-report
+      - name: Build all v0.9 product crates (Windows)
         if: runner.os == 'Windows'
-        run: maturin develop -m crates/alopex-py/Cargo.toml
-      - name: Run v0.8 release gate
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
+        run: cargo test --workspace --all-features --locked --no-run
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [fmt, clippy, test, coverage, security-audit, build, v09-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -453,7 +457,7 @@ jobs:
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
+             [[ "${{ needs['v09-release-gate'].result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "fmt: ${{ needs.fmt.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
@@ -461,7 +465,7 @@ jobs:
             echo "coverage: ${{ needs.coverage.result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
-            echo "v08-release-gate: ${{ needs['v08-release-gate'].result }}"
+            echo "v09-release-gate: ${{ needs['v09-release-gate'].result }}"
             exit 1
           fi
           echo "All CI jobs passed!"

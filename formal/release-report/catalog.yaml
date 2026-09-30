@@ -1,0 +1,44 @@
+schema: alopex-formal-catalog/v1
+model:
+  id: alopex-release-report-v0-8-5
+  language: TLA+
+  checker:
+    name: Apalache
+    image: ghcr.io/apalache-mc/apalache@sha256:fde994fd109323934b9abb7ad169de37b29acf2141483367f2913cae30ff3795
+    profile: bounded-model-check
+    max_steps: 12
+    constants:
+      RetryLimit: 2
+    scope: "One release-verification run, at most two retries, one report publication."
+    exclusions:
+      - "GitHub/PyPI/crates.io availability and indexing latency"
+      - "Human review quality"
+      - "Unbounded scheduler liveness and fairness"
+requirements:
+  - id: RELEASE-REPORT-SEPARATION
+    failure_mode: "A generated or failed report is published without an explicit publication request."
+    properties:
+      - ResultBeforeReport
+      - ExplicitPublication
+      - ReportBeforePublication
+    refinement:
+      - scripts/release/verify-release/run.sh
+      - .github/workflows/public-release-verification.yml
+    local_component_test: scripts/release/tests/test_verify_release_reporting.sh
+  - id: RELEASE-REPORT-SUCCESS-ONLY
+    failure_mode: "A failed or skipped verification is imported into docs as a public guarantee."
+    properties:
+      - SuccessOnlyPublication
+      - NoSkippedPublication
+      - FailureEvidenceRetained
+    refinement:
+      - .github/workflows/public-release-verification.yml
+    local_component_test: scripts/release/tests/test_public_release_workflow.py
+  - id: RELEASE-REPORT-FAILURE-NOTIFICATION
+    failure_mode: "A scheduled failure is neither retained as evidence nor surfaced to maintainers."
+    properties:
+      - FailureEvidenceRetained
+      - FailureNotificationIsTruthful
+    refinement:
+      - .github/workflows/public-release-verification.yml
+    local_component_test: scripts/release/tests/test_public_release_workflow.py

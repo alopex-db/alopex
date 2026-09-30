@@ -24,6 +24,8 @@ usage() {
     cat <<'EOF'
 Usage: scripts/release/v09_gate.sh --phase 4 --manifest ABSOLUTE_PATH
 
+       scripts/release/v09_gate.sh --workflow-contract-only
+
 Runs the v0.9.0 Phase 4 exact-register verifier, every Phase 4 fixture, the
 complete product-workspace suite, Chirps prerequisite checks, and the
 documentation/CI/artifact-identity checks.  The manifest and all generated
@@ -262,20 +264,34 @@ check_docs_ci_and_artifact_identity() {
         add_blocker "I-26: workspace artifact version is ${version:-unknown}, expected ${TARGET_VERSION}"
     fi
     if [[ ! -f "${PROJECT_ROOT}/docs/release-v0.9-support.md" || \
-          ! -f "${PROJECT_ROOT}/docs/upgrade-v0.8.1-to-v0.9.md" ]]; then
+          ( ! -f "${PROJECT_ROOT}/docs/upgrade-v0.8.1-to-v0.9.md" && \
+            ! -f "${PROJECT_ROOT}/docs/upgrade-v0.8-to-v0.9.md" ) ]]; then
         add_blocker "I-26: v0.9 support/upgrade documentation is incomplete"
     fi
+    check_release_workflow_contract
+}
+
+check_release_workflow_contract() {
+    local workflow="${PROJECT_ROOT}/.github/workflows/release.yml"
     if [[ ! -f "${workflow}" ]]; then
         add_blocker "I-26: release workflow is missing"
         return
     fi
-    if ! grep -Fq 'v09-candidate-gate' "${workflow}" || \
-       ! grep -Fq 'V09_SPECS_DIR' "${workflow}"; then
-        add_blocker "I-26: release workflow does not invoke the v0.9 candidate gate with approved specs"
+    if ! grep -Fq "v[0-9]+\\.[0-9]+\\.[0-9]+-rc\\." "${workflow}" || \
+       ! grep -Fq "candidate_manifest.py" "${workflow}" || \
+       ! grep -Fq "promote-release" "${workflow}" || \
+       ! grep -Fq "RELEASE_TARGET_SHA" "${workflow}"; then
+        add_blocker "I-26: release workflow does not implement the immutable RC/manifest/same-SHA promotion flow"
     fi
-    if grep -Eq 'v07_gate\.sh|verify-v08-surfaces\.sh' "${workflow}"; then
-        add_blocker "I-26: a legacy v0.7/v0.8 gate is present in the v0.9 release workflow"
+    if grep -Eq 'type_capability_gate\.py|verify-v08-surfaces\.sh' "${workflow}"; then
+        add_blocker "I-26: a v0.8-specific release gate is present in the v0.9 release workflow"
     fi
+}
+
+run_workflow_contract_only() {
+    check_release_workflow_contract
+    exit_if_blocked || return $?
+    log_info "v0.9 release workflow contract passed"
 }
 
 run_phase4_fixtures() {
@@ -357,6 +373,10 @@ cleanup() {
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --workflow-contract-only)
+                run_workflow_contract_only
+                return $?
+                ;;
             --phase)
                 [[ $# -ge 2 ]] || fail_usage "--phase needs a value"
                 [[ "$2" == "${TARGET_PHASE}" ]] || fail_usage "only Phase ${TARGET_PHASE} is supported"

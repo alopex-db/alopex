@@ -33,3 +33,24 @@ def test_candidate_runner_defaults_to_chirps_v07() -> None:
         encoding="utf-8"
     )
     assert 'CHIRPS_REF="${CHIRPS_REF:-release/v0.7.0}"' in runner
+
+
+def test_release_workflow_uses_immutable_rc_manifest_promotion() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    for required in (
+        "v[0-9]+\\.[0-9]+\\.[0-9]+-rc",
+        "candidate_manifest.py",
+        "promote-release",
+        "RELEASE_TARGET_SHA",
+        "prepare-python-release.sh",
+    ):
+        assert required in workflow
+    assert "type_capability_gate.py" not in workflow
+    assert "v07_gate.sh" not in workflow
+
+
+def test_ci_uses_the_v09_target_gate() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "v09-release-gate:" in workflow
+    assert "--v09-candidate-gate" in workflow
+    assert "v08-release-gate" not in workflow

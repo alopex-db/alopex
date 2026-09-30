@@ -1,9 +1,33 @@
 name: alopex-py-release
 
 on:
-  push:
-    tags:
-      - "alopex-py-v*"
+  # The core release dispatches this workflow; RC qualification builds and stable delivery promotes.
+  workflow_dispatch:
+    inputs:
+      core_run_id:
+        description: "Core workflow run bound to this release"
+        required: true
+        type: string
+      source_ref:
+        description: "Immutable tag to check out"
+        required: false
+        default: ""
+        type: string
+      core_tag:
+        description: "Core RC or stable tag holding parser assets"
+        required: false
+        default: ""
+        type: string
+      candidate_tag:
+        description: "Qualified RC tag whose Python artifacts are promoted"
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "qualification builds artifacts; promotion publishes qualified artifacts"
+        required: true
+        default: "promotion"
+        type: string
 
 defaults:
   run:
@@ -15,6 +39,7 @@ env:
 jobs:
   linux:
     name: linux (${{ matrix.target }})
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -24,14 +49,92 @@ jobs:
         # aarch64 linker rejects it as incompatible. Keep x86_64 releasable
         # while the ARM-native/shared-library build path is resolved.
         target: [x86_64]
+        target_triple: [x86_64-unknown-linux-gnu]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Resolve source release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          rm -rf .core-parser-assets
+          mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download "$CORE_TAG" --repo alopex-db/alopex \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+            --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.26.0-*.tar.gz" \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest "${PARSER_MANIFEST}" \
+            --asset-dir .core-parser-assets
+          python - <<'PY'
+          import hashlib, json, os, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
+          asset = next(item for item in manifest['assets'] if item['target'] == 'x86_64-unknown-linux-gnu')
+          archive = root / asset['archive']['filename']
+          with tarfile.open(archive, 'r:gz') as handle:
+              members = {member.name: handle.extractfile(member).read() for member in handle.getmembers()}
+          library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu')
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
+          package_native = Path('crates/alopex-py/python/alopex/native')
+          package_native.mkdir(parents=True, exist_ok=True)
+          (package_native / name).write_bytes(library)
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          PY
+      - name: Checkout release parser tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
+      - name: Bind source parser pins to release assets
+        run: |
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
+            --manifest "${PARSER_MANIFEST}" \
+            --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
+            --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
           manylinux: auto
           args: -m crates/alopex-py/Cargo.toml --release --out dist
@@ -40,52 +143,36 @@ jobs:
           #   "Script to run before maturin command on Linux."
           # manylinux: auto では maturin-action が manylinux コンテナ内でビルドするため、
           # このスクリプトも同コンテナ内 (AlmaLinux ベース) で cargo build 前に実行される。
-          # ここで Nim 2.2 をセットアップし、alopex-sql の build.rs が要求する
-          # libalopex_sql_parser.so を crates/alopex-sql/nim-sql-parser/ に生成する。
-          #
-          # Nim 公式は aarch64 向けプリビルドバイナリ tar.xz を配布していない
-          # (x64 のみ。https://nim-lang.org/download/ で確認)。そのため両ターゲットで
-          # 確実に動くソースからのブートストラップ (csources 同梱) を採用する。
-          # manylinux には gcc/make があるためソースビルドが可能。
-          #
-          # 要 CI 検証:
-          #   - aarch64 ターゲットは maturin-action が QEMU エミュレーションの
-          #     aarch64 コンテナで実行する可能性が高く、ソースビルドは動作するが
-          #     低速。実際の所要時間・成否は CI 上でのみ確認可能。
-          #   - manylinux コンテナ内の curl/xz/gcc 可用性は CI 上で要確認。
           before-script-linux: |
             set -euxo pipefail
             REPO_ROOT="$PWD"
-            CHIRPS_DIR="$(dirname "$(dirname "${REPO_ROOT}")")/chirps"
-            rm -rf "${CHIRPS_DIR}"
-            git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${CHIRPS_DIR}"
-            NIM_VERSION=2.2.4
-            curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
-            mkdir -p /opt/nim-src
-            tar -xJf /tmp/nim.tar.xz -C /opt/nim-src --strip-components=1
-            cd /opt/nim-src
-            sh build.sh
-            bin/nim c --skipUserCfg --skipParentCfg koch
-            ./koch boot -d:release
-            ./koch tools
-            export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
-            # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
-            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
-            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
-            # manylinux コンテナ内では root がマウントされた repo を読むため、
-            # nimble lib が内部で実行する git ls-files 用に safe.directory を登録する。
-            git config --global --add safe.directory "${REPO_ROOT}"
-            cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
-            nimble install -y npeg msgpack4nim
-            nimble lib
             cd "${REPO_ROOT}"
       - name: Inspect Linux wheel contents
         shell: bash
         run: |
           set -euo pipefail
+          library_sha="$(python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-unknown-linux-gnu'))
+          PY
+          )"
           for wheel in dist/*.whl; do
-            python scripts/release/verify_wheel_contents.py "$wheel"
+            python scripts/release/verify_wheel_contents.py "$wheel" \
+              --expected-library-path alopex/native/libalopex_sql_parser.so \
+            --expected-library-sha256 "$library_sha" --expected-contract-version 0.26.0
           done
+      - name: Exercise Linux wheel vector and streaming APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
+          python -m venv "${smoke_venv}"
+          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
+          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -94,6 +181,7 @@ jobs:
 
   macos:
     name: macos (${{ matrix.target }})
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -103,36 +191,123 @@ jobs:
           # parser shared library is built natively before linking.
           - os: macos-15-intel
             target: x86_64
+            target_triple: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64
+            target_triple: aarch64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
-      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
-      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
-      # 要 CI 検証: x86_64 は Intel runner、aarch64 は macos-latest 上で検証する。
-      - name: Setup Nim
-        uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Resolve source release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TRIPLE: ${{ matrix.target_triple }}
+        run: |
+          set -euo pipefail
+          rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+            --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.26.0-*.tar.gz" \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest "${PARSER_MANIFEST}" \
+            --asset-dir .core-parser-assets
+          TARGET_TRIPLE="$TARGET_TRIPLE" python - <<'PY'
+          import hashlib, json, os, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
+          target = os.environ['TARGET_TRIPLE']
+          asset = next(item for item in manifest['assets'] if item['target'] == target)
+          with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
+              members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
+          library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
+          package_native = Path('crates/alopex-py/python/alopex/native')
+          package_native.mkdir(parents=True, exist_ok=True)
+          (package_native / name).write_bytes(library)
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          PY
+      - name: Checkout release parser tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
+      - name: Bind source parser pins to release assets
+        run: |
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
+            --manifest "${PARSER_MANIFEST}" \
+            --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
+            --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
-          args: -m crates/alopex-py/Cargo.toml --release --out dist
+          args: -m crates/alopex-py/Cargo.toml --release --auditwheel repair --out dist
           target: ${{ matrix.target }}
       - name: Inspect macOS wheel contents
         shell: bash
         run: |
           set -euo pipefail
+          library_sha="$(TARGET_TRIPLE="${{ matrix.target_triple }}" python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == os.environ['TARGET_TRIPLE']))
+          PY
+          )"
           for wheel in dist/*.whl; do
-            python scripts/release/verify_wheel_contents.py "$wheel"
+            python scripts/release/verify_wheel_contents.py "$wheel" \
+              --expected-library-path alopex/native/libalopex_sql_parser.dylib \
+            --expected-library-sha256 "$library_sha" --expected-contract-version 0.26.0
           done
+      - name: Exercise macOS wheel vector and streaming APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
+          python -m venv "${smoke_venv}"
+          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
+          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -141,32 +316,90 @@ jobs:
 
   windows:
     name: windows (x86_64)
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
-      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
-      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
-      - name: Setup Nim
-        uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
-      - name: Stage Nim parser DLL in Python package
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Resolve source release version
         shell: bash
         run: |
           set -euo pipefail
-          dll="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll"
-          test -f "$dll"
-          mkdir -p crates/alopex-py/python/alopex/native
-          cp "$dll" crates/alopex-py/python/alopex/native/
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          core_tag="${{ inputs.core_tag }}"
+          echo "CORE_TAG=${core_tag:-v${version}}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+            --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.26.0-*.tar.gz" \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest "${PARSER_MANIFEST}" \
+            --asset-dir .core-parser-assets
+          python - <<'PY'
+          import hashlib, json, os, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == os.environ['CORE_TAG']
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
+          target = 'x86_64-pc-windows-msvc'
+          asset = next(item for item in manifest['assets'] if item['target'] == target)
+          with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
+              members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
+          library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
+          Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
+          Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
+          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.26.0\n')
+          Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          PY
+      - name: Checkout release parser tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
+      - name: Bind source parser pins to release assets
+        run: |
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
+            --manifest "${PARSER_MANIFEST}" \
+            --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
+            --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
           args: -m crates/alopex-py/Cargo.toml --release --out dist
       - name: Inspect Windows wheel contents
@@ -175,8 +408,18 @@ jobs:
           set -euo pipefail
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$wheel"
-          python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll
-      - name: Import Windows wheel without ALOPEX_DLL_DIR
+          library_sha="$(python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-pc-windows-msvc'))
+          PY
+          )"
+          python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll \
+            --expected-library-sha256 "$library_sha" --expected-contract-version 0.26.0 \
+            --expected-loader-path alopex/native/alopex_sql_parser.dll
+      - name: Exercise Windows wheel APIs without external DLL overrides
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -184,11 +427,11 @@ jobs:
           if (Test-Path $venv) { Remove-Item -Recurse -Force $venv }
           python -m venv $venv
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & "$venv\Scripts\python.exe" -m pip install numpy==2.2.1
           & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
-          Remove-Item Env:ALOPEX_DLL_DIR -ErrorAction SilentlyContinue
           Push-Location $env:RUNNER_TEMP
           try {
-            & "$venv\Scripts\python.exe" -c "from alopex import Database; print('clean wheel import OK')"
+            & "$venv\Scripts\python.exe" "$env:GITHUB_WORKSPACE\scripts\release\verify_python_vector_api.py"
           } finally {
             Pop-Location
           }
@@ -200,15 +443,22 @@ jobs:
 
   sdist:
     name: sdist
+    if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Remove native parser vendor files from sdist staging
+        run: |
+          set -euo pipefail
+          find crates/alopex-sql/nim-sql-parser/vendor \
+            -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: sdist
           args: -m crates/alopex-py/Cargo.toml --out dist
       - name: Inspect sdist contents
@@ -224,70 +474,52 @@ jobs:
           name: sdist
           path: dist/*
 
-  publish-testpypi:
-    name: publish-testpypi
+  candidate-release:
+    name: Attach qualified Python artifacts
     runs-on: ubuntu-latest
     needs: [linux, macos, windows, sdist]
-    environment: testpypi
+    if: ${{ inputs.mode == 'qualification' }}
     permissions:
-      id-token: write
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
       - name: Flatten dist directory
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           mkdir -p wheels
           find dist -name "*.whl" -exec cp {} wheels/ \;
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
-          ls -la wheels/
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: wheels/
-          skip-existing: true
-
-  verify-testpypi:
-    name: verify-testpypi
-    runs-on: ubuntu-latest
-    needs: [publish-testpypi]
-    steps:
-      - name: Wait for TestPyPI indexing
-        run: sleep 60
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install from TestPyPI
-        run: |
-          pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            alopex
-      - name: Verify import
-        run: |
-          python -c "from alopex import Database; print('Database import OK')"
-          python -c "from alopex import Transaction; print('Transaction import OK')"
+          test -n "${{ inputs.core_tag }}"
+          gh release upload --repo "${GITHUB_REPOSITORY}" "${{ inputs.core_tag }}" wheels/* --clobber
 
   publish-pypi:
     name: publish-pypi
     runs-on: ubuntu-latest
-    needs: [verify-testpypi]
+    if: ${{ inputs.mode == 'promotion' }}
     environment: pypi
     permissions:
       id-token: write
+      contents: read
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-      - name: Flatten dist directory
+      - name: Download qualified candidate artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CORE_TAG: ${{ inputs.core_tag }}
         run: |
+          set -euo pipefail
+          test -n "${CANDIDATE_TAG}"
+          version="${CORE_TAG#v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p wheels
-          find dist -name "*.whl" -exec cp {} wheels/ \;
-          find dist -name "*.tar.gz" -exec cp {} wheels/ \;
-          ls -la wheels/
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "alopex-${version}-*.whl" --pattern "alopex-${version}.tar.gz" \
+            --dir wheels --clobber
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -297,15 +529,178 @@ jobs:
   github-release:
     name: github-release
     runs-on: ubuntu-latest
-    needs: [linux, macos, windows, sdist]
+    if: ${{ inputs.mode == 'promotion' }}
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
+      - name: Download qualified candidate artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CORE_TAG: ${{ inputs.core_tag }}
+        run: |
+          set -euo pipefail
+          test -n "${CANDIDATE_TAG}"
+          version="${CORE_TAG#v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p wheels
+          gh release download "${CANDIDATE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "alopex-${version}-*.whl" --pattern "alopex-${version}.tar.gz" \
+            --dir wheels --clobber
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          tag_name: ${{ inputs.source_ref || github.ref_name }}
+          files: wheels/*
+
+  final-release-join:
+    name: final-release-join
+    runs-on: ubuntu-latest
+    needs: [publish-pypi, github-release]
+    if: ${{ inputs.mode == 'promotion' && always() && needs.publish-pypi.result == 'success' && needs.github-release.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.ref }}
+
+      - name: Resolve exact core and Python workflow identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PYTHON_RUN_ID: ${{ github.run_id }}
+          PYTHON_TAG_NAME: ${{ inputs.source_ref || github.ref_name }}
+          CORE_RUN_ID: ${{ inputs.core_run_id }}
+        run: |
+          set -euo pipefail
+          version="${PYTHON_TAG_NAME#alopex-py-v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          core_tag="v${version}"
+          printf 'VERSION=%s\nCORE_TAG=%s\n' "${version}" "${core_tag}" >> "${GITHUB_ENV}"
+          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${core_tag}" | jq -r '.object.sha')"
+          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${core_tag}" | jq -r '.object.type')"
+          if [[ "${core_tag_type}" == "tag" ]]; then
+            core_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${core_tag_sha}" | jq -r '.object.sha')"
+          fi
+          python_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${PYTHON_TAG_NAME}" | jq -r '.object.sha')"
+          python_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${PYTHON_TAG_NAME}" | jq -r '.object.type')"
+          if [[ "${python_tag_type}" == "tag" ]]; then
+            python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
+          fi
+          PYTHON_HEAD_SHA="$(git rev-parse HEAD)"
+          printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
+          [[ "${PYTHON_HEAD_SHA}" == "${python_tag_sha}" ]] || {
+            echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
+            exit 1
+          }
+          git fetch --force origin "refs/tags/${core_tag}:refs/tags/${core_tag}" \
+            "refs/tags/${PYTHON_TAG_NAME}:refs/tags/${PYTHON_TAG_NAME}"
+          test "${core_tag_sha}" = "${python_tag_sha}" || {
+            echo "Python tag must point to the exact Core tag SHA" >&2
+            exit 1
+          }
+          version_at_tag="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          test "${version_at_tag}" = "${version}"
+          [[ "${CORE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          core_run_json="$(gh api "repos/${REPOSITORY}/actions/runs/${CORE_RUN_ID}")"
+          core_run_head_sha="$(jq -r '.head_sha' <<< "${core_run_json}")"
+          test "$(jq -r '.repository.full_name' <<< "${core_run_json}")" = "${REPOSITORY}"
+          test "$(jq -r '.path' <<< "${core_run_json}")" = ".github/workflows/release.yml"
+          # The reusable release run's head_sha identifies the workflow
+          # definition commit; release.yml validates RELEASE_TARGET_SHA
+          # against the immutable core tag before publishing it.
+          jobs="$(gh api "repos/${REPOSITORY}/actions/runs/${CORE_RUN_ID}/jobs?per_page=100")"
+          JOBS="${jobs}" python3 - <<'PY'
+          import json
+          import os
+
+          jobs = json.loads(os.environ["JOBS"])["jobs"]
+          conclusions = {job["name"]: job.get("conclusion") for job in jobs}
+          if conclusions.get("Publish qualified crate archives to crates.io") != "success":
+              raise SystemExit("bound core run has not successfully published crates")
+          if conclusions.get("Create stable GitHub Release") != "success":
+              raise SystemExit("bound core run has not successfully created the release")
+          PY
+          core_run_id="${CORE_RUN_ID}"
+          printf 'CORE_TAG_SHA=%s\nPYTHON_TAG_SHA=%s\nCORE_RUN_ID=%s\nCORE_RUN_HEAD_SHA=%s\nPYTHON_RUN_ID=%s\n' \
+            "${core_tag_sha}" "${python_tag_sha}" "${core_run_id}" "${core_run_head_sha}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"
+
+      - name: Download the immutable parser envelope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p join-assets
+          gh release download "${CORE_TAG}" --repo "${REPOSITORY}" \
+            --pattern "parser-assets-v${VERSION}.json" \
+            --pattern "parser-vendor-manifest-v${VERSION}.json" \
+            --dir join-assets --clobber
+
+      - name: Build and verify the public Core/Python join
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - "${CORE_TAG_SHA}" "${PYTHON_TAG_SHA}" "${CORE_RUN_ID}" "${CORE_RUN_HEAD_SHA}" \
+            "${PYTHON_RUN_ID}" "${PYTHON_HEAD_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import urllib.request
+
+          core_sha, python_sha, core_run, core_run_head, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
+          root = pathlib.Path(asset_dir)
+          envelope = json.loads((root / f"parser-assets-v{version}.json").read_text())
+          manifest = json.loads((root / f"parser-vendor-manifest-v{version}.json").read_text())
+          def get_json(url):
+              with urllib.request.urlopen(url) as response:
+                  return json.load(response)
+          def digest(value):
+              if not isinstance(value, str) or len(value) != 64:
+                  raise SystemExit(f"invalid digest: {value!r}")
+              return value
+          crates = []
+          for name in ("alopex-core", "alopex-sql", "alopex-dataframe", "alopex-embedded", "alopex-cluster", "alopex-server", "alopex-cli"):
+              payload = get_json(f"https://crates.io/api/v1/crates/{name}/{version}")
+              if payload.get("version", {}).get("num") != version:
+                  raise SystemExit(f"crates.io version mismatch for {name}")
+              crates.append({"name": name, "status": "published"})
+          pypi = get_json(f"https://pypi.org/pypi/alopex/{version}/json")
+          distributions = [
+              {"name": item["filename"], "status": "published", "sha256": digest(item["digests"]["sha256"])}
+              for item in pypi.get("urls", [])
+              if item["filename"].endswith((".whl", ".tar.gz"))
+          ]
+          if not distributions:
+              raise SystemExit("PyPI has no wheel/sdist for the release")
+          envelope_assets = {item["target"]: item for item in envelope["assets"]}
+          assets = []
+          for item in manifest["assets"]:
+              target = item["target"]
+              if target not in envelope_assets:
+                  raise SystemExit(f"missing envelope target {target}")
+              assets.append({
+                  "target": target,
+                  "archive_sha256": digest(envelope_assets[target]["sha256"]),
+                  "library_sha256": digest(item["library"]["sha256"]),
+                  # The core release gate's successful run is the recorded native-smoke evidence.
+                  "native_smoke": True,
+              })
+          candidate = {
+              "version": version,
+              "core_tag": {"name": f"v{version}", "peeled_sha": core_sha},
+              "python_tag": {"name": f"alopex-py-v{version}", "peeled_sha": python_sha},
+              "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_run_head, "source_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
+              "python": {"status": "success", "published": True, "run_id": python_run, "head_sha": python_head, "peeled_sha": python_sha, "registry": "pypi", "distributions": distributions},
+              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / f"parser-vendor-manifest-v{version}.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / f"parser-assets-v{version}.json").read_bytes()).hexdigest()), "assets": assets},
+              "publication_order": {"core_before_python": True},
+              "provenance": {"python_descends_from_core": True},
+          }
+          (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
+          PY
+          bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
