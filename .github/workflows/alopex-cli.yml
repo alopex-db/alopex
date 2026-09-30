@@ -2,7 +2,6 @@ name: Alopex CLI Integration Tests
 
 on:
   push:
-    branches: [main, develop]
     paths:
       - 'crates/alopex-cli/**'
       - 'crates/alopex-embedded/**'
@@ -10,7 +9,6 @@ on:
       - 'crates/alopex-sql/**'
       - '.github/workflows/alopex-cli.yml'
   pull_request:
-    branches: [main]
     paths:
       - 'crates/alopex-cli/**'
       - 'crates/alopex-embedded/**'

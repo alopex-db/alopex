@@ -2,9 +2,7 @@ name: Compatibility
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
-    branches: [main]
 
 env:
   RUST_BACKTRACE: 1

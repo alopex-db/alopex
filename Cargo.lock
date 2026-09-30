@@ -80,7 +80,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "alopex-chirps"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-chirps-core",
  "alopex-chirps-file-transfer",
@@ -91,10 +91,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "futures",
  "http 0.2.12",
  "openraft",
  "prometheus",
+ "quinn",
  "serde",
+ "sha2",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -102,17 +106,18 @@ dependencies = [
 
 [[package]]
 name = "alopex-chirps-core"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-chirps-wire",
  "async-trait",
+ "serde",
  "thiserror 1.0.69",
  "tokio",
 ]
 
 [[package]]
 name = "alopex-chirps-file-transfer"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-chirps-core",
  "alopex-chirps-wire",
@@ -134,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-chirps-gossip-swim"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-chirps-wire",
  "async-trait",
@@ -147,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-chirps-raft-storage"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-core 0.3.4",
  "anyhow",
@@ -156,12 +161,13 @@ dependencies = [
  "crc32fast",
  "openraft",
  "serde",
+ "sha2",
  "tokio",
 ]
 
 [[package]]
 name = "alopex-chirps-transport-quic"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "alopex-chirps-core",
  "alopex-chirps-wire",
@@ -185,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-chirps-wire"
-version = "0.5.2"
+version = "0.7.0"
 dependencies = [
  "bincode",
  "serde",
@@ -194,10 +200,10 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-cluster",
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "alopex-embedded",
  "alopex-server",
  "alopex-sql",
@@ -247,14 +253,14 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-chirps",
  "alopex-chirps-core",
  "alopex-chirps-gossip-swim",
  "alopex-chirps-raft-storage",
  "alopex-chirps-transport-quic",
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "alopex-sql",
  "serde",
  "serde_json",
@@ -281,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-dataframe",
  "alopex-sql",
@@ -323,9 +329,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "arrow",
  "arrow-csv",
  "parquet 53.4.1",
@@ -337,10 +343,10 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-cluster",
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "alopex-dataframe",
  "alopex-sql",
  "arrow",
@@ -362,10 +368,10 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-cluster",
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "alopex-dataframe",
  "alopex-embedded",
  "alopex-sql",
@@ -381,11 +387,11 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "alopex-cli",
  "alopex-cluster",
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "alopex-embedded",
  "alopex-sql",
  "anyhow",
@@ -429,9 +435,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
- "alopex-core 0.8.1",
+ "alopex-core 0.9.0",
  "arrow-array 52.2.0",
  "arrow-schema 52.2.0",
  "base64 0.22.1",
