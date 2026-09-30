@@ -8,6 +8,7 @@ import numpy as np
 from scripts.performance.hnsw_v0811_contract import (
     DATASET_SIZE,
     DIMENSION,
+    _build_sql_only_hybrid,
     analyze_scale,
     decompose_latency,
     load_amazon_products,
@@ -24,6 +25,44 @@ from scripts.performance.hnsw_v0811_contract import (
 
 
 class HnswDiagnosticContractTests(unittest.TestCase):
+    def test_sql_only_hybrid_uses_one_filtered_knn_statement(self):
+        class Database:
+            def __init__(self):
+                self.statements = []
+
+            def execute_sql(self, statement):
+                self.statements.append(statement)
+                if statement.startswith("SELECT"):
+                    return [{"id": 41}, {"id": 42}]
+                return []
+
+        database = Database()
+        search = _build_sql_only_hybrid(
+            database,
+            np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        )
+
+        self.assertEqual(
+            search(np.asarray([1.0, 0.0], dtype=np.float32), 0.2),
+            [41, 42],
+        )
+        self.assertTrue(database.statements[0].startswith("CREATE TABLE"))
+        insert = next(
+            statement
+            for statement in database.statements
+            if statement.startswith("INSERT INTO hybrid_rows")
+        )
+        self.assertIn("(0, 0, [1.0, 0.0])", insert)
+        self.assertTrue(
+            any(statement.startswith("CREATE INDEX") for statement in database.statements)
+        )
+        statement = database.statements[-1]
+        self.assertIn("WHERE bucket < 200", statement)
+        self.assertIn(
+            "vector_distance(embedding, [1.0, 0.0], 'cosine')", statement
+        )
+        self.assertIn("LIMIT 10 WITH (ef_search = 64)", statement)
+
     def test_search_measurement_terminates_on_fixed_query_count(self):
         calls = []
         engine = SearchEngine(
@@ -255,6 +294,9 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         "alopex_advantageous_selectivities": [0.01],
                         "filter_aware_traversal": False,
                     },
+                    "hybrid_measurement_contract": {
+                        "alopex_query_surface": "SQL",
+                    },
                 },
                 scale={
                     "results": [
@@ -382,6 +424,7 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertIn("| 0.99 |", report)
             self.assertIn("## Latency decomposition", report)
             self.assertIn("## Hybrid", report)
+            self.assertIn("Alopex query surface: `SQL`", report)
             self.assertIn("## Scale", report)
             self.assertIn("alopex-sql-hnsw-postfilter", report)
             self.assertIn("10,000", report)
