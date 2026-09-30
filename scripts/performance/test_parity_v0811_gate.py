@@ -10,12 +10,18 @@ from unittest.mock import patch
 from scripts.performance.parity_v0811_gate import evaluate, percentile, validate_document
 from scripts.performance.parity_v0811_measure import (
     _environment,
+    normalize_memory_profile_bytes,
     normalize_hnsw,
     summarize_latencies,
 )
 
 
 class PerformanceParityGateTests(unittest.TestCase):
+    def test_measurement_normalizes_page_sized_memory_variance(self):
+        baseline = normalize_memory_profile_bytes(54746497024)
+        self.assertEqual(baseline, normalize_memory_profile_bytes(54746501120))
+        self.assertNotEqual(baseline, normalize_memory_profile_bytes(54747545600))
+
     def test_measurement_environment_ignores_untracked_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

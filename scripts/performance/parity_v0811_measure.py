@@ -53,6 +53,11 @@ WORKLOAD_COVERAGE = {
     "sql-postgresql-curated": SQL_POSTGRESQL_CLAIMS,
     "sql-streaming": SQL_STREAMING_CLAIMS,
 }
+MEMORY_PROFILE_QUANTUM_BYTES = 1024 * 1024
+
+
+def normalize_memory_profile_bytes(memory_bytes: int) -> int:
+    return memory_bytes // MEMORY_PROFILE_QUANTUM_BYTES * MEMORY_PROFILE_QUANTUM_BYTES
 
 
 def summarize_latencies(samples: list[float], rows: int) -> dict[str, float]:
@@ -160,7 +165,7 @@ def _environment() -> dict[str, object]:
         "cpu_model": cpu_model,
         "logical_cpu_count": os.cpu_count(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
-        "memory_bytes": memory_bytes,
+        "memory_bytes": normalize_memory_profile_bytes(memory_bytes),
         "build_profile": "release",
         "thread_count": 1,
         "python_version": platform.python_version(),
