@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify change scope classifier
+        run: bash scripts/ci/test_classify_change_scope.sh
       - name: Classify production and release-process changes
         id: classify
         shell: bash
