@@ -9,60 +9,91 @@
 # ビルドが通ること自体が「公開クレートが実際に取得・ビルドできる」ことの
 # 検証になる)。
 #
-# 実行結果は docs-public リポジトリへの PR として自動レポートされる
-# (--no-report で無効化可能。CI 以外でのアドホック実行時など、レポート
-# 不要な場合に使う)。「実行して終わり」では検証の意味が薄いため、成功時
-# だけでなく失敗時も必ずレポートを生成する。レポートは結果の一覧表だけ
-# ではなく、各ステップが「何を・なぜ検証するか」の説明文と、実行時の
-# 主要な出力(検証コーパスの実行結果サマリー等)を含む。
+# 実行結果は JSON と Markdown に保存するが、このスクリプト自身は push しない。
+# 公開は .github/workflows/public-release-verification.yml が担当し、成功・失敗・
+# incomplete の全結果をrun identity別に保存する。--report-only では保存済み JSON
+# から再検証なしで Markdown を再生成する。
 #
 # 新しいステップを追加する場合は run_step 呼び出しに DESCRIPTION も
 # 必ず添える(結果一覧だけのステップを増やさない)。
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
-#   V09_SPECS_DIR=/path/to/alopex-spec-workflow \
-#     ./scripts/release/verify-release/run.sh 0.9.0 --v09-candidate-gate --no-report
-#   例: ./scripts/release/verify-release/run.sh 0.7.6
+#       [--results-file PATH] [--report-dir DIR]
+#   ./scripts/release/verify-release/run.sh --report-only RESULTS.json
+#       [--report-dir DIR]
+#   ./scripts/release/verify-release/run.sh --verify-join candidate.json
+#   省略時は Cargo.toml の workspace.package.version を使う。
 #
-# chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
-# 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
-
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../docs-public"
-if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
-    && [ -d "${REPO_ROOT}/../../docs-public" ]; then
-    DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../../docs-public"
-fi
-DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
+ALOPEX_VERSION="$(python3 - "${REPO_ROOT}/Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
 
-ALOPEX_VERSION="0.7.6"
+with pathlib.Path(sys.argv[1]).open("rb") as stream:
+    print(tomllib.load(stream)["workspace"]["package"]["version"])
+PY
+)"
 DO_REPORT=1
+JOIN_FILE=""
+REPORT_ONLY_FILE=""
+RESULTS_FILE=""
+REPORT_OUTPUT_DIR=""
 V09_CANDIDATE_GATE=0
-for arg in "$@"; do
-    case "${arg}" in
-        --no-report) DO_REPORT=0 ;;
-        --v09-candidate-gate) V09_CANDIDATE_GATE=1 ;;
-        *) ALOPEX_VERSION="${arg}" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-report) DO_REPORT=0; shift ;;
+        --v09-candidate-gate) V09_CANDIDATE_GATE=1; shift ;;
+        --results-file)
+            [[ $# -ge 2 ]] || { echo "--results-file requires a path" >&2; exit 64; }
+            RESULTS_FILE="$2"
+            shift 2
+            ;;
+        --report-dir)
+            [[ $# -ge 2 ]] || { echo "--report-dir requires a directory" >&2; exit 64; }
+            REPORT_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --report-only)
+            [[ $# -ge 2 ]] || { echo "--report-only requires a result JSON path" >&2; exit 64; }
+            REPORT_ONLY_FILE="$2"
+            shift 2
+            ;;
+        --verify-join)
+            if [[ $# -lt 2 ]]; then
+                echo "--verify-join requires a candidate JSON path" >&2
+                exit 64
+            fi
+            JOIN_FILE="$2"
+            shift 2
+            ;;
+        --*)
+            echo "unknown option: $1" >&2
+            exit 64
+            ;;
+        *) ALOPEX_VERSION="$1"; shift ;;
     esac
 done
 
+REPORT_OUTPUT_DIR="${REPORT_OUTPUT_DIR:-${REPO_ROOT}/release-verification-output}"
+RESULTS_FILE="${RESULTS_FILE:-${REPORT_OUTPUT_DIR}/v${ALOPEX_VERSION}.json}"
+
+if [[ -n "${REPORT_ONLY_FILE}" ]]; then
+    python3 "${SCRIPT_DIR}/report.py" render \
+        --results "${REPORT_ONLY_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
+    exit 0
+fi
+
 IMAGE_TAG="alopex-verify-release:${ALOPEX_VERSION}"
 DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../chirps"
-if [ ! -d "${DEFAULT_CHIRPS_DIR}" ] && [ -d "${REPO_ROOT}/../../chirps" ]; then
+if [[ ! -d "${DEFAULT_CHIRPS_DIR}" && -d "${REPO_ROOT}/../../chirps" ]]; then
     DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../../chirps"
 fi
-CHIRPS_REPO_URL="${CHIRPS_REPO_URL:-https://github.com/alopex-db/alopex-chirps.git}"
-CHIRPS_REF="${CHIRPS_REF:-release/v0.7.0}"
-CHIRPS_DIR_WAS_EXPLICIT=0
-if [ -n "${CHIRPS_DIR:-}" ]; then
-    CHIRPS_DIR_WAS_EXPLICIT=1
-else
-    CHIRPS_DIR="${DEFAULT_CHIRPS_DIR}"
-fi
+CHIRPS_DIR="${CHIRPS_DIR:-${DEFAULT_CHIRPS_DIR}}"
 LOG_DIR="$(mktemp -d)"
 TOOLS_TARGET_DIR=""
 cleanup() { rm -rf "${LOG_DIR}" "${TOOLS_TARGET_DIR}"; }
@@ -143,32 +174,156 @@ run_v09_candidate_gate() {
         bash scripts/release/v09_gate.sh --phase 4 --manifest "${manifest_path}"
 }
 
-ensure_chirps_dir() {
-    if [ -d "${CHIRPS_DIR}" ]; then
-        return 0
+if [[ "${V09_CANDIDATE_GATE}" -eq 1 ]]; then
+    run_v09_candidate_gate
+    exit $?
+fi
+
+# Verify the immutable public-surface join without building from repository
+# product bytes. The input is a recorded candidate envelope produced from
+# public registries/GitHub and is intentionally fixture-friendly for CI tests.
+verify_release_join() {
+    local candidate="$1"
+    if [[ ! -f "${candidate}" || -L "${candidate}" ]]; then
+        log_fail "release join candidate is not a regular file: ${candidate}"
+        return 2
     fi
-    if [ "${CHIRPS_DIR_WAS_EXPLICIT}" -eq 1 ]; then
-        log_fail "CHIRPS_DIR で指定された chirps リポジトリが見つからない: ${CHIRPS_DIR}"
-        echo "  パスを修正するか、CHIRPS_DIR を未指定にして公開 repo からの一時取得を使ってください。"
-        exit 2
-    fi
-    if ! command -v git >/dev/null 2>&1; then
-        log_fail "git コマンドが見つからないため、公開 chirps repo を取得できません。"
-        echo "  CHIRPS_DIR=<path> を指定してください。"
-        exit 2
-    fi
-    local cloned_dir="${LOG_DIR}/chirps"
-    log_info "chirps checkout が見つからないため、公開 repo から一時取得します: ${CHIRPS_REPO_URL} (${CHIRPS_REF})"
-    git clone --depth 1 --branch "${CHIRPS_REF}" "${CHIRPS_REPO_URL}" "${cloned_dir}"
-    CHIRPS_DIR="${cloned_dir}"
+    python3 - "${candidate}" "${ALOPEX_VERSION}" <<'PY'
+import json
+import re
+import sys
+
+candidate_path, version = sys.argv[1:]
+expected_tag = f"v{version}"
+sha40 = re.compile(r"^[0-9a-fA-F]{40}$")
+sha64 = re.compile(r"^[0-9a-fA-F]{64}$")
+targets = {
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
 }
 
-# --- レポート用の結果蓄積 ---
-# 各ステップを "name|status|description|logfile" 形式で配列に積む。
-# status は ok / fail のいずれか。description はレポート読者(一般公開)
-# に「これは何を検証しているか」を伝える1〜2文。logfile はそのステップの
-# 標準出力キャプチャ(存在すれば末尾を抜粋してレポートに埋め込む)。
-declare -a REPORT_STEPS=()
+def fail(message):
+    print(f"release-join: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with open(candidate_path, encoding="utf-8") as stream:
+        data = json.load(stream)
+except (OSError, json.JSONDecodeError) as exc:
+    fail(f"invalid candidate JSON: {exc}")
+
+if data.get("version") != version:
+    fail(f"candidate version {data.get('version')!r} != {version!r}")
+core_tag = data.get("core_tag")
+if not isinstance(core_tag, dict) or core_tag.get("name") != expected_tag:
+    fail(f"core tag must be {expected_tag}")
+core_sha = core_tag.get("peeled_sha")
+if not isinstance(core_sha, str) or not sha40.fullmatch(core_sha):
+    fail("core tag must have a full peeled SHA")
+python_tag = data.get("python_tag")
+if not isinstance(python_tag, dict) or python_tag.get("name") != f"alopex-py-v{version}":
+    fail(f"python tag must be alopex-py-v{version}")
+python_sha = python_tag.get("peeled_sha")
+if not isinstance(python_sha, str) or not sha40.fullmatch(python_sha):
+    fail("python tag must have a full peeled SHA")
+
+for surface_name in ("core", "python"):
+    surface = data.get(surface_name)
+    if not isinstance(surface, dict):
+        fail(f"missing {surface_name} public surface")
+    if surface.get("status") != "success" or not surface.get("published"):
+        fail(f"{surface_name} surface is not successfully published")
+    if not isinstance(surface.get("run_id"), str) or not surface["run_id"]:
+        fail(f"{surface_name} workflow run identity is missing")
+    head_sha = surface.get("head_sha")
+    if not isinstance(head_sha, str) or not sha40.fullmatch(head_sha):
+        fail(f"{surface_name} workflow head SHA is missing or invalid")
+    if surface_name == "core":
+        source_sha = surface.get("source_sha", head_sha)
+        if source_sha != core_sha:
+            fail("core release source SHA does not match the core tag")
+        if surface.get("peeled_sha") != core_sha:
+            fail("core surface is bound to a different SHA")
+    else:
+        if head_sha != python_sha or surface.get("peeled_sha") != python_sha:
+            fail("python surface is not bound to the Python tag")
+    if not isinstance(surface.get("registry"), str) or not surface["registry"]:
+        fail(f"{surface_name} registry identity is missing")
+
+crates = data["core"].get("crates")
+if not isinstance(crates, list) or not crates or any(
+    not isinstance(item, dict) or item.get("status") != "published"
+    for item in crates
+):
+    fail("core crate publication set is incomplete")
+distributions = data["python"].get("distributions")
+if not isinstance(distributions, list) or not distributions or any(
+    not isinstance(item, dict)
+    or item.get("status") != "published"
+    or not isinstance(item.get("sha256"), str)
+    or not sha64.fullmatch(item["sha256"])
+    for item in distributions
+):
+    fail("Python wheel/sdist publication set is incomplete")
+
+parser = data.get("parser")
+if not isinstance(parser, dict):
+    fail("parser public surface is missing")
+if parser.get("contract") != "0.26.0":
+    fail("parser contract must be 0.26.0")
+for field in ("manifest_sha256", "envelope_sha256"):
+    if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
+        fail(f"parser {field} is missing or invalid")
+assets = parser.get("assets")
+if not isinstance(assets, list) or {a.get("target") for a in assets if isinstance(a, dict)} != targets:
+    fail("parser assets do not cover exactly the four release targets")
+for asset in assets:
+    if not isinstance(asset, dict):
+        fail("parser asset record is invalid")
+    if not sha64.fullmatch(str(asset.get("archive_sha256", ""))) or not sha64.fullmatch(str(asset.get("library_sha256", ""))):
+        fail(f"parser asset digest is invalid for {asset.get('target')}")
+    if asset.get("native_smoke") is not True:
+        fail(f"native smoke evidence is missing for {asset.get('target')}")
+
+if data.get("publication_order", {}).get("core_before_python") is not True:
+    fail("publication order does not prove core-before-Python")
+if data.get("provenance", {}).get("python_descends_from_core") is not True:
+    fail("Python tag ancestry from the core tag is not proven")
+
+print(f"release-join: complete for {expected_tag} at {core_sha} / {python_sha}")
+PY
+}
+
+if [[ -n "${JOIN_FILE}" ]]; then
+    verify_release_join "${JOIN_FILE}"
+    exit $?
+fi
+
+for fts_surface in \
+    docs/sql-full-text-search.md \
+    scripts/demo/v08/demo_full_text_search.sql \
+    crates/alopex-sql/tests/full_text_search.rs; do
+    if [[ ! -s "${REPO_ROOT}/${fts_surface}" ]]; then
+        echo "ERROR: missing v0.8.10 full-text search surface: ${fts_surface}" >&2
+        exit 1
+    fi
+done
+for mutation_surface in \
+    docs/sql-mutations-v0.8.11.md \
+    scripts/demo/v0811/demo_sql_mutations.py \
+    formal/tla/sql/SqlMutationLifecycle.tla; do
+    if [[ ! -s "${REPO_ROOT}/${mutation_surface}" ]]; then
+        echo "ERROR: missing v0.8.11 SQL mutation surface: ${mutation_surface}" >&2
+        exit 1
+    fi
+done
+if ! grep -Fq "USING FTS" "${REPO_ROOT}/scripts/demo/v08/demo_full_text_search.sql"; then
+    echo "ERROR: the v0.8.10 full-text demo does not cover the FTS index" >&2
+    exit 1
+fi
+
 OVERALL_STATUS="ok"
 STEP_INDEX=0
 
@@ -192,168 +347,33 @@ run_step() {
 
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
-        REPORT_STEPS+=("${name}|ok|${description}|${logfile}")
+        python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
+            --name "${name}" --status success --description "${description}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
-        REPORT_STEPS+=("${name}|fail|${description}|${logfile}")
         OVERALL_STATUS="fail"
-        write_report_and_maybe_pr
+        python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
+            --name "${name}" --status failure --description "${description}" --log "${logfile}"
+        write_report
         exit "${status}"
     fi
 }
 
 # ログファイルから末尾 N 行を Markdown コードブロックとして整形する。
-render_log_excerpt() {
-    local logfile="$1" lines="${2:-40}"
-    if [ ! -s "${logfile}" ]; then
-        return 0
-    fi
-    echo '```'
-    tail -n "${lines}" "${logfile}"
-    echo '```'
-}
-
-# docs-public 側に前回までの実行が残した「report/verify-release-*」
-# ブランチのうち、対応する PR がマージ済みのものをローカル・リモート
-# 両方から削除する。run.sh 自身が作ったブランチの後始末を毎回自動で
-# 行い、実行のたびに未マージ分だけが残る状態を保つ(マージされていない
-# ブランチは残し、確認なしに壊さない)。
-cleanup_merged_report_branches() {
-    if ! command -v gh >/dev/null 2>&1; then
-        return 0
-    fi
-    (
-        cd "${DOCS_PUBLIC_DIR}" || return 0
-        if [ -n "$(git status --porcelain)" ]; then
-            log_info "docs-public に未コミット変更があるため、古い report ブランチ cleanup をスキップします"
-            return 0
-        fi
-        # 前回実行が report/verify-release-* ブランチにチェックアウトした
-        # まま終わっている場合、そのブランチ自身は `git branch -D` できない
-        # (カレントブランチは削除不可)。先に main へ戻しておく。
-        git checkout main >/dev/null 2>&1
-        local merged_branches
-        merged_branches="$(gh pr list --repo alopex-db/docs --state merged \
-            --search 'head:report/verify-release-' \
-            --json headRefName --jq '.[].headRefName' 2>/dev/null | sort -u)"
-        [ -z "${merged_branches}" ] && return 0
-        local branch
-        while IFS= read -r branch; do
-            [ -z "${branch}" ] && continue
-            if git show-ref --verify --quiet "refs/heads/${branch}"; then
-                git branch -D "${branch}" >/dev/null 2>&1 \
-                    && log_info "docs-public: マージ済みブランチを削除しました(local): ${branch}"
-            fi
-            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-                git push origin --delete "${branch}" >/dev/null 2>&1 \
-                    && log_info "docs-public: マージ済みブランチを削除しました(remote): ${branch}"
-            fi
-        done <<<"${merged_branches}"
-    )
-}
-
-write_report_and_maybe_pr() {
+write_report() {
     if [ "${DO_REPORT}" -eq 0 ]; then
-        log_info "--no-report 指定によりレポート生成をスキップします"
+        log_info "--no-report 指定により Markdown 生成をスキップします(JSON は保存済み)"
         return 0
     fi
-    if [ ! -d "${DOCS_PUBLIC_DIR}" ]; then
-        log_fail "docs-public リポジトリが見つからない: ${DOCS_PUBLIC_DIR}"
-        log_fail "DOCS_PUBLIC_DIR=<path> で指定するか、${REPO_ROOT}/../docs-public に配置すること。レポートは生成できません。"
-        return 1
-    fi
-    cleanup_merged_report_branches
-
-    local report_date report_dir report_file rust_version nim_image
-    report_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    report_dir="${DOCS_PUBLIC_DIR}/reports/release-verification"
-    report_file="${report_dir}/v${ALOPEX_VERSION}.md"
-    mkdir -p "${report_dir}"
-    rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
-    nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
-
-    {
-        echo "# リリース確認レポート: v${ALOPEX_VERSION}"
-        echo ""
-        echo "> 総合結果: **$([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 全ステップ成功" || echo "❌ 失敗あり")**"
-        echo ""
-        if [ "${OVERALL_STATUS}" = "ok" ]; then
-            echo "v${ALOPEX_VERSION} は、crates.io / PyPI に公開されたパッケージを"
-            echo "そのままインストールした状態で、ライブラリ・組み込み(ファイル)・"
-            echo "サーバー・クラスタのすべてが同一データに対して同一の結果を返すことを"
-            echo "確認済みである。"
-        else
-            echo "v${ALOPEX_VERSION} の確認中に失敗したステップがある。詳細は下記を参照。"
-        fi
-        echo ""
-        echo "## ステップ"
-        echo ""
-        local entry name status description logfile mark i=0
-        for entry in "${REPORT_STEPS[@]}"; do
-            i=$((i + 1))
-            IFS='|' read -r name status description logfile <<<"${entry}"
-            mark="✅"
-            [ "${status}" = "fail" ] && mark="❌"
-            echo "### ${i}. ${name} ${mark}"
-            echo ""
-            echo "${description}"
-            echo ""
-            render_log_excerpt "${logfile}" 60
-            echo ""
-        done
-        echo "---"
-        echo ""
-        echo "## 検証環境"
-        echo ""
-        echo "| 項目 | 値 |"
-        echo "|---|---|"
-        echo "| 対象バージョン | v${ALOPEX_VERSION} |"
-        echo "| 生成日時 (UTC) | ${report_date} |"
-        echo "| パッケージ取得元 | crates.io(alopex-cli/alopex-server) / PyPI(alopex) |"
-        echo "| ソースビルド | なし(公開パッケージのみ使用) |"
-        echo "| Rust | \`${rust_version}\` |"
-        echo "| Nim(ビルド専用イメージ) | \`${nim_image}\` |"
-        echo "| Python | \`3.11\` |"
-    } >"${report_file}"
-
-    log_info "レポートを生成しました: ${report_file}"
-
-    if ! command -v gh >/dev/null 2>&1; then
-        log_fail "gh コマンドが見つからないため PR 作成をスキップします(レポートファイルは生成済み)"
-        return 1
-    fi
-
-    local branch="report/verify-release-v${ALOPEX_VERSION}"
-    (
-        cd "${DOCS_PUBLIC_DIR}"
-        if ! git diff --quiet -- "reports/release-verification/v${ALOPEX_VERSION}.md" 2>/dev/null && \
-           ! git status --porcelain -- "reports/release-verification/v${ALOPEX_VERSION}.md" | grep -q .; then
-            log_info "レポート内容に変更なし。PR 作成をスキップします。"
-            exit 0
-        fi
-        git checkout -B "${branch}"
-        git add "reports/release-verification/v${ALOPEX_VERSION}.md"
-        git commit -m "docs(release): v${ALOPEX_VERSION} リリース確認レポート ($([ "${OVERALL_STATUS}" = "ok" ] && echo "success" || echo "failure"))"
-        git push -u origin "${branch}" --force
-        gh pr create \
-            --title "docs(release): v${ALOPEX_VERSION} リリース確認レポート" \
-            --body "$(cat <<EOF
-verify-release/run.sh の自動実行結果。総合結果: $([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 成功" || echo "❌ 失敗あり")。
-
-詳細は \`reports/release-verification/v${ALOPEX_VERSION}.md\` を参照。
-EOF
-)" \
-            --base main --head "${branch}" 2>&1 || log_info "PR が既に存在するか作成に失敗しました(レポートファイルは push 済み)"
-    )
-    log_ok "docs-public へレポートを push しました(branch: ${branch})"
+    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
+    python3 "${SCRIPT_DIR}/report.py" render \
+        --results "${RESULTS_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
 }
 
-if [[ "${V09_CANDIDATE_GATE}" -eq 1 ]]; then
-    run_v09_candidate_gate
-    exit $?
-fi
-
-ensure_chirps_dir
+rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
+nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
+python3 "${SCRIPT_DIR}/report.py" init --results "${RESULTS_FILE}" \
+    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}"
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
@@ -382,7 +402,6 @@ run_in_container() {
     docker run --rm \
         --user "$(id -u):$(id -g)" -e HOME=/tmp/verify-home \
         -v "${REPO_ROOT}":/workspace:ro \
-        -v "${CHIRPS_DIR}":/chirps:ro \
         -v "${TOOLS_TARGET_DIR}":/tools-target \
         -w /workspace \
         -e "ALOPEX_BINARY_SOURCE=released" \
@@ -393,13 +412,107 @@ run_in_container() {
 }
 
 run_step "verify-release-embedded ビルド" \
-    "crates/alopex-tools(開発ツール専用の独立ワークスペース)が crates.io 公開版の alopex-embedded/alopex-sql に依存としてビルドできるかを検証する。これが通ること自体が「公開 crate が実際に取得・ビルド可能」であることの証明になる。" \
-    -- run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release --locked'
+    "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
+    -- run_in_container bash -c '
+set -euo pipefail
+tool_source="$(mktemp -d)"
+trap "rm -rf \"${tool_source}\"" EXIT
+mkdir -p "${tool_source}/src/bin"
+cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/demo_v08_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/verify_sql_transaction_failures.rs "${tool_source}/src/bin/"
+cat >"${tool_source}/src/bin/embedded-dependency-smoke.rs" <<'EOF'
+use std::sync::Arc;
+
+use alopex_embedded::Database;
+use alopex_sql::SqlValue;
+
+fn main() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE smoke (id INTEGER)")
+        .expect("published alopex-embedded must execute SQL without parser runtime assets");
+    let mut statement = database
+        .prepare("INSERT INTO smoke VALUES (?)")
+        .expect("published alopex-embedded must prepare SQL");
+    statement.bind(1, SqlValue::Integer(1)).expect("bind");
+    statement.execute().expect("execute prepared SQL");
+    println!("ok");
+}
+EOF
+cat >"${tool_source}/Cargo.toml" <<EOF
+[workspace]
+
+[package]
+name = "alopex-release-verifier"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "verify-release-embedded"
+path = "src/bin/verify_release_embedded.rs"
+
+[[bin]]
+name = "demo-v08-embedded"
+path = "src/bin/demo_v08_embedded.rs"
+
+[[bin]]
+name = "embedded-dependency-smoke"
+path = "src/bin/embedded-dependency-smoke.rs"
+
+[[bin]]
+name = "verify-sql-transaction-failures"
+path = "src/bin/verify_sql_transaction_failures.rs"
+
+[dependencies]
+serde_json = "1.0"
+alopex-embedded = { version = "=${ALOPEX_VERSION}" }
+alopex-core = { version = "=${ALOPEX_VERSION}" }
+alopex-sql = { version = "=${ALOPEX_VERSION}" }
+EOF
+CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+cargo generate-lockfile --manifest-path "${tool_source}/Cargo.toml"
+python3 - "${tool_source}/Cargo.lock" "${ALOPEX_VERSION}" <<'PY'
+import sys
+import tomllib
+
+lock_path, expected = sys.argv[1:]
+with open(lock_path, "rb") as stream:
+    packages = tomllib.load(stream).get("package", [])
+owned = {
+    "alopex-core",
+    "alopex-dataframe",
+    "alopex-sql",
+    "alopex-embedded",
+    "alopex-cluster",
+    "alopex-cli",
+    "alopex-server",
+    "alopex-py",
+}
+alopex = [p for p in packages if p["name"] in owned]
+bad = sorted((p["name"], p["version"]) for p in alopex if p["version"] != expected)
+if bad:
+    raise SystemExit(f"Alopex dependency resolution escaped v{expected}: {bad}")
+if not any(p["name"] == "alopex-embedded" for p in alopex):
+    raise SystemExit("Cargo.lock does not contain the published alopex-embedded package")
+PY
+'
+
+run_step "公開版 alopex-embedded 実行時依存 smoke" \
+    "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
+    -- run_in_container bash -c \
+    'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH /tools-target/release/embedded-dependency-smoke'
+
+run_step "公開版 SQL transaction failure conformance" \
+    "公開版 alopex-embedded の別プロセスを transaction 中に強制終了し、未 commit/rollback 済み書込みの不可視性、acknowledged commit の再起動後可視性、savepoint failure recovery、並行 session 競合を再検証する。" \
+    -- run_in_container /tools-target/release/verify-sql-transaction-failures
 
 run_step "mode-parity 検証 (verify.py)" \
-    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)の全組み合わせが一致することを確認する。" \
+    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
     -- run_in_container python3 scripts/parity/verify.py \
-        --corpus scripts/parity/corpus --expected scripts/parity/expected
+        --corpus scripts/parity/corpus --expected scripts/parity/expected \
+        --require-all
 
 run_step "mode-parity デモ (demo.py)" \
     "上記の機械検証と同一のコーパスを使い、「One Engine, Four Forms」を人間向けに実演する。第1幕(ライブラリ/インメモリ)で実行した結果が、第2幕(組み込み/ファイル永続化)・第3幕(シングルノードサーバー、HTTP と gRPC の両方)・第4幕(サーバー停止後に CLI で再オープン)・第5幕(cluster-aware 単一メンバー)を通じて一貫することを確認する。" \
@@ -567,7 +680,27 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
     "crates.io/PyPI から取得した v${ALOPEX_VERSION} の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
     -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
+run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. native JSON/JSONB, JSON-on-TEXT, FETCH/WITH TIES pagination, TRY_CAST, standard predicates, frames, named WINDOW, and QUALIFY (demo_sql_v08.py)" \
+    "PyPI 公開版で、v0.8 系の JSON-on-TEXT scalar/table/aggregate、FETCH FIRST/OFFSET/WITH TIES pagination、TRY_CAST/CAST failure contract、truth/distinctness/row-value predicate、TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
+    -- run_in_container python3 scripts/demo/v08/demo_sql_v08.py
+
+run_step "v${ALOPEX_VERSION} v0.8.11 SQL mutation contracts" \
+    "PyPI公開版で、CHECK/FK、RETURNING/ON CONFLICT、SEQUENCE/CURRVAL、CSV COPY round-trip、未知FORMAT拒否、information_schema introspectionを自己検証する。" \
+    -- run_in_container python3 scripts/demo/v0811/demo_sql_mutations.py
+
+run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
+    "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \
+    -- run_in_container python3 scripts/demo/v074/demo_api_surfaces.py
+
+run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
+    "PyPI 公開版の Python バインディングから、SQL 経由とネイティブ API の両方でベクトル検索を実行する。API 不在時だけ issue #82 を明記して SKIP とし、存在時は全メソッドを呼び出して L2 距離と node_count を表示する。" \
+    -- run_in_container python3 scripts/demo/v074/demo_vector_api.py
+
+run_step "v${ALOPEX_VERSION} Embedded API 全シナリオ" \
+    "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の10シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
+    -- run_in_container bash scripts/demo/v08/demo_embedded_v08.sh
+
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
 
-write_report_and_maybe_pr
+write_report
