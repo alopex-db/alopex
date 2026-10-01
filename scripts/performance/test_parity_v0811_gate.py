@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +13,7 @@ from scripts.performance.parity_v0811_gate import evaluate, percentile, validate
 from scripts.performance.parity_v0811_measure import (
     _environment,
     MEMORY_PROFILE_QUANTUM_BYTES,
+    _streaming,
     normalize_memory_profile_bytes,
     normalize_hnsw,
     summarize_latencies,
@@ -18,6 +21,51 @@ from scripts.performance.parity_v0811_measure import (
 
 
 class PerformanceParityGateTests(unittest.TestCase):
+    def test_streaming_measurement_uses_the_same_batch_size_for_both_engines(self):
+        observed: dict[str, list[int]] = {"alopex": [], "polars": []}
+
+        class Batch:
+            def __init__(self, height: int):
+                self.height = height
+
+        class Batches:
+            def __init__(self):
+                self.values = iter((Batch(1), Batch(1)))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.values)
+
+        class Plan:
+            def __init__(self, engine: str):
+                self.engine = engine
+
+            def collect(self):
+                return Batch(2)
+
+            def collect_batches(self, *, chunk_size: int):
+                observed[self.engine].append(chunk_size)
+                return Batches()
+
+        def scan(engine: str):
+            return lambda _fixture: Plan(engine)
+
+        alopex = types.SimpleNamespace(LazyFrame=types.SimpleNamespace(scan_csv=scan("alopex")))
+        polars = types.SimpleNamespace(__version__="1.43.2", scan_csv=scan("polars"))
+        with patch.dict(sys.modules, {"alopex": alopex, "polars": polars}):
+            _streaming("alopex", Path("rows.csv"), rows=2, warmups=0, runs=1)
+            _streaming("polars", Path("rows.csv"), rows=2, warmups=0, runs=1)
+
+        self.assertEqual(observed, {"alopex": [8192], "polars": [8192]})
+
     def test_measurement_normalizes_page_sized_memory_variance(self):
         baseline = normalize_memory_profile_bytes(54746497024)
         self.assertEqual(baseline, normalize_memory_profile_bytes(54746501120))
