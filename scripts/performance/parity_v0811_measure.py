@@ -285,7 +285,7 @@ def _streaming(
 
         def consume():
             started = time.perf_counter()
-            with build().collect_batches(chunk_size=1024) as stream:
+            with build().collect_batches(chunk_size=8192) as stream:
                 first = next(stream)
                 first_elapsed = time.perf_counter() - started
                 count = first.height + sum(batch.height for batch in stream)
