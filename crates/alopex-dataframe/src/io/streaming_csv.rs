@@ -301,7 +301,9 @@ fn project_batch(batch: RecordBatch, projection: Option<&[usize]>) -> Result<Rec
 }
 
 fn bounded_block_bytes(memory_limit_bytes: u64) -> Result<usize> {
-    let bytes = (memory_limit_bytes / 32).clamp(1, 64 * 1024);
+    // A frame contains a requested batch, not one record. A fixed 64 KiB cap
+    // rejects the default 8,192-row batch before the resource budget is reached.
+    let bytes = (memory_limit_bytes / 32).max(1);
     usize::try_from(bytes).map_err(|_| {
         DataFrameError::configuration("memory_limit_bytes", "does not fit this platform")
     })
@@ -567,6 +569,24 @@ mod tests {
                 .value(0),
             2
         );
+    }
+
+    #[test]
+    fn batch_larger_than_the_legacy_frame_cap_is_admitted_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large-batch.csv");
+        let mut csv = String::from("id,label\n");
+        for index in 0..8_192 {
+            csv.push_str(&format!("{index},row-{index:05}\n"));
+        }
+        std::fs::write(&path, csv).unwrap();
+
+        let factory = CsvBatchSourceFactory::new(&path, CsvReadOptions::default());
+        let mut stream =
+            DataFrameStream::from_factory(&factory, options(64 * 1024 * 1024, 8_192)).unwrap();
+
+        assert_eq!(stream.next_batch().unwrap().unwrap().height(), 8_192);
+        assert!(stream.next_batch().unwrap().is_none());
     }
 
     #[test]
