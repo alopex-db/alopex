@@ -121,7 +121,7 @@ def validate_performance_contracts(path: Path, payload: dict[str, object]) -> li
         "self-hosted",
         "linux",
         "x64",
-        "alopex-performance-mac-x64",
+        "alopex-performance",
     ]:
         errors.append(f"{path}: performance runner must use the dedicated labels")
     contracts = payload.get("contracts", {})

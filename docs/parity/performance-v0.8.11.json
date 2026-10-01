@@ -1,11 +1,11 @@
 {
   "schema": "alopex.performance-conformance/v1",
   "runner_profile": {
-    "labels": ["self-hosted", "linux", "x64", "alopex-performance-mac-x64"],
-    "os": "ubuntu-26.04",
-    "cpu_model": "QEMU TCG CPU version 2.5+",
-    "logical_cpu_count": 4,
-    "memory_bytes": 25188892672,
+    "labels": ["self-hosted", "linux", "x64", "alopex-performance"],
+    "os": "ubuntu-24.04",
+    "cpu_model": "AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx",
+    "logical_cpu_count": 8,
+    "memory_bytes": 54746152960,
     "cpu_affinity": [0],
     "build_profile": "release",
     "thread_count": 1
@@ -20,7 +20,7 @@
         "polars-eager-api": ["DataFrame.__init__", "DataFrame.explode", "DataFrame.height", "DataFrame.lazy", "DataFrame.to_dict", "DataFrame.width", "Expr.add", "Expr.alias", "Expr.and_", "Expr.eq", "Expr.ge", "Expr.gt", "Expr.le", "Expr.lt", "Expr.mul", "Expr.not_", "Expr.or_", "Expr.sub", "LazyFrame.filter", "LazyFrame.select", "LazyFrame.with_columns", "Series.name", "Series.to_list", "col", "concat", "concat_str", "lit"]
       },
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff",
@@ -48,7 +48,7 @@
         "polars-parquet-streaming": ["LazyFrame.collect", "LazyFrame.collect_batches"]
       },
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff",
@@ -73,7 +73,7 @@
       "evidence": "scripts/performance/hnsw_v0811_contract.py",
       "evidence_ids": ["hnsw-pareto"],
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291",
@@ -110,7 +110,7 @@
         "sql-sqlite-curated": ["portable SELECT/null/order/coercion", "parser/lexer", "transactions/savepoints", "prepared statements", "CHECK/FK constraints"]
       },
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
@@ -141,7 +141,7 @@
         "sql-postgresql-curated": ["EXPLAIN JSON", "RETURNING", "ON CONFLICT", "SERIAL/IDENTITY/SEQUENCE", "VIEW/ALTER TABLE/TRUNCATE", "MERGE/UPDATE FROM/DELETE USING", "information_schema"]
       },
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
@@ -172,7 +172,7 @@
         "sql-streaming": ["streaming query"]
       },
       "fixture": {
-        "hardware_profile": "alopex-performance-mac-x64-v1",
+        "hardware_profile": "alopex-performance-x64-v1",
         "build_profile": "release",
         "thread_count": 1,
         "dataset_sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
