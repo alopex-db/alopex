@@ -21,6 +21,8 @@ use crate::physical::{
 };
 use crate::{DataFrameError, Result};
 
+const READER_BUFFER_BYTES: usize = 64 * 1024;
+
 /// Re-consumable bounded CSV source factory.
 #[derive(Debug, Clone)]
 pub struct CsvBatchSourceFactory {
@@ -89,6 +91,9 @@ impl BatchSourceFactory for CsvBatchSourceFactory {
             projection_indices(&full_schema, self.options.projection.as_deref())?;
         let output_schema = projected_schema(&full_schema, projection_indices.as_deref());
 
+        let reader_buffer_reservation = context
+            .budget
+            .reserve(ResourceScope::Source, read_buffer_bytes(block_bytes) as u64)?;
         let file = File::open(&self.path)
             .map_err(|source| DataFrameError::io_with_path(source, &self.path))?;
         let mut framer = BoundedCsvFramer::new(
@@ -109,6 +114,7 @@ impl BatchSourceFactory for CsvBatchSourceFactory {
             projection_indices,
             options: self.options.clone(),
             schema_reservation: Some(schema_reservation),
+            reader_buffer_reservation: Some(reader_buffer_reservation),
         }))
     }
 }
@@ -122,6 +128,8 @@ struct CsvBatchSource {
     options: CsvReadOptions,
     // Holds the bounded schema-inference allocation for the source lifetime.
     schema_reservation: Option<ResourceReservation>,
+    // Holds the reader buffer allocation for the source lifetime.
+    reader_buffer_reservation: Option<ResourceReservation>,
 }
 
 impl BatchSource for CsvBatchSource {
@@ -161,6 +169,7 @@ impl BatchSource for CsvBatchSource {
 
     fn close(&mut self) -> Result<()> {
         self.schema_reservation.take();
+        self.reader_buffer_reservation.take();
         Ok(())
     }
 }
@@ -171,6 +180,9 @@ fn infer_schema_bounded(
     context: &BatchOpenContext,
     block_bytes: usize,
 ) -> Result<(SchemaRef, ResourceReservation)> {
+    let _reader_buffer_reservation = context
+        .budget
+        .reserve(ResourceScope::Source, read_buffer_bytes(block_bytes) as u64)?;
     let file = File::open(path).map_err(|source| DataFrameError::io_with_path(source, path))?;
     let mut framer =
         BoundedCsvFramer::new(file, path.to_path_buf(), options.quote_char, block_bytes);
@@ -309,6 +321,10 @@ fn bounded_block_bytes(memory_limit_bytes: u64) -> Result<usize> {
     })
 }
 
+fn read_buffer_bytes(block_bytes: usize) -> usize {
+    block_bytes.clamp(1, READER_BUFFER_BYTES)
+}
+
 fn conservative_decode_upper_bound(raw_bytes: usize, rows: usize, columns: usize) -> u64 {
     let raw = u64::try_from(raw_bytes).unwrap_or(u64::MAX);
     let cells = u64::try_from(rows)
@@ -334,7 +350,7 @@ struct FramedBytes {
 
 /// Fixed-capacity framing reader that understands escaped quotes and multiline quoted records.
 struct BoundedCsvFramer<R> {
-    reader: R,
+    reader: BufReader<R>,
     path: PathBuf,
     quote_char: Option<u8>,
     byte_cap: usize,
@@ -344,7 +360,7 @@ struct BoundedCsvFramer<R> {
 impl<R: Read> BoundedCsvFramer<R> {
     fn new(reader: R, path: PathBuf, quote_char: Option<u8>, byte_cap: usize) -> Self {
         Self {
-            reader,
+            reader: BufReader::with_capacity(read_buffer_bytes(byte_cap), reader),
             path,
             quote_char,
             byte_cap,
@@ -517,13 +533,18 @@ impl QuoteTracker {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::io::{Cursor, Read};
     use std::num::NonZeroUsize;
+    use std::path::PathBuf;
+    use std::rc::Rc;
 
     use arrow::array::Int64Array;
 
-    use super::CsvBatchSourceFactory;
+    use super::{BoundedCsvFramer, CsvBatchSourceFactory};
     use crate::io::CsvReadOptions;
     use crate::physical::budget::StreamOptions;
+    use crate::physical::BatchOpenContext;
     use crate::physical::DataFrameStream;
     use crate::DataFrameError;
 
@@ -533,6 +554,48 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             NonZeroUsize::new(batch_rows).unwrap(),
         )
+    }
+
+    struct CountingReader {
+        inner: Cursor<Vec<u8>>,
+        reads: Rc<Cell<usize>>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.reads.set(self.reads.get().saturating_add(1));
+            self.inner.read(bytes)
+        }
+    }
+
+    #[test]
+    fn framing_large_batch_does_not_read_the_source_byte_by_byte() {
+        let mut csv = String::new();
+        for index in 0..8_192 {
+            csv.push_str(&format!("{index},row-{index:05}\n"));
+        }
+        let reads = Rc::new(Cell::new(0));
+        let reader = CountingReader {
+            inner: Cursor::new(csv.into_bytes()),
+            reads: reads.clone(),
+        };
+        let context = BatchOpenContext::new(options(64 * 1024 * 1024, 8_192));
+        let mut framer = BoundedCsvFramer::new(
+            reader,
+            PathBuf::from("counting.csv"),
+            Some(b'"'),
+            2 * 1024 * 1024,
+        );
+
+        assert_eq!(
+            framer.next_frame(8_192, &context).unwrap().unwrap().rows,
+            8_192
+        );
+        assert!(
+            reads.get() <= 32,
+            "framing made {} underlying reads for one bounded batch",
+            reads.get()
+        );
     }
 
     #[test]
