@@ -121,6 +121,7 @@ def _io_bytes() -> float:
 
 
 def _environment() -> dict[str, object]:
+    os_release = platform.freedesktop_os_release()
     cpu_model = next(
         (
             line.split(":", 1)[1].strip()
@@ -160,7 +161,7 @@ def _environment() -> dict[str, object]:
         "alopex_version": importlib.metadata.version("alopex"),
         "alopex_revision": revision,
         "alopex_tree_sha256": source_hash.hexdigest(),
-        "os": "ubuntu-24.04",
+        "os": f"{os_release['ID']}-{os_release['VERSION_ID']}",
         "kernel": platform.release(),
         "cpu_model": cpu_model,
         "logical_cpu_count": os.cpu_count(),
