@@ -600,7 +600,9 @@ build_docker() {
     echo "docker is required for the Docker backend" >&2
     return 1
   }
-  if command -v podman >/dev/null 2>&1 && [[ "$(command -v docker)" -ef "$(command -v podman)" ]]; then
+  if docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq 'name=rootless'; then
+    user_args=()
+  elif command -v podman >/dev/null 2>&1 && [[ "$(command -v docker)" -ef "$(command -v podman)" ]]; then
     user_args=(--userns=keep-id --user "$(id -u):$(id -g)")
   fi
   output_dir="$(dirname "${OUTPUT}")"

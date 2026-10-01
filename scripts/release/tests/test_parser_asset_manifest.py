@@ -931,6 +931,10 @@ from pathlib import Path
 import sys
 
 arguments = sys.argv[1:]
+if arguments[:1] == ["info"]:
+    print(os.environ.get("ALOPEX_DOCKER_SECURITY_OPTIONS", ""))
+    raise SystemExit(0)
+
 output_setting = next(
     (value for value in arguments if "ALOPEX_NIM_PARSER_OUTPUT=" in value),
     None,
@@ -988,16 +992,18 @@ raise SystemExit(43)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["ALOPEX_DOCKER_CAPTURE"] = str(capture)
+        environment["ALOPEX_DOCKER_SECURITY_OPTIONS"] = ""
+        command = [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--backend",
+            "docker",
+            "--output",
+            str(isolated_output),
+        ]
 
         result = subprocess.run(
-            [
-                "bash",
-                str(BUILD_SCRIPT),
-                "--backend",
-                "docker",
-                "--output",
-                str(isolated_output),
-            ],
+            command,
             cwd=REPOSITORY_ROOT,
             env=environment,
             text=True,
@@ -1017,6 +1023,27 @@ raise SystemExit(43)
             "0.26.0\n",
         )
         self.assertIn("ALOPEX_NIM_PARSER_OUTPUT=/output/", docker_arguments)
+        self.assertIn("--user", json.loads(docker_arguments)["arguments"])
+
+        environment["ALOPEX_DOCKER_SECURITY_OPTIONS"] = "name=rootless"
+        rootless_result = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        rootless_arguments = (
+            capture.read_text(encoding="utf-8") if capture.exists() else ""
+        )
+        self.assertEqual(
+            rootless_result.returncode,
+            0,
+            f"{rootless_result.stderr}\ndocker arguments: {rootless_arguments}",
+        )
+        self.assertEqual(isolated_output.read_bytes(), b"docker-parser-output")
+        self.assertNotIn("--user", json.loads(rootless_arguments)["arguments"])
         after = {
             path: path.read_bytes() if path.exists() else None for path in repo_outputs
         }
