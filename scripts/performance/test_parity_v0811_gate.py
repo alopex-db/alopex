@@ -74,7 +74,7 @@ class PerformanceParityGateTests(unittest.TestCase):
             normalize_memory_profile_bytes(baseline + MEMORY_PROFILE_QUANTUM_BYTES),
         )
 
-    def test_measurement_environment_ignores_untracked_directories(self):
+    def test_measurement_environment_records_runtime_os_and_ignores_untracked_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "source.py").write_text("source\n", encoding="utf-8")
@@ -99,6 +99,10 @@ class PerformanceParityGateTests(unittest.TestCase):
                         "scripts.performance.parity_v0811_measure.importlib.metadata.version",
                         return_value="0.8.14",
                     ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.freedesktop_os_release",
+                        return_value={"ID": "ubuntu", "VERSION_ID": "26.04"},
+                    ),
                 ):
                     environment = _environment()
             finally:
@@ -107,6 +111,7 @@ class PerformanceParityGateTests(unittest.TestCase):
         expected = hashlib.sha256()
         expected.update(b"source.py\0source\n\0")
         self.assertEqual(environment["alopex_tree_sha256"], expected.hexdigest())
+        self.assertEqual(environment["os"], "ubuntu-26.04")
 
     def test_measurement_summary_reports_percentiles_and_throughput(self):
         summary = summarize_latencies([0.001, 0.002, 0.004, 0.003], rows=100)

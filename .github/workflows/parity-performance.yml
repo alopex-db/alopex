@@ -33,7 +33,7 @@ env:
 jobs:
   performance:
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
-    runs-on: [self-hosted, linux, x64, alopex-performance]
+    runs-on: [self-hosted, linux, x64, alopex-performance-mac-x64]
     timeout-minutes: 360
     services:
       postgres:

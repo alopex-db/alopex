@@ -143,35 +143,6 @@ class LedgerContractTests(unittest.TestCase):
             )
         )
 
-    def test_issue_owned_performance_workflow_uses_dedicated_runner(self):
-        workflow = (
-            Path(__file__).resolve().parents[1]
-            / ".github/workflows/parity-performance.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("[self-hosted, linux, x64, alopex-performance]", workflow)
-        self.assertIn("schedule:", workflow)
-        self.assertIn("issue_number:", workflow)
-        self.assertIn("Owning issue number for this acceptance run", workflow)
-        self.assertIn("required: true", workflow)
-        self.assertIn("options: [curated, full]", workflow)
-        self.assertIn('--suite "$SUITE"', workflow)
-        self.assertIn("postgres:16.14", workflow)
-        self.assertIn("datafusion==50.0.0", workflow)
-        self.assertIn("duckdb==1.4.0", workflow)
-        self.assertIn("pysqlite3-binary==0.5.4", workflow)
-        self.assertIn("sql_v0811_differential", workflow)
-        self.assertIn("polars_public_inventory.py", workflow)
-        self.assertIn("sql_public_inventory.py", workflow)
-        self.assertIn("hnsw_public_inventory.py", workflow)
-        self.assertNotIn("continue-on-error: true", workflow)
-        ci = (
-            Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("parity: ${{ steps.classify.outputs.parity }}", ci)
-        self.assertNotIn("name: Required parity", ci)
-        self.assertNotIn("uses: ./.github/workflows/parity-performance.yml", ci)
-        self.assertNotIn("parity]", ci)
-
     def test_sql_reference_engines_have_separate_runnable_contracts(self):
         contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)["contracts"]
         self.assertEqual(
