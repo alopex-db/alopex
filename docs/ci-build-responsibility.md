@@ -8,6 +8,20 @@ The production rule is:
 
 > One `(toolchain, target, profile, features, package/target set)` signature has one execution owner in a workflow graph.
 
+## Pre-dispatch local execution gate
+
+Before dispatching a CI workflow, the change owner must run every test that the
+workflow will execute locally and record a green result against the candidate
+commit.  Each local run must use the same command, input, pinned dependencies,
+and runner profile as CI; a neighbouring test, a broader suite, or a different
+machine profile is not substitute evidence.
+
+The Issue owning the change must identify the exact local commands, commit,
+runner profile, and result before dispatch.  A CI-only external service or
+privilege is the only exception, and the owner must record why no equivalent
+local execution is possible before dispatching.  A failed or incomplete local
+run blocks dispatch until the same target is reproduced, corrected, and green.
+
 Owner result JSON is the machine-facing evidence. GitHub Job Summary and uploaded Cargo timing HTML are human-facing views; neither is an input to a later build.
 
 ## Ownership
