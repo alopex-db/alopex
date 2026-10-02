@@ -16,6 +16,15 @@ commit.  Each local run must use the same command, input, pinned dependencies,
 and runner profile as CI; a neighbouring test, a broader suite, or a different
 machine profile is not substitute evidence.
 
+The change owner must complete those local rows in order on every local
+execution environment designated for the task, including macOS when it is
+designated.  The Issue matrix must show the environment for each row before CI
+dispatch.  A macOS result is an additional required preflight and never a
+substitute for a native runner's performance evidence.  A green local result
+recorded after dispatch does not qualify that CI run; the change owner must
+mark that run non-acceptance evidence, complete the missing local row, and
+dispatch a new final gate.
+
 The Issue owning the change must identify the exact local commands, commit,
 runner profile, and result before dispatch.  A CI-only external service or
 privilege is the only exception, and the owner must record why no equivalent
