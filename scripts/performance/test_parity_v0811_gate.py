@@ -197,6 +197,34 @@ class PerformanceParityGateTests(unittest.TestCase):
 
         self.assertEqual(evaluate("example", contract, measurement), [])
 
+    def test_gate_uses_absolute_budget_for_noisy_micro_latency_ratio(self):
+        contract = {
+            "kind": "sql",
+            "reference_revision": "sqlite/sqlite@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "metrics": ["plan_latency_p50_ms"],
+            "thresholds": {
+                "max_latency_ratio": 35.0,
+                "min_throughput_ratio": 0.025,
+                "max_peak_memory_ratio": 4.5,
+                "max_absolute_by_metric": {"plan_latency_p50_ms": 1.25},
+                "max_ratio_by_metric": {"plan_latency_p50_ms": 60.0},
+            },
+        }
+        measurement = {
+            "reference_revision": "sqlite/sqlite@v1.0.0",
+            "dataset_sha256": "a" * 64,
+            "subject": {"plan_latency_p50_ms": 0.994358},
+            "reference": {"plan_latency_p50_ms": 0.014545},
+        }
+
+        self.assertEqual(evaluate("sqlite", contract, measurement), [])
+
+        measurement["subject"]["plan_latency_p50_ms"] = 1.251
+        errors = evaluate("sqlite", contract, measurement)
+
+        self.assertTrue(any("plan_latency_p50_ms ratio" in error for error in errors))
+
     def test_gate_rejects_wrong_revision_missing_metric_and_regression(self):
         contract = {
             "kind": "sql",
