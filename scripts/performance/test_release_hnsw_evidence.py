@@ -142,6 +142,7 @@ class ReleaseHnswEvidenceTests(unittest.TestCase):
                     )
                 ]
             },
+            "hybrid_measurement_contract": {"alopex_query_surface": "SQL"},
         }
         payload["best_at_recall"] = best_at_recall(payload["summary"])
         markdown = render_markdown(payload).encode("utf-8")
