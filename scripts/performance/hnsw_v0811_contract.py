@@ -29,6 +29,7 @@ HYBRID_QUERY_COUNT = 200
 SEED = 42
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
 RECALL_CEILING_VALUES = (512, 1024, 4096, DATASET_SIZE)
+RAW_CHECKPOINT_SCHEMA = "alopex.hnsw-diagnostic-checkpoint/v1"
 
 # Comparison rows are deliberately phase-specific.  A build duration cannot
 # share a row with query throughput or latency: doing so makes unlike
@@ -37,6 +38,32 @@ BUILD_COMPARISON_FIELDS = frozenset({"build_ms", "index_memory_bytes", "node_cou
 SEARCH_COMPARISON_FIELDS = frozenset(
     {"query_count", "qps", "p50_ms", "p95_ms", "p99_ms", "recall_at_k"}
 )
+
+
+class RawCheckpointWriter:
+    """Append each completed measurement case before later phases can fail."""
+
+    def __init__(self, output: Path) -> None:
+        output.mkdir(parents=True, exist_ok=True)
+        self.path = output / "hnsw-diagnostic.raw.ndjson"
+        with self.path.open("w", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps({"schema": RAW_CHECKPOINT_SCHEMA, "event": "start"})
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def append(self, phase: str, rows: list[dict[str, object]]) -> None:
+        record = {
+            "schema": RAW_CHECKPOINT_SCHEMA,
+            "phase": phase,
+            "rows": rows,
+        }
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
 
 
 def validate_comparison_row(row: dict[str, object]) -> None:
@@ -1097,6 +1124,7 @@ def run_scale_benchmark(
     max_n: int,
     min_queries: int,
     run_count: int,
+    checkpoint: Callable[[str, list[dict[str, object]]], None] | None = None,
 ) -> dict[str, object]:
     import h5py
     import numpy as np
@@ -1129,37 +1157,6 @@ def run_scale_benchmark(
             ):
                 engine = builder(vectors)
                 try:
-                    ef_values = (
-                        (size,)
-                        if engine.name == "faiss-flat-exact"
-                        else EF_SEARCH_VALUES
-                    )
-                    runs = []
-                    for ef_search in ef_values:
-                        runs.extend(
-                            measure_setting(
-                                engine,
-                                queries,
-                                truth,
-                                acceptable,
-                                ef_search=ef_search,
-                                min_queries=min_queries,
-                                run_count=run_count,
-                                dataset_size=size,
-                            )
-                        )
-                    summary = summarize_by_engine(runs)
-                    raw_runs.extend(runs)
-                    eligible = [
-                        row
-                        for row in summary
-                        if float(row["median_recall_at_10"]) >= 0.95
-                    ]
-                    fastest = max(
-                        eligible,
-                        key=lambda row: float(row["median_queries_per_second"]),
-                        default=None,
-                    )
                     build_results.append(
                         {
                             "phase": "build",
@@ -1174,6 +1171,40 @@ def run_scale_benchmark(
                             "peak_rss_bytes": engine.peak_rss_bytes,
                             "node_count": engine.node_count,
                         }
+                    )
+                    if checkpoint is not None:
+                        checkpoint("scale-build", [build_results[-1]])
+                    ef_values = (
+                        (size,)
+                        if engine.name == "faiss-flat-exact"
+                        else EF_SEARCH_VALUES
+                    )
+                    runs = []
+                    for ef_search in ef_values:
+                        case_runs = measure_setting(
+                            engine,
+                            queries,
+                            truth,
+                            acceptable,
+                            ef_search=ef_search,
+                            min_queries=min_queries,
+                            run_count=run_count,
+                            dataset_size=size,
+                        )
+                        runs.extend(case_runs)
+                        if checkpoint is not None:
+                            checkpoint("scale-search", case_runs)
+                    summary = summarize_by_engine(runs)
+                    raw_runs.extend(runs)
+                    eligible = [
+                        row
+                        for row in summary
+                        if float(row["median_recall_at_10"]) >= 0.95
+                    ]
+                    fastest = max(
+                        eligible,
+                        key=lambda row: float(row["median_queries_per_second"]),
+                        default=None,
                     )
                     search_results.append(
                         {
@@ -1198,6 +1229,8 @@ def run_scale_benchmark(
                             "curve": summary,
                         }
                     )
+                    if checkpoint is not None:
+                        checkpoint("scale-summary", [search_results[-1]])
                 finally:
                     engine.close()
                     del engine
@@ -1228,6 +1261,7 @@ def run_benchmark(
     run_count: int,
     extended: bool = True,
     embedding_cache: Path | None = None,
+    checkpoint: Callable[[str, list[dict[str, object]]], None] | None = None,
 ) -> tuple[
     list[dict[str, object]],
     dict[str, object],
@@ -1272,31 +1306,39 @@ def run_benchmark(
                     "node_count": engine.node_count,
                 }
             )
+            if checkpoint is not None:
+                checkpoint("primary-build", [builds[-1]])
             ef_values = (
                 (DATASET_SIZE,)
                 if engine.name == "faiss-flat-exact"
                 else EF_SEARCH_VALUES
             )
             for ef_search in ef_values:
-                runs.extend(
-                    measure_setting(
-                        engine,
-                        queries,
-                        truth,
-                        acceptable_truth,
-                        ef_search=ef_search,
-                        min_queries=min_queries,
-                        run_count=run_count,
-                    )
+                case_runs = measure_setting(
+                    engine,
+                    queries,
+                    truth,
+                    acceptable_truth,
+                    ef_search=ef_search,
+                    min_queries=min_queries,
+                    run_count=run_count,
                 )
+                runs.extend(case_runs)
+                if checkpoint is not None:
+                    checkpoint("primary-search", case_runs)
             if engine.name != "faiss-flat-exact":
-                recall_ceiling.extend(
-                    recall_sweep(engine, queries, truth, acceptable_truth)
+                ceiling_runs = recall_sweep(
+                    engine, queries, truth, acceptable_truth
                 )
+                recall_ceiling.extend(ceiling_runs)
+                if checkpoint is not None:
+                    checkpoint("recall-ceiling", ceiling_runs)
             if extended and engine.name == "alopex-hnsw":
                 recall_investigation = investigate_recall_contract(
                     vectors, queries, truth, acceptable_truth, engine
                 )
+                if checkpoint is not None:
+                    checkpoint("recall-investigation", [recall_investigation])
         finally:
             engine.close()
             del engine
@@ -1319,6 +1361,8 @@ def run_benchmark(
         min_queries=min_queries,
         run_count=run_count,
     )
+    if checkpoint is not None:
+        checkpoint("fixed-cost", fixed_cost_runs)
     fixed_cost_us = {
         engine: statistics.median(float(row["latency_us"]) for row in rows)
         for engine, rows in (
@@ -1335,6 +1379,8 @@ def run_benchmark(
         min_queries=min(HYBRID_QUERY_COUNT, min_queries),
         run_count=run_count,
     )
+    if checkpoint is not None:
+        checkpoint("hybrid", hybrid_runs)
     base_summary = summarize_by_engine(runs)
     recall_investigation["m_semantics"] = {
         "alopex_m16_layer_zero_capacity": 32,
@@ -1657,12 +1703,14 @@ def main() -> int:
         parser.error("min-queries must be at least 10000")
     if args.runs != 3:
         parser.error("runs must be exactly 3")
+    checkpoint = RawCheckpointWriter(args.output)
     benchmark_runs, dataset, builds, recall_ceiling, diagnostics = run_benchmark(
         args.dataset,
         min_queries=args.min_queries,
         run_count=args.runs,
         extended=not args.baseline_only,
         embedding_cache=args.embedding_cache,
+        checkpoint=checkpoint.append,
     )
     scale = (
         run_scale_benchmark(
@@ -1670,6 +1718,7 @@ def main() -> int:
             max_n=args.max_scale_n,
             min_queries=args.min_queries,
             run_count=args.runs,
+            checkpoint=checkpoint.append,
         )
         if args.glove_dataset and not args.baseline_only
         else {}

@@ -2,9 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
+from scripts.performance import hnsw_v0811_contract as hnsw
 from scripts.performance.hnsw_v0811_contract import (
     DATASET_SIZE,
     DIMENSION,
@@ -21,11 +23,81 @@ from scripts.performance.hnsw_v0811_contract import (
     validate_comparison_row,
     validate_comparison_rows,
     SearchEngine,
+    RawCheckpointWriter,
     write_artifacts,
 )
 
 
 class HnswDiagnosticContractTests(unittest.TestCase):
+    def test_raw_checkpoint_is_readable_after_each_completed_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            writer = RawCheckpointWriter(Path(directory))
+            writer.append(
+                "primary-search",
+                [{"engine": "alopex-hnsw", "ef_search": 64}],
+            )
+            records = [
+                json.loads(line)
+                for line in (Path(directory) / "hnsw-diagnostic.raw.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(records[0]["event"], "start")
+        self.assertEqual(records[1]["phase"], "primary-search")
+        self.assertEqual(records[1]["rows"][0]["engine"], "alopex-hnsw")
+
+    def test_benchmark_checkpoints_each_completed_search_case(self):
+        def engine(name):
+            return SearchEngine(name, 0.0, lambda *_: [], lambda: None, 0, 0)
+
+        def measure(engine, *_args, **kwargs):
+            return [{"engine": engine.name, "ef_search": kwargs["ef_search"]}]
+
+        checkpoints = []
+        vectors = np.zeros((200, 2), dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "products.csv"
+            source.write_text("fixture", encoding="utf-8")
+            with (
+                patch.object(hnsw, "DATASET_SIZE", 200),
+                patch.object(hnsw, "load_amazon_products", return_value=list(range(200))),
+                patch.object(hnsw, "build_embeddings", return_value=(vectors, 1.0)),
+                patch.object(
+                    hnsw,
+                    "exact_ground_truth",
+                    return_value=([[0]] * 200, [[0]] * 200),
+                ),
+                patch.object(hnsw, "measure_setting", side_effect=measure),
+                patch.object(hnsw, "recall_sweep", return_value=[]),
+                patch.object(
+                    hnsw, "build_hnswlib", side_effect=lambda _: engine("hnswlib")
+                ),
+                patch.object(
+                    hnsw, "build_alopex", side_effect=lambda _: engine("alopex-hnsw")
+                ),
+                patch.object(
+                    hnsw,
+                    "build_faiss_flat",
+                    side_effect=lambda _: engine("faiss-flat-exact"),
+                ),
+                patch.object(
+                    hnsw,
+                    "build_faiss_hnsw",
+                    side_effect=lambda _: engine("faiss-hnsw"),
+                ),
+            ):
+                hnsw.run_benchmark(
+                    source,
+                    min_queries=1,
+                    run_count=1,
+                    extended=False,
+                    checkpoint=lambda phase, rows: checkpoints.append((phase, rows)),
+                )
+
+        self.assertEqual(sum(phase == "primary-build" for phase, _ in checkpoints), 4)
+        self.assertEqual(sum(phase == "primary-search" for phase, _ in checkpoints), 16)
+
     def test_sql_vector_literal_avoids_exponent_notation(self):
         literal = _sql_vector_literal(
             np.asarray([1e-8, -2e-10, 1.0], dtype=np.float32)
