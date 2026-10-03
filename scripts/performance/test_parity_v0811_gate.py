@@ -102,6 +102,27 @@ class PerformanceParityGateTests(unittest.TestCase):
                     patch(
                         "scripts.performance.parity_v0811_measure.platform.freedesktop_os_release",
                         return_value={"ID": "ubuntu", "VERSION_ID": "26.04"},
+                        create=True,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.Path.read_text",
+                        side_effect=(
+                            "model name : test cpu\n",
+                            "MemTotal: 1024 kB\n",
+                        ),
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.os.sched_getaffinity",
+                        return_value={0},
+                        create=True,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.os.cpu_count",
+                        return_value=1,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.release",
+                        return_value="test-kernel",
                     ),
                 ):
                     environment = _environment()
@@ -112,6 +133,9 @@ class PerformanceParityGateTests(unittest.TestCase):
         expected.update(b"source.py\0source\n\0")
         self.assertEqual(environment["alopex_tree_sha256"], expected.hexdigest())
         self.assertEqual(environment["os"], "ubuntu-26.04")
+        self.assertEqual(environment["cpu_model"], "test cpu")
+        self.assertEqual(environment["memory_bytes"], 1024 * 1024)
+        self.assertEqual(environment["cpu_affinity"], [0])
 
     def test_measurement_summary_reports_percentiles_and_throughput(self):
         summary = summarize_latencies([0.001, 0.002, 0.004, 0.003], rows=100)
