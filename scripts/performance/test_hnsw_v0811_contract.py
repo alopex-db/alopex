@@ -112,7 +112,10 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 )
 
         self.assertEqual(sum(phase == "primary-build" for phase, _ in checkpoints), 4)
-        self.assertEqual(sum(phase == "primary-search" for phase, _ in checkpoints), 5)
+        self.assertEqual(
+            sum(phase == "primary-search" for phase, _ in checkpoints),
+            len(hnsw.EF_SEARCH_VALUES) + 1,
+        )
 
     def test_counterbalanced_engine_orders_visit_each_position_once(self):
         engines = ("hnswlib", "alopex-hnsw", "faiss-hnsw")
