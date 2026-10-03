@@ -25,6 +25,7 @@ DATASET_SIZE = 9171
 DIMENSION = 128
 QUERY_COUNT = 10_000
 MIN_DURATION_SECONDS = 2.0
+MEASUREMENT_RUNS = 3
 HYBRID_QUERY_COUNT = 200
 SEED = 42
 EF_SEARCH_VALUES = (16, 32, 64, 128, 256)
@@ -485,6 +486,84 @@ def build_hnswlib(vectors) -> SearchEngine:
     )
 
 
+def counterbalanced_engine_orders(engines: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    return tuple(engines[offset:] + engines[:offset] for offset in range(len(engines)))
+
+
+def _prepare_setting(
+    engine: SearchEngine,
+    queries,
+    ground_truth,
+    acceptable_truth,
+    *,
+    ef_search: int,
+    k: int = 10,
+) -> tuple[float, float, float | None]:
+    for query in queries:
+        engine.search(query, k, ef_search)
+    predicted = [engine.search(query, k, ef_search) for query in queries]
+    recall = recall_at_k(predicted, ground_truth)
+    tie_aware_recall = tie_aware_recall_at_k(predicted, acceptable_truth, k)
+    native_latency_us = (
+        statistics.median(
+            engine.native_search_time_us(query, k, ef_search) for query in queries
+        )
+        if engine.native_search_time_us
+        else None
+    )
+    return recall, tie_aware_recall, native_latency_us
+
+
+def _measure_prepared_run(
+    engine: SearchEngine,
+    queries,
+    prepared: tuple[float, float, float | None],
+    *,
+    ef_search: int,
+    min_queries: int,
+    run: int,
+    k: int,
+    min_duration_seconds: float,
+    dataset_size: int,
+) -> dict[str, object]:
+    recall, tie_aware_recall, native_latency_us = prepared
+    started = time.perf_counter()
+    executed = 0
+    latencies = []
+    while executed < min_queries or time.perf_counter() - started < min_duration_seconds:
+        query_started = time.perf_counter_ns()
+        engine.search(queries[executed % len(queries)], k, ef_search)
+        latencies.append((time.perf_counter_ns() - query_started) / 1000)
+        executed += 1
+    elapsed = time.perf_counter() - started
+    return {
+        "engine": engine.name,
+        "ef_search": ef_search,
+        "run": run,
+        "dataset_size": dataset_size,
+        "dimension": queries.shape[1],
+        "query_count": executed,
+        "duration_seconds": elapsed,
+        "queries_per_second": executed / elapsed,
+        "latency_us": elapsed * 1_000_000 / executed,
+        "native_search_latency_us": native_latency_us,
+        "python_binding_residual_us": (
+            max(0.0, elapsed * 1_000_000 / executed - native_latency_us)
+            if native_latency_us is not None
+            else None
+        ),
+        "query_latency_p50_us": statistics.median(latencies),
+        "query_latency_p95_us": sorted(latencies)[
+            max(0, (95 * len(latencies) + 99) // 100 - 1)
+        ],
+        "query_latency_p99_us": sorted(latencies)[
+            max(0, (99 * len(latencies) + 99) // 100 - 1)
+        ],
+        "recall_at_10": recall,
+        "tie_aware_recall_at_10": tie_aware_recall,
+    }
+
+
 def measure_setting(
     engine: SearchEngine,
     queries,
@@ -498,57 +577,63 @@ def measure_setting(
     k: int = 10,
     dataset_size: int = DATASET_SIZE,
 ) -> list[dict[str, object]]:
-    for query in queries:
-        engine.search(query, k, ef_search)
-    predicted = [engine.search(query, k, ef_search) for query in queries]
-    recall = recall_at_k(predicted, ground_truth)
-    tie_aware_recall = tie_aware_recall_at_k(predicted, acceptable_truth, k)
-    native_latency_us = (
-        statistics.median(
-            engine.native_search_time_us(query, k, ef_search) for query in queries
-        )
-        if engine.native_search_time_us
-        else None
+    prepared = _prepare_setting(
+        engine, queries, ground_truth, acceptable_truth, ef_search=ef_search, k=k
     )
-    rows = []
-    for run in range(1, run_count + 1):
-        started = time.perf_counter()
-        executed = 0
-        latencies = []
-        while executed < min_queries or time.perf_counter() - started < min_duration_seconds:
-            query_started = time.perf_counter_ns()
-            engine.search(queries[executed % len(queries)], k, ef_search)
-            latencies.append((time.perf_counter_ns() - query_started) / 1000)
-            executed += 1
-        elapsed = time.perf_counter() - started
-        rows.append(
-            {
-                "engine": engine.name,
-                "ef_search": ef_search,
-                "run": run,
-                "dataset_size": dataset_size,
-                "dimension": queries.shape[1],
-                "query_count": executed,
-                "duration_seconds": elapsed,
-                "queries_per_second": executed / elapsed,
-                "latency_us": elapsed * 1_000_000 / executed,
-                "native_search_latency_us": native_latency_us,
-                "python_binding_residual_us": (
-                    max(0.0, elapsed * 1_000_000 / executed - native_latency_us)
-                    if native_latency_us is not None
-                    else None
-                ),
-                "query_latency_p50_us": statistics.median(latencies),
-                "query_latency_p95_us": sorted(latencies)[
-                    max(0, (95 * len(latencies) + 99) // 100 - 1)
-                ],
-                "query_latency_p99_us": sorted(latencies)[
-                    max(0, (99 * len(latencies) + 99) // 100 - 1)
-                ],
-                "recall_at_10": recall,
-                "tie_aware_recall_at_10": tie_aware_recall,
-            }
+    return [
+        _measure_prepared_run(
+            engine,
+            queries,
+            prepared,
+            ef_search=ef_search,
+            min_queries=min_queries,
+            run=run,
+            k=k,
+            min_duration_seconds=min_duration_seconds,
+            dataset_size=dataset_size,
         )
+        for run in range(1, run_count + 1)
+    ]
+
+
+def measure_counterbalanced_settings(
+    engines: tuple[SearchEngine, ...],
+    queries,
+    ground_truth,
+    acceptable_truth,
+    *,
+    ef_search_values: tuple[int, ...],
+    min_queries: int,
+    run_count: int,
+    min_duration_seconds: float = MIN_DURATION_SECONDS,
+) -> list[dict[str, object]]:
+    if run_count != len(engines):
+        raise ValueError("counterbalanced run count must match ANN engine count")
+    engines_by_name = {engine.name: engine for engine in engines}
+    orders = counterbalanced_engine_orders(tuple(engines_by_name))
+    rows = []
+    for ef_search in ef_search_values:
+        prepared = {
+            engine.name: _prepare_setting(
+                engine, queries, ground_truth, acceptable_truth, ef_search=ef_search
+            )
+            for engine in engines
+        }
+        for run, order in enumerate(orders, start=1):
+            for measurement_order, name in enumerate(order):
+                row = _measure_prepared_run(
+                    engines_by_name[name],
+                    queries,
+                    prepared[name],
+                    ef_search=ef_search,
+                    min_queries=min_queries,
+                    run=run,
+                    k=10,
+                    min_duration_seconds=min_duration_seconds,
+                    dataset_size=DATASET_SIZE,
+                )
+                row["measurement_order"] = measurement_order
+                rows.append(row)
     return rows
 
 
@@ -1290,9 +1375,11 @@ def run_benchmark(
     recall_ceiling = []
     recall_investigation = {}
     builders = (build_hnswlib, build_alopex, build_faiss_flat, build_faiss_hnsw)
-    for builder in builders:
-        engine = builder(vectors)
-        try:
+    engines = []
+    try:
+        for builder in builders:
+            engine = builder(vectors)
+            engines.append(engine)
             builds.append(
                 {
                     "phase": "build",
@@ -1308,40 +1395,54 @@ def run_benchmark(
             )
             if checkpoint is not None:
                 checkpoint("primary-build", [builds[-1]])
-            ef_values = (
-                (DATASET_SIZE,)
-                if engine.name == "faiss-flat-exact"
-                else EF_SEARCH_VALUES
+        ann_engines = tuple(
+            engine for engine in engines if engine.name != "faiss-flat-exact"
+        )
+        for ef_search in EF_SEARCH_VALUES:
+            case_runs = measure_counterbalanced_settings(
+                ann_engines,
+                queries,
+                truth,
+                acceptable_truth,
+                ef_search_values=(ef_search,),
+                min_queries=min_queries,
+                run_count=run_count,
             )
-            for ef_search in ef_values:
-                case_runs = measure_setting(
-                    engine,
-                    queries,
-                    truth,
-                    acceptable_truth,
-                    ef_search=ef_search,
-                    min_queries=min_queries,
-                    run_count=run_count,
-                )
-                runs.extend(case_runs)
-                if checkpoint is not None:
-                    checkpoint("primary-search", case_runs)
-            if engine.name != "faiss-flat-exact":
-                ceiling_runs = recall_sweep(
-                    engine, queries, truth, acceptable_truth
-                )
-                recall_ceiling.extend(ceiling_runs)
-                if checkpoint is not None:
-                    checkpoint("recall-ceiling", ceiling_runs)
-            if extended and engine.name == "alopex-hnsw":
-                recall_investigation = investigate_recall_contract(
-                    vectors, queries, truth, acceptable_truth, engine
-                )
-                if checkpoint is not None:
-                    checkpoint("recall-investigation", [recall_investigation])
-        finally:
+            runs.extend(case_runs)
+            if checkpoint is not None:
+                checkpoint("primary-search", case_runs)
+        flat_engine = next(
+            engine for engine in engines if engine.name == "faiss-flat-exact"
+        )
+        flat_runs = measure_setting(
+            flat_engine,
+            queries,
+            truth,
+            acceptable_truth,
+            ef_search=DATASET_SIZE,
+            min_queries=min_queries,
+            run_count=run_count,
+        )
+        runs.extend(flat_runs)
+        if checkpoint is not None:
+            checkpoint("primary-search", flat_runs)
+        for engine in ann_engines:
+            ceiling_runs = recall_sweep(engine, queries, truth, acceptable_truth)
+            recall_ceiling.extend(ceiling_runs)
+            if checkpoint is not None:
+                checkpoint("recall-ceiling", ceiling_runs)
+        if extended:
+            alopex_engine = next(
+                engine for engine in ann_engines if engine.name == "alopex-hnsw"
+            )
+            recall_investigation = investigate_recall_contract(
+                vectors, queries, truth, acceptable_truth, alopex_engine
+            )
+            if checkpoint is not None:
+                checkpoint("recall-investigation", [recall_investigation])
+    finally:
+        for engine in engines:
             engine.close()
-            del engine
     metadata = {
         "source": "Amazon Product Dataset 2020",
         "source_file": dataset.name,
@@ -1586,7 +1687,7 @@ def write_artifacts(
             "warmup": "one complete query cycle per engine/setting",
             "min_queries": QUERY_COUNT,
             "min_duration_seconds": MIN_DURATION_SECONDS,
-            "runs": 3,
+            "runs": MEASUREMENT_RUNS,
             "metrics": [
                 "recall_at_10",
                 "tie_aware_recall_at_10",
@@ -1692,7 +1793,7 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--min-queries", type=int, default=QUERY_COUNT)
-    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--runs", type=int, default=MEASUREMENT_RUNS)
     parser.add_argument("--release-version")
     parser.add_argument("--glove-dataset", type=Path)
     parser.add_argument("--max-scale-n", type=int, default=1_000_000)
@@ -1701,8 +1802,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.min_queries < QUERY_COUNT:
         parser.error("min-queries must be at least 10000")
-    if args.runs != 3:
-        parser.error("runs must be exactly 3")
+    if args.runs != MEASUREMENT_RUNS:
+        parser.error(f"runs must be exactly {MEASUREMENT_RUNS}")
     checkpoint = RawCheckpointWriter(args.output)
     benchmark_runs, dataset, builds, recall_ceiling, diagnostics = run_benchmark(
         args.dataset,
