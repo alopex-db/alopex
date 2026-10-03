@@ -500,8 +500,8 @@ impl HnswGraph {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
         // hashing and per-entry allocation on the search hot path.
         let mut visited = vec![false; self.nodes.len()];
-        let mut candidates = BinaryHeap::new();
-        let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::new();
+        let mut candidates = BinaryHeap::with_capacity(ef);
+        let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(ef);
 
         let mut scratch = SearchStats::default();
         let stats_ref: &mut SearchStats = match stats {
