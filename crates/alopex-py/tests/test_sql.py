@@ -107,6 +107,17 @@ def test_transaction_parameters_use_native_prepared_values(db):
     assert stored[0]["value"][-1] == 0.5
 
 
+def test_transaction_native_text_parameter_does_not_expand_sql(db):
+    payload = "x" * 1_048_576
+    transaction = db.begin(TxnMode.READ_WRITE)
+    try:
+        selected = transaction.execute_sql("SELECT ? AS value", [payload])
+        assert type(selected[0]["value"]) is str
+        assert selected == [{"value": payload}]
+    finally:
+        transaction.rollback()
+
+
 def test_transaction_mixed_parameters_fall_back_to_rendered_sql(db):
     transaction = db.begin(TxnMode.READ_WRITE)
     timestamp = dt.datetime(2024, 5, 4, 3, 2, 1)
