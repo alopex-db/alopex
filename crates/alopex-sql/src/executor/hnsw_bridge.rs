@@ -1,6 +1,6 @@
 use alopex_core::Error as CoreError;
 use alopex_core::kv::KVStore;
-use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, SearchStats};
+use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, SearchStats, validate_ef_search};
 use alopex_core::vector::{Metric, validate_dimensions};
 
 use crate::ast::ddl::VectorMetric;
@@ -256,12 +256,7 @@ fn parse_ef_search(value: &str) -> Result<usize> {
             reason: format!("整数値に変換できません: {value}"),
         })
     })?;
-    if parsed == 0 {
-        return Err(ExecutorError::Core(CoreError::InvalidParameter {
-            param: "ef_search".into(),
-            reason: "must be greater than zero".into(),
-        }));
-    }
+    validate_ef_search(parsed).map_err(ExecutorError::from)?;
     Ok(parsed)
 }
 
@@ -341,5 +336,9 @@ mod tests {
         let invalid = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
             .with_option("ef_search", "0");
         assert!(HnswBridge::search_ef(&invalid).is_err());
+
+        let too_large = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("ef_search", "10000000000000");
+        assert!(HnswBridge::search_ef(&too_large).is_err());
     }
 }

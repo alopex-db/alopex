@@ -171,12 +171,30 @@ fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     if pattern.options.enable_hnsw == Some(false) {
         return Ok(None);
     }
+    let force_hnsw = pattern.options.enable_hnsw == Some(true);
     if table.storage_options.storage_type != StorageType::Row {
+        if force_hnsw {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "HNSW search".into(),
+                reason: "enable_hnsw=true requires row storage".into(),
+            });
+        }
         return Ok(None);
     }
     let Some(index) = find_hnsw_index(catalog, table, &pattern.column) else {
+        if force_hnsw {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "HNSW search".into(),
+                reason: "enable_hnsw=true requires an HNSW index on the query column".into(),
+            });
+        }
         return Ok(None);
     };
+    if force_hnsw {
+        // This forces initial HNSW selection only. execute_hnsw_search_with_stats
+        // retains its exact post-filter fallback when HNSW cannot yield enough rows.
+        return Ok(Some(index));
+    }
     let dimension = vector_dimension(table, &pattern.column).unwrap_or(HNSW_BASE_DIMENSIONS);
     let threshold = hnsw_row_threshold(pattern.k as usize, dimension);
     let indexed_rows = txn.hnsw_entry(&index.name)?.stats().node_count;

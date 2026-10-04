@@ -317,9 +317,11 @@ impl HnswGraph {
             }
         }
 
-        let mut ef = ef_search;
-        if ef < k {
-            ef = k;
+        let active_count = usize::try_from(self.active_count).unwrap_or(usize::MAX);
+        let ef = ef_search.max(k).min(active_count);
+        #[cfg(test)]
+        {
+            stats.effective_ef_search = ef;
         }
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));

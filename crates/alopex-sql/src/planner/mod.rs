@@ -51,6 +51,7 @@ use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::storage::SqlValue;
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
+use alopex_core::vector::hnsw::MAX_HNSW_EF_SEARCH;
 use named_window::resolve_named_windows;
 use std::collections::{HashMap, HashSet};
 
@@ -83,11 +84,11 @@ fn parse_knn_query_options(
                     .value
                     .parse::<usize>()
                     .ok()
-                    .filter(|value| *value > 0)
+                    .filter(|value| (1..=MAX_HNSW_EF_SEARCH).contains(value))
                     .ok_or_else(|| {
-                        PlannerError::invalid_expression(
-                            "ef_search must be a positive integer".to_string(),
-                        )
+                        PlannerError::invalid_expression(format!(
+                            "ef_search must be an integer between 1 and {MAX_HNSW_EF_SEARCH}"
+                        ))
                     })?;
                 if parsed.ef_search.replace(value).is_some() {
                     return Err(PlannerError::invalid_expression(
