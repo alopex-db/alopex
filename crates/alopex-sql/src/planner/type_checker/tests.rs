@@ -78,6 +78,25 @@ fn number_expr(value: &str) -> Expr {
 }
 
 #[test]
+fn test_infer_parameter_keeps_whole_floats_as_double() {
+    let catalog = create_test_catalog();
+
+    let float_values = [SqlValue::Float(2.0)];
+    let float = TypeChecker::new(&catalog)
+        .with_parameters(&float_values)
+        .infer_parameter(1, test_span())
+        .unwrap();
+    assert_eq!(float.resolved_type, ResolvedType::Double);
+
+    let double_values = [SqlValue::Double(2.0)];
+    let double = TypeChecker::new(&catalog)
+        .with_parameters(&double_values)
+        .infer_parameter(1, test_span())
+        .unwrap();
+    assert_eq!(double.resolved_type, ResolvedType::Double);
+}
+
+#[test]
 fn test_infer_case_promotes_result_branches_and_keeps_simple_operand() {
     let catalog = create_test_catalog();
     let type_checker = TypeChecker::new(&catalog);
