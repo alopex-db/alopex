@@ -15,7 +15,7 @@ use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::SqlValue;
 
-use super::{BulkReader, CopyField, CopySchema};
+use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, validate_file_path};
 
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
@@ -87,6 +87,14 @@ pub fn parquet_schema(path: &str) -> Result<CopySchema> {
         .map(|fields| CopySchema { fields })
 }
 
+pub(crate) fn parquet_schema_with_security(
+    path: &str,
+    config: &CopySecurityConfig,
+) -> Result<CopySchema> {
+    validate_file_path(path, config)?;
+    parquet_schema(path)
+}
+
 pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
     let schema = parquet_schema(path)?;
     let columns = schema
@@ -109,6 +117,14 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
         rows.extend(batch);
     }
     Ok((schema, rows))
+}
+
+pub(crate) fn read_parquet_with_security(
+    path: &str,
+    config: &CopySecurityConfig,
+) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
+    validate_file_path(path, config)?;
+    read_parquet(path)
 }
 
 impl BulkReader for ParquetReader {
