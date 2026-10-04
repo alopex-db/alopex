@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex};
 
+use alopex_sql::{AlopexDialect, Parser};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::sql::{self, PyPreparedBinding};
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::DatabaseControl;
 use crate::error;
@@ -492,7 +494,9 @@ impl PyTransaction {
         sql: &str,
         params: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        sql::validate_sql_input(sql)?;
+        let bindings = sql::prepared_bindings(params.as_ref())?;
+        sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         self.ensure_active()?;
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
@@ -505,17 +509,52 @@ impl PyTransaction {
             Embedded(alopex_embedded::Error),
         }
 
-        let result = py.detach(|| {
-            let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
-            let txn = guard.as_mut().ok_or(ExecError::Closed)?;
-            txn.execute_sql(&bound_sql).map_err(ExecError::Embedded)
+        let prepared_statement = (!bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| matches!(binding, PyPreparedBinding::Native(_))))
+        .then(|| Parser::parse_sql(&AlopexDialect, sql).ok())
+        .flatten()
+        .and_then(|mut statements| {
+            if statements.len() == 1 {
+                statements.pop()
+            } else {
+                None
+            }
         });
+        let result = if let Some(statement) = prepared_statement {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            py.detach(|| {
+                let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
+                let txn = guard.as_mut().ok_or(ExecError::Closed)?;
+                txn.execute_prepared_statement(&statement, &values)
+                    .map_err(ExecError::Embedded)
+            })
+        } else {
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let bound_sql = sql::bind_rendered_params(sql, &rendered)?;
+            py.detach(|| {
+                let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
+                let txn = guard.as_mut().ok_or(ExecError::Closed)?;
+                txn.execute_sql(&bound_sql).map_err(ExecError::Embedded)
+            })
+        };
         let result = result.map_err(|err| match err {
             ExecError::LockPoisoned => error::to_py_err("transaction lock poisoned"),
             ExecError::Closed => error::to_py_err("transaction is closed"),
             ExecError::Embedded(err) => error::embedded_err(err),
         })?;
-        crate::embedded::sql::execution_result_to_py(py, result)
+        sql::execution_result_to_py(py, result)
     }
 
     /// Create a named savepoint within this transaction.

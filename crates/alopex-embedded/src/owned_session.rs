@@ -180,7 +180,11 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
-    pub(crate) fn execute_prepared_statement(
+    /// Execute one parsed SQL statement with native bound values without committing.
+    ///
+    /// Callers that own an embedded transaction can preserve typed parameter values
+    /// instead of rendering them into SQL text before execution.
+    pub fn execute_prepared_statement(
         &mut self,
         statement: &alopex_sql::Statement,
         parameters: &[alopex_sql::SqlValue],
