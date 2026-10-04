@@ -11,15 +11,6 @@ MANIFEST_TOOL="${ROOT_DIR}/scripts/release/parser_asset_manifest.py"
 BACKEND="${NIM_PARSER_BACKEND:-auto}"
 TARGET=""
 ARCHIVE_DIR=""
-REQUIRED_ALOPEX_VERSION="$(python3 - "${ROOT_DIR}/Cargo.toml" <<'PY'
-import pathlib
-import sys
-import tomllib
-
-with pathlib.Path(sys.argv[1]).open("rb") as stream:
-    print(tomllib.load(stream)["workspace"]["package"]["version"])
-PY
-)"
 REQUIRED_CONTRACT_VERSION="$(tr -d '\r\n' < "${PARSER_DIR}/PARSER_CONTRACT_VERSION")"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
@@ -202,13 +193,50 @@ resolve_executable() {
   printf '%s/%s\n' "${candidate_dir}" "$(basename "${candidate}")"
 }
 
+resolve_python() {
+  local python_candidate="${PYTHON:-}"
+
+  if [[ -z "${python_candidate}" ]]; then
+    python_candidate="$(command -v python3 || command -v python || true)"
+  fi
+  [[ -n "${python_candidate}" ]] || {
+    echo "Python 3 is required to produce parser archives" >&2
+    exit 1
+  }
+  python_candidate="$(to_posix_path "${python_candidate}")"
+  case "${python_candidate}" in
+    */.asdf/shims/python|*/.asdf/shims/python.exe|*/.asdf/shims/python3|*/.asdf/shims/python3.exe)
+      command -v asdf >/dev/null 2>&1 || {
+        echo "cannot resolve the asdf Python shim" >&2
+        exit 1
+      }
+      python_candidate="$(asdf which "$(basename "${python_candidate}" .exe)")"
+      ;;
+  esac
+  PYTHON_BIN="$(resolve_executable "${python_candidate}")"
+  [[ -x "${PYTHON_BIN}" ]] || {
+    echo "resolved Python is not executable: ${PYTHON_BIN}" >&2
+    exit 1
+  }
+}
+
+resolve_python
+REQUIRED_ALOPEX_VERSION="$("${PYTHON_BIN}" - "${ROOT_DIR}/Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+with pathlib.Path(sys.argv[1]).open("rb") as stream:
+    print(tomllib.load(stream)["workspace"]["package"]["version"])
+PY
+)"
+
 resolve_host_tools() {
   local nim_candidate="${ALOPEX_NIM_BIN:-}"
   local nimble_candidate="${ALOPEX_NIMBLE_BIN:-}"
   local nimble_bin_dir
   local nimble_name
   local nimble_sibling
-  local python_candidate
 
   if [[ -z "${nim_candidate}" ]]; then
     nim_candidate="$(command -v nim || true)"
@@ -251,26 +279,6 @@ resolve_host_tools() {
     exit 1
   }
 
-  python_candidate="$(command -v python3 || command -v python || true)"
-  [[ -n "${python_candidate}" ]] || {
-    echo "Python 3 is required to produce parser archives" >&2
-    exit 1
-  }
-  python_candidate="$(to_posix_path "${python_candidate}")"
-  case "${python_candidate}" in
-    */.asdf/shims/python|*/.asdf/shims/python.exe|*/.asdf/shims/python3|*/.asdf/shims/python3.exe)
-      command -v asdf >/dev/null 2>&1 || {
-        echo "cannot resolve the asdf Python shim" >&2
-        exit 1
-      }
-      python_candidate="$(asdf which "$(basename "${python_candidate}" .exe)")"
-      ;;
-  esac
-  PYTHON_BIN="$(resolve_executable "${python_candidate}")"
-  [[ -x "${PYTHON_BIN}" ]] || {
-    echo "resolved Python is not executable: ${PYTHON_BIN}" >&2
-    exit 1
-  }
 }
 
 if [[ "${BACKEND}" == "auto" ]]; then
