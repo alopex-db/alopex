@@ -42,6 +42,7 @@ mod parquet;
 
 pub use csv::CsvReader;
 pub use parquet::{ParquetReader, parquet_schema, read_parquet};
+pub(crate) use parquet::{parquet_schema_with_security, read_parquet_with_security};
 
 /// ファイル形式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
