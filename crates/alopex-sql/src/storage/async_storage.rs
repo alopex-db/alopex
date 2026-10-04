@@ -19,7 +19,10 @@ use crate::executor::{
     ExecutionResult, ExecutorError, Result as ExecResult, Row, bulk, copy_format, ddl, dml, query,
 };
 use crate::parser::Parser;
-use crate::planner::{LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing};
+use crate::planner::{
+    LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing,
+    plan_sql_for_routing_with_copy_security,
+};
 use crate::storage::bridge::HnswTxnEntry;
 use crate::storage::error::{Result as StorageResult, StorageError};
 use crate::storage::{KeyEncoder, RowCodec};
@@ -49,7 +52,7 @@ where
     mode: TxnMode,
     catalog: Option<Arc<RwLock<dyn Catalog + Send + Sync>>>,
     memory_policy: Option<MemoryPolicy>,
-    copy_security: bulk::CopySecurityConfig,
+    copy_security: Option<bulk::CopySecurityConfig>,
     _marker: PhantomData<&'txn ()>,
 }
 
@@ -64,7 +67,7 @@ where
             mode,
             catalog: None,
             memory_policy: None,
-            copy_security: bulk::CopySecurityConfig::default(),
+            copy_security: None,
             _marker: PhantomData,
         }
     }
@@ -87,7 +90,7 @@ where
 
     /// Restrict file paths used by COPY statements.
     pub fn set_copy_security(&mut self, config: bulk::CopySecurityConfig) {
-        self.copy_security = config;
+        self.copy_security = Some(config);
     }
 
     /// Attach a memory policy and return the updated bridge.
@@ -121,9 +124,14 @@ where
             }
         };
         let sql = sql.to_string();
+        let copy_security = self.copy_security.clone();
         Box::pin(async move {
             let guard = catalog.read().expect("catalog lock poisoned");
-            plan_sql_for_routing(&*guard, &sql).map_err(|err| ExecutorError::InvalidOperation {
+            let result = match copy_security {
+                Some(config) => plan_sql_for_routing_with_copy_security(&*guard, &sql, &config),
+                None => plan_sql_for_routing(&*guard, &sql),
+            };
+            result.map_err(|err| ExecutorError::InvalidOperation {
                 operation: "async_plan_for_routing".into(),
                 reason: err.to_string(),
             })
@@ -347,7 +355,8 @@ where
         let state = Arc::clone(&self.state);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
-        let copy_security = self.copy_security.clone();
+        let read_security = self.copy_security.clone();
+        let copy_security = read_security.clone().unwrap_or_default();
         Box::pin(async move {
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
@@ -369,6 +378,7 @@ where
                     &sql,
                     mode,
                     &copy_security,
+                    read_security.as_ref(),
                 );
                 let (txn, hnsw) = blocking_txn.into_parts();
                 (result, txn, hnsw)
@@ -404,6 +414,7 @@ where
         let state = Arc::clone(&self.state);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
+        let read_security = self.copy_security.clone();
         let sender_for_task = sender.clone();
 
         tokio::spawn(async move {
@@ -427,7 +438,13 @@ where
             let join = tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
                     BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                stream_query_blocking(&mut blocking_txn, &catalog, &sql, sender_blocking);
+                stream_query_blocking(
+                    &mut blocking_txn,
+                    &catalog,
+                    &sql,
+                    sender_blocking,
+                    read_security.as_ref(),
+                );
                 blocking_txn.into_parts()
             });
 
@@ -481,6 +498,7 @@ fn execute_sql_blocking_multi<T>(
     sql: &str,
     mode: TxnMode,
     copy_security: &bulk::CopySecurityConfig,
+    read_security: Option<&bulk::CopySecurityConfig>,
 ) -> ExecResult<Vec<ExecutionResult>>
 where
     T: for<'a> AsyncKVTransaction<'a>,
@@ -497,7 +515,10 @@ where
     for stmt in statements {
         let plan = {
             let guard = catalog.read().expect("catalog lock poisoned");
-            Planner::new(&*guard).plan(&stmt)?
+            match read_security {
+                Some(config) => Planner::with_copy_security(&*guard, config.clone()).plan(&stmt)?,
+                None => Planner::new(&*guard).plan(&stmt)?,
+            }
         };
 
         let op_name = plan.operation_name();
@@ -557,7 +578,14 @@ where
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *source)?
+                let ExecutionResult::Query(result) =
+                    query::execute_query_with_policy_and_copy_security(
+                        txn,
+                        &*guard,
+                        *source,
+                        None,
+                        read_security,
+                    )?
                 else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "INSERT ... SELECT".into(),
@@ -622,7 +650,14 @@ where
                 });
                 let format = copy_format(&path, &options)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *query)?
+                let ExecutionResult::Query(result) =
+                    query::execute_query_with_policy_and_copy_security(
+                        txn,
+                        &*guard,
+                        *query,
+                        None,
+                        read_security,
+                    )?
                 else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "COPY TO".into(),
@@ -688,7 +723,13 @@ where
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");
                 let policy = txn.memory_policy().cloned();
-                query::execute_query_with_policy(txn, &*guard, query_plan, policy.as_ref())?
+                query::execute_query_with_policy_and_copy_security(
+                    txn,
+                    &*guard,
+                    query_plan,
+                    policy.as_ref(),
+                    read_security,
+                )?
             }
         });
     }
@@ -701,6 +742,7 @@ fn stream_query_blocking<T>(
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     sender: tokio::sync::mpsc::Sender<ExecResult<Row>>,
+    read_security: Option<&bulk::CopySecurityConfig>,
 ) where
     T: for<'a> AsyncKVTransaction<'a>,
 {
@@ -721,7 +763,13 @@ fn stream_query_blocking<T>(
 
     let plan = {
         let guard = catalog.read().expect("catalog lock poisoned");
-        match Planner::new(&*guard).plan(&statements[0]) {
+        let result = match read_security {
+            Some(config) => {
+                Planner::with_copy_security(&*guard, config.clone()).plan(&statements[0])
+            }
+            None => Planner::new(&*guard).plan(&statements[0]),
+        };
+        match result {
             Ok(plan) => plan,
             Err(err) => {
                 let _ = sender.blocking_send(Err(err.into()));
@@ -740,14 +788,19 @@ fn stream_query_blocking<T>(
 
     let guard = catalog.read().expect("catalog lock poisoned");
     let policy = txn.memory_policy().cloned();
-    let mut iter =
-        match query::execute_query_streaming_with_policy(txn, &*guard, plan, policy.as_ref()) {
-            Ok(iter) => iter,
-            Err(err) => {
-                let _ = sender.blocking_send(Err(err));
-                return;
-            }
-        };
+    let mut iter = match query::execute_query_streaming_with_policy_and_copy_security(
+        txn,
+        &*guard,
+        plan,
+        policy.as_ref(),
+        read_security,
+    ) {
+        Ok(iter) => iter,
+        Err(err) => {
+            let _ = sender.blocking_send(Err(err));
+            return;
+        }
+    };
 
     let mut row_id = 0u64;
     loop {
