@@ -776,7 +776,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
-        self.execute_in_txn_with_hnsw_flush(plan, txn, true)
+        let flush_hnsw = txn.mode() != TxnMode::ReadOnly;
+        self.execute_in_txn_with_hnsw_flush(plan, txn, flush_hnsw)
     }
 
     /// Execute a bounded batch and finalize its HNSW changes before returning.

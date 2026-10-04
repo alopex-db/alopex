@@ -209,6 +209,15 @@ pub struct Database {
     pub(crate) store: Arc<AnyKV>,
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
+    pub(crate) hnsw_cache_epoch: AtomicU64,
+    pub(crate) hnsw_cache_gate: RwLock<()>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_after_executor_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_write_gate_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_write_gate_acquired:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
     /// Table info cache for scan/write operations.
     pub(crate) table_info_cache: RwLock<HashMap<String, CachedTableInfo>>,
@@ -425,6 +434,14 @@ impl Database {
             store,
             sql_catalog,
             hnsw_cache: RwLock::new(HashMap::new()),
+            hnsw_cache_epoch: AtomicU64::new(0),
+            hnsw_cache_gate: RwLock::new(()),
+            #[cfg(test)]
+            hnsw_cache_after_executor_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hnsw_cache_write_gate_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hnsw_cache_write_gate_acquired: std::sync::Mutex::new(None),
             vector_cache: RwLock::new(None),
             table_info_cache: RwLock::new(HashMap::new()),
             table_info_cache_epoch: AtomicU64::new(0),
@@ -487,6 +504,10 @@ impl Database {
     }
 
     fn hnsw_cache_get(&self, name: &str) -> Option<Arc<HnswIndex>> {
+        let _gate = self
+            .hnsw_cache_gate
+            .read()
+            .expect("hnsw cache gate lock poisoned");
         let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
         cache.get(name).cloned()
     }
@@ -498,9 +519,82 @@ impl Database {
         index
     }
 
-    fn hnsw_cache_remove(&self, name: &str) {
+    pub(crate) fn hnsw_cache_snapshot(&self) -> (u64, Vec<(String, HnswIndex)>) {
+        let epoch = self.hnsw_cache_epoch.load(Ordering::Acquire);
+        let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
+        let entries = cache
+            .iter()
+            .map(|(name, index)| (name.clone(), index.clone_for_read()))
+            .collect();
+        (epoch, entries)
+    }
+
+    pub(crate) fn hnsw_cache_insert_if_current(
+        &self,
+        epoch: u64,
+        entries: Vec<(String, HnswIndex)>,
+    ) {
+        if entries.is_empty() || self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
+            return;
+        }
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-        cache.remove(name);
+        if self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
+            return;
+        }
+        for (name, index) in entries {
+            cache.entry(name).or_insert_with(|| Arc::new(index));
+        }
+    }
+
+    pub(crate) fn commit_with_hnsw_cache_invalidation<T, E>(
+        &self,
+        commit: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        self.commit_with_hnsw_cache_update(commit, || {})
+    }
+
+    pub(crate) fn commit_with_hnsw_cache_update<T, E>(
+        &self,
+        commit: impl FnOnce() -> std::result::Result<T, E>,
+        update: impl FnOnce(),
+    ) -> std::result::Result<T, E> {
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .hnsw_cache_write_gate_barrier
+            .lock()
+            .expect("hnsw cache write gate barrier lock poisoned")
+            .clone()
+        {
+            barrier.wait();
+            barrier.wait();
+        }
+        let _gate = self
+            .hnsw_cache_gate
+            .write()
+            .expect("hnsw cache gate lock poisoned");
+        #[cfg(test)]
+        if let Some(sender) = self
+            .hnsw_cache_write_gate_acquired
+            .lock()
+            .expect("hnsw cache write gate acquired sender lock poisoned")
+            .clone()
+        {
+            sender
+                .send(())
+                .expect("hnsw cache write gate acquired receiver dropped");
+        }
+        let result = commit();
+        if result.is_ok() {
+            self.invalidate_hnsw_cache_while_write_locked();
+            update();
+        }
+        result
+    }
+
+    fn invalidate_hnsw_cache_while_write_locked(&self) {
+        self.hnsw_cache_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        cache.clear();
     }
 
     /// Returns the current table info cache epoch.
@@ -729,8 +823,12 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::create(name, config).map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        txn.commit_self().map_err(Error::Core)?;
-        self.hnsw_cache_insert(name, index);
+        self.commit_with_hnsw_cache_update(
+            || txn.commit_self().map_err(Error::Core),
+            || {
+                self.hnsw_cache_insert(name, index);
+            },
+        )?;
         Ok(())
     }
 
@@ -739,8 +837,7 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
-        txn.commit_self().map_err(Error::Core)?;
-        self.hnsw_cache_remove(name);
+        self.commit_with_hnsw_cache_invalidation(|| txn.commit_self().map_err(Error::Core))?;
         Ok(())
     }
 
@@ -749,10 +846,19 @@ impl Database {
         if let Some(index) = self.hnsw_cache_get(name) {
             return Ok(index.stats());
         }
-        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let (mut txn, epoch) = {
+            let _gate = self
+                .hnsw_cache_gate
+                .read()
+                .expect("hnsw cache gate lock poisoned");
+            (
+                self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?,
+                self.hnsw_cache_epoch.load(Ordering::Acquire),
+            )
+        };
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let stats = index.stats();
-        self.hnsw_cache_insert(name, index);
+        self.hnsw_cache_insert_if_current(epoch, vec![(name.to_string(), index)]);
         Ok(stats)
     }
 
@@ -762,8 +868,12 @@ impl Database {
         let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        txn.commit_self().map_err(Error::Core)?;
-        self.hnsw_cache_insert(name, index);
+        self.commit_with_hnsw_cache_update(
+            || txn.commit_self().map_err(Error::Core),
+            || {
+                self.hnsw_cache_insert(name, index);
+            },
+        )?;
         Ok(result)
     }
 
@@ -810,10 +920,21 @@ impl Database {
         } else {
             None
         };
-        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let (mut txn, epoch) = {
+            let _gate = self
+                .hnsw_cache_gate
+                .read()
+                .expect("hnsw cache gate lock poisoned");
+            (
+                self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?,
+                self.hnsw_cache_epoch.load(Ordering::Acquire),
+            )
+        };
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let load_time = load_start.map(|start| start.elapsed());
-        let index = self.hnsw_cache_insert(name, index);
+        let cached_index = index.clone_for_read();
+        self.hnsw_cache_insert_if_current(epoch, vec![(name.to_string(), cached_index)]);
+        let index = Arc::new(index);
         let search_start = if profile {
             Some(std::time::Instant::now())
         } else {
@@ -1493,25 +1614,28 @@ impl<'a> Transaction<'a> {
         }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-        txn.commit_self().map_err(Error::Core)?;
-        if !hnsw_indices.is_empty() {
-            let mut cache = self
-                .db
-                .hnsw_cache
-                .write()
-                .expect("hnsw cache lock poisoned");
-            for (name, (index, _state)) in hnsw_indices {
-                cache.insert(name, Arc::new(index));
-            }
-        }
-
-        // KV commit 成功後のみ、カタログにオーバーレイを適用する。
         let overlay = std::mem::take(&mut self.overlay);
         let catalog_modified = self.catalog_modified;
-        let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
-        catalog.apply_overlay(overlay);
-        drop(catalog); // Release lock before invalidating cache
-                       // Invalidate table info cache only if DDL operations were performed
+        self.db.commit_with_hnsw_cache_update(
+            || txn.commit_self().map_err(Error::Core),
+            || {
+                // KV commit 成功後のみ、カタログと対応するHNSW cacheを公開する。
+                let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
+                catalog.apply_overlay(overlay);
+                drop(catalog);
+                if !hnsw_indices.is_empty() {
+                    let mut cache = self
+                        .db
+                        .hnsw_cache
+                        .write()
+                        .expect("hnsw cache lock poisoned");
+                    for (name, (index, _state)) in hnsw_indices {
+                        cache.insert(name, Arc::new(index));
+                    }
+                }
+            },
+        )?;
+        // Invalidate table info cache only if DDL operations were performed.
         if catalog_modified {
             self.db.invalidate_table_info_cache();
         }

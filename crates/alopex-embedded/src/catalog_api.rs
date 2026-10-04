@@ -2449,14 +2449,15 @@ impl Database {
             delta.catalog_version.to_be_bytes().to_vec(),
         )
         .map_err(|error| error.to_string())?;
-        txn.commit_self().map_err(|error| error.to_string())?;
-        catalog.apply_overlay(overlay);
         drop(catalog);
+        self.commit_with_hnsw_cache_update(
+            || txn.commit_self().map_err(|error| error.to_string()),
+            || {
+                let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+                catalog.apply_overlay(overlay);
+            },
+        )?;
         self.invalidate_table_info_cache();
-        self.hnsw_cache
-            .write()
-            .map_err(|_| "HNSW cache lock poisoned".to_string())?
-            .clear();
         Ok(())
     }
 }

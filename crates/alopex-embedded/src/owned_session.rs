@@ -320,11 +320,26 @@ impl OwnedEmbeddedTransaction {
             .map_err(Error::Core)?;
         preparation?;
 
-        self.session.commit().map_err(Error::Core)?;
         let overlay = std::mem::take(&mut self.overlay);
-        let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
-        catalog.apply_overlay(overlay);
-        drop(catalog);
+        let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
+        self.db.commit_with_hnsw_cache_update(
+            || self.session.commit().map_err(Error::Core),
+            || {
+                let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
+                catalog.apply_overlay(overlay);
+                drop(catalog);
+                if !hnsw_indices.is_empty() {
+                    let mut cache = self
+                        .db
+                        .hnsw_cache
+                        .write()
+                        .expect("hnsw cache lock poisoned");
+                    for (name, (index, _)) in hnsw_indices {
+                        cache.insert(name, Arc::new(index));
+                    }
+                }
+            },
+        )?;
         if self.catalog_modified {
             self.db.invalidate_table_info_cache();
         }
@@ -335,17 +350,6 @@ impl OwnedEmbeddedTransaction {
                 .write()
                 .expect("vector cache lock poisoned");
             *cache = None;
-        }
-        if !self.hnsw_indices.is_empty() {
-            let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-            let mut cache = self
-                .db
-                .hnsw_cache
-                .write()
-                .expect("hnsw cache lock poisoned");
-            for (name, (index, _)) in hnsw_indices {
-                cache.insert(name, Arc::new(index));
-            }
         }
         Ok(())
     }
