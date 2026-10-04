@@ -108,6 +108,30 @@ jobs:
         run: bash scripts/test-nim-parser.sh --backend host
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  clippy-beta:
+    name: Clippy (beta)
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build Nim SQL parser library
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
+      - name: Run Nim SQL parser tests
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     needs: [scope]

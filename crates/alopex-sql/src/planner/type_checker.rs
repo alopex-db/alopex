@@ -1919,7 +1919,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn infer_like_type_with_scope(
         &self,
         expr: &Expr,
