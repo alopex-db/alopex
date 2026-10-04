@@ -9,6 +9,7 @@ use pyo3::IntoPyObjectExt;
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::sql::{self, PyPreparedBinding};
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
@@ -42,23 +43,6 @@ pub struct PyPreparedStatement {
     sql: String,
     bindings: Vec<Option<PyPreparedBinding>>,
     finalized: bool,
-}
-
-#[derive(Clone)]
-enum PyPreparedBinding {
-    Native(SqlValue),
-    Rendered(String),
-}
-
-fn native_binding(native: SqlValue) -> PyPreparedBinding {
-    PyPreparedBinding::Native(native)
-}
-
-fn render_prepared_binding(binding: PyPreparedBinding) -> alopex_embedded::Result<String> {
-    match binding {
-        PyPreparedBinding::Native(value) => alopex_embedded::render_prepared_parameter(&value),
-        PyPreparedBinding::Rendered(value) => Ok(value),
-    }
 }
 
 fn is_transaction_control_statement(sql: &str) -> bool {
@@ -186,7 +170,7 @@ impl PyPreparedStatement {
             .ok_or_else(|| {
                 error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
             })?;
-        *slot = Some(prepared_binding(&value, index - 1)?);
+        *slot = Some(sql::prepared_binding(&value, index - 1)?);
         Ok(())
     }
 
@@ -239,7 +223,7 @@ impl PyPreparedStatement {
         } else {
             let rendered = bindings
                 .into_iter()
-                .map(render_prepared_binding)
+                .map(sql::render_prepared_binding)
                 .collect::<alopex_embedded::Result<Vec<_>>>()
                 .map_err(error::embedded_err)?;
             let sql = crate::embedded::sql::bind_rendered_params(&sql, &rendered)?;
@@ -304,7 +288,7 @@ fn prepared_native_rows(
             values
                 .iter()
                 .enumerate()
-                .map(|(index, value)| match prepared_binding(value, index)? {
+                .map(|(index, value)| match sql::prepared_binding(value, index)? {
                     PyPreparedBinding::Native(native) => Ok(native),
                     PyPreparedBinding::Rendered(_) => {
                         Err(error::AlopexError::SqlParamUnsupportedType(format!(
@@ -315,102 +299,6 @@ fn prepared_native_rows(
                 })
                 .collect()
         })
-        .collect()
-}
-
-fn prepared_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<PyPreparedBinding> {
-    if value.is_none() {
-        return Ok(native_binding(SqlValue::Null));
-    }
-    if value.is_instance_of::<pyo3::types::PyBool>() {
-        return Ok(native_binding(SqlValue::Boolean(value.extract()?)));
-    }
-    if value.is_instance_of::<pyo3::types::PyInt>() {
-        let integer = value.extract::<i64>().map_err(|_| {
-            error::AlopexError::SqlParamInvalidValue(format!(
-                "params[{index}] の整数が 64bit 符号付き整数の範囲外です"
-            ))
-        })?;
-        return Ok(native_binding(
-            i32::try_from(integer)
-                .map(SqlValue::Integer)
-                .unwrap_or(SqlValue::BigInt(integer)),
-        ));
-    }
-    if value.is_instance_of::<pyo3::types::PyFloat>() {
-        let number = value.extract::<f64>()?;
-        if !number.is_finite() {
-            return Err(error::AlopexError::SqlParamInvalidValue(format!(
-                "params[{index}]: 有限でない浮動小数点値（{number}）は使用できません"
-            ))
-            .into());
-        }
-        return Ok(native_binding(SqlValue::Double(number)));
-    }
-    if value.is_instance_of::<pyo3::types::PyString>() {
-        let text = value.extract::<String>()?;
-        if text.contains('\0') {
-            return Err(error::AlopexError::SqlParamInvalidValue(format!(
-                "params[{index}]: NUL 文字を含む文字列は使用できません"
-            ))
-            .into());
-        }
-        return Ok(native_binding(SqlValue::Text(text)));
-    }
-    if value.is_instance_of::<PyBytes>() || value.is_instance_of::<pyo3::types::PyByteArray>() {
-        return Ok(PyPreparedBinding::Rendered(
-            crate::embedded::sql::render_param(value, index)?,
-        ));
-    }
-    if value.cast::<PyDict>().is_err() {
-        if let Ok(iter) = value.try_iter() {
-            let mut values = Vec::new();
-            for (position, item) in iter.enumerate() {
-                let value = item?.extract::<f64>().map_err(|_| {
-                    PyErr::from(error::AlopexError::SqlParamUnsupportedType(format!(
-                        "params[{index}][{position}] を数値へ変換できません"
-                    )))
-                })?;
-                if !value.is_finite() || !(value as f32).is_finite() {
-                    return Err(error::AlopexError::SqlParamInvalidValue(format!(
-                        "params[{index}][{position}] は有限の f32 である必要があります"
-                    ))
-                    .into());
-                }
-                values.push(value as f32);
-            }
-            if values.is_empty() {
-                return Err(error::AlopexError::SqlParamInvalidValue(format!(
-                    "params[{index}]: 空のベクトルリテラルは使用できません"
-                ))
-                .into());
-            }
-            return Ok(native_binding(SqlValue::Vector(values)));
-        }
-    }
-    Ok(PyPreparedBinding::Rendered(
-        crate::embedded::sql::render_param(value, index)?,
-    ))
-}
-
-fn prepared_bindings(params: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<PyPreparedBinding>> {
-    let Some(params) = params else {
-        return Ok(Vec::new());
-    };
-    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = params.cast::<PyList>() {
-        list.iter().collect()
-    } else if let Ok(tuple) = params.cast::<PyTuple>() {
-        tuple.iter().collect()
-    } else {
-        return Err(error::AlopexError::SqlParamUnsupportedType(
-            "params には list または tuple を指定してください".into(),
-        )
-        .into());
-    };
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, value)| prepared_binding(value, index))
         .collect()
 }
 
@@ -561,7 +449,8 @@ impl PyDatabase {
         params: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.ensure_open()?;
-        let bindings = prepared_bindings(params.as_ref())?;
+        sql::validate_sql_input(sql)?;
+        let bindings = sql::prepared_bindings(params.as_ref())?;
         crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         if is_transaction_control_statement(sql) {
             return Err(error::to_py_err(
@@ -593,7 +482,7 @@ impl PyDatabase {
         } else {
             let rendered = bindings
                 .into_iter()
-                .map(render_prepared_binding)
+                .map(sql::render_prepared_binding)
                 .collect::<alopex_embedded::Result<Vec<_>>>()
                 .map_err(error::embedded_err)?;
             let bound_sql = crate::embedded::sql::bind_rendered_params(sql, &rendered)?;

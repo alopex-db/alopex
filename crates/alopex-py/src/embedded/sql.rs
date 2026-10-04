@@ -20,6 +20,129 @@ use alopex_sql::ExecutionResult;
 
 use crate::error::AlopexError;
 
+/// One Python binding after classifying whether it can use the native
+/// prepared-statement transport or needs the SQL-literal compatibility path.
+#[derive(Clone)]
+pub(crate) enum PyPreparedBinding {
+    Native(SqlValue),
+    Rendered(String),
+}
+
+fn native_binding(native: SqlValue) -> PyPreparedBinding {
+    PyPreparedBinding::Native(native)
+}
+
+pub(crate) fn render_prepared_binding(
+    binding: PyPreparedBinding,
+) -> alopex_embedded::Result<String> {
+    match binding {
+        PyPreparedBinding::Native(value) => alopex_embedded::render_prepared_parameter(&value),
+        PyPreparedBinding::Rendered(value) => Ok(value),
+    }
+}
+
+/// Convert Python parameter values once for every embedded SQL execution surface.
+///
+/// Database and explicit-transaction execution share this owner so a binding
+/// classified as native never falls back to SQL text materialization merely
+/// because a transaction is active.
+pub(crate) fn prepared_bindings(
+    params: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PyPreparedBinding>> {
+    let Some(params) = params else {
+        return Ok(Vec::new());
+    };
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = params.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = params.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Err(AlopexError::SqlParamUnsupportedType(
+            "params には list または tuple を指定してください".into(),
+        )
+        .into());
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, value)| prepared_binding(value, index))
+        .collect()
+}
+
+pub(crate) fn prepared_binding(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+) -> PyResult<PyPreparedBinding> {
+    if value.is_none() {
+        return Ok(native_binding(SqlValue::Null));
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Ok(native_binding(SqlValue::Boolean(value.extract()?)));
+    }
+    if value.is_instance_of::<PyInt>() {
+        let integer = value.extract::<i64>().map_err(|_| {
+            AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}] の整数が 64bit 符号付き整数の範囲外です"
+            ))
+        })?;
+        return Ok(native_binding(
+            i32::try_from(integer)
+                .map(SqlValue::Integer)
+                .unwrap_or(SqlValue::BigInt(integer)),
+        ));
+    }
+    if value.is_instance_of::<PyFloat>() {
+        let number = value.extract::<f64>()?;
+        if !number.is_finite() {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: 有限でない浮動小数点値（{number}）は使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Double(number)));
+    }
+    if value.is_instance_of::<PyString>() {
+        let text = value.extract::<String>()?;
+        if text.contains('\0') {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: NUL 文字を含む文字列は使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Text(text)));
+    }
+    if value.is_instance_of::<PyBytes>() || value.is_instance_of::<PyByteArray>() {
+        return Ok(PyPreparedBinding::Rendered(render_param(value, index)?));
+    }
+    if value.cast::<PyDict>().is_err() {
+        if let Ok(iter) = value.try_iter() {
+            let mut values = Vec::new();
+            for (position, item) in iter.enumerate() {
+                let value = item?.extract::<f64>().map_err(|_| {
+                    PyErr::from(AlopexError::SqlParamUnsupportedType(format!(
+                        "params[{index}][{position}] を数値へ変換できません"
+                    )))
+                })?;
+                if !value.is_finite() || !(value as f32).is_finite() {
+                    return Err(AlopexError::SqlParamInvalidValue(format!(
+                        "params[{index}][{position}] は有限の f32 である必要があります"
+                    ))
+                    .into());
+                }
+                values.push(value as f32);
+            }
+            if values.is_empty() {
+                return Err(AlopexError::SqlParamInvalidValue(format!(
+                    "params[{index}]: 空のベクトルリテラルは使用できません"
+                ))
+                .into());
+            }
+            return Ok(native_binding(SqlValue::Vector(values)));
+        }
+    }
+    Ok(PyPreparedBinding::Rendered(render_param(value, index)?))
+}
+
 /// `?` プレースホルダへ params をエスケープ展開した SQL を返す。
 ///
 /// - `params` は list / tuple のみ受け付ける（str などのシーケンスは拒否）。
@@ -28,6 +151,13 @@ use crate::error::AlopexError;
 /// - プレースホルダ数とパラメータ数の不一致は `ValueError`。
 /// - NUL 文字を含む SQL / 文字列パラメータは `ValueError`（FFI 境界の制約）。
 pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
+    validate_sql_input(sql)?;
+    let rendered = render_params(params)?;
+    bind_rendered_params(sql, &rendered)
+}
+
+/// Validate the SQL text before either native or rendered parameter execution.
+pub(crate) fn validate_sql_input(sql: &str) -> PyResult<()> {
     // Nim FFI 境界（nim_ffi.rs）は CString を使うため、NUL を含む SQL は panic になる。
     // ここで明示的に ValueError として拒否する。
     if sql.contains('\0') {
@@ -36,8 +166,7 @@ pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyRes
         )
         .into());
     }
-    let rendered = render_params(params)?;
-    bind_rendered_params(sql, &rendered)
+    Ok(())
 }
 
 pub(crate) fn bind_rendered_params(sql: &str, rendered: &[String]) -> PyResult<String> {
