@@ -1,4 +1,5 @@
 use crate::vector::hnsw::HnswGraph;
+use crate::vector::hnsw::MAX_HNSW_EF_SEARCH;
 use crate::vector::Metric;
 
 fn base_config() -> crate::vector::hnsw::HnswConfig {
@@ -178,6 +179,27 @@ fn ef_search_is_auto_corrected() {
     let (results, _stats) = graph.search(&[0.0, 0.0], 3, 1).unwrap();
     // ef_search=1 でも k=3 に補正されるので 3 件返る
     assert_eq!(results.len(), 3);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn maximum_ef_search_is_clamped_to_active_node_count() {
+    let mut graph = make_graph();
+    for (key, vector) in [
+        (&b"a"[..], &[0.0, 0.0][..]),
+        (&b"b"[..], &[1.0, 0.0][..]),
+        (&b"c"[..], &[2.0, 0.0][..]),
+    ] {
+        graph.insert(key, vector, b"").unwrap();
+    }
+
+    let active_count = usize::try_from(graph.active_count).unwrap();
+    let (results, stats) = graph.search(&[0.0, 0.0], 1, MAX_HNSW_EF_SEARCH).unwrap();
+
+    assert_eq!(active_count, 3);
+    assert_eq!(stats.effective_ef_search, active_count);
+    assert!(stats.effective_ef_search <= active_count);
+    assert_eq!(results.len(), 1);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
