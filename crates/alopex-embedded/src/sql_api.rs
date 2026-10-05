@@ -1192,6 +1192,60 @@ mod tests {
     }
 
     #[test]
+    fn auto_commit_hnsw_read_reports_writer_gate_wait() {
+        let (db, _, query, _) = hnsw_cache_test_fixture();
+        let db = Arc::new(db);
+        db.execute_sql("CREATE TABLE writes (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        db.execute_sql(&query).unwrap();
+
+        let after_executor_barrier = Arc::new(Barrier::new(2));
+        let write_gate_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() =
+            Some(Arc::clone(&after_executor_barrier));
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
+        let (write_gate_wait_tx, write_gate_wait_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_wait.lock().unwrap() = Some(write_gate_wait_tx);
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+        let (write_done_tx, write_done_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let reader_db = Arc::clone(&db);
+            scope.spawn(move || {
+                reader_db.execute_sql(&query).unwrap();
+                read_done_tx.send(()).unwrap();
+            });
+            after_executor_barrier.wait();
+
+            let writer_db = Arc::clone(&db);
+            scope.spawn(move || {
+                writer_db
+                    .execute_sql("INSERT INTO writes (id) VALUES (1);")
+                    .unwrap();
+                write_done_tx.send(()).unwrap();
+            });
+            write_gate_barrier.wait();
+            write_gate_barrier.wait();
+            assert!(
+                matches!(
+                    write_gate_wait_rx.recv_timeout(Duration::from_millis(250)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "writer must not acquire the gate while the auto-commit HNSW read is in flight"
+            );
+            after_executor_barrier.wait();
+            read_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            write_gate_wait_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            write_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_wait.lock().unwrap() = None;
+    }
+
+    #[test]
     fn failed_commit_does_not_publish_hnsw_cache_state() {
         let (db, _, query, _) = hnsw_cache_test_fixture();
         db.execute_sql(&query).unwrap();
