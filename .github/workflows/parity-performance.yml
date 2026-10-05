@@ -154,10 +154,14 @@ jobs:
             --output performance-artifacts/measurements.json
       - name: Verify SQL HNSW cost regression
         id: sql_knn_cost
+        env:
+          ALOPEX_KNN_COST_RAW_NDJSON: performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
+          ALOPEX_KNN_COST_SOURCE_COMMIT: ${{ github.sha }}
+          ALOPEX_KNN_COST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -o pipefail
           taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test knn_index_cost \
-            sql_knn_hnsw_cost_does_not_track_table_rows -- --ignored --exact --nocapture \
+            sql_knn_hnsw_cost_process_separated_evidence -- --ignored --exact --nocapture \
             2>&1 | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
       - name: Verify prepared batch throughput
         id: prepared_batch_throughput
