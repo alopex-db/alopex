@@ -1206,6 +1206,8 @@ mod tests {
         *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
         let (write_gate_wait_tx, write_gate_wait_rx) = mpsc::channel();
         *db.hnsw_cache_write_gate_wait.lock().unwrap() = Some(write_gate_wait_tx);
+        let (write_gate_wait_started_tx, write_gate_wait_started_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_wait_started.lock().unwrap() = Some(write_gate_wait_started_tx);
         let (read_done_tx, read_done_rx) = mpsc::channel();
         let (write_done_tx, write_done_rx) = mpsc::channel();
 
@@ -1226,23 +1228,33 @@ mod tests {
             });
             write_gate_barrier.wait();
             write_gate_barrier.wait();
-            assert!(
-                matches!(
-                    write_gate_wait_rx.recv_timeout(Duration::from_millis(250)),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                ),
-                "writer must not acquire the gate while the auto-commit HNSW read is in flight"
+            let writer_reached_gate_request =
+                write_gate_wait_started_rx.recv_timeout(Duration::from_secs(1));
+            let writer_blocked = matches!(
+                write_gate_wait_rx.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
             );
             after_executor_barrier.wait();
             read_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            write_gate_wait_rx
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap();
+            let wait = write_gate_wait_rx.recv_timeout(Duration::from_secs(1));
             write_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                writer_reached_gate_request.is_ok(),
+                "writer must reach the measured gate request before the read is released"
+            );
+            assert!(
+                writer_blocked,
+                "writer must not acquire the gate while the auto-commit HNSW read is in flight"
+            );
+            assert!(
+                wait.unwrap() >= Duration::from_millis(250),
+                "writer gate wait must cover the reader-held interval"
+            );
         });
         *db.hnsw_cache_after_executor_barrier.lock().unwrap() = None;
         *db.hnsw_cache_write_gate_barrier.lock().unwrap() = None;
         *db.hnsw_cache_write_gate_wait.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_wait_started.lock().unwrap() = None;
     }
 
     #[test]

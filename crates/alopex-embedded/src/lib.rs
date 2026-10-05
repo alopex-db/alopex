@@ -221,6 +221,9 @@ pub struct Database {
     #[cfg(test)]
     pub(crate) hnsw_cache_write_gate_wait:
         std::sync::Mutex<Option<std::sync::mpsc::Sender<std::time::Duration>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_write_gate_wait_started:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
     /// Table info cache for scan/write operations.
     pub(crate) table_info_cache: RwLock<HashMap<String, CachedTableInfo>>,
@@ -447,6 +450,8 @@ impl Database {
             hnsw_cache_write_gate_acquired: std::sync::Mutex::new(None),
             #[cfg(test)]
             hnsw_cache_write_gate_wait: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hnsw_cache_write_gate_wait_started: std::sync::Mutex::new(None),
             vector_cache: RwLock::new(None),
             table_info_cache: RwLock::new(HashMap::new()),
             table_info_cache_epoch: AtomicU64::new(0),
@@ -579,6 +584,18 @@ impl Database {
             .lock()
             .expect("hnsw cache write gate wait sender lock poisoned")
             .clone();
+        #[cfg(test)]
+        let write_gate_wait_started_sender = self
+            .hnsw_cache_write_gate_wait_started
+            .lock()
+            .expect("hnsw cache write gate wait started sender lock poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(sender) = write_gate_wait_started_sender {
+            sender
+                .send(())
+                .expect("hnsw cache write gate wait started receiver dropped");
+        }
         #[cfg(test)]
         let write_gate_wait_start = write_gate_wait_sender
             .as_ref()
