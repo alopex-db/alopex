@@ -156,7 +156,7 @@ main() {
     run_step "DataFrame: stability bench gate" \
         cargo test -p alopex-core --test dataframe_stability_bench
     run_step "Compatibility: format compatibility tests" \
-        cargo test -p alopex-core --tests format_compatibility_test
+        cargo test -p alopex-core --test format_compatibility_test --features lane_ci
     run_step "Bench: embedded compaction latency <=25%" \
         cargo test -p alopex-core --features lane_perf --test embedded_compaction_latency
 
