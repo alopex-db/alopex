@@ -3,7 +3,7 @@ use crate::ast::ddl::{
     TableConstraint,
 };
 use crate::ast::dml::{
-    CopySource, FromItem, InsertSource, MergeAction, OnConflictAction, QueryBody, Select,
+    CopySource, FromItem, InsertSource, JoinType, MergeAction, OnConflictAction, QueryBody, Select,
     SelectItem, SetOperation, SetOperator, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, WindowSpec};
@@ -247,7 +247,7 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
 
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {
     ensure_linked_parser_contract(&nim_ffi::parser_contract_version())?;
-    let natural_join_markers = natural_join_markers(sql);
+    let natural_join_markers = natural_join_markers(sql)?;
     let normalized_sql = normalize_identifier_case(sql);
     let result = nim_ffi::parse_sql(&normalized_sql).map_err(parser_error_from_ffi_input)?;
     match result.kind {
@@ -911,13 +911,17 @@ fn normalize_identifier_case(sql: &str) -> String {
     normalized
 }
 
-fn natural_join_markers(sql: &str) -> Vec<bool> {
+fn natural_join_markers(sql: &str) -> Result<Vec<bool>> {
     let mut markers = Vec::new();
     let mut saw_natural = false;
+    let mut saw_cross = false;
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' | '"' => skip_quoted(&mut chars, ch),
+            '\'' | '"' => {
+                skip_quoted(&mut chars, ch);
+                saw_cross = false;
+            }
             '-' if chars.peek() == Some(&'-') => {
                 chars.next();
                 for comment_ch in chars.by_ref() {
@@ -936,7 +940,10 @@ fn natural_join_markers(sql: &str) -> Vec<bool> {
                     previous = comment_ch;
                 }
             }
-            ';' => saw_natural = false,
+            ';' => {
+                saw_natural = false;
+                saw_cross = false;
+            }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut word = String::from(c);
                 while chars
@@ -947,17 +954,32 @@ fn natural_join_markers(sql: &str) -> Vec<bool> {
                 }
                 match word.to_ascii_lowercase().as_str() {
                     "natural" => saw_natural = true,
+                    "cross" => saw_cross = true,
                     "join" => {
-                        markers.push(saw_natural);
+                        if saw_cross && saw_natural {
+                            return Err(ParserError::UnexpectedToken {
+                                line: 0,
+                                column: 0,
+                                expected: "NATURAL INNER, LEFT, RIGHT, or FULL JOIN".into(),
+                                found: "NATURAL CROSS JOIN".into(),
+                            });
+                        }
+                        // Both comma and explicit CROSS joins become Cross
+                        // AST nodes; neither carries a NATURAL annotation.
+                        if !saw_cross {
+                            markers.push(saw_natural);
+                        }
                         saw_natural = false;
+                        saw_cross = false;
                     }
-                    _ => {}
+                    _ => saw_cross = false,
                 }
             }
-            _ => {}
+            c if c.is_whitespace() => {}
+            _ => saw_cross = false,
         }
     }
-    markers
+    Ok(markers)
 }
 
 fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char) {
@@ -990,8 +1012,8 @@ fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<boo
         return Err(ParserError::UnexpectedToken {
             line: 0,
             column: 0,
-            expected: format!("{supplied} NATURAL join markers, one per join"),
-            found: format!("{consumed} joins in the AST"),
+            expected: format!("{supplied} NATURAL join markers, one per non-CROSS join"),
+            found: format!("{consumed} non-CROSS joins in the AST"),
         });
     }
     Ok(())
@@ -1278,13 +1300,16 @@ fn annotate_from_natural_joins(
             right,
             natural,
             condition,
+            join_type,
             ..
         } => {
             annotate_from_natural_joins(left, natural_markers, consumed);
-            if let Some(marker) = natural_markers.next() {
-                *natural |= marker;
+            if *join_type != JoinType::Cross {
+                if let Some(marker) = natural_markers.next() {
+                    *natural |= marker;
+                }
+                *consumed += 1;
             }
-            *consumed += 1;
             annotate_from_natural_joins(right, natural_markers, consumed);
             if let Some(condition) = condition {
                 annotate_expr_natural_joins(condition, natural_markers, consumed);

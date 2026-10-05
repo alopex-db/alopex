@@ -9,6 +9,93 @@ fn assert_join_natural(from: &FromItem, expected: bool) {
 }
 
 #[test]
+fn comma_and_cross_table_function_joins_do_not_consume_nested_natural_markers() {
+    let parsed = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT p.id, u.unnest FROM lat_parent AS p, UNNEST(p.emb) AS u ORDER BY p.id, u.unnest",
+    )
+    .unwrap();
+    let StatementKind::Select(select) = &parsed[0].kind else {
+        panic!("expected SELECT")
+    };
+    assert_join_natural(&select.from[0], false);
+    for separator in [",", "CROSS JOIN"] {
+        let parsed = Parser::parse_sql(
+            &AlopexDialect,
+            &format!(
+                "SELECT * FROM a {separator} (SELECT * FROM b NATURAL JOIN c) q;
+             SELECT * FROM d NATURAL JOIN e"
+            ),
+        )
+        .unwrap();
+        let StatementKind::Select(select) = &parsed[0].kind else {
+            panic!("expected SELECT")
+        };
+        assert_join_natural(&select.from[0], false);
+        let FromItem::Join { right, .. } = &select.from[0] else {
+            panic!("expected JOIN")
+        };
+        let FromItem::Derived { subquery, .. } = right.as_ref() else {
+            panic!("expected derived")
+        };
+        let QueryBody::Select(inner) = subquery.as_ref() else {
+            panic!("expected inner SELECT")
+        };
+        assert_join_natural(&inner.from[0], true);
+        let StatementKind::Select(next) = &parsed[1].kind else {
+            panic!("expected next SELECT")
+        };
+        assert_join_natural(&next.from[0], true);
+    }
+}
+
+#[test]
+fn cross_join_markers_preserve_both_children_and_ignore_quoted_keywords() {
+    for separator in [",", "CROSS /* JOIN NATURAL */ JOIN"] {
+        let parsed = Parser::parse_sql(
+            &AlopexDialect,
+            &format!(
+                "SELECT 'CROSS JOIN NATURAL' FROM (SELECT * FROM a NATURAL JOIN b) l
+             {separator} (SELECT * FROM c JOIN d USING (id)) r"
+            ),
+        )
+        .unwrap();
+        let StatementKind::Select(select) = &parsed[0].kind else {
+            panic!("expected SELECT")
+        };
+        assert_join_natural(&select.from[0], false);
+        let FromItem::Join { left, right, .. } = &select.from[0] else {
+            panic!("expected JOIN")
+        };
+        for (child, natural) in [(left, true), (right, false)] {
+            let FromItem::Derived { subquery, .. } = child.as_ref() else {
+                panic!("expected derived")
+            };
+            let QueryBody::Select(inner) = subquery.as_ref() else {
+                panic!("expected SELECT")
+            };
+            assert_join_natural(&inner.from[0], natural);
+        }
+    }
+    let parsed = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT * FROM a AS \"cross\" JOIN b USING (id)",
+    )
+    .unwrap();
+    let StatementKind::Select(select) = &parsed[0].kind else {
+        panic!("expected SELECT")
+    };
+    assert_join_natural(&select.from[0], false);
+}
+
+#[test]
+fn natural_cross_join_is_rejected_instead_of_losing_its_annotation() {
+    let error =
+        Parser::parse_sql(&AlopexDialect, "SELECT * FROM a NATURAL CROSS JOIN b").unwrap_err();
+    assert!(error.to_string().contains("NATURAL CROSS JOIN"), "{error}");
+}
+
+#[test]
 fn ctas_query_preserves_nested_join_markers_across_explain_and_statements() {
     for prefix in ["EXPLAIN", "EXPLAIN ANALYZE"] {
         let parsed = Parser::parse_sql(
