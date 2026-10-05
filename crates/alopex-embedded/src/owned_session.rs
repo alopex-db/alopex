@@ -4,7 +4,7 @@
 //! separate boundary used by Python and asynchronous stream work: it clones the database's
 //! storage `Arc` and returns only core-owned session state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{
@@ -141,6 +141,7 @@ struct OwnedEmbeddedSavepoint {
     vector_cache_invalidated: bool,
     vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
+    hnsw_index_names: HashSet<String>,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -207,6 +208,7 @@ impl OwnedEmbeddedTransaction {
         if self.failed {
             return Err(Error::TxnFailed);
         }
+        self.stage_hnsw_changes()?;
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -216,6 +218,7 @@ impl OwnedEmbeddedTransaction {
             vector_cache_invalidated: self.vector_cache_invalidated,
             vector_index: self.vector_index.clone(),
             vector_index_dirty: self.vector_index_dirty,
+            hnsw_index_names: self.hnsw_indices.keys().cloned().collect(),
         });
         Ok(())
     }
@@ -224,6 +227,7 @@ impl OwnedEmbeddedTransaction {
     pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
         let position = self.savepoint_position(name)?;
         let savepoint = &self.savepoints[position];
+        let hnsw_index_names = savepoint.hnsw_index_names.clone();
         self.session
             .rollback_to_savepoint(savepoint.core_id)
             .map_err(Error::Core)?;
@@ -232,6 +236,7 @@ impl OwnedEmbeddedTransaction {
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
         self.vector_index = savepoint.vector_index.clone();
         self.vector_index_dirty = savepoint.vector_index_dirty;
+        self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
         self.failed = false;
         self.savepoints.truncate(position + 1);
         Ok(())
@@ -255,6 +260,65 @@ impl OwnedEmbeddedTransaction {
             .iter()
             .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| Error::SavepointNotFound(name.to_owned()))
+    }
+
+    /// Make direct HNSW changes visible to SQL and discard the superseded graph.
+    pub(crate) fn stage_hnsw_before_sql(&mut self) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
+        if !self.hnsw_indices.is_empty() {
+            if let Err(error) = self.stage_hnsw_changes() {
+                self.failed = true;
+                return Err(error);
+            }
+            // SQL owns its own graph and may update or drop an index. The next
+            // direct HNSW operation must reload the transaction's current KV state.
+            self.hnsw_indices.clear();
+        }
+        Ok(())
+    }
+
+    /// Stage direct HNSW changes before capturing the core transaction savepoint.
+    fn stage_hnsw_changes(&mut self) -> Result<()> {
+        let mut preparation = Ok(());
+        self.session
+            .with_transaction(|transaction| {
+                let mut transaction = alopex_core::kv::any::AnyKVTransaction::Owned(
+                    OwnedKVTransactionAdapter::new(transaction),
+                );
+                for (index, state) in self.hnsw_indices.values_mut() {
+                    if preparation.is_ok() {
+                        preparation = index
+                            .commit_staged(&mut transaction, state)
+                            .map_err(Error::Core);
+                    }
+                }
+                Ok(())
+            })
+            .map_err(Error::Core)?;
+        preparation
+    }
+
+    /// Restore direct HNSW state to the set present when the savepoint was created.
+    fn rollback_hnsw_to_savepoint(&mut self, retained: &HashSet<String>) -> Result<()> {
+        // A newer savepoint stages HNSW changes and clears their undo snapshot.
+        // The core transaction has already rolled back to the requested point;
+        // reload that version instead of using the latest graph's undo state.
+        let restored = self
+            .session
+            .with_transaction(|transaction| {
+                let mut transaction = OwnedKVTransactionAdapter::new(transaction);
+                let mut restored = HashMap::with_capacity(retained.len());
+                for name in retained {
+                    let index = HnswIndex::load(name, &mut transaction)?;
+                    restored.insert(name.clone(), (index, HnswTransactionState::default()));
+                }
+                Ok(restored)
+            })
+            .map_err(Error::Core)?;
+        self.hnsw_indices = restored;
+        Ok(())
     }
 
     /// Preflight a streamable local SELECT against this transaction's catalog overlay.
@@ -372,7 +436,57 @@ mod tests {
     use alopex_core::kv::OwnedReadOptions;
     use alopex_core::txn::OwnedLeaseOutcome;
     use alopex_core::TxnMode;
+    use alopex_core::{HnswConfig, Metric};
     use std::sync::Arc;
+
+    #[test]
+    fn owned_prepared_many_after_direct_hnsw_noop_uses_latest_vector() {
+        use alopex_sql::storage::SqlValue;
+        use alopex_sql::{AlopexDialect, ExecutionResult, Parser};
+
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));
+             INSERT INTO items VALUES (1, [0.0, 0.0]);
+             CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+        )
+        .unwrap();
+        let index_name = "idx_items_embedding";
+        let (before, _) = db.search_hnsw(index_name, &[0.0, 0.0], 1, Some(8)).unwrap();
+        assert_eq!(before.len(), 1);
+        let key = before[0].key.clone();
+        let metadata = before[0].metadata.clone();
+        let mut transaction = Arc::clone(&db)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw(index_name, &key, &[0.0, 0.0], &metadata)
+            .unwrap();
+        let statement = Parser::parse_sql(
+            &AlopexDialect,
+            "UPDATE items SET embedding = [9.0, 0.0] WHERE id = 1",
+        )
+        .unwrap()
+        .remove(0);
+        let results = transaction
+            .execute_prepared_many(&statement, [Vec::<SqlValue>::new()], |_| Ok(()))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        transaction.commit().unwrap();
+
+        let ExecutionResult::Query(result) = db
+            .execute_sql("SELECT embedding FROM items WHERE id = 1")
+            .unwrap()
+        else {
+            panic!("expected SQL query result");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Vector(vec![9.0, 0.0])]]);
+        let (after, _) = db.search_hnsw(index_name, &[9.0, 0.0], 1, Some(8)).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].key, key);
+        assert_eq!(after[0].metadata, metadata);
+        assert_eq!(after[0].distance, 0.0);
+    }
 
     #[test]
     fn embedded_factory_uses_owned_lifecycle_without_changing_borrowed_transactions() {
@@ -499,5 +613,100 @@ mod tests {
             Some(vec![0.0, 1.0])
         );
         reader.rollback().unwrap();
+    }
+
+    #[test]
+    fn owned_embedded_nested_savepoint_rollback_discards_staged_hnsw_mutations() {
+        for fail_sql in [false, true] {
+            let database = Arc::new(Database::new());
+            database
+                .create_hnsw_index(
+                    "vec_idx",
+                    HnswConfig::default()
+                        .with_dimension(2)
+                        .with_metric(Metric::L2),
+                )
+                .unwrap();
+
+            let mut transaction = Arc::clone(&database)
+                .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                .unwrap();
+            transaction
+                .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+                .unwrap();
+            transaction.create_savepoint("s1").unwrap();
+            transaction
+                .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+                .unwrap();
+            // Capturing s2 stages the HNSW delta into the core transaction. An
+            // older savepoint must still restore the graph that existed at s1.
+            if fail_sql {
+                // Planning fails after the direct graph has been staged and cleared.
+                assert!(transaction
+                    .execute_sql("SELECT * FROM missing_table")
+                    .is_err());
+                assert!(matches!(transaction.commit(), Err(Error::TxnFailed)));
+            } else {
+                transaction.create_savepoint("s2").unwrap();
+            }
+            transaction.rollback_to_savepoint("s1").unwrap();
+            transaction.commit().unwrap();
+
+            let (results, _) = database
+                .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+                .unwrap();
+            let mut keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+            keys.sort();
+            assert_eq!(keys, vec![b"keep".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn owned_embedded_savepoint_rollback_discards_hnsw_mutations() {
+        let database = Arc::new(Database::new());
+        let config = HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(Metric::L2);
+        database
+            .create_hnsw_index("vec_idx", config.clone())
+            .unwrap();
+        database.create_hnsw_index("post_idx", config).unwrap();
+
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("before_hnsw").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        transaction
+            .upsert_to_hnsw_batch(
+                "vec_idx",
+                &[b"discard_batch".to_vec()],
+                &[&[2.0, 0.0]],
+                None,
+            )
+            .unwrap();
+        assert!(transaction.delete_from_hnsw("vec_idx", b"keep").unwrap());
+        transaction
+            .upsert_to_hnsw("post_idx", b"post_discard", &[3.0, 0.0], b"")
+            .unwrap();
+        transaction.rollback_to_savepoint("before_hnsw").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let mut keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        keys.sort();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+
+        let (post_results, _) = database
+            .search_hnsw("post_idx", &[3.0, 0.0], 10, Some(10))
+            .unwrap();
+        assert!(post_results.is_empty());
     }
 }

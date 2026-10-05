@@ -14,6 +14,92 @@ fn config() -> HnswConfig {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn owned_direct_hnsw_update_then_sql_read_invalidates_shared_cache() {
+    use alopex_sql::storage::SqlValue;
+    use alopex_sql::ExecutionResult;
+
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.create_hnsw_index("vec_idx", config()).unwrap();
+    let mut seed = db.begin(TxnMode::ReadWrite).unwrap();
+    seed.upsert_to_hnsw("vec_idx", b"key", &[0.0, 0.0], b"metadata")
+        .unwrap();
+    seed.commit().unwrap();
+    let (before, _) = db.search_hnsw("vec_idx", &[0.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(before[0].distance, 0.0);
+
+    let mut transaction = Arc::clone(&db)
+        .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+        .unwrap();
+    transaction
+        .upsert_to_hnsw("vec_idx", b"key", &[9.0, 0.0], b"metadata")
+        .unwrap();
+    let ExecutionResult::Query(result) = transaction.execute_sql("SELECT 1").unwrap() else {
+        panic!("expected SQL query result");
+    };
+    assert_eq!(result.rows, vec![vec![SqlValue::Integer(1)]]);
+    transaction.commit().unwrap();
+
+    let (after, _) = db.search_hnsw("vec_idx", &[9.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].key, b"key");
+    assert_eq!(after[0].metadata, b"metadata");
+    assert_eq!(after[0].distance, 0.0);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn owned_sql_update_after_direct_hnsw_noop_uses_latest_vector() {
+    use alopex_sql::storage::SqlValue;
+    use alopex_sql::ExecutionResult;
+
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));
+         INSERT INTO items VALUES (1, [0.0, 0.0]);
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    )
+    .unwrap();
+
+    // Use the name declared in SQL and resolve the opaque key through the public
+    // search API. The direct
+    // upsert preserves the vector and metadata, so only SQL changes the value.
+    let index_name = "idx_items_embedding";
+    let (before, _) = db.search_hnsw(index_name, &[0.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].distance, 0.0);
+    let key = before[0].key.clone();
+    let metadata = before[0].metadata.clone();
+
+    let mut transaction = Arc::clone(&db)
+        .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+        .unwrap();
+    transaction
+        .upsert_to_hnsw(index_name, &key, &[0.0, 0.0], &metadata)
+        .unwrap();
+    transaction
+        .execute_sql("UPDATE items SET embedding = [9.0, 0.0] WHERE id = 1")
+        .unwrap();
+    transaction.commit().unwrap();
+
+    let ExecutionResult::Query(result) = db
+        .execute_sql("SELECT embedding FROM items WHERE id = 1")
+        .unwrap()
+    else {
+        panic!("expected SQL query result");
+    };
+    assert_eq!(result.rows, vec![vec![SqlValue::Vector(vec![9.0, 0.0])]]);
+    let (after, _) = db.search_hnsw(index_name, &[9.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].key, key);
+    assert_eq!(after[0].metadata, metadata);
+    assert_eq!(
+        after[0].distance, 0.0,
+        "HNSW must reflect the later SQL update"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn hnsw_lifecycle_via_embedded_api() {
     let db = Database::new();
     db.create_hnsw_index("vec_idx", config()).unwrap();
