@@ -282,13 +282,17 @@ mod tests {
 
     #[test]
     fn evaluate_function_type_mismatch_first_argument() {
-        let col = TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty());
+        let col = TypedExpr::literal(
+            Literal::Number("1".into()),
+            ResolvedType::Integer,
+            Span::empty(),
+        );
         let args = vec![
             col,
             make_vector_literal(vec![1.0, 2.0]),
             make_metric_expr("cosine"),
         ];
-        let row = vec![SqlValue::Null];
+        let row = vec![];
         let ctx = EvalContext::new(&row);
 
         let err =
@@ -296,6 +300,40 @@ mod tests {
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(VectorError::TypeMismatch)) => {}
             other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_vector_functions_propagate_null_arguments() {
+        let row = vec![];
+        let ctx = EvalContext::new(&row);
+        for function in ["vector_dims", "vector_norm"] {
+            let args = vec![TypedExpr::literal(
+                Literal::Null,
+                ResolvedType::Null,
+                Span::empty(),
+            )];
+            assert_eq!(
+                evaluate_function_call(function, &args, false, false, &ctx).unwrap(),
+                SqlValue::Null,
+                "{function}",
+            );
+        }
+        for function in ["vector_distance", "vector_similarity"] {
+            for null_argument in 0..3 {
+                let mut args = vec![
+                    make_vector_literal(vec![1.0, 0.0]),
+                    make_vector_literal(vec![0.0, 1.0]),
+                    make_metric_expr("cosine"),
+                ];
+                args[null_argument] =
+                    TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty());
+                assert_eq!(
+                    evaluate_function_call(function, &args, false, false, &ctx).unwrap(),
+                    SqlValue::Null,
+                    "{function}, NULL argument {null_argument}",
+                );
+            }
         }
     }
 
@@ -316,6 +354,75 @@ mod tests {
                 VectorError::InvalidVectorLiteral { reason },
             )) => assert!(reason.contains("empty")),
             other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_null_literals_propagate_through_sql_planning_and_execution() {
+        use std::sync::{Arc, RwLock};
+
+        use alopex_core::kv::memory::MemoryKV;
+
+        use crate::catalog::MemoryCatalog;
+        use crate::executor::{ExecutionResult, Executor};
+        use crate::planner::Planner;
+        use crate::{AlopexDialect, Parser};
+
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+        let mut queries = vec![
+            "SELECT vector_dims(NULL)".to_string(),
+            "SELECT vector_norm(NULL)".to_string(),
+        ];
+        for function in ["vector_distance", "vector_similarity"] {
+            for (first, second) in [
+                ("NULL", "[1.0, 0.0]"),
+                ("[1.0, 0.0]", "NULL"),
+                ("NULL", "NULL"),
+            ] {
+                queries.push(format!("SELECT {function}({first}, {second}, 'cosine')"));
+            }
+        }
+        for sql in queries {
+            let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+            let plan = Planner::new(&*catalog.read().unwrap())
+                .plan(&statement)
+                .unwrap_or_else(|error| panic!("{sql}: {error}"));
+            let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+                panic!("expected query result: {sql}");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Null]], "{sql}");
+        }
+    }
+
+    #[test]
+    fn vector_null_support_keeps_non_vector_and_null_metric_planning_errors() {
+        use crate::catalog::MemoryCatalog;
+        use crate::planner::{Planner, PlannerError};
+        use crate::{AlopexDialect, Parser};
+
+        let catalog = MemoryCatalog::new();
+        let planner = Planner::new(&catalog);
+        for function in ["vector_distance", "vector_similarity"] {
+            for (first, second, metric) in [
+                ("1", "[1.0, 0.0]", "'cosine'"),
+                ("'text'", "[1.0, 0.0]", "'cosine'"),
+                ("[1.0, 0.0]", "1", "'cosine'"),
+                ("[1.0, 0.0]", "'text'", "'cosine'"),
+                ("NULL", "1", "'cosine'"),
+                ("'text'", "NULL", "'cosine'"),
+                ("[1.0, 0.0]", "[0.0, 1.0]", "NULL"),
+            ] {
+                let sql = format!("SELECT {function}({first}, {second}, {metric})");
+                let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+                assert!(
+                    matches!(
+                        planner.plan(&statement),
+                        Err(PlannerError::TypeMismatch { .. })
+                    ),
+                    "{sql}",
+                );
+            }
         }
     }
 

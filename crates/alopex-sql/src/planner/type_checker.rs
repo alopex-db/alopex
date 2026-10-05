@@ -2821,10 +2821,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ///
     /// # Requirements
     ///
-    /// - First argument must be a Vector type (column reference)
-    /// - Second argument must be a Vector type (vector literal)
+    /// - First and second arguments must be Vector or NULL
     /// - Third argument must be a Text type (metric string)
-    /// - Vector dimensions must match
+    /// - Known vector dimensions must match
     pub fn check_vector_distance(
         &self,
         args: &[TypedExpr],
@@ -2839,61 +2838,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             });
         }
 
-        // First argument: Vector column
-        let col_dim = match &args[0].resolved_type {
-            ResolvedType::Vector { dimension, .. } => *dimension,
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[0].span.start.line,
-                    column: args[0].span.start.column,
-                });
-            }
-        };
-
-        // Second argument: Vector literal
-        let vec_dim = match &args[1].resolved_type {
-            ResolvedType::Vector { dimension, .. } => *dimension,
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[1].span.start.line,
-                    column: args[1].span.start.column,
-                });
-            }
-        };
-
-        // Check dimension match
-        self.check_vector_dimension(col_dim, vec_dim, args[1].span)?;
-
-        // Third argument: Metric string
-        match &args[2].resolved_type {
-            ResolvedType::Text => {
-                // Validate metric value if it's a literal
-                if let TypedExprKind::Literal(Literal::String(s)) = &args[2].kind {
-                    self.normalize_metric(s, args[2].span)?;
-                }
-            }
-            ResolvedType::Null => {
-                // NULL metric is not allowed
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: "Null".to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
-            }
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
-            }
-        }
+        crate::scalar::check_vector_triplet(args)?;
 
         Ok(ResolvedType::Double)
     }
