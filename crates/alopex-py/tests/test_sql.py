@@ -65,6 +65,73 @@ def test_parameter_binding_keeps_native_and_mixed_paths(db):
     assert db.execute_sql("SELECT id FROM mixed_params ORDER BY id") == [{"id": 1}, {"id": 2}]
 
 
+def test_native_float_parameters_preserve_double_type(db):
+    assert db.execute_sql("SELECT ? / 2 AS value", [5.0]) == [{"value": 2.5}]
+
+    prepared = db.prepare("SELECT ? AS value")
+    prepared.bind(1, 2.0)
+    assert prepared.execute() == [{"value": 2.0}]
+
+    selected = db.execute_sql("SELECT ? AS value", [2.0])
+    assert type(selected[0]["value"]) is float
+    assert selected == [{"value": 2.0}]
+
+    db.execute_sql("CREATE TABLE double_params (id BIGINT PRIMARY KEY, value DOUBLE)")
+    assert db.execute_sql("INSERT INTO double_params VALUES (?, ?)", [1, 1e20]) == 1
+    assert db.execute_sql("SELECT value FROM double_params") == [{"value": 1e20}]
+
+
+def test_transaction_parameters_use_native_prepared_values(db):
+    dimensions = 70_000
+    values = [0.5] * dimensions
+    middle = dimensions // 2
+    values[middle] = -0.25
+    db.execute_sql(
+        f"CREATE TABLE transaction_params (id INTEGER PRIMARY KEY, value VECTOR({dimensions}))"
+    )
+
+    transaction = db.begin(TxnMode.READ_WRITE)
+    selected = transaction.execute_sql("SELECT ? / 2 AS value", [5.0])
+    assert type(selected[0]["value"]) is float
+    assert selected == [{"value": 2.5}]
+    assert (
+        transaction.execute_sql("INSERT INTO transaction_params VALUES (?, ?)", [1, values])
+        == 1
+    )
+    transaction.commit()
+
+    stored = db.execute_sql("SELECT value FROM transaction_params")
+    assert len(stored[0]["value"]) == dimensions
+    assert stored[0]["value"][0] == 0.5
+    assert stored[0]["value"][middle] == -0.25
+    assert stored[0]["value"][-1] == 0.5
+
+
+def test_transaction_native_text_parameter_does_not_expand_sql(db):
+    payload = "x" * 1_048_576
+    transaction = db.begin(TxnMode.READ_WRITE)
+    try:
+        selected = transaction.execute_sql("SELECT ? AS value", [payload])
+        assert type(selected[0]["value"]) is str
+        assert selected == [{"value": payload}]
+    finally:
+        transaction.rollback()
+
+
+def test_transaction_mixed_parameters_fall_back_to_rendered_sql(db):
+    transaction = db.begin(TxnMode.READ_WRITE)
+    timestamp = dt.datetime(2024, 5, 4, 3, 2, 1)
+
+    selected = transaction.execute_sql(
+        "SELECT ? AS value, ? AS at",
+        [2.0, timestamp],
+    )
+
+    assert type(selected[0]["value"]) is float
+    assert selected[0]["value"] == 2.0
+    transaction.rollback()
+
+
 def test_prepared_execute_many_is_atomic(db):
     db.execute_sql("CREATE TABLE batch_items (id INTEGER PRIMARY KEY, embedding VECTOR(2))")
     statement = db.prepare("INSERT INTO batch_items VALUES (?, ?)")
@@ -767,6 +834,20 @@ def test_execute_sql_invalid_sql_raises_alopex_error_with_code(db):
     with pytest.raises(AlopexError) as raised:
         db.execute_sql("SELEKT 1 FRUM nowhere")
     assert getattr(raised.value, "code", "").startswith("ALOPEX-")
+
+
+def test_execute_sql_rejects_nul_sql_before_native_binding(db):
+    with pytest.raises(ValueError) as raised:
+        db.execute_sql("SELECT 1\0")
+    assert raised.value.code == "ALOPEX-PY019"
+
+
+def test_transaction_execute_sql_rejects_nul_sql_before_native_binding(db):
+    transaction = db.begin(TxnMode.READ_WRITE)
+    with pytest.raises(ValueError) as raised:
+        transaction.execute_sql("SELECT 1\0")
+    assert raised.value.code == "ALOPEX-PY019"
+    transaction.rollback()
 
 
 def test_execute_sql_on_closed_database_raises(db):

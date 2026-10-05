@@ -8,8 +8,11 @@ use alopex_server::config::ServerConfig;
 use alopex_server::Server;
 use tempfile::tempdir;
 
-/// Stable substring every `AlreadyOpen` rendering must contain.
-const LOCK_MESSAGE: &str = "already open by another process";
+/// These tests create both handles in this process, not in a child process.
+#[cfg(unix)]
+const LOCK_MESSAGE: &str = "already open in this process";
+#[cfg(not(unix))]
+const LOCK_MESSAGE: &str = "already open";
 
 fn server_config(data_dir: &std::path::Path) -> ServerConfig {
     ServerConfig {

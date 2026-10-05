@@ -297,7 +297,7 @@ fn required_vector(
         None => Err(ExecutorError::InvalidOperation {
             operation: "HNSW index".into(),
             reason: format!(
-                "テーブル {table} の HNSW インデックス対象カラム {} に NULL が含まれています (RowID={row_id})",
+                "HNSW index target column {} on table {table} contains NULL (row_id={row_id})",
                 column.name
             ),
         }),
@@ -341,5 +341,23 @@ mod tests {
         let invalid = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
             .with_option("ef_search", "0");
         assert!(HnswBridge::search_ef(&invalid).is_err());
+    }
+
+    #[test]
+    fn null_vector_error_is_english() {
+        let column = ColumnMetadata::new(
+            "embedding",
+            ResolvedType::Vector {
+                dimension: 2,
+                metric: VectorMetric::L2,
+            },
+        );
+        let error = required_vector(&7, "items", &column, &SqlValue::Null).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExecutorError::InvalidOperation { reason, .. }
+                if reason == "HNSW index target column embedding on table items contains NULL (row_id=7)"
+        ));
     }
 }

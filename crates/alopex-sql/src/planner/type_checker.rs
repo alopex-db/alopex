@@ -454,8 +454,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             SqlValue::Boolean(value) => Literal::Boolean(*value),
             SqlValue::Integer(value) => Literal::Number(value.to_string()),
             SqlValue::BigInt(value) => Literal::Number(value.to_string()),
-            SqlValue::Float(value) if value.is_finite() => Literal::Number(value.to_string()),
-            SqlValue::Double(value) if value.is_finite() => Literal::Number(value.to_string()),
+            SqlValue::Float(value) if value.is_finite() => Self::floating_parameter_literal(*value),
+            SqlValue::Double(value) if value.is_finite() => {
+                Self::floating_parameter_literal(*value)
+            }
             SqlValue::Text(value) => Literal::String(value.clone()),
             SqlValue::Decimal(value) => Literal::Number(value.to_string()),
             SqlValue::Json(value) => {
@@ -479,6 +481,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             }
         };
         self.infer_literal_type(&literal, span)
+    }
+
+    /// Preserve a bound finite floating-point value as a SQL floating literal.
+    ///
+    /// Rust formats whole floating-point values without a decimal point (for
+    /// example, `2.0` as `"2"`). The type checker would then re-infer that
+    /// value as Integer or BigInt, so retain an explicit floating marker.
+    fn floating_parameter_literal(value: impl ToString) -> Literal {
+        let mut rendered = value.to_string();
+        if !rendered.contains(['.', 'e', 'E']) {
+            rendered.push_str(".0");
+        }
+        Literal::Number(rendered)
     }
 
     /// Infer the type of a column reference.

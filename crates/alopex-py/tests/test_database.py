@@ -1,3 +1,4 @@
+import os
 import shutil
 
 import pytest
@@ -90,7 +91,13 @@ def test_second_open_of_one_database_is_rejected(tmp_path):
     try:
         with pytest.raises(AlopexError) as excinfo:
             Database.open(str(container))
-        assert "already open by another process" in str(excinfo.value)
+        message = str(excinfo.value)
+        if os.name == "posix":
+            assert "already open in this process" in message
+            assert "Database or Transaction handles" in message
+        else:
+            # Windows can prevent reading the holder's diagnostic record.
+            assert "already open" in message
     finally:
         db.close()
 
