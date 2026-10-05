@@ -45,6 +45,7 @@ pub fn execute_update_with_returning<
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    super::reject_columnar_dml(&table, "UPDATE")?;
     let mut rows_affected = 0u64;
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;

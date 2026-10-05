@@ -28,6 +28,163 @@ fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn columnar_dml_rejects_every_write_entrypoint() {
+    use alopex_sql::ast::expr::Literal;
+    use alopex_sql::planner::{MergeActionPlan, MergeClausePlan};
+
+    let number = || {
+        literal(
+            TypedExprKind::Literal(Literal::Number("1".into())),
+            ResolvedType::Integer,
+        )
+    };
+    for operation in ["INSERT", "INSERT SELECT", "UPDATE", "DELETE", "MERGE"] {
+        let (mut executor, _) = create_executor();
+        for (name, storage) in [("target", "columnar"), ("source", "row")] {
+            executor
+                .execute(LogicalPlan::CreateTable {
+                    table: TableMetadata::new(
+                        name,
+                        vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+                    ),
+                    if_not_exists: false,
+                    with_options: vec![("storage".into(), storage.into())],
+                })
+                .unwrap();
+        }
+        // A row-store write remains supported and supplies a nonempty MERGE source.
+        executor
+            .execute(LogicalPlan::Insert {
+                table: "source".into(),
+                columns: vec!["id".into()],
+                values: vec![vec![number()]],
+                conflict: None,
+                returning: None,
+            })
+            .unwrap();
+        let plan = match operation {
+            "INSERT" => LogicalPlan::Insert {
+                table: "target".into(),
+                columns: vec!["id".into()],
+                values: vec![vec![number()]],
+                conflict: None,
+                returning: None,
+            },
+            "INSERT SELECT" => LogicalPlan::InsertSelect {
+                table: "target".into(),
+                columns: vec!["id".into()],
+                source: Box::new(LogicalPlan::Values {
+                    rows: vec![vec![number()]],
+                    schema: vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+                }),
+                conflict: None,
+                returning: None,
+            },
+            "UPDATE" => LogicalPlan::Update {
+                table: "target".into(),
+                assignments: vec![TypedAssignment {
+                    column: "id".into(),
+                    column_index: 0,
+                    value: number(),
+                }],
+                filter: None,
+                join_source: None,
+                returning: None,
+            },
+            "DELETE" => LogicalPlan::Delete {
+                table: "target".into(),
+                filter: None,
+                join_source: None,
+                returning: None,
+            },
+            "MERGE" => LogicalPlan::Merge {
+                target: "target".into(),
+                source: "source".into(),
+                on: literal(
+                    TypedExprKind::Literal(Literal::Boolean(true)),
+                    ResolvedType::Boolean,
+                ),
+                clauses: vec![MergeClausePlan {
+                    matched: false,
+                    condition: None,
+                    action: MergeActionPlan::Insert {
+                        columns: vec!["id".into()],
+                        values: vec![number()],
+                    },
+                }],
+            },
+            _ => unreachable!(),
+        };
+        let error = executor.execute(plan).expect_err(operation);
+        assert!(
+            matches!(error, ExecutorError::UnsupportedOperation(ref message)
+            if message.starts_with(operation.split_whitespace().next().unwrap())
+                && message.contains("columnar") && message.contains("COPY")),
+            "{operation}: {error}"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_sql_dml_preserves_copied_rows() {
+    use alopex_sql::dialect::AlopexDialect;
+    use alopex_sql::parser::Parser;
+    use alopex_sql::planner::Planner;
+    use alopex_sql::storage::SqlValue;
+    use std::io::Write;
+
+    let (mut executor, catalog) = create_executor();
+    let mut run = |sql: &str| {
+        let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        executor.execute(plan)
+    };
+    run("CREATE TABLE columnar_target (id INT PRIMARY KEY, value INT) WITH (storage='columnar')")
+        .unwrap();
+    run("CREATE TABLE row_source (id INT PRIMARY KEY, value INT)").unwrap();
+    run("INSERT INTO row_source VALUES (1, 20), (2, 30)").unwrap();
+    let mut csv = tempfile::NamedTempFile::new().unwrap();
+    writeln!(csv, "id,value\n1,10").unwrap();
+    assert_eq!(
+        run(&format!(
+            "COPY columnar_target FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
+            csv.path().display()
+        ))
+        .unwrap(),
+        ExecutionResult::RowsAffected(1)
+    );
+    for sql in [
+        "INSERT INTO columnar_target VALUES (2, 30)",
+        "INSERT INTO columnar_target SELECT id, value FROM row_source",
+        "INSERT INTO columnar_target VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET value = excluded.value",
+        "INSERT INTO columnar_target VALUES (1, 20) ON CONFLICT (id) DO NOTHING",
+        "UPDATE columnar_target SET value = 20 WHERE id = 1",
+        "DELETE FROM columnar_target WHERE id = 1",
+        "MERGE INTO columnar_target USING row_source ON columnar_target.id = row_source.id WHEN MATCHED THEN UPDATE SET value = row_source.value",
+    ] {
+        let error = run(sql).expect_err(sql);
+        assert!(
+            matches!(error, ExecutorError::UnsupportedOperation(ref message)
+            if message.starts_with(sql.split_whitespace().next().unwrap())
+                && message.contains("columnar") && message.contains("COPY")),
+            "{sql}: {error}"
+        );
+        let ExecutionResult::Query(result) = run("SELECT id, value FROM columnar_target").unwrap()
+        else {
+            panic!("query result expected")
+        };
+        assert_eq!(
+            result.rows,
+            vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn executor_end_to_end_manual_plans() {
     let (mut executor, _catalog) = create_executor();
 
