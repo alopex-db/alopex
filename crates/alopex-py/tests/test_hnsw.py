@@ -61,6 +61,41 @@ def test_hnsw_batch_upsert_rejects_mismatched_lengths_atomically():
 
 
 @pytest.mark.requires_numpy
+def test_hnsw_savepoint_rollback_discards_mutations():
+    import numpy as np
+
+    db = Database.new()
+    db.create_hnsw_index("idx", HnswConfig(2))
+    db.create_hnsw_index("post_idx", HnswConfig(2))
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.upsert_to_hnsw("idx", b"keep", np.array([1.0, 0.0], dtype=np.float32), None)
+    txn.savepoint("before_hnsw")
+    txn.upsert_to_hnsw("idx", b"discard", np.array([0.0, 1.0], dtype=np.float32), None)
+    assert (
+        txn.upsert_to_hnsw_batch(
+            "idx",
+            [b"discard_batch"],
+            np.array([[1.0, 1.0]], dtype=np.float32),
+        )
+        == 1
+    )
+    txn.delete_from_hnsw("idx", b"keep")
+    txn.upsert_to_hnsw(
+        "post_idx", b"post_discard", np.array([2.0, 1.0], dtype=np.float32), None
+    )
+    txn.rollback_to("before_hnsw")
+    txn.commit()
+
+    results, _ = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 10)
+    assert {result.key for result in results} == {b"keep"}
+    post_results, _ = db.search_hnsw(
+        "post_idx", np.array([2.0, 1.0], dtype=np.float32), 10
+    )
+    assert post_results == []
+
+
+@pytest.mark.requires_numpy
 def test_hnsw_multithreaded_search_releases_gil():
     import time
     import threading

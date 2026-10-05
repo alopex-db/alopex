@@ -64,11 +64,17 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/native");
     }
     if cfg!(target_os = "windows") {
-        println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
+        println!(
+            "cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします"
+        );
         return;
     }
 
-    if profile == "release" {
+    // Maturin marks extension builds independently of the Cargo profile.
+    // Unix extensions resolve Python symbols from the loading interpreter;
+    // embedding flags can load a second runtime with standalone Python.
+    println!("cargo:rerun-if-env-changed=PYO3_BUILD_EXTENSION_MODULE");
+    if profile == "release" || env::var_os("PYO3_BUILD_EXTENSION_MODULE").is_some() {
         return;
     }
 

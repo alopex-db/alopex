@@ -248,6 +248,7 @@ where
     V: AsRef<[SqlValue]>,
     F: FnMut(&[SqlValue]) -> Result<()>,
 {
+    transaction.stage_hnsw_before_sql()?;
     if statement.kind.requires_write() {
         let mut cache = transaction
             .db
@@ -335,6 +336,7 @@ fn execute_statements_owned(
         return Ok(alopex_sql::ExecutionResult::Success);
     }
 
+    transaction.stage_hnsw_before_sql()?;
     if statements.iter().any(stmt_requires_write) {
         let mut cache = transaction
             .db
