@@ -748,6 +748,22 @@ def test_execute_sql_question_mark_inside_literal_is_not_placeholder(users_db):
     assert rows == [{"name": "wh?t"}]
 
 
+@pytest.mark.parametrize("params", [None, [], ()])
+def test_execute_sql_empty_bindings_preserve_literal_and_comment_question_marks(db, params):
+    assert db.execute_sql(
+        "SELECT 'wh?t' AS value /* block ? */ -- line ?\n", params
+    ) == [{"value": "wh?t"}]
+
+
+@pytest.mark.parametrize("params", [None, [], ()])
+def test_execute_sql_empty_bindings_validate_before_transaction_control(db, params):
+    for sql in ["SELECT ? AS value", "BEGIN ?"]:
+        with pytest.raises(ValueError) as raised:
+            db.execute_sql(sql, params)
+        assert raised.value.code == "ALOPEX-PY015"
+    assert db.execute_sql("SELECT 1 AS value") == [{"value": 1}]
+
+
 def test_execute_sql_value_types_roundtrip(db):
     db.execute_sql(
         "CREATE TABLE vals (id INTEGER PRIMARY KEY, flag BOOLEAN, ratio DOUBLE, big BIGINT)"

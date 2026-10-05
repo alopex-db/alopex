@@ -22,7 +22,7 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
-use super::{columnar_scan, project, scan};
+use super::{columnar_scan, project};
 
 // #449 measured exact scan as faster at 8k rows, 128 dimensions, and k=10.
 const HNSW_BASE_MIN_ROWS: usize = 8_192;
@@ -350,30 +350,80 @@ fn execute_heap_scan<'txn, S: KVStore + 'txn>(
     vector_idx: usize,
     higher_is_better: bool,
 ) -> Result<Vec<HeapEntry>> {
-    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
-    let k = pattern.k as usize;
-
-    let rows = match table_meta.storage_options.storage_type {
-        StorageType::Columnar => columnar_rows(txn, table_meta, projection, filter, vector_idx)?,
-        StorageType::Row => scan::execute_scan(txn, table_meta)?,
-    };
-
-    for row in rows {
-        if let Some(predicate) = filter
-            && !evaluate_filter(predicate, &row)?
-        {
-            continue;
-        }
-
-        if let Some(score) = score_row(&row, vector_idx, pattern)? {
-            heap.push(HeapEntry::new(score, row, higher_is_better));
-            if heap.len() > k {
-                heap.pop();
-            }
+    match table_meta.storage_options.storage_type {
+        StorageType::Columnar => collect_heap_entries(
+            columnar_rows(txn, table_meta, projection, filter, vector_idx)?
+                .into_iter()
+                .map(Ok),
+            filter,
+            pattern,
+            vector_idx,
+            higher_is_better,
+        ),
+        StorageType::Row => {
+            let mut storage = txn.table_storage(table_meta);
+            let rows = storage.range_scan(0, u64::MAX)?.map(|entry| {
+                entry
+                    .map(|(row_id, values)| Row::new(row_id, values))
+                    .map_err(ExecutorError::from)
+            });
+            collect_heap_entries(rows, filter, pattern, vector_idx, higher_is_better)
         }
     }
+}
 
-    Ok(heap.into_vec())
+fn collect_heap_entries(
+    rows: impl Iterator<Item = Result<Row>>,
+    filter: Option<&TypedExpr>,
+    pattern: &KnnPattern,
+    vector_idx: usize,
+    higher_is_better: bool,
+) -> Result<Vec<HeapEntry>> {
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+    let k = pattern.k as usize;
+    let mut evaluation_error = None;
+    for row in rows {
+        // The former materialized scan decoded every row before evaluating
+        // expressions. Keep storage errors ahead of even earlier SQL errors.
+        let row = row?;
+        if evaluation_error.is_some() {
+            continue;
+        }
+        let score = (|| {
+            if let Some(predicate) = filter
+                && !evaluate_filter(predicate, &row)?
+            {
+                return Ok(None);
+            }
+            score_row(&row, vector_idx, pattern)
+        })();
+        match score {
+            Ok(Some(score)) => {
+                retain_top_k(&mut heap, HeapEntry::new(score, row, higher_is_better), k);
+            }
+            Ok(None) => {}
+            Err(error) => evaluation_error = Some(error),
+        }
+    }
+    match evaluation_error {
+        Some(error) => Err(error),
+        None => Ok(heap.into_vec()),
+    }
+}
+
+// The max-heap root is the worst retained candidate. Rejected rows need only
+// one comparison once the heap is full; replacing the root sifts just once.
+fn retain_top_k<T: Ord>(heap: &mut BinaryHeap<T>, candidate: T, k: usize) {
+    if k == 0 {
+        return;
+    }
+    if heap.len() < k {
+        heap.push(candidate);
+    } else if let Some(mut worst) = heap.peek_mut()
+        && candidate < *worst
+    {
+        *worst = candidate;
+    }
 }
 
 fn evaluate_filter(predicate: &TypedExpr, row: &Row) -> Result<bool> {
@@ -783,10 +833,390 @@ mod tests {
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::executor::dml::execute_insert;
     use crate::executor::evaluator::vector_ops::VectorMetric;
+    use crate::executor::query::scan;
     use crate::planner::typed_expr::TypedExpr;
     use crate::planner::types::ResolvedType;
     use crate::storage::{SqlTransaction, TxnBridge};
     use alopex_core::kv::memory::MemoryKV;
+
+    #[test]
+    fn columnar_exact_knn_copies_vectors_and_materializes_only_projected_ids() {
+        use crate::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
+        use crate::planner::typed_expr::ProjectedColumn;
+        use std::io::Write;
+        use std::sync::RwLock;
+
+        let store = Arc::new(MemoryKV::new());
+        let bridge = TxnBridge::new(store.clone());
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut executor = crate::executor::Executor::new(store, catalog.clone());
+        let stmt = crate::parser::Parser::parse_sql(
+            &crate::dialect::AlopexDialect,
+            "CREATE TABLE items (id INT, embedding VECTOR(2, COSINE)) WITH (storage='columnar', rowid_mode='direct')",
+        ).unwrap().pop().unwrap();
+        let plan = crate::planner::Planner::new(&*catalog.read().unwrap())
+            .plan(&stmt)
+            .unwrap();
+        executor.execute(plan).unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "id,embedding\n1,\"[1,0]\"\n2,NULL\n3,\"[0.8,0.6]\"\n4,\"[0,1]\"\n5,\"[-1,0]\"\n"
+        )
+        .unwrap();
+        let catalog = catalog.read().unwrap();
+        let table = catalog.get_table("items").unwrap();
+        assert_eq!(table.storage_options.storage_type, StorageType::Columnar);
+        assert_eq!(table.storage_options.row_id_mode, RowIdMode::Direct);
+        let mut copy_txn = bridge.begin_write().unwrap();
+        execute_copy(
+            &mut copy_txn,
+            &*catalog,
+            "items",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        copy_txn.commit().unwrap();
+        let projection = Projection::Columns(vec![ProjectedColumn {
+            expr: TypedExpr::column_ref(
+                "items".into(),
+                "id".into(),
+                0,
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            alias: None,
+        }]);
+        let filter = TypedExpr::binary_op(
+            TypedExpr::column_ref(
+                "items".into(),
+                "id".into(),
+                0,
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            BinaryOp::Gt,
+            TypedExpr::literal(
+                Literal::Number("1".into()),
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            ResolvedType::Boolean,
+            Span::empty(),
+        );
+        let mut txn = bridge.begin_read().unwrap();
+        let ExecutionResult::Query(result) = execute_knn_query(
+            &mut txn,
+            &*catalog,
+            &base_pattern(2),
+            &projection,
+            Some(&filter),
+        )
+        .unwrap() else {
+            panic!("expected query")
+        };
+        assert_eq!(
+            result.rows,
+            vec![vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]]
+        );
+    }
+
+    #[test]
+    fn streaming_heap_preserves_row_bounds_nulls_and_ties() {
+        for table_id in [7, u32::MAX] {
+            let (bridge, _, input_table) = setup_table();
+            let table = input_table.with_table_id(table_id);
+            let mut txn = bridge.begin_write().unwrap();
+            for (row_id, value) in [
+                (0, SqlValue::Vector(vec![1.0, 0.0])),
+                (1, SqlValue::Null),
+                (u64::MAX, SqlValue::Vector(vec![1.0, 0.0])),
+            ] {
+                txn.table_storage(&table)
+                    .insert(row_id, &[SqlValue::Integer(1), value])
+                    .unwrap();
+            }
+            let projection = Projection::All(vec!["id".into(), "embedding".into()]);
+            let scanned = scan::execute_scan(&mut txn, &table).unwrap();
+            assert_eq!(
+                scanned.iter().map(|row| row.row_id).collect::<Vec<_>>(),
+                vec![0, 1, u64::MAX]
+            );
+            for descending in [false, true] {
+                let entries = execute_heap_scan(
+                    &mut txn,
+                    &table,
+                    &projection,
+                    None,
+                    &base_pattern(4),
+                    1,
+                    descending,
+                )
+                .unwrap();
+                let mut ids = entries
+                    .iter()
+                    .map(|entry| entry.row.row_id)
+                    .collect::<Vec<_>>();
+                ids.sort();
+                assert_eq!(ids, vec![0, u64::MAX]);
+                assert!(entries.iter().all(|entry| entry.score == 1.0));
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_heap_preserves_decode_error_priority() {
+        let (bridge, catalog, _) = setup_table();
+        let table = catalog.get_table("items").unwrap().clone();
+        let mut txn = bridge.begin_write().unwrap();
+        insert_rows(&mut txn, &catalog, &[[0.0, 0.0], [1.0, 0.0]]);
+        let projection = Projection::All(vec!["id".into(), "embedding".into()]);
+        let expected_evaluation = execute_heap_scan(
+            &mut txn,
+            &table,
+            &projection,
+            None,
+            &base_pattern(1),
+            1,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            expected_evaluation.contains("zero-norm"),
+            "{expected_evaluation}"
+        );
+        txn.inner_mut()
+            .put(
+                crate::storage::KeyEncoder::row_key(table.table_id, u64::MAX),
+                vec![],
+            )
+            .unwrap();
+        let expected_storage = scan::execute_scan(&mut txn, &table)
+            .unwrap_err()
+            .to_string();
+        let actual = execute_heap_scan(
+            &mut txn,
+            &table,
+            &projection,
+            None,
+            &base_pattern(1),
+            1,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(actual, expected_storage);
+        assert_ne!(actual, expected_evaluation);
+    }
+
+    #[test]
+    fn streaming_heap_keeps_first_evaluation_error_and_drains_rows() {
+        let visited = std::cell::Cell::new(0);
+        let rows = vec![
+            Row::new(0, vec![SqlValue::Vector(vec![0.0, 0.0])]),
+            Row::new(1, vec![SqlValue::Integer(1)]),
+            Row::new(2, vec![SqlValue::Null]),
+        ];
+        let actual = collect_heap_entries(
+            rows.into_iter().map(|row| {
+                visited.set(visited.get() + 1);
+                Ok(row)
+            }),
+            None,
+            &base_pattern(1),
+            0,
+            true,
+        )
+        .unwrap_err();
+        assert!(actual.to_string().contains("zero-norm"), "{actual}");
+        assert_eq!(visited.get(), 3);
+    }
+
+    #[test]
+    fn bounded_heap_matches_full_sort_and_reduces_rejected_comparisons() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        #[derive(Eq, PartialEq)]
+        struct Counted(i32, Rc<Cell<usize>>);
+        impl Ord for Counted {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.1.set(self.1.get() + 1);
+                self.0.cmp(&other.0)
+            }
+        }
+        impl PartialOrd for Counted {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        for values in [vec![3, 1, 2, 1, 4], vec![4, 3, 2, 1, 0], vec![]] {
+            for descending in [false, true] {
+                let values: Vec<_> = values
+                    .iter()
+                    .map(|&v| if descending { -v } else { v })
+                    .collect();
+                for k in [0, 1, values.len(), values.len() + 1] {
+                    let mut expected = values.clone();
+                    expected.sort();
+                    expected.truncate(k);
+                    let mut heap = BinaryHeap::new();
+                    for &value in &values {
+                        retain_top_k(&mut heap, value, k);
+                        assert!(heap.len() <= k);
+                    }
+                    assert_eq!(heap.into_sorted_vec(), expected);
+                }
+            }
+        }
+
+        let count = Rc::new(Cell::new(0));
+        let mut bounded = BinaryHeap::new();
+        for value in 0..1000 {
+            retain_top_k(&mut bounded, Counted(value, Rc::clone(&count)), 10);
+        }
+        let bounded_comparisons = count.replace(0);
+        let mut previous = BinaryHeap::new();
+        for value in 0..1000 {
+            previous.push(Counted(value, Rc::clone(&count)));
+            if previous.len() > 10 {
+                previous.pop();
+            }
+        }
+        let previous_comparisons = count.get();
+        eprintln!(
+            "top_k_comparisons rows=1000 k=10 bounded={bounded_comparisons} previous_push_pop={previous_comparisons}"
+        );
+        assert!(bounded_comparisons < previous_comparisons);
+        assert_eq!(
+            bounded
+                .into_sorted_vec()
+                .into_iter()
+                .map(|v| v.0)
+                .collect::<Vec<_>>(),
+            previous
+                .into_sorted_vec()
+                .into_iter()
+                .map(|v| v.0)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exact_scan_matches_sorted_scores_at_k_boundaries() {
+        let (bridge, catalog, _) = setup_table();
+        // CREATE TABLE assigns the persisted keyspace ID; the setup input
+        // metadata still has the unregistered ID and cannot drive a scan.
+        let table = catalog.get_table("items").unwrap().clone();
+        let mut txn = bridge.begin_write().unwrap();
+        insert_rows(
+            &mut txn,
+            &catalog,
+            &[[1.0, 0.0], [0.0, 1.0], [0.7, 0.7], [-1.0, 0.0]],
+        );
+        let projection = Projection::All(
+            table
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            for k in [0, 1, 3, 4, 5, u64::MAX] {
+                let mut pattern = base_pattern(k);
+                pattern.sort_direction = direction;
+                let result =
+                    execute_knn_query(&mut txn, &catalog, &pattern, &projection, None).unwrap();
+                let mut expected = scan::execute_scan(&mut txn, &table).unwrap();
+                assert_eq!(
+                    expected.len(),
+                    4,
+                    "oracle scan: direction={direction:?} k={k}"
+                );
+                expected.sort_by(|a, b| {
+                    let order = score_row(a, 1, &pattern)
+                        .unwrap()
+                        .unwrap()
+                        .total_cmp(&score_row(b, 1, &pattern).unwrap().unwrap());
+                    if direction == SortDirection::Desc {
+                        order.reverse()
+                    } else {
+                        order
+                    }
+                });
+                expected.truncate(k as usize);
+                let ExecutionResult::Query(actual) = result else {
+                    panic!("expected query")
+                };
+                assert_eq!(
+                    actual.rows,
+                    expected
+                        .into_iter()
+                        .map(|row| row.values)
+                        .collect::<Vec<_>>(),
+                    "direction={direction:?} k={k}"
+                );
+            }
+        }
+        let pattern = base_pattern(1);
+        assert_eq!(
+            score_row(&Row::new(0, vec![SqlValue::Null]), 0, &pattern).unwrap(),
+            None
+        );
+        assert!(score_row(&Row::new(0, vec![SqlValue::Integer(1)]), 0, &pattern).is_err());
+        assert!(score_row(&Row::new(0, vec![SqlValue::Vector(vec![1.0])]), 0, &pattern).is_err());
+    }
+
+    #[test]
+    fn full_heap_does_not_hide_later_score_errors() {
+        let (bridge, catalog, table) = setup_table();
+        let mut txn = bridge.begin_write().unwrap();
+        insert_rows(&mut txn, &catalog, &[[1.0, 0.0], [0.0, 0.0]]);
+        let projection = Projection::All(
+            table
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        assert!(
+            execute_knn_query(&mut txn, &catalog, &base_pattern(1), &projection, None).is_err()
+        );
+        let filter = TypedExpr::binary_op(
+            TypedExpr::column_ref(
+                "items".into(),
+                "id".into(),
+                0,
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            BinaryOp::Eq,
+            TypedExpr::literal(
+                Literal::Number("0".into()),
+                ResolvedType::Integer,
+                Span::empty(),
+            ),
+            ResolvedType::Boolean,
+            Span::empty(),
+        );
+        let ExecutionResult::Query(result) = execute_knn_query(
+            &mut txn,
+            &catalog,
+            &base_pattern(1),
+            &projection,
+            Some(&filter),
+        )
+        .unwrap() else {
+            panic!("expected query")
+        };
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], SqlValue::Integer(0));
+    }
 
     #[test]
     fn hnsw_threshold_scales_with_k_and_vector_dimension() {

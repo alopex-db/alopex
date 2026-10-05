@@ -451,7 +451,8 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         sql::validate_sql_input(sql)?;
         let bindings = sql::prepared_bindings(params.as_ref())?;
-        crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
+        let validated_sql =
+            crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         if is_transaction_control_statement(sql) {
             return Err(error::to_py_err(
                 "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
@@ -463,6 +464,7 @@ impl PyDatabase {
                 .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
             && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() == 1)
         {
+            drop(validated_sql);
             let values = bindings
                 .into_iter()
                 .map(|binding| match binding {
@@ -479,7 +481,11 @@ impl PyDatabase {
                 statement.execute()
             })
             .map_err(error::embedded_err)?
+        } else if bindings.is_empty() {
+            py.detach(move || db.execute_sql(&validated_sql))
+                .map_err(error::embedded_err)?
         } else {
+            drop(validated_sql);
             let rendered = bindings
                 .into_iter()
                 .map(sql::render_prepared_binding)
