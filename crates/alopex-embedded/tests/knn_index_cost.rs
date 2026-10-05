@@ -9,18 +9,67 @@ use std::time::Instant;
 
 use alopex_embedded::Database;
 use alopex_sql::ExecutionResult;
+use serde::Deserialize;
 
 const DIMENSION: usize = 128;
 const K: usize = 10;
 const METRIC: &str = "COSINE";
 const SIZES: [usize; 4] = [9_600, 16_000, 20_000, 40_000];
 const RUNS: usize = 5;
+const TRIAL_ORDERS: [[&str; 2]; 2] = [["exact", "hnsw"], ["hnsw", "exact"]];
 const ROWS_ENV: &str = "ALOPEX_KNN_COST_ROWS";
-const RESULT_ENV: &str = "ALOPEX_KNN_COST_RESULT";
 const ARM_ENV: &str = "ALOPEX_KNN_COST_ARM";
+const TRIAL_ENV: &str = "ALOPEX_KNN_COST_TRIAL";
+const ARM_ORDER_ENV: &str = "ALOPEX_KNN_COST_ARM_ORDER";
 const RAW_NDJSON_ENV: &str = "ALOPEX_KNN_COST_RAW_NDJSON";
 const SOURCE_COMMIT_ENV: &str = "ALOPEX_KNN_COST_SOURCE_COMMIT";
 const RUN_ID_ENV: &str = "ALOPEX_KNN_COST_RUN_ID";
+
+#[test]
+fn raw_record_validator_requires_counterbalanced_sample_identity() {
+    let source_commit = env::var(SOURCE_COMMIT_ENV).unwrap_or_else(|_| "local".to_owned());
+    let run_id = env::var(RUN_ID_ENV).unwrap_or_else(|_| "local".to_owned());
+    let mut lines = Vec::new();
+    for rows in SIZES {
+        for (trial, arms) in TRIAL_ORDERS.into_iter().enumerate() {
+            for (arm_order, arm) in arms.into_iter().enumerate() {
+                for sample_index in 0..RUNS {
+                    lines.push(
+                        serde_json::json!({
+                            "schema": "alopex-knn-cost-v1",
+                            "source_commit": &source_commit,
+                            "run_id": &run_id,
+                            "surface": "embedded_sql",
+                            "phase": "search",
+                            "arm": arm,
+                            "trial": trial,
+                            "arm_order": arm_order,
+                            "rows": rows,
+                            "dimension": DIMENSION,
+                            "k": K,
+                            "metric": METRIC,
+                            "warmups": 1,
+                            "sample_index": sample_index,
+                            "elapsed_ns": 1,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    let records = format!("{}\n", lines.join("\n"));
+    assert_eq!(
+        validate_raw_records(&records).len(),
+        SIZES.len() * TRIAL_ORDERS.len() * 2 * RUNS
+    );
+
+    let duplicate = records.replacen("\"sample_index\":0", "\"sample_index\":1", 1);
+    assert!(
+        std::panic::catch_unwind(|| validate_raw_records(&duplicate)).is_err(),
+        "validator must reject a duplicate sample index"
+    );
+}
 
 #[test]
 #[ignore = "run by parity-performance to publish issue #461 evidence"]
@@ -61,44 +110,6 @@ fn sql_knn_hnsw_cost_does_not_track_table_rows() {
     }
 }
 
-#[test]
-#[ignore = "run one row count per process to publish issue #461 raw samples"]
-fn sql_knn_hnsw_cost_single_size_writes_raw_samples() {
-    let rows = selected_rows();
-    let output = env::var_os(RESULT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("{RESULT_ENV} must name a raw-result file"));
-    let db = Database::open_in_memory().expect("open database");
-    seed(&db, "items_exact", rows, false);
-    seed(&db, "items_hnsw", rows, true);
-
-    let exact = query("items_exact");
-    let hnsw = query("items_hnsw");
-    assert_hnsw_path(&db, &hnsw);
-    db.execute_sql(&exact).expect("warm exact query");
-    db.execute_sql(&hnsw).expect("warm hnsw query");
-
-    let exact_samples = elapsed_millis(&db, &exact);
-    let hnsw_samples = elapsed_millis(&db, &hnsw);
-    let exact_ms = median_millis(&exact_samples);
-    let hnsw_ms = median_millis(&hnsw_samples);
-    let ratio = hnsw_ms / exact_ms;
-    fs::write(
-        &output,
-        format!(
-            "{{\"rows\":{rows},\"metric\":\"{METRIC}\",\"exact_ms\":[{}],\"hnsw_ms\":[{}],\"exact_median_ms\":{exact_ms:.6},\"hnsw_median_ms\":{hnsw_ms:.6},\"ratio\":{ratio:.6}}}\n",
-            samples_json(&exact_samples),
-            samples_json(&hnsw_samples),
-        ),
-    )
-    .expect("persist raw cost samples");
-
-    assert!(
-        ratio < 1.0,
-        "HNSW must beat exact at {rows} rows: {ratio:.3}"
-    );
-}
-
 fn selected_rows() -> usize {
     let rows = env::var(ROWS_ENV)
         .unwrap_or_else(|_| panic!("{ROWS_ENV} must select one supported row count"))
@@ -111,14 +122,6 @@ fn selected_rows() -> usize {
     rows
 }
 
-fn samples_json(samples: &[f64]) -> String {
-    samples
-        .iter()
-        .map(|sample| format!("{sample:.6}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 #[test]
 #[ignore = "run one SQL kNN arm per process to publish issue #461 raw evidence"]
 fn sql_knn_hnsw_cost_process_separated_evidence() {
@@ -129,38 +132,52 @@ fn sql_knn_hnsw_cost_process_separated_evidence() {
         !raw_path.exists(),
         "{RAW_NDJSON_ENV} must not overwrite an existing artifact"
     );
+    if let Some(parent) = raw_path.parent() {
+        fs::create_dir_all(parent).expect("create raw artifact directory");
+    }
     for rows in SIZES {
-        for arm in ["exact", "hnsw"] {
-            let status = Command::new(env::current_exe().expect("test executable"))
-                .arg("--ignored")
-                .arg("--exact")
-                .arg("sql_knn_hnsw_cost_process_worker")
-                .env(ROWS_ENV, rows.to_string())
-                .env(ARM_ENV, arm)
-                .env(RAW_NDJSON_ENV, &raw_path)
-                .env(
-                    SOURCE_COMMIT_ENV,
-                    env::var(SOURCE_COMMIT_ENV).unwrap_or_else(|_| "local".to_owned()),
-                )
-                .env(
-                    RUN_ID_ENV,
-                    env::var(RUN_ID_ENV).unwrap_or_else(|_| "local".to_owned()),
-                )
-                .status()
-                .expect("start worker");
-            assert!(status.success(), "worker failed for rows={rows} arm={arm}");
+        for (trial, arms) in TRIAL_ORDERS.into_iter().enumerate() {
+            for (arm_order, arm) in arms.into_iter().enumerate() {
+                let status = Command::new(env::current_exe().expect("test executable"))
+                    .arg("--ignored")
+                    .arg("--exact")
+                    .arg("sql_knn_hnsw_cost_process_worker")
+                    .env(ROWS_ENV, rows.to_string())
+                    .env(ARM_ENV, arm)
+                    .env(TRIAL_ENV, trial.to_string())
+                    .env(ARM_ORDER_ENV, arm_order.to_string())
+                    .env(RAW_NDJSON_ENV, &raw_path)
+                    .env(
+                        SOURCE_COMMIT_ENV,
+                        env::var(SOURCE_COMMIT_ENV).unwrap_or_else(|_| "local".to_owned()),
+                    )
+                    .env(
+                        RUN_ID_ENV,
+                        env::var(RUN_ID_ENV).unwrap_or_else(|_| "local".to_owned()),
+                    )
+                    .status()
+                    .expect("start worker");
+                assert!(
+                    status.success(),
+                    "worker failed for rows={rows} trial={trial} arm={arm}"
+                );
+            }
         }
     }
     let records = fs::read_to_string(&raw_path).expect("read raw artifact");
-    assert_eq!(
-        records.lines().count(),
-        SIZES.len() * 2 * RUNS,
-        "every rows/arm/sample must persist one record"
-    );
+    let samples = validate_raw_records(&records);
     let mut first_hnsw_ns = None;
     for rows in SIZES {
-        let exact_ns = median_nanos(raw_samples(&records, rows, "exact"));
-        let hnsw_ns = median_nanos(raw_samples(&records, rows, "hnsw"));
+        for trial in 0..TRIAL_ORDERS.len() {
+            let exact_ns = median_nanos(raw_samples(&samples, rows, trial, "exact"));
+            let hnsw_ns = median_nanos(raw_samples(&samples, rows, trial, "hnsw"));
+            assert!(
+                hnsw_ns < exact_ns,
+                "HNSW must beat exact at rows={rows} trial={trial}: {hnsw_ns}ns vs {exact_ns}ns"
+            );
+        }
+        let exact_ns = median_nanos(raw_samples_for_arm(&samples, rows, "exact"));
+        let hnsw_ns = median_nanos(raw_samples_for_arm(&samples, rows, "hnsw"));
         assert!(
             hnsw_ns < exact_ns,
             "HNSW must beat exact at {rows} rows: {hnsw_ns}ns vs {exact_ns}ns"
@@ -176,26 +193,140 @@ fn sql_knn_hnsw_cost_process_separated_evidence() {
     }
 }
 
-fn raw_samples(records: &str, rows: usize, arm: &str) -> Vec<u64> {
+#[derive(Debug, Deserialize)]
+struct RawSample {
+    schema: String,
+    source_commit: String,
+    run_id: String,
+    surface: String,
+    phase: String,
+    arm: String,
+    trial: usize,
+    arm_order: usize,
+    rows: usize,
+    dimension: usize,
+    k: usize,
+    metric: String,
+    warmups: usize,
+    sample_index: usize,
+    elapsed_ns: u64,
+}
+
+fn validate_raw_records(records: &str) -> Vec<RawSample> {
+    let source_commit = env::var(SOURCE_COMMIT_ENV).unwrap_or_else(|_| "local".to_owned());
+    let run_id = env::var(RUN_ID_ENV).unwrap_or_else(|_| "local".to_owned());
     let samples = records
         .lines()
-        .filter_map(|line| {
-            let record: serde_json::Value = serde_json::from_str(line).expect("decode raw record");
-            (record["rows"].as_u64() == Some(rows as u64) && record["arm"].as_str() == Some(arm))
-                .then(|| record["elapsed_ns"].as_u64().expect("raw elapsed_ns"))
+        .enumerate()
+        .map(|(line_number, line)| {
+            serde_json::from_str::<RawSample>(line).unwrap_or_else(|error| {
+                panic!("decode raw record at line {}: {error}", line_number + 1)
+            })
         })
         .collect::<Vec<_>>();
     assert_eq!(
         samples.len(),
+        SIZES.len() * TRIAL_ORDERS.len() * 2 * RUNS,
+        "every rows/trial/arm/sample must persist one record"
+    );
+
+    let mut seen = std::collections::BTreeSet::new();
+    for sample in &samples {
+        assert_eq!(sample.schema, "alopex-knn-cost-v1", "raw schema");
+        assert_eq!(sample.source_commit, source_commit, "raw source commit");
+        assert_eq!(sample.run_id, run_id, "raw run identity");
+        assert_eq!(sample.surface, "embedded_sql", "raw surface");
+        assert_eq!(sample.phase, "search", "raw phase");
+        assert!(SIZES.contains(&sample.rows), "raw rows={}", sample.rows);
+        assert!(
+            sample.trial < TRIAL_ORDERS.len(),
+            "raw trial={}",
+            sample.trial
+        );
+        assert!(sample.arm_order < 2, "raw arm order={}", sample.arm_order);
+        assert_eq!(
+            sample.arm, TRIAL_ORDERS[sample.trial][sample.arm_order],
+            "raw trial/arm order"
+        );
+        assert_eq!(sample.dimension, DIMENSION, "raw dimension");
+        assert_eq!(sample.k, K, "raw k");
+        assert_eq!(sample.metric, METRIC, "raw metric");
+        assert_eq!(sample.warmups, 1, "raw warmups");
+        assert!(
+            sample.sample_index < RUNS,
+            "raw sample index={}",
+            sample.sample_index
+        );
+        assert!(sample.elapsed_ns > 0, "raw elapsed time");
+        assert!(
+            seen.insert((
+                sample.rows,
+                sample.trial,
+                sample.arm.as_str(),
+                sample.sample_index
+            )),
+            "duplicate raw sample rows={} trial={} arm={} sample_index={}",
+            sample.rows,
+            sample.trial,
+            sample.arm,
+            sample.sample_index
+        );
+    }
+
+    for rows in SIZES {
+        for (trial, arms) in TRIAL_ORDERS.into_iter().enumerate() {
+            for arm in arms {
+                for sample_index in 0..RUNS {
+                    assert!(
+                        seen.contains(&(rows, trial, arm, sample_index)),
+                        "missing raw sample rows={rows} trial={trial} arm={arm} sample_index={sample_index}"
+                    );
+                }
+            }
+        }
+    }
+    samples
+}
+
+fn raw_samples(samples: &[RawSample], rows: usize, trial: usize, arm: &str) -> Vec<u64> {
+    let samples = samples
+        .iter()
+        .filter(|sample| sample.rows == rows && sample.trial == trial && sample.arm == arm)
+        .map(|sample| sample.elapsed_ns)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples.len(),
         RUNS,
-        "rows={rows} arm={arm} must persist {RUNS} samples"
+        "rows={rows} trial={trial} arm={arm} must persist {RUNS} samples"
+    );
+    samples
+}
+
+fn raw_samples_for_arm(samples: &[RawSample], rows: usize, arm: &str) -> Vec<u64> {
+    let samples = samples
+        .iter()
+        .filter(|sample| sample.rows == rows && sample.arm == arm)
+        .map(|sample| sample.elapsed_ns)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples.len(),
+        TRIAL_ORDERS.len() * RUNS,
+        "rows={rows} arm={arm} must persist every counterbalanced sample"
     );
     samples
 }
 
 fn median_nanos(mut samples: Vec<u64>) -> u64 {
+    assert!(!samples.is_empty(), "median needs samples");
     samples.sort_unstable();
-    samples[RUNS / 2]
+    let middle = samples.len() / 2;
+    if samples.len() % 2 == 1 {
+        samples[middle]
+    } else {
+        samples[middle - 1] / 2
+            + samples[middle] / 2
+            + (samples[middle - 1] % 2 + samples[middle] % 2) / 2
+    }
 }
 
 #[test]
@@ -203,9 +334,15 @@ fn median_nanos(mut samples: Vec<u64>) -> u64 {
 fn sql_knn_hnsw_cost_process_worker() {
     let rows = selected_rows();
     let arm = env::var(ARM_ENV).expect("worker arm");
+    let trial = selected_usize(TRIAL_ENV, TRIAL_ORDERS.len());
+    let arm_order = selected_usize(ARM_ORDER_ENV, 2);
     assert!(
         matches!(arm.as_str(), "exact" | "hnsw"),
         "unsupported arm {arm}"
+    );
+    assert_eq!(
+        arm, TRIAL_ORDERS[trial][arm_order],
+        "worker arm must match counterbalanced trial order"
     );
     let raw_path = env::var_os(RAW_NDJSON_ENV)
         .map(PathBuf::from)
@@ -219,11 +356,36 @@ fn sql_knn_hnsw_cost_process_worker() {
     }
     db.execute_sql(&query).expect("warm query");
     for (sample_index, elapsed_ms) in elapsed_millis(&db, &query).into_iter().enumerate() {
-        append_raw_sample(&raw_path, rows, &arm, sample_index, elapsed_ms);
+        append_raw_sample(
+            &raw_path,
+            rows,
+            &arm,
+            trial,
+            arm_order,
+            sample_index,
+            elapsed_ms,
+        );
     }
 }
 
-fn append_raw_sample(path: &PathBuf, rows: usize, arm: &str, sample_index: usize, elapsed_ms: f64) {
+fn selected_usize(name: &str, upper_bound: usize) -> usize {
+    let value = env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be set"))
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"));
+    assert!(value < upper_bound, "{name}={value} is out of range");
+    value
+}
+
+fn append_raw_sample(
+    path: &PathBuf,
+    rows: usize,
+    arm: &str,
+    trial: usize,
+    arm_order: usize,
+    sample_index: usize,
+    elapsed_ms: f64,
+) {
     let record = serde_json::json!({
         "schema": "alopex-knn-cost-v1",
         "source_commit": env::var(SOURCE_COMMIT_ENV).unwrap_or_else(|_| "local".to_owned()),
@@ -231,6 +393,8 @@ fn append_raw_sample(path: &PathBuf, rows: usize, arm: &str, sample_index: usize
         "surface": "embedded_sql",
         "phase": "search",
         "arm": arm,
+        "trial": trial,
+        "arm_order": arm_order,
         "rows": rows,
         "dimension": DIMENSION,
         "k": K,

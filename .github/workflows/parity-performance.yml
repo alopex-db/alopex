@@ -155,7 +155,7 @@ jobs:
       - name: Verify SQL HNSW cost regression
         id: sql_knn_cost
         env:
-          ALOPEX_KNN_COST_RAW_NDJSON: performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
+          ALOPEX_KNN_COST_RAW_NDJSON: ${{ github.workspace }}/performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
           ALOPEX_KNN_COST_SOURCE_COMMIT: ${{ github.sha }}
           ALOPEX_KNN_COST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
