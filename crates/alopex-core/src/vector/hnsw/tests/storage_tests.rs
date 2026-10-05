@@ -8,7 +8,7 @@ use crate::vector::hnsw::types::HnswMetadata;
 use crate::vector::hnsw::HnswConfig;
 use crate::vector::hnsw::HnswGraph;
 use crate::vector::hnsw::HnswStorage;
-use crate::vector::hnsw::{HnswIndex, HnswTransactionState};
+use crate::vector::hnsw::{HnswIndex, HnswTransactionState, MAX_HNSW_EF_SEARCH};
 use crate::vector::Metric;
 use crate::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -84,6 +84,20 @@ fn staged_batch_publishes_stats_only_after_commit() {
     let mut load_txn = kv.begin(TxnMode::ReadOnly).unwrap();
     let loaded = HnswIndex::load("test_index", &mut load_txn).unwrap();
     assert_eq!(loaded.search(&[0.0, 0.0], 2, None).unwrap().0.len(), 2);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn public_search_rejects_ef_search_above_the_safety_limit() {
+    let index = HnswIndex::create("test_index", base_config()).unwrap();
+
+    let error = index
+        .search(&[0.0, 0.0], 1, Some(MAX_HNSW_EF_SEARCH + 1))
+        .expect_err("public HNSW search must reject an unsafe ef_search");
+    assert!(matches!(
+        error,
+        Error::InvalidParameter { ref param, .. } if param == "ef_search"
+    ));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

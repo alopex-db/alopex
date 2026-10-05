@@ -40,6 +40,8 @@ pub struct CreateTable {
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
     pub with_options: Vec<IndexOption>,
+    #[serde(default)]
+    pub query: Option<Select>,
     pub span: Span,
 }
 
@@ -284,6 +286,8 @@ pub struct Truncate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateIndex {
     pub if_not_exists: bool,
+    #[serde(default)]
+    pub unique: bool,
     pub name: String,
     pub table: String,
     pub column: String,

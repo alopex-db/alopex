@@ -85,7 +85,7 @@ pub(crate) fn build_fts_index_for_existing_rows<'txn, S: KVStore + 'txn>(
     }
 }
 
-pub(super) fn ensure_indexable_columns(
+pub(crate) fn ensure_indexable_columns(
     table: &TableMetadata,
     column_indices: &[usize],
     operation: &str,
@@ -147,11 +147,15 @@ pub(crate) fn build_index_for_existing_rows<'txn, S: KVStore + 'txn>(
     let mut start_row_id = 0u64;
 
     loop {
+        if start_row_id == u64::MAX {
+            break;
+        }
         let rows = fetch_rows_chunk(txn, table, start_row_id + 1, CHUNK_SIZE)?;
         if rows.is_empty() {
             break;
         }
 
+        let mut duplicate_value = None;
         let insert_result = txn.with_index(
             index.index_id,
             index.unique,
@@ -162,7 +166,16 @@ pub(crate) fn build_index_for_existing_rows<'txn, S: KVStore + 'txn>(
                         start_row_id = row_id;
                         continue;
                     }
-                    storage.insert(&row, row_id)?;
+                    if let Err(error) = storage.insert(&row, row_id) {
+                        duplicate_value = Some(format!(
+                            "{:?}",
+                            column_indices
+                                .iter()
+                                .map(|&column| &row[column])
+                                .collect::<Vec<_>>()
+                        ));
+                        return Err(error);
+                    }
                     start_row_id = row_id;
                 }
                 Ok(())
@@ -176,7 +189,7 @@ pub(crate) fn build_index_for_existing_rows<'txn, S: KVStore + 'txn>(
                     ConstraintViolation::Unique {
                         index_name: index.name.clone(),
                         columns: index.columns.clone(),
-                        value: None,
+                        value: duplicate_value,
                     },
                 ));
             }
@@ -194,10 +207,11 @@ fn fetch_rows_chunk<'txn, S: KVStore + 'txn>(
     chunk_size: u64,
 ) -> Result<Vec<(u64, Vec<SqlValue>)>> {
     Ok(txn.with_table(table, |table_storage| {
-        let end_row_id = start_row_id.saturating_add(chunk_size - 1);
-        let scan = table_storage.range_scan(start_row_id, end_row_id)?;
+        // Bound the number of actual rows, not the row-id interval: deletions
+        // can leave arbitrarily large gaps before the next live row.
+        let scan = table_storage.range_scan(start_row_id, u64::MAX)?;
         let mut rows = Vec::new();
-        for entry in scan {
+        for entry in scan.take(chunk_size as usize) {
             let (row_id, row) = entry?;
             rows.push((row_id, row));
         }

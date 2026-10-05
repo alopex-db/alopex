@@ -65,9 +65,10 @@ const LOCK_FILE_SUFFIX: &str = ".lock";
 
 /// A held data-directory lock.
 ///
-/// The lock lives for as long as this value does. Dropping it closes the file
-/// descriptor, which is what releases the OS lock — there is no explicit
-/// unlock, and the lock file itself is intentionally left on disk (裁定 D8):
+/// The lock lives for as long as this value does. Dropping it explicitly unlocks
+/// before closing the descriptor: an unrelated forked child can still hold the
+/// same open file description until exec, even with CLOEXEC. The lock file
+/// itself is intentionally left on disk (裁定 D8):
 /// deleting it would let `A unlink -> B creates a new inode and locks it -> C
 /// locks the same new inode` slip two writers through.
 #[derive(Debug)]
@@ -77,14 +78,23 @@ pub(crate) struct DirectoryLock {
     path: Option<PathBuf>,
     /// The locked handle.
     ///
-    /// Never read — holding it *is* the point. The OS lock lives on the open
-    /// file description, so the lock is released precisely when this field is
-    /// dropped and the descriptor closes. That is also why an abnormal exit
-    /// cannot leave a lock behind: the kernel closes it for us.
+    /// The OS lock lives on the open file description. Explicit unlock on owner
+    /// drop prevents a forked child's temporary descriptor from extending it.
+    /// Closing the last descriptor also releases it after an abnormal exit.
     #[cfg(not(target_arch = "wasm32"))]
     _file: Option<std::fs::File>,
     #[cfg(target_arch = "wasm32")]
     _wasm: (),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            // Best effort in Drop; closing the file remains the fallback.
+            let _ = file.unlock();
+        }
+    }
 }
 
 impl DirectoryLock {
@@ -388,6 +398,122 @@ mod tests {
         assert!(
             lock_path.exists(),
             "the lock file is left behind on purpose (裁定 D8)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "spawned by the pre-exec lock lifetime regression"]
+    fn child_after_lock_owner_drop() {}
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_child_waits_before_exec() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("db");
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let held = acquire(&data_dir, &lock_path).unwrap();
+        let lock_fd = held._file.as_ref().unwrap().as_raw_fd();
+        // CLOEXEC closes the inherited descriptor at exec, not at fork.
+        // SAFETY: held owns this valid descriptor throughout this call.
+        let flags = unsafe { libc::fcntl(lock_fd, libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+
+        let (mut ready, child_ready) = UnixStream::pair().unwrap();
+        let (mut resume, child_resume) = UnixStream::pair().unwrap();
+        ready
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let child = std::thread::spawn(move || {
+            let ready_fd = child_ready.as_raw_fd();
+            let resume_fd = child_resume.as_raw_fd();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "lsm::lock::tests::child_after_lock_owner_drop",
+                    "--exact",
+                    "--ignored",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // Force and synchronize the fork-to-exec boundary. This does not
+            // assume which spawn implementation an unmodified Command selects.
+            // SAFETY: the child only uses async-signal-safe syscalls on inherited
+            // descriptors, stack storage and non-allocating OS error values.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fcntl(lock_fd, libc::F_GETFD) < 0 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+                    }
+                    let mut byte = 1u8;
+                    if libc::write(ready_fd, (&byte as *const u8).cast(), 1) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    let mut poll = libc::pollfd {
+                        fd: resume_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // Bound the child lifetime even if the parent assertion fails.
+                    if libc::poll(&mut poll, 1, 10_000) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
+                    }
+                    if libc::read(resume_fd, (&mut byte as *mut u8).cast(), 1) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn()?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(error);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let synchronized = ready.read_exact(&mut [0]);
+        let while_held = acquire(&data_dir, &lock_path);
+        drop(held);
+        let reopened = acquire(&data_dir, &lock_path);
+        // Release/reap the child before asserting so RED leaves no child behind.
+        let resumed = resume.write_all(&[1]);
+        let child_status = child.join().unwrap();
+        synchronized.expect("child reached pre-exec with the lock descriptor");
+        resumed.expect("release child");
+        assert!(child_status.unwrap().success());
+        assert!(matches!(while_held, Err(Error::AlreadyOpen { .. })));
+        assert!(
+            reopened.is_ok(),
+            "parent lock drop must allow reopen before the child execs: {reopened:?}"
+        );
+        assert!(
+            matches!(
+                acquire(&data_dir, &lock_path),
+                Err(Error::AlreadyOpen { .. })
+            ),
+            "the new owner's lock must remain held after the child exits"
         );
     }
 

@@ -93,6 +93,7 @@ struct ExplainAnalysis<'a> {
 fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
+    btree_indexes: &[Option<String>],
     format: ExplainFormat,
     analysis: Option<ExplainAnalysis<'_>>,
 ) -> ExecutionResult {
@@ -117,6 +118,22 @@ fn explain_result(
                 text.push('\n');
                 text.push_str(&explain_knn_stats_text(stats));
             }
+            let mut indexes = btree_indexes.iter();
+            text = text
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.trim_start().starts_with("Scan table=")
+                        && let Some(Some(index_name)) = indexes.next()
+                    {
+                        return line.replacen(
+                            "Scan table=",
+                            &format!("IndexScan index={index_name} table="),
+                            1,
+                        );
+                    }
+                    line.to_owned()
+                })
+                .collect();
             ("QUERY PLAN", text)
         }
         ExplainFormat::Json => {
@@ -126,6 +143,31 @@ fn explain_result(
             if let Some(selected_path) = hnsw_path {
                 document["physical_plan"]["selected_path"] =
                     serde_json::Value::String(selected_path);
+            }
+            fn annotate_scans<'a>(
+                node: &mut serde_json::Value,
+                indexes: &mut impl Iterator<Item = &'a Option<String>>,
+            ) {
+                if node["node"] == "Scan"
+                    && let Some(Some(index_name)) = indexes.next()
+                {
+                    node["node"] = serde_json::json!("IndexScan");
+                    node["index"] = serde_json::json!(index_name);
+                }
+                if let Some(children) = node["children"].as_array_mut() {
+                    for child in children {
+                        annotate_scans(child, indexes);
+                    }
+                }
+            }
+            annotate_scans(
+                &mut document["physical_plan"]["root"],
+                &mut btree_indexes.iter(),
+            );
+            if let [Some(index_name)] = btree_indexes {
+                document["physical_plan"]["access_path"] = serde_json::json!({
+                    "node": "IndexScan", "index": index_name,
+                });
             }
             ("query_plan", document.to_string())
         }
@@ -356,12 +398,22 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let btree_index = {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::selected_btree_indexes(&input, &*catalog)
+                };
                 let hnsw_path = self.run_in_write_txn(|txn| {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     query::explain_knn_path(txn, &*catalog, &input)
                 })?;
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, format, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
                 let (result, knn_stats) = if hnsw_path.is_some() {
@@ -381,6 +433,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
+                    &btree_index,
                     format,
                     Some(ExplainAnalysis {
                         knn_stats: knn_stats.as_ref(),
@@ -402,6 +455,12 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 if_not_exists,
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => self.execute_create_table_as(table, with_options, if_not_exists, *source),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
             LogicalPlan::CreateView {
                 table,
@@ -587,6 +646,55 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 table,
                 with_options,
                 if_not_exists,
+            )
+        })
+    }
+
+    fn execute_create_table_as(
+        &mut self,
+        table: crate::catalog::TableMetadata,
+        with_options: Vec<(String, String)>,
+        if_not_exists: bool,
+        source: LogicalPlan,
+    ) -> Result<ExecutionResult> {
+        let table_name = table.name.clone();
+        let columns = table
+            .column_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            if catalog.table_exists(&table_name) {
+                return if if_not_exists {
+                    Ok(ExecutionResult::Success)
+                } else {
+                    Err(ExecutorError::TableAlreadyExists(table_name))
+                };
+            }
+            ddl::create_table::validate_ctas_storage(&with_options)?;
+            let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "CREATE TABLE AS".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *catalog,
+                table,
+                with_options,
+                false,
+            )?;
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*catalog,
+                &table_name,
+                columns,
+                result.rows,
+                None,
+                None,
             )
         })
     }
@@ -834,21 +942,32 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 format,
                 input,
             } => {
-                let hnsw_path = {
-                    let (mut sql_txn, _) = txn.split_parts();
+                let (btree_index, hnsw_path) = {
+                    let (mut sql_txn, overlay) = txn.split_parts();
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
-                    query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    (
+                        query::selected_btree_indexes(&input, &view),
+                        query::explain_knn_path(&mut sql_txn, &view, &input)?,
+                    )
                 };
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, format, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
                 let (result, knn_stats) = if hnsw_path.is_some() {
                     let _statement_timestamp = evaluator::begin_statement();
                     let execution = {
-                        let (mut sql_txn, _) = txn.split_parts();
+                        let (mut sql_txn, overlay) = txn.split_parts();
                         let catalog = self.catalog.read().expect("catalog lock poisoned");
-                        query::execute_query_with_knn_stats(&mut sql_txn, &*catalog, &input)?
+                        let view = TxnCatalogView::new(&*catalog, &*overlay);
+                        query::execute_query_with_knn_stats(&mut sql_txn, &view, &input)?
                     };
                     match execution {
                         Some((result, stats)) => (result, Some(stats)),
@@ -861,6 +980,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
+                    &btree_index,
                     format,
                     Some(ExplainAnalysis {
                         knn_stats: knn_stats.as_ref(),
@@ -914,6 +1034,57 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 with_options,
                 if_not_exists,
             ),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => {
+                let table_name = table.name.clone();
+                let columns = table
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                if catalog.table_exists_in_txn(&table_name, overlay) {
+                    return if if_not_exists {
+                        Ok(ExecutionResult::Success)
+                    } else {
+                        Err(ExecutorError::TableAlreadyExists(table_name))
+                    };
+                }
+                ddl::create_table::validate_ctas_storage(&with_options)?;
+                let result = {
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    let ExecutionResult::Query(result) =
+                        query::execute_query(&mut sql_txn, &view, *source)?
+                    else {
+                        return Err(ExecutorError::InvalidOperation {
+                            operation: "CREATE TABLE AS".into(),
+                            reason: "SELECT source did not return query rows".into(),
+                        });
+                    };
+                    result
+                };
+                self.execute_create_table_in_txn(
+                    &mut *catalog,
+                    &mut sql_txn,
+                    overlay,
+                    table,
+                    with_options,
+                    false,
+                )?;
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                dml::execute_insert_rows_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table_name,
+                    columns,
+                    result.rows,
+                    None,
+                    None,
+                )
+            }
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table_in_txn(
                 &mut *catalog,
                 &mut sql_txn,
@@ -1236,31 +1407,14 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         table.storage_options = ddl::create_table::parse_storage_options(&with_options)?;
 
-        let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
-            let column_indices = pk_columns
-                .iter()
-                .map(|name| {
-                    table
-                        .get_column_index(name)
-                        .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let index_id = catalog.next_index_id();
-            let index_name = ddl::create_pk_index_name(&table.name);
-            let mut index = crate::catalog::IndexMetadata::new(
-                index_id,
-                index_name,
-                table.name.clone(),
-                pk_columns,
-            )
-            .with_column_indices(column_indices)
-            .with_unique(true);
-            index.catalog_name = table.catalog_name.clone();
-            index.namespace_name = table.namespace_name.clone();
-            Some(index)
-        } else {
-            None
-        };
+        let unique_indexes = ddl::create_table::constraint_indexes(catalog, &table)?;
+        let mut index_names = std::collections::HashSet::new();
+        for index in &unique_indexes {
+            if catalog.index_exists_in_txn(&index.name, overlay) || !index_names.insert(&index.name)
+            {
+                return Err(ExecutorError::IndexAlreadyExists(index.name.clone()));
+            }
+        }
 
         let table_id = catalog.next_table_id();
         table = table.with_table_id(table_id);
@@ -1286,7 +1440,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 )?;
             }
         }
-        if let Some(index) = &pk_index {
+        for index in &unique_indexes {
             catalog
                 .persist_create_index(txn.inner_mut(), index)
                 .map_err(Self::map_catalog_error)?;
@@ -1294,7 +1448,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         // オーバーレイに反映（ベースカタログはコミットまで不変）
         overlay.add_table(TableFqn::from(&table), table);
-        if let Some(index) = pk_index {
+        for index in unique_indexes {
             overlay.add_index(IndexFqn::from(&index), index);
         }
 

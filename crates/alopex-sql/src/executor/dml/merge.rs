@@ -25,6 +25,7 @@ where
         .get_table(target_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(target_name.to_string()))?;
+    super::reject_columnar_dml(&target, "MERGE")?;
     let source = catalog
         .get_table(source_name)
         .cloned()

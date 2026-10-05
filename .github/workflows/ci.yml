@@ -108,6 +108,30 @@ jobs:
         run: bash scripts/test-nim-parser.sh --backend host
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  clippy-beta:
+    name: Clippy (beta)
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build Nim SQL parser library
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
+      - name: Run Nim SQL parser tests
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     needs: [scope]
@@ -579,7 +603,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [scope, fmt, formal, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [scope, fmt, formal, clippy, clippy-beta, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -593,6 +617,7 @@ jobs:
             if [[ "${{ needs.fmt.result }}" != "skipped" ]] || \
                [[ "${{ needs.formal.result }}" != "skipped" ]] || \
                [[ "${{ needs.clippy.result }}" != "skipped" ]] || \
+               [[ "${{ needs.clippy-beta.result }}" != "skipped" ]] || \
                [[ "${{ needs.test.result }}" != "skipped" ]] || \
                [[ "${{ needs.coverage.result }}" != "skipped" ]] || \
                [[ "${{ needs['security-audit'].result }}" != "skipped" ]] || \
@@ -607,6 +632,7 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.formal.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
+             [[ "${{ needs.clippy-beta.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
@@ -616,6 +642,7 @@ jobs:
             echo "fmt: ${{ needs.fmt.result }}"
             echo "formal: ${{ needs.formal.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
+            echo "clippy-beta: ${{ needs.clippy-beta.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"

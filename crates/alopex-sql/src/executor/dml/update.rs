@@ -8,6 +8,7 @@ use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::subquery::evaluate_expr_with_subqueries;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::Projection;
@@ -45,6 +46,7 @@ pub fn execute_update_with_returning<
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    super::reject_columnar_dml(&table, "UPDATE")?;
     let mut rows_affected = 0u64;
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;
@@ -94,15 +96,16 @@ pub fn execute_update_with_returning<
             if _join_source.is_some() && joined.is_none() {
                 continue;
             }
-            if !predicate_matches(&filter, &eval_row)? {
+            if !predicate_matches(txn, catalog, &filter, row_id, &eval_row)? {
                 continue;
             }
 
-            let ctx = EvalContext::new(&eval_row);
+            let eval_row = Row::new(row_id, eval_row);
             let mut new_row = row.clone();
 
             for assignment in &assignments {
-                let mut value = evaluate(&assignment.value, &ctx)?;
+                let mut value =
+                    evaluate_expr_with_subqueries(txn, catalog, &assignment.value, &eval_row)?;
                 let target_type = &table.columns[assignment.column_index].data_type;
                 let compatible_vector = matches!(
                     (target_type, &value),
@@ -253,10 +256,16 @@ fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     Ok(batch)
 }
 
-fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
+fn predicate_matches<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    filter: &Option<TypedExpr>,
+    row_id: u64,
+    row: &[SqlValue],
+) -> Result<bool> {
     if let Some(expr) = filter {
-        let ctx = EvalContext::new(row);
-        let value = evaluate(expr, &ctx)?;
+        let value =
+            evaluate_expr_with_subqueries(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
         Ok(matches!(value, SqlValue::Boolean(true)))
     } else {
         Ok(true)
@@ -292,20 +301,34 @@ fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError 
     }
 }
 
-fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
+fn map_index_error(index: &IndexMetadata, row: &[SqlValue], err: StorageError) -> ExecutorError {
     match err {
         StorageError::UniqueViolation { .. } => {
             if index.name.starts_with("__pk_") {
                 ConstraintViolation::PrimaryKey {
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             } else {
                 ConstraintViolation::Unique {
                     index_name: index.name.clone(),
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             }
@@ -349,12 +372,12 @@ fn update_indexes_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
             if !old_skip {
                 storage
                     .delete(old_row, *row_id)
-                    .map_err(|e| map_index_error(index, e))?;
+                    .map_err(|e| map_index_error(index, old_row, e))?;
             }
             if !new_skip {
                 storage
                     .insert(new_row, *row_id)
-                    .map_err(|e| map_index_error(index, e))?;
+                    .map_err(|e| map_index_error(index, new_row, e))?;
             }
         }
     }

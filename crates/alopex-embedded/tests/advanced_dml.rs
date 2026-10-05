@@ -112,8 +112,8 @@ fn merge_updates_matches_and_inserts_non_matches() {
     assert_eq!(
         db.execute_sql(
             "MERGE INTO target USING source ON target.id = source.id
-             WHEN MATCHED THEN UPDATE SET value = source.value
-             WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)"
+             WHEN MATCHED AND target.value = 'old' THEN UPDATE SET value = source.value
+             WHEN NOT MATCHED AND source.value = 'inserted' THEN INSERT (id, value) VALUES (source.id, source.value)"
         )
         .unwrap(),
         ExecutionResult::RowsAffected(2)

@@ -108,6 +108,9 @@ pub struct SearchStats {
     pub distance_computations: u64,
     /// Elapsed search time in microseconds.
     pub search_time_us: u64,
+    /// Effective breadth after the graph applies its active-node bound.
+    #[cfg(test)]
+    pub(crate) effective_ef_search: usize,
     #[cfg(test)]
     pub(crate) query_norm_computations: u64,
 }

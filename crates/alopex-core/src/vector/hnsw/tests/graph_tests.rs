@@ -1,4 +1,5 @@
 use crate::vector::hnsw::HnswGraph;
+use crate::vector::hnsw::MAX_HNSW_EF_SEARCH;
 use crate::vector::Metric;
 
 fn base_config() -> crate::vector::hnsw::HnswConfig {
@@ -182,6 +183,27 @@ fn ef_search_is_auto_corrected() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn maximum_ef_search_is_clamped_to_active_node_count() {
+    let mut graph = make_graph();
+    for (key, vector) in [
+        (&b"a"[..], &[0.0, 0.0][..]),
+        (&b"b"[..], &[1.0, 0.0][..]),
+        (&b"c"[..], &[2.0, 0.0][..]),
+    ] {
+        graph.insert(key, vector, b"").unwrap();
+    }
+
+    let active_count = usize::try_from(graph.active_count).unwrap();
+    let (results, stats) = graph.search(&[0.0, 0.0], 1, MAX_HNSW_EF_SEARCH).unwrap();
+
+    assert_eq!(active_count, 3);
+    assert_eq!(stats.effective_ef_search, active_count);
+    assert!(stats.effective_ef_search <= active_count);
+    assert_eq!(results.len(), 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn deleted_nodes_are_skipped_in_results() {
     let mut graph = make_graph();
     graph.insert(b"a", &[0.0, 0.0], b"ma").unwrap();
@@ -191,6 +213,41 @@ fn deleted_nodes_are_skipped_in_results() {
     let (results, _) = graph.search(&[0.0, 0.0], 2, 8).unwrap();
     assert!(results.iter().all(|r| r.key != b"a"));
     assert_eq!(graph.deleted_count, 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn deleted_bridges_do_not_consume_live_ef_slots() {
+    let mut graph = make_graph();
+    graph.insert(b"a", &[0.0, 0.0], b"ma").unwrap();
+    graph.insert(b"b", &[1.0, 0.0], b"mb").unwrap();
+    graph.insert(b"c", &[2.0, 0.0], b"mc").unwrap();
+    graph.delete(b"b").unwrap();
+    // A deterministic layer requires traversal through the deleted middle node.
+    graph.nodes[0].as_mut().unwrap().neighbors = vec![vec![1]];
+    graph.nodes[1].as_mut().unwrap().neighbors = vec![vec![0, 2]];
+    graph.nodes[2].as_mut().unwrap().neighbors = vec![vec![1]];
+    graph.entry_point = Some(0);
+    graph.max_level = 0;
+
+    let (results, stats) = graph.search(&[0.0, 0.0], 3, MAX_HNSW_EF_SEARCH).unwrap();
+    assert_eq!(stats.effective_ef_search, 2);
+    assert_eq!(
+        results
+            .iter()
+            .map(|hit| hit.key.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"a", b"c"]
+    );
+    assert_eq!(results[1].metadata, b"mc");
+    assert_eq!(results[1].distance, 2.0);
+
+    // ef=1 must expand the entry before comparing its neighbors; equality with
+    // the current worst result is not a reason to terminate the traversal.
+    let (results, stats) = graph.search(&[2.0, 0.0], 1, 1).unwrap();
+    assert_eq!(stats.effective_ef_search, 1);
+    assert_eq!(results[0].key, b"c");
+    assert_eq!(results[0].distance, 0.0);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

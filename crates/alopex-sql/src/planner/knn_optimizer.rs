@@ -38,6 +38,11 @@ pub enum SortDirection {
 pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
     let (sort_plan, k, options) = extract_limit(plan)?;
     let (order_expr, input_after_sort) = extract_sort(sort_plan)?;
+    // Both exact kNN and HNSW omit NULL vectors. NULLS FIRST ordering
+    // request must use the ordinary sort so those rows can lead the result.
+    if order_expr.nulls_first {
+        return None;
+    }
     let sort_direction = if order_expr.asc {
         SortDirection::Asc
     } else {
@@ -219,6 +224,22 @@ mod tests {
             offset,
             ties: None,
             knn_options: KnnQueryOptions::default(),
+        }
+    }
+
+    #[test]
+    fn nulls_first_requires_the_ordinary_sort() {
+        for (function, ascending) in [("vector_distance", true), ("vector_similarity", false)] {
+            let mut plan = build_plan(function, ascending, "cosine", None);
+            assert!(detect_knn_pattern(&plan).is_some());
+            let LogicalPlan::Limit { input, .. } = &mut plan else {
+                panic!("expected limit");
+            };
+            let LogicalPlan::Sort { order_by, .. } = input.as_mut() else {
+                panic!("expected sort");
+            };
+            order_by[0].nulls_first = true;
+            assert!(detect_knn_pattern(&plan).is_none());
         }
     }
 

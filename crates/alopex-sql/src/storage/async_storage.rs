@@ -19,7 +19,10 @@ use crate::executor::{
     ExecutionResult, ExecutorError, Result as ExecResult, Row, bulk, copy_format, ddl, dml, query,
 };
 use crate::parser::Parser;
-use crate::planner::{LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing};
+use crate::planner::{
+    LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing,
+    plan_sql_for_routing_with_copy_security,
+};
 use crate::storage::bridge::HnswTxnEntry;
 use crate::storage::error::{Result as StorageResult, StorageError};
 use crate::storage::{KeyEncoder, RowCodec};
@@ -49,7 +52,7 @@ where
     mode: TxnMode,
     catalog: Option<Arc<RwLock<dyn Catalog + Send + Sync>>>,
     memory_policy: Option<MemoryPolicy>,
-    copy_security: bulk::CopySecurityConfig,
+    copy_security: Option<bulk::CopySecurityConfig>,
     _marker: PhantomData<&'txn ()>,
 }
 
@@ -64,7 +67,7 @@ where
             mode,
             catalog: None,
             memory_policy: None,
-            copy_security: bulk::CopySecurityConfig::default(),
+            copy_security: None,
             _marker: PhantomData,
         }
     }
@@ -87,7 +90,7 @@ where
 
     /// Restrict file paths used by COPY statements.
     pub fn set_copy_security(&mut self, config: bulk::CopySecurityConfig) {
-        self.copy_security = config;
+        self.copy_security = Some(config);
     }
 
     /// Attach a memory policy and return the updated bridge.
@@ -121,9 +124,14 @@ where
             }
         };
         let sql = sql.to_string();
+        let copy_security = self.copy_security.clone();
         Box::pin(async move {
             let guard = catalog.read().expect("catalog lock poisoned");
-            plan_sql_for_routing(&*guard, &sql).map_err(|err| ExecutorError::InvalidOperation {
+            let result = match copy_security {
+                Some(config) => plan_sql_for_routing_with_copy_security(&*guard, &sql, &config),
+                None => plan_sql_for_routing(&*guard, &sql),
+            };
+            result.map_err(|err| ExecutorError::InvalidOperation {
                 operation: "async_plan_for_routing".into(),
                 reason: err.to_string(),
             })
@@ -347,7 +355,8 @@ where
         let state = Arc::clone(&self.state);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
-        let copy_security = self.copy_security.clone();
+        let read_security = self.copy_security.clone();
+        let copy_security = read_security.clone().unwrap_or_default();
         Box::pin(async move {
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
@@ -369,6 +378,7 @@ where
                     &sql,
                     mode,
                     &copy_security,
+                    read_security.as_ref(),
                 );
                 let (txn, hnsw) = blocking_txn.into_parts();
                 (result, txn, hnsw)
@@ -404,6 +414,7 @@ where
         let state = Arc::clone(&self.state);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
+        let read_security = self.copy_security.clone();
         let sender_for_task = sender.clone();
 
         tokio::spawn(async move {
@@ -427,7 +438,13 @@ where
             let join = tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
                     BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                stream_query_blocking(&mut blocking_txn, &catalog, &sql, sender_blocking);
+                stream_query_blocking(
+                    &mut blocking_txn,
+                    &catalog,
+                    &sql,
+                    sender_blocking,
+                    read_security.as_ref(),
+                );
                 blocking_txn.into_parts()
             });
 
@@ -481,10 +498,12 @@ fn execute_sql_blocking_multi<T>(
     sql: &str,
     mode: TxnMode,
     copy_security: &bulk::CopySecurityConfig,
+    read_security: Option<&bulk::CopySecurityConfig>,
 ) -> ExecResult<Vec<ExecutionResult>>
 where
     T: for<'a> AsyncKVTransaction<'a>,
 {
+    txn.read_security = read_security.cloned();
     let statements = parse_sql(sql)?;
     if statements.is_empty() {
         return Err(ExecutorError::InvalidOperation {
@@ -497,7 +516,10 @@ where
     for stmt in statements {
         let plan = {
             let guard = catalog.read().expect("catalog lock poisoned");
-            Planner::new(&*guard).plan(&stmt)?
+            match read_security {
+                Some(config) => Planner::with_copy_security(&*guard, config.clone()).plan(&stmt)?,
+                None => Planner::new(&*guard).plan(&stmt)?,
+            }
         };
 
         let op_name = plan.operation_name();
@@ -515,6 +537,23 @@ where
                     table,
                     with_options,
                     if_not_exists,
+                )?
+            }
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => {
+                ensure_write(mode, op_name)?;
+                let mut guard = catalog.write().expect("catalog lock poisoned");
+                execute_create_table_as_blocking(
+                    txn,
+                    &mut *guard,
+                    table,
+                    with_options,
+                    if_not_exists,
+                    *source,
                 )?
             }
             LogicalPlan::DropTable { name, if_exists } => {
@@ -557,7 +596,14 @@ where
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *source)?
+                let ExecutionResult::Query(result) =
+                    query::execute_query_with_policy_and_copy_security(
+                        txn,
+                        &*guard,
+                        *source,
+                        None,
+                        read_security,
+                    )?
                 else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "INSERT ... SELECT".into(),
@@ -622,7 +668,14 @@ where
                 });
                 let format = copy_format(&path, &options)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *query)?
+                let ExecutionResult::Query(result) =
+                    query::execute_query_with_policy_and_copy_security(
+                        txn,
+                        &*guard,
+                        *query,
+                        None,
+                        read_security,
+                    )?
                 else {
                     return Err(ExecutorError::InvalidOperation {
                         operation: "COPY TO".into(),
@@ -688,7 +741,13 @@ where
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");
                 let policy = txn.memory_policy().cloned();
-                query::execute_query_with_policy(txn, &*guard, query_plan, policy.as_ref())?
+                query::execute_query_with_policy_and_copy_security(
+                    txn,
+                    &*guard,
+                    query_plan,
+                    policy.as_ref(),
+                    read_security,
+                )?
             }
         });
     }
@@ -696,11 +755,55 @@ where
     Ok(results)
 }
 
+fn execute_create_table_as_blocking<T>(
+    txn: &mut BlockingSqlTransaction<T>,
+    catalog: &mut (dyn Catalog + Send + Sync),
+    table: TableMetadata,
+    with_options: Vec<(String, String)>,
+    if_not_exists: bool,
+    source: LogicalPlan,
+) -> ExecResult<ExecutionResult>
+where
+    T: for<'a> AsyncKVTransaction<'a>,
+{
+    let table_name = table.name.clone();
+    if catalog.table_exists(&table_name) {
+        return if if_not_exists {
+            Ok(ExecutionResult::Success)
+        } else {
+            Err(ExecutorError::TableAlreadyExists(table_name))
+        };
+    }
+    ddl::create_table::validate_ctas_storage(&with_options)?;
+    let columns = table
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)? else {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "CREATE TABLE AS".into(),
+            reason: "SELECT source did not return query rows".into(),
+        });
+    };
+    ddl::create_table::execute_create_table(txn, catalog, table, with_options, false)?;
+    dml::execute_insert_rows_with_plan(
+        txn,
+        &*catalog,
+        &table_name,
+        columns,
+        result.rows,
+        None,
+        None,
+    )
+}
+
 fn stream_query_blocking<T>(
     txn: &mut BlockingSqlTransaction<T>,
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     sender: tokio::sync::mpsc::Sender<ExecResult<Row>>,
+    read_security: Option<&bulk::CopySecurityConfig>,
 ) where
     T: for<'a> AsyncKVTransaction<'a>,
 {
@@ -721,7 +824,13 @@ fn stream_query_blocking<T>(
 
     let plan = {
         let guard = catalog.read().expect("catalog lock poisoned");
-        match Planner::new(&*guard).plan(&statements[0]) {
+        let result = match read_security {
+            Some(config) => {
+                Planner::with_copy_security(&*guard, config.clone()).plan(&statements[0])
+            }
+            None => Planner::new(&*guard).plan(&statements[0]),
+        };
+        match result {
             Ok(plan) => plan,
             Err(err) => {
                 let _ = sender.blocking_send(Err(err.into()));
@@ -740,14 +849,19 @@ fn stream_query_blocking<T>(
 
     let guard = catalog.read().expect("catalog lock poisoned");
     let policy = txn.memory_policy().cloned();
-    let mut iter =
-        match query::execute_query_streaming_with_policy(txn, &*guard, plan, policy.as_ref()) {
-            Ok(iter) => iter,
-            Err(err) => {
-                let _ = sender.blocking_send(Err(err));
-                return;
-            }
-        };
+    let mut iter = match query::execute_query_streaming_with_policy_and_copy_security(
+        txn,
+        &*guard,
+        plan,
+        policy.as_ref(),
+        read_security,
+    ) {
+        Ok(iter) => iter,
+        Err(err) => {
+            let _ = sender.blocking_send(Err(err));
+            return;
+        }
+    };
 
     let mut row_id = 0u64;
     loop {
@@ -823,6 +937,7 @@ struct BlockingSqlTransaction<T> {
     mode: TxnMode,
     hnsw_indices: HashMap<String, HnswTxnEntry>,
     memory_policy: Option<MemoryPolicy>,
+    read_security: Option<bulk::CopySecurityConfig>,
 }
 
 impl<T> BlockingSqlTransaction<T>
@@ -841,6 +956,7 @@ where
             mode,
             hnsw_indices,
             memory_policy,
+            read_security: None,
         }
     }
 
@@ -879,6 +995,10 @@ impl<'txn, T> crate::storage::bridge::SqlTxn<'txn, BlockingKVStore<T>> for Block
 where
     T: for<'a> AsyncKVTransaction<'a> + 'txn,
 {
+    fn read_security(&self) -> Option<&bulk::CopySecurityConfig> {
+        self.read_security.as_ref()
+    }
+
     fn mode(&self) -> TxnMode {
         self.mode
     }
@@ -1144,5 +1264,194 @@ where
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ctas_tests {
+    use super::*;
+    use crate::catalog::MemoryCatalog;
+    use crate::storage::SqlValue;
+    use alopex_core::kv::AsyncKVStore;
+    use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
+    use alopex_core::kv::memory::MemoryKV;
+
+    #[tokio::test]
+    async fn ctas_and_dml_plans_recheck_inherited_read_security() {
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let outside = temp.path().join("outside.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![7]))])
+            .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&outside).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let security = bulk::CopySecurityConfig {
+            allowed_base_dirs: Some(vec![allowed.canonicalize().unwrap()]),
+            allow_symlinks: false,
+        };
+        let store = AsyncKVStoreAdapter::from_arc(Arc::new(MemoryKV::new()), TxnMode::ReadWrite);
+        let transaction = store.begin_async().await.unwrap();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let mut txn = BlockingSqlTransaction::new(
+                transaction,
+                TxnMode::ReadWrite,
+                handle.clone(),
+                HashMap::new(),
+                None,
+            );
+            let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+                Arc::new(RwLock::new(MemoryCatalog::new()));
+            execute_sql_blocking_multi(
+                &mut txn,
+                &catalog,
+                "CREATE TABLE target (id INT, value INT); INSERT INTO target VALUES (7, 1)",
+                TxnMode::ReadWrite,
+                &security,
+                Some(&security),
+            )
+            .unwrap();
+            let path = outside.display();
+            // Unrestricted planning isolates the execution-time policy check.
+            for sql in [
+                format!("CREATE TABLE copied AS SELECT * FROM read_parquet('{path}')"),
+                format!("UPDATE target SET value = (SELECT id FROM read_parquet('{path}'))"),
+                format!("DELETE FROM target WHERE id IN (SELECT id FROM read_parquet('{path}'))"),
+            ] {
+                let statement = parse_sql(&sql).unwrap().remove(0);
+                let plan = Planner::new(&*catalog.read().unwrap())
+                    .plan(&statement)
+                    .unwrap();
+                let error = match plan {
+                    LogicalPlan::CreateTableAs {
+                        table,
+                        source,
+                        with_options,
+                        if_not_exists,
+                    } => execute_create_table_as_blocking(
+                        &mut txn,
+                        &mut *catalog.write().unwrap(),
+                        table,
+                        with_options,
+                        if_not_exists,
+                        *source,
+                    )
+                    .unwrap_err(),
+                    LogicalPlan::Update {
+                        table,
+                        assignments,
+                        filter,
+                        ..
+                    } => dml::execute_update(
+                        &mut txn,
+                        &*catalog.read().unwrap(),
+                        &table,
+                        assignments,
+                        filter,
+                    )
+                    .unwrap_err(),
+                    LogicalPlan::Delete { table, filter, .. } => {
+                        dml::execute_delete(&mut txn, &*catalog.read().unwrap(), &table, filter)
+                            .unwrap_err()
+                    }
+                    _ => panic!("unexpected test plan"),
+                };
+                assert!(
+                    matches!(error, ExecutorError::PathValidationFailed { .. }),
+                    "{sql}: {error}"
+                );
+                assert!(!catalog.read().unwrap().table_exists("copied"));
+            }
+            let results = execute_sql_blocking_multi(
+                &mut txn,
+                &catalog,
+                "SELECT id, value FROM target",
+                TxnMode::ReadWrite,
+                &security,
+                Some(&security),
+            )
+            .unwrap();
+            let ExecutionResult::Query(query) = &results[0] else {
+                panic!("expected target rows");
+            };
+            assert_eq!(
+                query.rows,
+                vec![vec![SqlValue::Integer(7), SqlValue::Integer(1)]]
+            );
+            let (transaction, _) = txn.into_parts();
+            handle.block_on(transaction.async_rollback()).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_columnar_ctas_rejects_before_catalog_mutation_and_preserves_noop() {
+        let store = AsyncKVStoreAdapter::from_arc(Arc::new(MemoryKV::new()), TxnMode::ReadWrite);
+        let transaction = store.begin_async().await.unwrap();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let mut txn = BlockingSqlTransaction::new(
+                transaction,
+                TxnMode::ReadWrite,
+                handle.clone(),
+                HashMap::new(),
+                None,
+            );
+            let mut catalog = MemoryCatalog::new();
+            let statement = parse_sql("CREATE TABLE copied AS SELECT 1 AS id")
+                .unwrap()
+                .remove(0);
+            let LogicalPlan::CreateTableAs { table, source, .. } =
+                Planner::new(&catalog).plan(&statement).unwrap()
+            else {
+                panic!("expected CTAS plan");
+            };
+            let options = vec![("storage".into(), "columnar".into())];
+            assert!(matches!(execute_create_table_as_blocking(
+                &mut txn, &mut catalog, table.clone(), options.clone(), true, *source.clone(),
+            ), Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
+            assert!(!catalog.table_exists("copied"));
+            execute_create_table_as_blocking(
+                &mut txn,
+                &mut catalog,
+                table.clone(),
+                vec![],
+                false,
+                *source.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                execute_create_table_as_blocking(
+                    &mut txn,
+                    &mut catalog,
+                    table,
+                    options,
+                    true,
+                    *source,
+                )
+                .unwrap(),
+                ExecutionResult::Success
+            );
+            let statement = parse_sql("SELECT id FROM copied").unwrap().remove(0);
+            let plan = Planner::new(&catalog).plan(&statement).unwrap();
+            let ExecutionResult::Query(result) =
+                query::execute_query(&mut txn, &catalog, plan).unwrap()
+            else {
+                panic!("expected preserved rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Integer(1)]]);
+            let (transaction, _) = txn.into_parts();
+            handle.block_on(transaction.async_rollback()).unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

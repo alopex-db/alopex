@@ -12,7 +12,8 @@ use crate::ast::ddl::{
     DropIndex, DropTable, IndexMethod,
 };
 use crate::ast::dml::{
-    Assignment, Delete, FromItem, Insert, InsertSource, OrderByExpr, Select, SelectItem, Update,
+    Assignment, Delete, FromItem, Insert, InsertSource, Merge, MergeAction, MergeClause,
+    OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
@@ -247,6 +248,44 @@ fn binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
     }
 }
 
+#[test]
+fn test_plan_merge_rejects_non_boolean_clause_condition() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let merge = Merge {
+        target: FromItem::Table {
+            name: "users".to_string(),
+            alias: None,
+            columns: vec![],
+            span: span(),
+        },
+        source: FromItem::Table {
+            name: "products".to_string(),
+            alias: None,
+            columns: vec![],
+            span: span(),
+        },
+        on: binary_op(
+            col_ref(Some("users"), "id"),
+            BinaryOp::Eq,
+            col_ref(Some("products"), "id"),
+        ),
+        clauses: vec![MergeClause {
+            matched: true,
+            condition: Some(int_lit(1)),
+            action: MergeAction::DoNothing,
+            span: span(),
+        }],
+        returning: vec![],
+        span: span(),
+    };
+
+    assert!(matches!(
+        planner.plan(&stmt(StatementKind::Merge(merge))),
+        Err(PlannerError::TypeMismatch { .. })
+    ));
+}
+
 // ============================================================
 // DDL Tests
 // ============================================================
@@ -288,6 +327,7 @@ fn test_plan_create_table() {
         ],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 
@@ -329,6 +369,7 @@ fn test_plan_create_table_already_exists() {
         columns: vec![],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 
@@ -351,6 +392,7 @@ fn test_plan_create_table_if_not_exists() {
         columns: vec![],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 
@@ -431,6 +473,7 @@ fn test_plan_create_index() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: true,
         name: "idx_users_name".to_string(),
         table: "users".to_string(),
         column: "name".to_string(),
@@ -451,6 +494,7 @@ fn test_plan_create_index() {
         assert_eq!(index.table, "users");
         assert_eq!(index.first_column(), Some("name"));
         assert_eq!(index.method, Some(IndexMethod::BTree));
+        assert!(index.unique);
         assert!(!if_not_exists);
     } else {
         panic!("Expected CreateIndex plan");
@@ -464,6 +508,7 @@ fn test_plan_create_index_column_not_found() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: false,
         name: "idx_users_foo".to_string(),
         table: "users".to_string(),
         column: "nonexistent".to_string(),
