@@ -168,6 +168,17 @@ where
                 });
             }
             new_table.columns.remove(index);
+            for (_, updated) in &mut updated_indexes {
+                updated.column_indices = updated
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        new_table
+                            .get_column_index(column)
+                            .ok_or_else(|| ExecutorError::ColumnNotFound(column.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
             let rows = scan_rows(txn, &old_table)?;
             rewrite_rows(txn, &new_table, rows, |mut row| {
                 row.remove(index);

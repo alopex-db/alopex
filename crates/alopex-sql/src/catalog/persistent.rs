@@ -49,6 +49,16 @@ pub enum CatalogError {
 
     #[error("invalid catalog metadata: {0}")]
     InvalidMetadata(String),
+
+    #[error("index recovery failed: {0}")]
+    IndexRecovery(String),
+}
+
+struct IndexRepair {
+    table: TableMetadata,
+    index: IndexMetadata,
+    key: Vec<u8>,
+    original: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1052,6 +1062,10 @@ impl<'a, S: KVStore> Catalog for TxnCatalogView<'a, S> {
             .filter(|idx| {
                 idx.catalog_name == table_meta.catalog_name
                     && idx.namespace_name == table_meta.namespace_name
+                    && !self
+                        .overlay
+                        .added_indexes
+                        .contains_key(&IndexFqn::from(*idx))
                     && !self.catalog.index_hidden_by_overlay(idx, self.overlay)
             })
             .collect();
@@ -1235,6 +1249,7 @@ impl<S: KVStore> PersistentCatalog<S> {
             inner.insert_table_unchecked(table);
         }
 
+        let mut index_repairs = Vec::new();
         for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
             let suffix = key_suffix(INDEXES_PREFIX, &key)?;
             let fqn = parse_index_key_suffix(&suffix)?;
@@ -1261,6 +1276,42 @@ impl<S: KVStore> PersistentCatalog<S> {
                     index.catalog_name = table.catalog_name.clone();
                     index.namespace_name = table.namespace_name.clone();
                 }
+                if index.columns.is_empty() {
+                    return Err(CatalogError::IndexRecovery(format!(
+                        "index '{}' must reference existing columns",
+                        index.name
+                    )));
+                }
+                let resolved = index
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        table.get_column_index(column).ok_or_else(|| {
+                            CatalogError::IndexRecovery(format!(
+                                "index '{}' refers to missing column '{}'",
+                                index.name, column
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if resolved != index.column_indices {
+                    if fqn.catalog != table.catalog_name
+                        || fqn.namespace != table.namespace_name
+                        || fqn.table != table.name
+                    {
+                        return Err(CatalogError::IndexRecovery(format!(
+                            "ambiguous table for index '{}'",
+                            index.name
+                        )));
+                    }
+                    index.column_indices = resolved;
+                    index_repairs.push(IndexRepair {
+                        table: table.clone(),
+                        index: index.clone(),
+                        key,
+                        original: value,
+                    });
+                }
                 inner.insert_index_unchecked(index);
             }
         }
@@ -1275,7 +1326,20 @@ impl<S: KVStore> PersistentCatalog<S> {
         }
         inner.set_counters(table_id_counter, index_id_counter);
 
+        let mut expected_tables = HashMap::new();
+        for repair in &index_repairs {
+            let table = &repair.table;
+            let key = table_key(&table.catalog_name, &table.namespace_name, &table.name);
+            let value = txn.get(&key)?.ok_or_else(|| {
+                CatalogError::IndexRecovery(format!("missing table '{}'", table.name))
+            })?;
+            expected_tables.insert(key, value);
+        }
         txn.rollback_self()?;
+
+        if !index_repairs.is_empty() {
+            Self::repair_indexes(&store, &index_repairs, &expected_tables)?;
+        }
 
         Ok(Self {
             inner,
@@ -1283,6 +1347,50 @@ impl<S: KVStore> PersistentCatalog<S> {
             catalogs,
             namespaces,
         })
+    }
+
+    fn repair_indexes(
+        store: &Arc<S>,
+        repairs: &[IndexRepair],
+        expected_tables: &HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<(), CatalogError> {
+        use crate::executor::ddl::recover_index::rebuild_index;
+        use crate::storage::TxnBridge;
+
+        let bridge = TxnBridge::new(store.clone());
+        let mut txn = bridge
+            .begin_write()
+            .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+        let result = (|| {
+            // A changed schema between detection and repair must not be overwritten.
+            // All checks precede every deletion, rebuild and metadata write.
+            for (key, expected) in expected_tables {
+                if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
+                    return Err(CatalogError::IndexRecovery(
+                        "table metadata changed during recovery".into(),
+                    ));
+                }
+            }
+            for repair in repairs {
+                if txn.inner_mut().get(&repair.key)?.as_ref() != Some(&repair.original) {
+                    return Err(CatalogError::IndexRecovery(
+                        "index metadata changed during recovery".into(),
+                    ));
+                }
+            }
+            for repair in repairs {
+                rebuild_index(&mut txn, &repair.table, &repair.index)
+                    .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            txn.rollback()
+                .map_err(|rollback| CatalogError::IndexRecovery(format!("{error}; {rollback}")))?;
+            return Err(error);
+        }
+        txn.commit()
+            .map_err(|error| CatalogError::IndexRecovery(error.to_string()))
     }
 
     fn migrate_v1_to_v2(store: &Arc<S>) -> Result<(), CatalogError> {

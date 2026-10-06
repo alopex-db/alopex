@@ -8,6 +8,7 @@ pub mod create_table;
 pub mod drop_index;
 pub mod drop_table;
 pub(crate) mod persistence;
+pub(crate) mod recover_index;
 pub mod schema_evolution;
 pub mod sequence;
 

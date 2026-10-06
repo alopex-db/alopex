@@ -13,6 +13,9 @@ use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use alopex_sql::executor::{ExecutionResult, Executor};
 use alopex_sql::storage::TxnBridge;
 
+#[path = "support/legacy_index_recovery.rs"]
+mod legacy_recovery;
+
 fn run_sql_in_txn(
     store: Arc<MemoryKV>,
     catalog: Arc<RwLock<PersistentCatalog<MemoryKV>>>,

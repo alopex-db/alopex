@@ -24,6 +24,51 @@ use alopex_sql::storage::{SqlTxn as _, TxnBridge};
 type PersistentCatalogHandle = Arc<RwLock<PersistentCatalog<MemoryKV>>>;
 type PersistentExecutor = Executor<MemoryKV, PersistentCatalog<MemoryKV>>;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn overlay_replaces_base_index_in_transaction_view() {
+    use alopex_sql::catalog::persistent::{IndexFqn, TableFqn};
+    use alopex_sql::catalog::{ColumnMetadata, IndexMetadata};
+
+    let store = Arc::new(MemoryKV::new());
+    let mut catalog = PersistentCatalog::new(store);
+    let mut table = TableMetadata::new(
+        "items",
+        vec![
+            ColumnMetadata::new("obsolete", ResolvedType::Integer),
+            ColumnMetadata::new("id", ResolvedType::Integer),
+        ],
+    )
+    .with_table_id(1);
+    let mut index = IndexMetadata::new(1, "idx_items_id", "items", vec!["id".into()])
+        .with_column_indices(vec![1]);
+    let mut base = CatalogOverlay::new();
+    base.add_table(TableFqn::from(&table), table.clone());
+    base.add_index(IndexFqn::from(&index), index.clone());
+    catalog.apply_overlay(base);
+
+    table.columns.remove(0);
+    index.column_indices = vec![0];
+    let mut overlay = CatalogOverlay::new();
+    overlay.add_table(TableFqn::from(&table), table);
+    overlay.add_index(IndexFqn::from(&index), index);
+
+    let view = TxnCatalogView::new(&catalog, &overlay);
+    let indexes = view.get_indexes_for_table("items");
+    assert_eq!(
+        indexes.len(),
+        1,
+        "an overlay replacement must hide the base index"
+    );
+    assert_eq!(indexes[0].name, "idx_items_id");
+    assert_eq!(indexes[0].column_indices, vec![0]);
+    assert_eq!(
+        catalog.get_indexes_for_table("items")[0].column_indices,
+        vec![1],
+        "the transaction overlay must not change the base catalog"
+    );
+}
+
 fn executor_with_persistent_catalog(
     store: Arc<MemoryKV>,
 ) -> (PersistentExecutor, PersistentCatalogHandle) {
