@@ -1,5 +1,8 @@
 import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -108,3 +111,24 @@ def test_in_memory_databases_are_not_locked():
     second = Database.open_in_memory()
     first.close()
     second.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize("finish", ["gc", "close"])
+def test_forked_database_drop_preserves_parent_lock(tmp_path, finish):
+    probe = Path(__file__).parent / "support" / "fork_lock_probe.py"
+    result = subprocess.run(
+        [sys.executable, str(probe), finish, str(tmp_path / "forked.alopex")],
+        capture_output=True, text=True, timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_parent_close_releases_lock_before_forked_child_exits(tmp_path):
+    probe = Path(__file__).parent / "support" / "fork_lock_probe.py"
+    result = subprocess.run(
+        [sys.executable, str(probe), "parent_close", str(tmp_path / "forked.alopex")],
+        capture_output=True, text=True, timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
