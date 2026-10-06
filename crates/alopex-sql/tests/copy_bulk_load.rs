@@ -963,3 +963,263 @@ fn copy_columnar_named_unique_supporting_pk_reports_primary_key() {
         vec![vec![SqlValue::Integer(1), SqlValue::Text("prior".into())]]
     );
 }
+
+fn assert_postload_columnar_unique_rejects_duplicates(public_sql: bool) {
+    use alopex_sql::catalog::IndexMetadata;
+    use alopex_sql::planner::LogicalPlan;
+
+    let (store, catalog, mut executor) = constraint_fixture("id INT");
+    let file = constraint_csv("id\n1\n1\n");
+    assert_eq!(
+        constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap(),
+        ExecutionResult::RowsAffected(2)
+    );
+    let expected = vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]];
+    let ExecutionResult::Query(before_rows) =
+        constraint_execute(&mut executor, &catalog, "SELECT id FROM users ORDER BY id").unwrap()
+    else {
+        panic!("expected existing columnar rows");
+    };
+    assert_eq!(before_rows.rows, expected);
+    let before = constraint_snapshot(&store);
+    let table_before = catalog.read().unwrap().get_table("users").unwrap().clone();
+    let plan = if public_sql {
+        let statement =
+            Parser::parse_sql(&AlopexDialect, "CREATE UNIQUE INDEX uq_users ON users(id)")
+                .unwrap()
+                .pop()
+                .unwrap();
+        assert!(matches!(
+            &statement.kind,
+            alopex_sql::ast::StatementKind::CreateIndex(index) if index.unique
+        ));
+        Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap()
+    } else {
+        LogicalPlan::CreateIndex {
+            index: IndexMetadata::new(0, "uq_users", "users", vec!["id".into()]).with_unique(true),
+            if_not_exists: false,
+        }
+    };
+    assert!(matches!(&plan, LogicalPlan::CreateIndex { index, .. } if index.unique));
+    let result = executor.execute(plan);
+    let after = constraint_snapshot(&store);
+    let index_absent = catalog.read().unwrap().get_index("uq_users").is_none();
+    let table_after = catalog.read().unwrap().get_table("users").unwrap().clone();
+    let ExecutionResult::Query(after_rows) =
+        constraint_execute(&mut executor, &catalog, "SELECT id FROM users ORDER BY id").unwrap()
+    else {
+        panic!("expected preserved columnar rows");
+    };
+    eprintln!(
+        "public_sql={public_sql} result={result:?} all_kv_unchanged={} index_absent={index_absent} rows={:?}",
+        before == after,
+        after_rows.rows
+    );
+    assert!(
+        matches!(&result, Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, columns, .. }))
+            if index_name == "uq_users" && columns == &["id"]),
+        "existing duplicate columnar rows must reject UNIQUE creation: {result:?}"
+    );
+    assert_eq!(after, before);
+    assert!(index_absent);
+    assert_eq!(table_after.table_id, table_before.table_id);
+    assert_eq!(table_after.name, table_before.name);
+    assert_eq!(table_after.primary_key, table_before.primary_key);
+    assert_eq!(table_after.properties, table_before.properties);
+    assert_eq!(table_after.storage_options, table_before.storage_options);
+    assert_eq!(after_rows.rows, expected);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_postload_unique_sql_rejects_existing_duplicates() {
+    assert_postload_columnar_unique_rejects_duplicates(true);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_postload_unique_typed_plan_rejects_existing_duplicates() {
+    assert_postload_columnar_unique_rejects_duplicates(false);
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn columnar_postload_unique_preserves_nulls_and_checks_future_copy() {
+    let (store, catalog, mut executor) = constraint_fixture("id INT");
+    for csv in ["id\n1\nNULL\n", "id\n2\nNULL\n"] {
+        let file = constraint_csv(csv);
+        constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap();
+    }
+    constraint_execute(
+        &mut executor,
+        &catalog,
+        "CREATE UNIQUE INDEX uq_users ON users(id)",
+    )
+    .unwrap();
+    let index = catalog
+        .read()
+        .unwrap()
+        .get_index("uq_users")
+        .unwrap()
+        .clone();
+    assert!(index.unique);
+    assert_eq!(index.column_indices, vec![0]);
+    let valid = constraint_csv("id\n3\nNULL\n");
+    constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&valid)).unwrap();
+    let before = constraint_snapshot(&store);
+    let duplicate = constraint_csv("id\n4\n1\n");
+    let result = constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&duplicate));
+    assert!(
+        matches!(&result, Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, .. })) if index_name == "uq_users"),
+        "{result:?}"
+    );
+    assert_eq!(constraint_snapshot(&store), before);
+    let ExecutionResult::Query(query) = constraint_execute(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM users ORDER BY id NULLS LAST",
+    )
+    .unwrap() else {
+        panic!("expected query");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+            vec![SqlValue::Null],
+            vec![SqlValue::Null],
+            vec![SqlValue::Null]
+        ]
+    );
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn columnar_postload_composite_unique_checks_complete_keys() {
+    for duplicate in [false, true] {
+        let (store, catalog, mut executor) = constraint_fixture("a INT, b INT");
+        for csv in [
+            "a,b\n1,10\nNULL,10\n1,NULL\n",
+            "a,b\n1,11\nNULL,10\n1,NULL\n",
+        ] {
+            let file = constraint_csv(csv);
+            constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap();
+        }
+        if duplicate {
+            let file = constraint_csv("a,b\n1,10\n");
+            constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap();
+        }
+        let before = constraint_snapshot(&store);
+        let ExecutionResult::Query(rows_before) = constraint_execute(
+            &mut executor,
+            &catalog,
+            "SELECT a, b FROM users ORDER BY a NULLS LAST, b NULLS LAST",
+        )
+        .unwrap() else {
+            panic!("expected composite rows");
+        };
+        let result = executor.execute(alopex_sql::planner::LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "uq_pair",
+                "users",
+                vec!["a".into(), "b".into()],
+            )
+            .with_unique(true),
+            if_not_exists: false,
+        });
+        let ExecutionResult::Query(rows_after) = constraint_execute(
+            &mut executor,
+            &catalog,
+            "SELECT a, b FROM users ORDER BY a NULLS LAST, b NULLS LAST",
+        )
+        .unwrap() else {
+            panic!("expected preserved composite rows");
+        };
+        assert_eq!(rows_after.rows, rows_before.rows);
+        if duplicate {
+            assert!(
+                matches!(&result, Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, columns, .. })) if index_name == "uq_pair" && columns == &["a", "b"]),
+                "{result:?}"
+            );
+            assert_eq!(constraint_snapshot(&store), before);
+            assert!(catalog.read().unwrap().get_index("uq_pair").is_none());
+        } else {
+            result.unwrap();
+            assert_eq!(
+                catalog
+                    .read()
+                    .unwrap()
+                    .get_index("uq_pair")
+                    .unwrap()
+                    .column_indices,
+                vec![0, 1]
+            );
+            let file = constraint_csv("a,b\n2,10\nNULL,10\n1,NULL\n");
+            assert_eq!(
+                constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap(),
+                ExecutionResult::RowsAffected(3)
+            );
+            let before = constraint_snapshot(&store);
+            let file = constraint_csv("a,b\n1,11\n");
+            assert!(matches!(
+                constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)),
+                Err(ExecutorError::ConstraintViolation(
+                    ConstraintViolation::Unique { .. }
+                ))
+            ));
+            assert_eq!(constraint_snapshot(&store), before);
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn columnar_postload_unique_rejects_unindexable_type_before_null_skip() {
+    for (declaration, kind) in [
+        ("JSON", "Json"),
+        ("VECTOR(2)", "Vector"),
+        ("INTERVAL", "Interval"),
+        ("DECIMAL(10,2)", "Decimal"),
+    ] {
+        let (store, catalog, mut executor) = constraint_fixture(&format!("payload {declaration}"));
+        // Fixed-encoding COPY has a separate known selector boundary on this
+        // base. Keep those cases at the empty-table DDL boundary, not a codec test.
+        if kind == "Json" {
+            let file = constraint_csv("payload\nNULL\n");
+            assert_eq!(
+                constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap(),
+                ExecutionResult::RowsAffected(1)
+            );
+        }
+        let before = constraint_snapshot(&store);
+        let result = executor.execute(alopex_sql::planner::LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "uq_json",
+                "users",
+                vec!["payload".into()],
+            )
+            .with_unique(true),
+            if_not_exists: false,
+        });
+        if kind == "Json" {
+            assert!(
+                matches!(&result, Err(ExecutorError::InvalidOperation { operation, reason })
+            if operation == "CREATE INDEX" && reason == "Alopex does not define a JSON sort order"),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(&result, Err(ExecutorError::Storage(alopex_sql::storage::StorageError::TypeMismatch { expected, actual })) if expected == "indexable scalar type" && actual == kind),
+                "{result:?}"
+            );
+        }
+        assert_eq!(constraint_snapshot(&store), before);
+        assert!(catalog.read().unwrap().get_index("uq_json").is_none());
+    }
+}

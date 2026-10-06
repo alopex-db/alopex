@@ -32,16 +32,15 @@ use crate::catalog::{
 };
 use crate::columnar::statistics::compute_row_group_statistics;
 use crate::executor::Row;
+use crate::executor::columnar_constraints;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::memory::{DEFAULT_SPILL_THRESHOLD_BYTES, MemoryPolicy, SpillPolicy};
 use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
-use crate::executor::query::iterator::{RowIterator, SortIterator};
+use crate::executor::query::iterator::RowIterator;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
-use crate::planner::typed_expr::{SortExpr, TypedExpr};
 use crate::planner::types::ResolvedType;
 use crate::storage::table::validate_row;
-use crate::storage::{KeyEncoder, SqlTxn, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 mod csv;
 mod parquet;
@@ -887,24 +886,7 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .collect();
     // Resolve metadata before NULL-skipping; missing positions are not SQL NULL.
     for index in &indexes {
-        if index.column_indices.is_empty()
-            || index.column_indices.len() != index.columns.len()
-            || index
-                .column_indices
-                .iter()
-                .zip(&index.columns)
-                .any(|(&position, name)| {
-                    table
-                        .columns
-                        .get(position)
-                        .is_none_or(|column| column.name != *name)
-                })
-        {
-            return Err(ExecutorError::BulkLoad(format!(
-                "invalid constraint metadata: {}",
-                index.name
-            )));
-        }
+        columnar_constraints::validate_index_columns(table, index)?;
     }
     let primary_columns: Vec<usize> = table
         .primary_key
@@ -920,14 +902,7 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
                 })
         })
         .collect::<Result<_>>()?;
-    let policy = txn.memory_policy().cloned().unwrap_or_else(|| {
-        MemoryPolicy::new(
-            Some(DEFAULT_SPILL_THRESHOLD_BYTES),
-            SpillPolicy::SpillToDisk {
-                directory: std::env::temp_dir(),
-            },
-        )
-    });
+    let policy = columnar_constraints::memory_policy(txn.memory_policy());
     let mut existing = if indexes.is_empty() {
         None
     } else {
@@ -951,21 +926,11 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
                         let position = index_position;
                         index_position += 1;
                         let index = &indexes[position];
-                        // The metadata and complete row shape have already been checked.
-                        if should_skip_unique_index_for_null(index, row) {
+                        let Some(key) = columnar_constraints::key(index, row)
+                            .map_err(|error| map_index_error(index, error))?
+                        else {
                             continue;
-                        }
-                        let values: Vec<SqlValue> = index
-                            .column_indices
-                            .iter()
-                            .map(|&column| row[column].clone())
-                            .collect();
-                        let key = if values.len() == 1 {
-                            KeyEncoder::index_value_prefix(index.index_id, &values[0])
-                        } else {
-                            KeyEncoder::composite_index_prefix(index.index_id, &values)
-                        }
-                        .map_err(|error| map_index_error(index, error))?;
+                        };
                         return Ok(Some(Row::new(position as u64, vec![SqlValue::Blob(key)])));
                     }
                 }
@@ -1007,48 +972,27 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
                 input_rows = batch.into_iter();
             }
         };
-        let input = CopyConstraintKeys {
-            next: &mut next_key,
-            schema: [ColumnMetadata::new("constraint_key", ResolvedType::Blob)],
-        };
-        let order = [SortExpr {
-            expr: TypedExpr::column_ref(
-                String::new(),
-                "constraint_key".into(),
-                0,
-                ResolvedType::Blob,
-                crate::Span::default(),
-            ),
-            asc: true,
-            nulls_first: false,
-        }];
-        let mut sorted = SortIterator::new_with_policy(input, &order, Some(policy))?;
-        let mut previous = None;
-        while let Some(row) = sorted.next_row() {
-            let row = row?;
-            if previous.as_ref() == Some(&row.values) {
-                let index = &indexes[row.row_id as usize];
-                // PersistentCatalog accepts an equivalent unique B-tree under
-                // another name as the PK's supporting index. Preserve that role.
-                let primary = index.table == table.name
-                    && index.catalog_name == table.catalog_name
-                    && index.namespace_name == table.namespace_name
-                    && table.primary_key.as_ref() == Some(&index.columns);
-                let violation = if primary {
-                    crate::executor::ConstraintViolation::PrimaryKey {
-                        columns: index.columns.clone(),
-                        value: None,
-                    }
-                } else {
-                    crate::executor::ConstraintViolation::Unique {
-                        index_name: index.name.clone(),
-                        columns: index.columns.clone(),
-                        value: None,
-                    }
-                };
-                return Err(ExecutorError::ConstraintViolation(violation));
-            }
-            previous = Some(row.values);
+        if let Some(position) = columnar_constraints::duplicate_constraint(&mut next_key, policy)? {
+            let index = &indexes[position];
+            // PersistentCatalog accepts an equivalent unique B-tree under
+            // another name as the PK's supporting index. Preserve that role.
+            let primary = index.table == table.name
+                && index.catalog_name == table.catalog_name
+                && index.namespace_name == table.namespace_name
+                && table.primary_key.as_ref() == Some(&index.columns);
+            let violation = if primary {
+                crate::executor::ConstraintViolation::PrimaryKey {
+                    columns: index.columns.clone(),
+                    value: None,
+                }
+            } else {
+                crate::executor::ConstraintViolation::Unique {
+                    index_name: index.name.clone(),
+                    columns: index.columns.clone(),
+                    value: None,
+                }
+            };
+            return Err(ExecutorError::ConstraintViolation(violation));
         }
     }
 
@@ -1077,22 +1021,6 @@ fn validate_copy_columnar_row(
         }
     }
     Ok(())
-}
-
-/// Streams one encoded constraint key at a time without retaining an extra row spool.
-struct CopyConstraintKeys<F> {
-    next: F,
-    schema: [ColumnMetadata; 1],
-}
-
-impl<F: FnMut() -> Result<Option<Row>>> RowIterator for CopyConstraintKeys<F> {
-    fn next_row(&mut self) -> Option<Result<Row>> {
-        (self.next)().transpose()
-    }
-
-    fn schema(&self) -> &[ColumnMetadata] {
-        &self.schema
-    }
 }
 
 fn map_compression(compression: Compression) -> CompressionV2 {
