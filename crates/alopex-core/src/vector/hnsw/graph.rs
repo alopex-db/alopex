@@ -279,16 +279,27 @@ impl HnswGraph {
     }
 
     /// Executes a top-k search. Returns results and search statistics.
+    #[cfg(test)]
     pub fn search(
         &self,
         query: &[f32],
         k: usize,
         ef_search: usize,
     ) -> Result<(Vec<HnswSearchResult>, SearchStats)> {
+        self.search_with_effective_ef(query, k, ef_search)
+            .map(|(results, stats, _)| (results, stats))
+    }
+
+    pub fn search_with_effective_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<(Vec<HnswSearchResult>, SearchStats, usize)> {
         validate_dimensions(self.config.dimension, query.len())?;
         validate_hnsw_vector(self.config.metric, query)?;
         if k == 0 || self.entry_point.is_none() || self.active_count == 0 {
-            return Ok((Vec::new(), SearchStats::default()));
+            return Ok((Vec::new(), SearchStats::default(), 0));
         }
 
         let mut stats = SearchStats::default();
@@ -306,7 +317,7 @@ impl HnswGraph {
                     max_level = self.calculate_max_level();
                     ep
                 }
-                None => return Ok((Vec::new(), stats)),
+                None => return Ok((Vec::new(), stats, 0)),
             },
         };
 
@@ -351,7 +362,7 @@ impl HnswGraph {
             .map(|(_, result)| result)
             .collect();
 
-        Ok((results, stats))
+        Ok((results, stats, ef))
     }
 
     /// Logically deletes a node by key. Returns true if a node was deleted.
