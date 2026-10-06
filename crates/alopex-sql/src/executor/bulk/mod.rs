@@ -31,11 +31,17 @@ use crate::catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
 };
 use crate::columnar::statistics::compute_row_group_statistics;
+use crate::executor::Row;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::memory::{DEFAULT_SPILL_THRESHOLD_BYTES, MemoryPolicy, SpillPolicy};
+use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
+use crate::executor::query::iterator::{RowIterator, SortIterator};
 use crate::executor::{ExecutionResult, ExecutorError, Result};
+use crate::planner::typed_expr::{SortExpr, TypedExpr};
 use crate::planner::types::ResolvedType;
-use crate::storage::{SqlTxn, SqlValue, StorageError};
+use crate::storage::table::validate_row;
+use crate::storage::{KeyEncoder, SqlTxn, SqlValue, StorageError};
 
 mod csv;
 mod parquet;
@@ -856,8 +862,6 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     table: &TableMetadata,
     mut reader: Box<dyn BulkReader>,
 ) -> Result<u64> {
-    let _ = catalog; // reserved for future index integration
-
     let row_group_size = table.storage_options.row_group_size.max(1) as usize;
     let compression = map_compression(table.storage_options.compression);
     let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
@@ -867,23 +871,185 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     });
     let schema = build_segment_schema(table)?;
 
+    // Preserve empty COPY as a no-op, including for a legacy invalid table.
+    let first_batch = loop {
+        match reader.next_batch(row_group_size)? {
+            Some(batch) if batch.is_empty() => continue,
+            Some(batch) => break batch,
+            None => return Ok(0),
+        }
+    };
+    let indexes: Vec<IndexMetadata> = catalog
+        .get_indexes_for_table(&table.name)
+        .into_iter()
+        .filter(|index| index.unique && matches!(index.method, None | Some(IndexMethod::BTree)))
+        .cloned()
+        .collect();
+    // Resolve metadata before NULL-skipping; missing positions are not SQL NULL.
+    for index in &indexes {
+        if index.column_indices.is_empty()
+            || index.column_indices.len() != index.columns.len()
+            || index
+                .column_indices
+                .iter()
+                .zip(&index.columns)
+                .any(|(&position, name)| {
+                    table
+                        .columns
+                        .get(position)
+                        .is_none_or(|column| column.name != *name)
+                })
+        {
+            return Err(ExecutorError::BulkLoad(format!(
+                "invalid constraint metadata: {}",
+                index.name
+            )));
+        }
+    }
+    let primary_columns: Vec<usize> = table
+        .primary_key
+        .iter()
+        .flatten()
+        .map(|name| {
+            table
+                .columns
+                .iter()
+                .position(|column| column.name == *name)
+                .ok_or_else(|| {
+                    ExecutorError::BulkLoad(format!("unknown primary key column: {name}"))
+                })
+        })
+        .collect::<Result<_>>()?;
+    let policy = txn.memory_policy().cloned().unwrap_or_else(|| {
+        MemoryPolicy::new(
+            Some(DEFAULT_SPILL_THRESHOLD_BYTES),
+            SpillPolicy::SpillToDisk {
+                directory: std::env::temp_dir(),
+            },
+        )
+    });
+    let mut existing = if indexes.is_empty() {
+        None
+    } else {
+        Some(create_columnar_scan_iterator(
+            txn,
+            table,
+            &ColumnarScan::new(table.table_id, Vec::new(), None, None),
+        )?)
+    };
     let mut row_group_stats = Vec::new();
     let mut total_rows = 0u64;
-    while let Some(batch) = reader.next_batch(row_group_size)? {
-        if batch.is_empty() {
-            continue;
+    {
+        let mut first_batch = Some(first_batch);
+        let mut input_rows = Vec::new().into_iter();
+        let mut current_row: Option<Vec<SqlValue>> = None;
+        let mut index_position = 0;
+        let mut next_key = || -> Result<Option<Row>> {
+            loop {
+                if let Some(row) = &current_row {
+                    while index_position < indexes.len() {
+                        let position = index_position;
+                        index_position += 1;
+                        let index = &indexes[position];
+                        // The metadata and complete row shape have already been checked.
+                        if should_skip_unique_index_for_null(index, row) {
+                            continue;
+                        }
+                        let values: Vec<SqlValue> = index
+                            .column_indices
+                            .iter()
+                            .map(|&column| row[column].clone())
+                            .collect();
+                        let key = if values.len() == 1 {
+                            KeyEncoder::index_value_prefix(index.index_id, &values[0])
+                        } else {
+                            KeyEncoder::composite_index_prefix(index.index_id, &values)
+                        }
+                        .map_err(|error| map_index_error(index, error))?;
+                        return Ok(Some(Row::new(position as u64, vec![SqlValue::Blob(key)])));
+                    }
+                }
+                current_row = None;
+                index_position = 0;
+                if let Some(scan) = &mut existing {
+                    if let Some(row) = scan.next_row() {
+                        let row = row?;
+                        validate_copy_columnar_row(table, &primary_columns, &row.values)?;
+                        current_row = Some(row.values);
+                        continue;
+                    }
+                    existing = None;
+                }
+                if let Some(row) = input_rows.next() {
+                    current_row = Some(row);
+                    continue;
+                }
+                let batch = match first_batch.take() {
+                    Some(batch) => Some(batch),
+                    None => reader.next_batch(row_group_size)?,
+                };
+                let Some(batch) = batch else {
+                    return Ok(None);
+                };
+                if batch.is_empty() {
+                    continue;
+                }
+                for row in &batch {
+                    validate_copy_columnar_row(table, &primary_columns, row)?;
+                }
+                let stats = compute_row_group_statistics(&batch);
+                let record_batch = build_record_batch(&schema, table, &batch)?;
+                writer
+                    .write_batch(record_batch)
+                    .map_err(|error| ExecutorError::Columnar(error.to_string()))?;
+                row_group_stats.push(stats);
+                total_rows += batch.len() as u64;
+                input_rows = batch.into_iter();
+            }
+        };
+        let input = CopyConstraintKeys {
+            next: &mut next_key,
+            schema: [ColumnMetadata::new("constraint_key", ResolvedType::Blob)],
+        };
+        let order = [SortExpr {
+            expr: TypedExpr::column_ref(
+                String::new(),
+                "constraint_key".into(),
+                0,
+                ResolvedType::Blob,
+                crate::Span::default(),
+            ),
+            asc: true,
+            nulls_first: false,
+        }];
+        let mut sorted = SortIterator::new_with_policy(input, &order, Some(policy))?;
+        let mut previous = None;
+        while let Some(row) = sorted.next_row() {
+            let row = row?;
+            if previous.as_ref() == Some(&row.values) {
+                let index = &indexes[row.row_id as usize];
+                // PersistentCatalog accepts an equivalent unique B-tree under
+                // another name as the PK's supporting index. Preserve that role.
+                let primary = index.table == table.name
+                    && index.catalog_name == table.catalog_name
+                    && index.namespace_name == table.namespace_name
+                    && table.primary_key.as_ref() == Some(&index.columns);
+                let violation = if primary {
+                    crate::executor::ConstraintViolation::PrimaryKey {
+                        columns: index.columns.clone(),
+                        value: None,
+                    }
+                } else {
+                    crate::executor::ConstraintViolation::Unique {
+                        index_name: index.name.clone(),
+                        columns: index.columns.clone(),
+                        value: None,
+                    }
+                };
+                return Err(ExecutorError::ConstraintViolation(violation));
+            }
+            previous = Some(row.values);
         }
-        let stats = compute_row_group_statistics(&batch);
-        let record_batch = build_record_batch(&schema, table, &batch)?;
-        writer
-            .write_batch(record_batch)
-            .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
-        row_group_stats.push(stats);
-        total_rows += batch.len() as u64;
-    }
-
-    if total_rows == 0 {
-        return Ok(0);
     }
 
     let segment = writer
@@ -892,6 +1058,41 @@ fn bulk_load_columnar<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     let _segment_id = persist_segment(txn, table, segment, &row_group_stats)?;
 
     Ok(total_rows)
+}
+
+fn validate_copy_columnar_row(
+    table: &TableMetadata,
+    primary_columns: &[usize],
+    row: &[SqlValue],
+) -> Result<()> {
+    validate_row(table, row).map_err(|error| map_storage_error(table, error))?;
+    for &position in primary_columns {
+        if row[position].is_null() {
+            return Err(map_storage_error(
+                table,
+                StorageError::NullConstraintViolation {
+                    column: table.columns[position].name.clone(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Streams one encoded constraint key at a time without retaining an extra row spool.
+struct CopyConstraintKeys<F> {
+    next: F,
+    schema: [ColumnMetadata; 1],
+}
+
+impl<F: FnMut() -> Result<Option<Row>>> RowIterator for CopyConstraintKeys<F> {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        (self.next)().transpose()
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
 }
 
 fn map_compression(compression: Compression) -> CompressionV2 {

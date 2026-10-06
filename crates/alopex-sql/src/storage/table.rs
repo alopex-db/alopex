@@ -135,27 +135,31 @@ impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
     }
 
     fn validate_row(&self, row: &[SqlValue]) -> Result<()> {
-        let expected = self.table_meta.column_count();
-        if row.len() != expected {
-            return Err(StorageError::TypeMismatch {
-                expected: format!("{} columns", expected),
-                actual: format!("{} columns", row.len()),
-            });
-        }
-
-        for (idx, col) in self.table_meta.columns.iter().enumerate() {
-            if (col.not_null || col.primary_key) && row[idx].is_null() {
-                return Err(StorageError::NullConstraintViolation {
-                    column: col.name.clone(),
-                });
-            }
-        }
-        Ok(())
+        validate_row(&self.table_meta, row)
     }
 
     fn row_key(&self, row_id: u64) -> Key {
         KeyEncoder::row_key(self.table_id, row_id)
     }
+}
+
+pub(crate) fn validate_row(table: &TableMetadata, row: &[SqlValue]) -> Result<()> {
+    let expected = table.column_count();
+    if row.len() != expected {
+        return Err(StorageError::TypeMismatch {
+            expected: format!("{} columns", expected),
+            actual: format!("{} columns", row.len()),
+        });
+    }
+
+    for (idx, col) in table.columns.iter().enumerate() {
+        if (col.not_null || col.primary_key) && row[idx].is_null() {
+            return Err(StorageError::NullConstraintViolation {
+                column: col.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Iterator over table rows that lazily decodes RowCodec.
