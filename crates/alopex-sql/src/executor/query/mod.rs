@@ -1185,12 +1185,10 @@ fn build_iterator_pipeline_with_outer<
             let iter = iterator::VecIterator::new(rows, schema.clone());
             Ok((Box::new(iter), projection, schema))
         }
-        LogicalPlan::TableFunction {
-            function,
-            args,
-            schema,
-        } => {
-            let rows = execute_table_function(txn, catalog, function, &args, outer, context)?;
+        ref table_function @ LogicalPlan::TableFunction { ref schema, .. } => {
+            let rows =
+                execute_table_function(txn, catalog, table_function, outer, memory, context)?;
+            let schema = schema.clone();
             let projection =
                 Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -2011,13 +2009,22 @@ fn execute_lateral_join<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<
 fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
-    function: crate::planner::TableFunctionKind,
-    args: &[crate::planner::typed_expr::TypedExpr],
+    plan: &LogicalPlan,
     outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
     context: &QueryExecutionContext,
 ) -> Result<Vec<Row>> {
     use crate::planner::TableFunctionKind;
 
+    let LogicalPlan::TableFunction {
+        function,
+        args,
+        schema,
+    } = plan
+    else {
+        unreachable!("table function execution requires a table function plan");
+    };
+    let function = *function;
     let empty = Row::new(0, Vec::new());
     let eval_row = combine_outer_for_eval(&empty, outer);
     let mut values = Vec::with_capacity(args.len());
@@ -2095,11 +2102,13 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     reason: "requires a TEXT path".into(),
                 });
             };
-            let result = match &context.copy_security {
-                Some(config) => crate::executor::bulk::read_parquet_with_security(path, config),
-                None => crate::executor::bulk::read_parquet(path),
-            };
-            result.map(|(_, rows)| {
+            crate::executor::bulk::read_parquet_with_plan(
+                path,
+                schema,
+                context.copy_security.as_ref(),
+                memory,
+            )
+            .map(|rows| {
                 rows.into_iter()
                     .enumerate()
                     .map(|(index, values)| Row::new(index as u64, values))
