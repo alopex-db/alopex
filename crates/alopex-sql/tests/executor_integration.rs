@@ -11,6 +11,9 @@ use std::sync::{Arc, RwLock};
 #[path = "support/btree_read_counts.rs"]
 mod btree_read_counts;
 
+#[path = "support/integer_primary_key_boundaries.rs"]
+mod integer_primary_key_boundaries;
+
 fn create_executor() -> (
     Executor<MemoryKV, MemoryCatalog>,
     Arc<RwLock<MemoryCatalog>>,
@@ -916,7 +919,7 @@ fn btree_same_type_boundaries_preserve_scan_comparison_semantics() {
             ResolvedType::BigInt,
             vec!["9007199254740992", "9007199254740993", "9007199254740994"],
             "9007199254740992",
-            2,
+            1,
         ),
         (ResolvedType::Text, vec!["a", "a\0b", "b"], "a", 1),
     ] {

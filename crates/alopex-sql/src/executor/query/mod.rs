@@ -89,10 +89,11 @@ fn index_predicate(
     }
 
     // Candidate lookup must preserve the evaluator's comparison semantics.
-    // FLOAT/DOUBLE keys distinguish signed zero; BIGINT comparisons round to
-    // f64. TEXT's NUL terminator and BLOB's length prefix do not preserve SQL
+    // FLOAT/DOUBLE keys distinguish signed zero. TEXT's NUL terminator and
+    // BLOB's length prefix do not preserve SQL
     // range order, although their equality lookups are safe with the residual
-    // filter below. Keep unsupported encodings on the ordinary scan path.
+    // filter below. Keep unsupported encodings and the existing conservative
+    // BIGINT fallback on the ordinary scan path.
     match &value {
         SqlValue::Integer(_)
         | SqlValue::Boolean(_)
