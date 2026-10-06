@@ -6398,12 +6398,20 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.from.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.from.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
             let ctes = CtePlans::default();
+            // Rename only the visible relation; physical source lookup keeps its catalog name.
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let assignments = stmt
                 .assignments
@@ -6714,12 +6722,20 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "DELETE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.using.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.using.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
             let ctes = CtePlans::default();
+            // Rename only the visible relation; physical source lookup keeps its catalog name.
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let condition = stmt
                 .selection
