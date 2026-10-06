@@ -9,6 +9,121 @@ use alopex_core::columnar::segment_v2::{
 };
 use alopex_core::storage::compression::{create_compressor, CompressionV2};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn fixed_selected_codec_roundtrips() {
+    use alopex_core::columnar::encoding_v2::{
+        create_decoder, create_encoder, select_encoding, Bitmap, EncodingHints, EncodingV2,
+    };
+    for ids in [
+        vec![1u8, 2, 3, 4],
+        vec![3, 1, 4, 2],
+        vec![1; 8],
+        vec![2, 1, 2, 1, 2, 1],
+        vec![],
+    ] {
+        for nulls in [false, true] {
+            let valid: Vec<bool> = (0..ids.len()).map(|i| !nulls || i != 1).collect();
+            let values: Vec<Vec<u8>> = ids
+                .iter()
+                .zip(&valid)
+                .map(|(&id, &valid)| vec![if valid { id } else { 0 }; 8])
+                .collect();
+            let present: Vec<u8> = ids
+                .iter()
+                .zip(&valid)
+                .filter_map(|(&id, &valid)| valid.then_some(id))
+                .collect();
+            let distinct_count = present
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let hints = EncodingHints {
+                is_sorted: present.windows(2).all(|pair| pair[0] <= pair[1]),
+                distinct_count,
+                total_count: ids.len(),
+                ..Default::default()
+            };
+            let column = Column::Fixed { len: 8, values };
+            let bitmap = nulls.then(|| Bitmap::from_bools(&valid));
+            let encoding = select_encoding(LogicalType::Fixed(8), &hints);
+            let bytes = create_encoder(encoding)
+                .encode(&column, bitmap.as_ref())
+                .unwrap_or_else(|error| {
+                    panic!("ids={ids:?}, nulls={nulls}, codec={encoding:?}: {error}")
+                });
+            let decoded = create_decoder(encoding)
+                .decode(&bytes, ids.len(), LogicalType::Fixed(8))
+                .unwrap();
+            assert_eq!(
+                decoded,
+                (column, bitmap),
+                "ids={ids:?}, nulls={nulls}, codec={encoding:?}"
+            );
+            if !ids.is_empty() && distinct_count > 0 && distinct_count * 2 < ids.len() {
+                assert_eq!(
+                    encoding,
+                    EncodingV2::Dictionary,
+                    "preserve Fixed dictionary compression"
+                );
+            }
+        }
+    }
+    let column = Column::Fixed {
+        len: 8,
+        values: vec![vec![0; 8]; 4],
+    };
+    let bitmap = Some(Bitmap::new(4));
+    let hints = EncodingHints {
+        is_sorted: true,
+        distinct_count: 0,
+        total_count: 4,
+        ..Default::default()
+    };
+    let encoding = select_encoding(LogicalType::Fixed(8), &hints);
+    let bytes = create_encoder(encoding)
+        .encode(&column, bitmap.as_ref())
+        .unwrap();
+    assert_eq!(
+        create_decoder(encoding)
+            .decode(&bytes, 4, LogicalType::Fixed(8))
+            .unwrap(),
+        (column, bitmap)
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn binary_sorted_selected_codec_roundtrips() {
+    use alopex_core::columnar::encoding_v2::{
+        create_decoder, create_encoder, select_encoding, Bitmap, EncodingHints, EncodingV2,
+    };
+    let column = Column::Binary(vec![
+        b"prefix-a".to_vec(),
+        b"prefix-ab".to_vec(),
+        b"prefix-b".to_vec(),
+    ]);
+    let hints = EncodingHints {
+        is_sorted: true,
+        distinct_count: 3,
+        total_count: 3,
+        ..Default::default()
+    };
+    let encoding = select_encoding(LogicalType::Binary, &hints);
+    assert_eq!(encoding, EncodingV2::IncrementalString);
+    for bitmap in [None, Some(Bitmap::from_bools(&[true, false, true]))] {
+        let bytes = create_encoder(encoding)
+            .encode(&column, bitmap.as_ref())
+            .unwrap();
+        assert_eq!(
+            create_decoder(encoding)
+                .decode(&bytes, 3, LogicalType::Binary)
+                .unwrap(),
+            (column.clone(), bitmap)
+        );
+    }
+}
+
 fn simple_schema() -> Schema {
     Schema {
         columns: vec![

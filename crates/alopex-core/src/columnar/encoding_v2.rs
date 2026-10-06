@@ -1988,7 +1988,9 @@ pub fn select_encoding(logical_type: LogicalType, hints: &EncodingHints) -> Enco
         LogicalType::Float64 => EncodingV2::ByteStreamSplit,
         LogicalType::Bool => select_bool_encoding(hints),
         LogicalType::Binary => select_binary_encoding(hints),
-        LogicalType::Fixed(_) => select_binary_encoding(hints),
+        // IncrementalString accepts variable-length Binary only. Fixed
+        // columns retain the shared Dictionary/Plain selection instead.
+        LogicalType::Fixed(_) => select_dictionary_or_plain(hints),
     }
 }
 
@@ -2048,6 +2050,10 @@ fn select_binary_encoding(hints: &EncodingHints) -> EncodingV2 {
         return EncodingV2::IncrementalString;
     }
 
+    select_dictionary_or_plain(hints)
+}
+
+fn select_dictionary_or_plain(hints: &EncodingHints) -> EncodingV2 {
     // Low cardinality: use Dictionary
     if hints.total_count > 0 && hints.distinct_count > 0 {
         let cardinality_ratio = hints.distinct_count as f64 / hints.total_count as f64;
