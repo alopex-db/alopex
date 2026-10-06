@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "case": "column",
+      "entries": 11,
+      "sha256": "8ce89c5ce8bf3ed8d8e642969d4a850d64b70fbe3a51274eabcaf09176da7768",
+      "sql_sha256": "1365d7f88d51a0a71cbfcf219013ce35fedcf3f4c950dea9740a2bf76ee37e98"
+    },
+    {
+      "case": "named",
+      "entries": 11,
+      "sha256": "86022fc32371fb6e20825cea4bc4c9b64bd3187d3527be86d4a9aec786424cc8",
+      "sql_sha256": "7e777e145622b024751f9128ae1365c46aca7cf04f10915cba5fe6e9a48170bb"
+    },
+    {
+      "case": "composite",
+      "entries": 11,
+      "sha256": "c9711ce5f9ab8073e6bf43161d791fb6bf5bdd4e12bb76d274a61f97b8992c3c",
+      "sql_sha256": "1459e20b7ba589d97f005acffdce14018c99dea9224897db80f06af7f13c1d56"
+    },
+    {
+      "case": "nullable",
+      "entries": 15,
+      "sha256": "06483d743b16a0d2c5930100f9324743134f3ef3a6aa4a9b22ca63c3b0a78454",
+      "sql_sha256": "641c6e08e2ac72d2a56d5695ef8b06fb58313060dfbe6d5ab2e07a3865c25f6f"
+    },
+    {
+      "case": "duplicate",
+      "entries": 13,
+      "sha256": "c6c1d630361ffd0b69e5c01c0e430e671462c64d4e5485a31c4a196e2a366611",
+      "sql_sha256": "94d0231cf881d257cffcc2366eb57476b7903756460aeba0995790a72be03c98"
+    },
+    {
+      "case": "named_duplicate",
+      "entries": 13,
+      "sha256": "52a12e6dc0bd901991e83c7bd293d8b9b39d43b2cf6afea7e2c1480af8cf8dbb",
+      "sql_sha256": "58929074031c84af932f477ed83d7832b4b2eaee18362eebf81a756fd8c8ac14"
+    },
+    {
+      "case": "composite_duplicate",
+      "entries": 13,
+      "sha256": "658c69c0253baf9d105f0a3109eb3d4d537838c47d34f54270921a70f7505f27",
+      "sql_sha256": "17401357256d7b42b99b4e57dac758e535c8cdf531fb74fd64ca2f00e0bc31fa"
+    }
+  ],
+  "fixture_sha256": "db3ef6506d01c93dcb623b82e4ad9a6112bd07386a54429af294279294613415",
+  "identity": {
+    "commands": [
+      "rustc -C opt-level=1 -C debuginfo=0 -C embed-bitcode=yes -C metadata=issue585old -L dependency=<owned-temp>/native -L dependency=<third-party> -L native=<owned-temp>/parser --edition=2021 --crate-type rlib --crate-name alopex_core --cfg feature=\\\"default\\\" --cfg feature=\\\"compression-zstd\\\" --cfg feature=\\\"zstd\\\" --extern bincode=<third-party>/libbincode-28e6283f7225ed8c.rlib --extern regex=<third-party>/libregex-3cf8b5a844a093a0.rlib --extern zstd=<third-party>/libzstd-6e6d9142821fa43d.rlib --extern rand=<third-party>/librand-93d445e122e6b887.rlib --extern crc32fast=<third-party>/libcrc32fast-c11278399153afbd.rlib --extern futures_core=<third-party>/libfutures_core-5fb07f2fae219509.rlib --extern memmap2=<third-party>/libmemmap2-568e674c13f143e0.rlib --extern serde=<third-party>/libserde-8f957917eee4a4d8.rlib --extern tracing=<third-party>/libtracing-9bd8dc805c23d7b1.rlib --extern snap=<third-party>/libsnap-346bb41c337ad273.rlib --extern hex=<third-party>/libhex-0372880fdee80842.rlib --extern uuid=<third-party>/libuuid-f3828baa1ecfe91a.rlib --extern csv=<third-party>/libcsv-2321dcc89595d34b.rlib --extern chrono=<third-party>/libchrono-d52e9fe7792979df.rlib --extern md5=<third-party>/libmd5-a86c18d7b08a7a5e.rlib --extern sha2=<third-party>/libsha2-7efb214e3104708f.rlib --extern arrow_schema=<third-party>/libarrow_schema-c1e2018a5e3864e5.rlib --extern arrow_array=<third-party>/libarrow_array-56317420238735dc.rlib --extern base64=<third-party>/libbase64-504b3cf90ab4f68f.rlib --extern serde_json=<third-party>/libserde_json-22e25cc3262a4339.rlib --extern parquet=<third-party>/libparquet-e9dffb1501edd449.rlib --extern rmp_serde=<third-party>/librmp_serde-95f9bc8f2e71ca9b.rlib --extern thiserror=<third-party>/libthiserror-9f886331ae89c866.rlib <old-source>/crates/alopex-core/src/lib.rs -o <owned-temp>/native/libalopex_core.rlib",
+      "rustc -C opt-level=1 -C debuginfo=0 -C embed-bitcode=yes -C metadata=issue585old -L dependency=<owned-temp>/native -L dependency=<third-party> -L native=<owned-temp>/parser --edition=2024 --crate-type rlib --crate-name alopex_sql --cfg feature=\\\"default\\\" --cfg feature=\\\"lane_ci\\\" -L native=<owned-temp>/parser --extern bincode=<third-party>/libbincode-28e6283f7225ed8c.rlib --extern regex=<third-party>/libregex-3cf8b5a844a093a0.rlib --extern zstd=<third-party>/libzstd-6e6d9142821fa43d.rlib --extern rand=<third-party>/librand-93d445e122e6b887.rlib --extern crc32fast=<third-party>/libcrc32fast-c11278399153afbd.rlib --extern futures_core=<third-party>/libfutures_core-5fb07f2fae219509.rlib --extern memmap2=<third-party>/libmemmap2-568e674c13f143e0.rlib --extern serde=<third-party>/libserde-8f957917eee4a4d8.rlib --extern tracing=<third-party>/libtracing-9bd8dc805c23d7b1.rlib --extern snap=<third-party>/libsnap-346bb41c337ad273.rlib --extern hex=<third-party>/libhex-0372880fdee80842.rlib --extern uuid=<third-party>/libuuid-f3828baa1ecfe91a.rlib --extern csv=<third-party>/libcsv-2321dcc89595d34b.rlib --extern chrono=<third-party>/libchrono-d52e9fe7792979df.rlib --extern md5=<third-party>/libmd5-a86c18d7b08a7a5e.rlib --extern sha2=<third-party>/libsha2-7efb214e3104708f.rlib --extern arrow_schema=<third-party>/libarrow_schema-c1e2018a5e3864e5.rlib --extern arrow_array=<third-party>/libarrow_array-56317420238735dc.rlib --extern base64=<third-party>/libbase64-504b3cf90ab4f68f.rlib --extern serde_json=<third-party>/libserde_json-22e25cc3262a4339.rlib --extern parquet=<third-party>/libparquet-e9dffb1501edd449.rlib --extern rmp_serde=<third-party>/librmp_serde-95f9bc8f2e71ca9b.rlib --extern thiserror=<third-party>/libthiserror-1292c6e08c73fc30.rlib --extern alopex_core=<owned-temp>/native/libalopex_core.rlib <old-source>/crates/alopex-sql/src/lib.rs -o <owned-temp>/native/libalopex_sql.rlib",
+      "rustc -C opt-level=1 -C debuginfo=0 -C embed-bitcode=yes -C metadata=issue585old -L dependency=<owned-temp>/native -L dependency=<third-party> -L native=<owned-temp>/parser --edition=2024 --crate-name old_unique_producer -C lto=thin --extern alopex_core=<owned-temp>/native/libalopex_core.rlib --extern alopex_sql=<owned-temp>/native/libalopex_sql.rlib --extern bincode=<third-party>/libbincode-28e6283f7225ed8c.rlib --extern serde_json=<third-party>/libserde_json-22e25cc3262a4339.rlib --extern hex=<third-party>/libhex-0372880fdee80842.rlib crates/alopex-sql/tests/support/legacy_unique_producer.rs -o <owned-temp>/native/old-unique-producer"
+    ],
+    "compiler": "rustc 1.96.0 ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96; aarch64-apple-darwin; LLVM 22.1.2",
+    "dependencies_sha256": "019fe2fc12705fbe6fb17706edf7940ad659add0c4fde961355a10ce029467a3",
+    "oracle_source_sha256": "bc75ed4f36364bad7ec598f88e87619f5da83b5b4fecda4f7b8871889c8f8b5f",
+    "parser_command": "bash scripts/build-nim-parser.sh --backend host --target aarch64-apple-darwin --output <owned-temp>/parser/libalopex_sql_parser.dylib --archive-dir <owned-temp>/parser-record",
+    "parser_contract": "0.25.0",
+    "parser_record_sha256": "75700c4e1361f43e06e6498b5817c678be3df0d1fb9ec122c27dce47fe4aec71",
+    "parser_source_sha256": "5714205bc38d73cc8a40100a15025f22e0c2dbfd33c8e5edb18cbc70cf39804d",
+    "producer_binary_sha256": "b022dc59afd4b51df575f840bad4b1500b257554914b6518fec96f560fd47e22",
+    "producer_command": "<owned-temp>/native/old-unique-producer CASE <owned-temp>/cases/CASE.json",
+    "producer_source_sha256": "ea8ec654c32677fe73340dfc70bd603086bef9752cd3b0b6dc1f0a96e86c31db",
+    "scope": "SQL catalog/index all-KV-byte upgrade; not physical-file/WAL/Python compatibility",
+    "source_clean": true,
+    "source_commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+    "source_manifest_sha256": "18d276a34b48670fe4b6378a272619f451345a1e002e4191449e3d95de0067b0",
+    "source_tag": "v0.8.15",
+    "tag_object": "f00d6416e429c1167d92417e726263333e9fb005"
+  },
+  "schema": "alopex-sql-kv-fixture-provenance/v1"
+}

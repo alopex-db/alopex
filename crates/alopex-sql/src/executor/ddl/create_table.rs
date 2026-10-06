@@ -89,6 +89,15 @@ pub(crate) fn constraint_indexes<C: Catalog + ?Sized>(
     catalog: &mut C,
     table: &TableMetadata,
 ) -> Result<Vec<IndexMetadata>> {
+    let mut indexes = constraint_index_definitions(table)?;
+    for index in &mut indexes {
+        index.index_id = catalog.next_index_id();
+    }
+    Ok(indexes)
+}
+
+/// Resolve constraint definitions without allocating IDs or mutating the catalog.
+pub(crate) fn constraint_index_definitions(table: &TableMetadata) -> Result<Vec<IndexMetadata>> {
     let mut unique_columns = Vec::new();
     if let Some(pk_columns) = table.primary_key.clone() {
         unique_columns.push((create_pk_index_name(&table.name), pk_columns));
@@ -99,6 +108,20 @@ pub(crate) fn constraint_indexes<C: Catalog + ?Sized>(
                 name.clone()
                     .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
                 columns.clone(),
+            ));
+        }
+    }
+    // Older/direct metadata can retain a column flag without normalized JSON.
+    // Prefer existing definitions (and their names) for the same single column.
+    for (position, column) in table.columns.iter().enumerate() {
+        if column.unique
+            && !unique_columns
+                .iter()
+                .any(|(_, columns)| columns.len() == 1 && columns[0] == column.name)
+        {
+            unique_columns.push((
+                format!("__uq_{}_column_{}", table.name, position),
+                vec![column.name.clone()],
             ));
         }
     }
@@ -114,14 +137,9 @@ pub(crate) fn constraint_indexes<C: Catalog + ?Sized>(
         }
         let column_indices = resolve_column_indices(table, &columns)?;
         ensure_indexable_columns(table, &column_indices, "UNIQUE")?;
-        let mut index = IndexMetadata::new(
-            catalog.next_index_id(),
-            index_name,
-            table.name.clone(),
-            columns,
-        )
-        .with_column_indices(column_indices)
-        .with_unique(true);
+        let mut index = IndexMetadata::new(0, index_name, table.name.clone(), columns)
+            .with_column_indices(column_indices)
+            .with_unique(true);
         index.catalog_name = table.catalog_name.clone();
         index.namespace_name = table.namespace_name.clone();
         unique_indexes.push(index);
