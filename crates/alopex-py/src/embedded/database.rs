@@ -41,10 +41,19 @@ pub struct PyDatabase {
 
 #[pyclass(name = "PreparedStatement")]
 pub struct PyPreparedStatement {
-    database: Option<Arc<alopex_embedded::Database>>,
+    owner: Option<PreparedOwner>,
     control: Arc<DatabaseControl>,
     sql: String,
     bindings: Vec<Option<PyPreparedBinding>>,
+}
+
+#[derive(Clone)]
+enum PreparedOwner {
+    Database(Arc<alopex_embedded::Database>),
+    Transaction {
+        inner: Arc<PyTransactionInner>,
+        statement: Arc<alopex_sql::Statement>,
+    },
 }
 
 struct PythonReader(Py<PyAny>);
@@ -104,12 +113,13 @@ impl Write for PythonWriter {
 
 #[pymethods]
 impl PyPreparedStatement {
-    fn parameter_count(&self) -> usize {
-        self.bindings.len()
+    fn parameter_count(&self, py: Python<'_>) -> PyResult<usize> {
+        self.ensure_open(py)?;
+        Ok(self.bindings.len())
     }
 
-    fn bind(&mut self, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
-        self.ensure_open()?;
+    fn bind(&mut self, py: Python<'_>, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
+        let transaction_owned = matches!(self.ensure_open(py)?, PreparedOwner::Transaction { .. });
         let count = self.bindings.len();
         let slot = index
             .checked_sub(1)
@@ -117,12 +127,19 @@ impl PyPreparedStatement {
             .ok_or_else(|| {
                 error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
             })?;
-        *slot = Some(sql::prepared_binding(&value, index - 1)?);
+        let binding = sql::prepared_binding(&value, index - 1)?;
+        if transaction_owned && matches!(binding, PyPreparedBinding::Rendered(_)) {
+            return Err(error::AlopexError::SqlParamUnsupportedType(
+                "transaction prepared bindings require native scalar or vector values".into(),
+            )
+            .into());
+        }
+        *slot = Some(binding);
         Ok(())
     }
 
-    fn reset(&mut self) -> PyResult<()> {
-        self.ensure_open()?;
+    fn reset(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.ensure_open(py)?;
         self.bindings.fill(None);
         Ok(())
     }
@@ -130,7 +147,7 @@ impl PyPreparedStatement {
     fn finalize(&mut self) -> PyResult<()> {
         // Finalization must remain possible after Database.close(). Taking the
         // handle both marks this statement finalized and releases its lock owner.
-        self.database
+        self.owner
             .take()
             .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
         self.bindings.clear();
@@ -138,7 +155,7 @@ impl PyPreparedStatement {
     }
 
     fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let database = Arc::clone(self.ensure_open()?);
+        let owner = self.ensure_open(py)?.clone();
         let bindings = self
             .bindings
             .iter()
@@ -150,6 +167,28 @@ impl PyPreparedStatement {
             })
             .collect::<PyResult<Vec<_>>>()?;
         let sql = self.sql.clone();
+        if let PreparedOwner::Transaction { inner, statement } = &owner {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(value) => Ok(value),
+                    PyPreparedBinding::Rendered(_) => {
+                        Err(error::AlopexError::SqlParamUnsupportedType(
+                            "transaction prepared bindings require native values".into(),
+                        )
+                        .into())
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let result =
+                crate::embedded::transaction::with_prepared_transaction(py, inner, true, |txn| {
+                    txn.execute_prepared_statement(statement, &values)
+                })?;
+            return sql::execution_result_to_py(py, result);
+        }
+        let PreparedOwner::Database(database) = owner else {
+            unreachable!()
+        };
         let result = if bindings
             .iter()
             .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
@@ -182,14 +221,25 @@ impl PyPreparedStatement {
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
-    /// Execute native parameter rows atomically in one transaction.
-    fn execute_many(&mut self, py: Python<'_>, rows: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let database = Arc::clone(self.ensure_open()?);
+    /// Execute native rows. Transaction-owned statements leave commit/rollback to the caller.
+    pub(super) fn execute_many(
+        &mut self,
+        py: Python<'_>,
+        rows: Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let owner = self.ensure_open(py)?.clone();
         let rows = prepared_native_rows(&rows, self.bindings.len())?;
         let sql = self.sql.clone();
-        let results = py
-            .detach(move || database.prepare(&sql)?.execute_many(rows))
-            .map_err(error::embedded_err)?;
+        let results = match owner {
+            PreparedOwner::Database(database) => py
+                .detach(move || database.prepare(&sql)?.execute_many(rows))
+                .map_err(error::embedded_err)?,
+            PreparedOwner::Transaction { inner, statement } => {
+                crate::embedded::transaction::with_prepared_transaction(py, &inner, true, |txn| {
+                    txn.execute_prepared_many(&statement, rows, |_| Ok(()))
+                })?
+            }
+        };
         let values = PyList::empty(py);
         for result in results {
             values.append(crate::embedded::sql::execution_result_to_py(py, result)?)?;
@@ -251,13 +301,49 @@ fn prepared_native_rows(
 }
 
 impl PyPreparedStatement {
-    fn ensure_open(&self) -> PyResult<&Arc<alopex_embedded::Database>> {
-        let database = self
-            .database
+    fn ensure_open(&self, py: Python<'_>) -> PyResult<&PreparedOwner> {
+        let owner = self
+            .owner
             .as_ref()
             .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
         self.control.ensure_open()?;
-        Ok(database)
+        if let PreparedOwner::Transaction { inner, .. } = owner {
+            crate::embedded::transaction::with_prepared_transaction(py, inner, false, |_| Ok(()))?;
+        }
+        Ok(owner)
+    }
+
+    pub(super) fn for_transaction(
+        py: Python<'_>,
+        sql: &str,
+        inner: Arc<PyTransactionInner>,
+        control: Arc<DatabaseControl>,
+    ) -> PyResult<Self> {
+        control.ensure_open()?;
+        crate::embedded::transaction::with_prepared_transaction(py, &inner, false, |_| Ok(()))?;
+        sql::validate_sql_input(sql)?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "transaction prepared statements do not accept transaction control SQL",
+            ));
+        }
+        let mut statements = Parser::parse_sql(&AlopexDialect, sql)
+            .map_err(|err| error::embedded_err(alopex_embedded::Error::Sql(err.into())))?;
+        if statements.len() != 1 {
+            return Err(error::embedded_err(
+                alopex_embedded::Error::PreparedStatementRequiresSingleStatement,
+            ));
+        }
+        let parameter_count = sql::split_on_placeholders(sql).len() - 1;
+        Ok(Self {
+            owner: Some(PreparedOwner::Transaction {
+                inner,
+                statement: Arc::new(statements.remove(0)),
+            }),
+            control,
+            sql: sql.to_owned(),
+            bindings: vec![None; parameter_count],
+        })
     }
 }
 
@@ -457,7 +543,7 @@ impl PyDatabase {
             .map_err(error::embedded_err)?
             .parameter_count();
         Ok(PyPreparedStatement {
-            database: Some(database),
+            owner: Some(PreparedOwner::Database(database)),
             control: Arc::clone(&self.control),
             sql: sql.to_owned(),
             bindings: vec![None; parameter_count],
@@ -888,13 +974,13 @@ mod tests {
             db.execute_sql(py, "CREATE TABLE prepared (id INTEGER PRIMARY KEY)", None)
                 .unwrap();
             let mut statement = db.prepare("INSERT INTO prepared (id) VALUES (?)").unwrap();
-            assert_eq!(statement.parameter_count(), 1);
+            assert_eq!(statement.parameter_count(py).unwrap(), 1);
             let one = 1i64.into_py_any(py).unwrap();
-            statement.bind(1, one.bind(py).clone()).unwrap();
+            statement.bind(py, 1, one.bind(py).clone()).unwrap();
             statement.execute(py).unwrap();
-            statement.reset().unwrap();
+            statement.reset(py).unwrap();
             let two = 2i64.into_py_any(py).unwrap();
-            statement.bind(1, two.bind(py).clone()).unwrap();
+            statement.bind(py, 1, two.bind(py).clone()).unwrap();
             statement.execute(py).unwrap();
             statement.finalize().unwrap();
             assert!(statement.execute(py).is_err());
@@ -923,10 +1009,11 @@ mod tests {
             let mut statement = db.prepare(&sql).expect("prepare");
             for row in 0..ROWS {
                 statement
-                    .bind(2 * row + 1, (row as i64).into_bound_py_any(py).unwrap())
+                    .bind(py, 2 * row + 1, (row as i64).into_bound_py_any(py).unwrap())
                     .expect("id");
                 statement
                     .bind(
+                        py,
                         2 * row + 2,
                         PyList::new(py, vec![0.25f64; DIMENSIONS])
                             .unwrap()

@@ -29,6 +29,57 @@ pub(crate) struct PyTransactionInner {
     state: Mutex<TxnState>,
 }
 
+/// Borrow the existing owner for one finite call; never create a rollback-on-drop wrapper.
+pub(super) fn with_prepared_transaction<T: Send>(
+    py: Python<'_>,
+    inner: &Arc<PyTransactionInner>,
+    executing: bool,
+    operation: impl FnOnce(&mut alopex_embedded::OwnedEmbeddedTransaction) -> alopex_embedded::Result<T>
+        + Send,
+) -> PyResult<T> {
+    enum CallError {
+        StateLock,
+        TransactionLock,
+        Closed,
+        StreamActive,
+        MustAbort,
+        Native(alopex_embedded::Error),
+    }
+    let result = py.detach(|| {
+        let state = inner.state.lock().map_err(|_| CallError::StateLock)?;
+        if *state != TxnState::Active {
+            return Err(CallError::Closed);
+        }
+        let mut guard = inner.txn.lock().map_err(|_| CallError::TransactionLock)?;
+        let txn = guard.as_mut().ok_or(CallError::Closed)?;
+        if executing {
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CallError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CallError::MustAbort);
+                }
+                _ => {}
+            }
+        }
+        operation(txn).map_err(CallError::Native)
+    });
+    result.map_err(|err| match err {
+        CallError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CallError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CallError::Closed => error::to_py_err("transaction is closed"),
+        CallError::StreamActive => {
+            error::stream_error("stream_active", "transaction stream is active")
+        }
+        CallError::MustAbort => error::stream_error(
+            "stream_abort_required",
+            "transaction stream requires rollback",
+        ),
+        CallError::Native(err) => error::embedded_err(err),
+    })
+}
+
 /// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
 pub(super) fn rollback_tracked_for_database_close(
     py: Python<'_>,
@@ -697,6 +748,30 @@ impl PyTransaction {
             ExecError::Embedded(err) => error::embedded_err(err),
         })?;
         sql::execution_result_to_py(py, result)
+    }
+
+    /// Prepare one native-bound statement owned by this transaction.
+    fn prepare(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+    ) -> PyResult<crate::embedded::database::PyPreparedStatement> {
+        crate::embedded::database::PyPreparedStatement::for_transaction(
+            py,
+            sql,
+            Arc::clone(&self.inner),
+            Arc::clone(&self.control),
+        )
+    }
+
+    /// Execute native rows without committing. Execution errors require explicit rollback.
+    fn execute_many(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        rows: Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.prepare(py, sql)?.execute_many(py, rows)
     }
 
     /// Create a named savepoint within this transaction.

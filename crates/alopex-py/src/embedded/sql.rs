@@ -309,7 +309,7 @@ enum ScanState {
 }
 
 /// SQL を「引用符・コメント外の `?`」で分割する。戻り値の長さは `プレースホルダ数 + 1`。
-fn split_on_placeholders(sql: &str) -> Vec<&str> {
+pub(super) fn split_on_placeholders(sql: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     let mut state = ScanState::Normal;

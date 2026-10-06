@@ -175,6 +175,8 @@ def test_prepared_finalize_releases_database_handle(tmp_path, close_first):
             statement.finalize()
         with pytest.raises(AlopexError, match="prepared statement is finalized"):
             statement.execute()
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.parameter_count()
     finally:
         reopened.close()
 
@@ -192,6 +194,8 @@ def test_prepared_rejects_execute_after_database_close(tmp_path, operation):
         statement.bind(2, dt.datetime(2024, 5, 4, 3, 2, 1) if operation == "rendered" else None)
     database.close()
     try:
+        with pytest.raises(AlopexError, match="database is closed"):
+            statement.parameter_count()
         with pytest.raises(AlopexError, match="database is closed"):
             if operation == "many":
                 statement.execute_many([[2, None], [3, None]])
