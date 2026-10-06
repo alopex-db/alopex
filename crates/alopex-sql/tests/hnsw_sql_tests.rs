@@ -189,6 +189,131 @@ fn dml_changes_are_reflected_in_hnsw_index() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn knn_nulls_last_exact_matches_sort_prefix() {
+    assert_knn_nulls_last_matches_sort_prefix(false, false);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn knn_nulls_last_columnar_matches_sort_prefix() {
+    assert_knn_nulls_last_matches_sort_prefix(false, true);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn knn_nulls_last_hnsw_matches_sort_prefix() {
+    assert_knn_nulls_last_matches_sort_prefix(true, false);
+}
+
+fn assert_knn_nulls_last_matches_sort_prefix(indexed: bool, columnar: bool) {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let storage = if columnar {
+        " WITH (storage='columnar')"
+    } else {
+        ""
+    };
+    run_sql(
+        &mut executor,
+        &catalog,
+        &format!(
+            "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2), s INT){storage};"
+        ),
+    );
+    if columnar {
+        use alopex_sql::executor::bulk::{
+            CopyOptions, CopySecurityConfig, FileFormat, execute_copy,
+        };
+        use alopex_sql::storage::TxnBridge;
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "id,embedding,s\n3,\"[2,0]\",1\n1,\"[0,0]\",1\n2,NULL,1\n4,\"[3,0]\",0\n"
+        )
+        .unwrap();
+        let bridge = TxnBridge::new(store);
+        let mut txn = bridge.begin_write().unwrap();
+        execute_copy(
+            &mut txn,
+            &*catalog.read().unwrap(),
+            "items",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    } else {
+        run_sql(
+            &mut executor,
+            &catalog,
+            "INSERT INTO items VALUES (1, [0.0, 0.0], 1), (2, NULL, 1), (3, [2.0, 0.0], 1), (4, [3.0, 0.0], 0);",
+        );
+    }
+    if indexed {
+        run_sql(
+            &mut executor,
+            &catalog,
+            "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+        );
+    }
+    for (function, direction) in [("vector_distance", "ASC"), ("vector_similarity", "DESC")] {
+        for nulls in ["", " NULLS LAST"] {
+            for predicate in [
+                "",
+                " WHERE s = 1",
+                " WHERE s = 0",
+                " WHERE embedding IS NULL",
+                " WHERE id < 0",
+            ] {
+                let sql = format!(
+                    "SELECT id, {function}(embedding, [0.0, 0.0], 'l2') FROM items{predicate} \
+                     ORDER BY {function}(embedding, [0.0, 0.0], 'l2') {direction}{nulls}"
+                );
+                let ordinary = run_sql(&mut executor, &catalog, &sql);
+                let ExecutionResult::Query(ordinary) = ordinary.last().unwrap() else {
+                    panic!("expected ordinary query result");
+                };
+                // Distinct non-NULL scores and one NULL avoid unspecified peer ordering.
+                for k in [0, 1, 2, 3, 4, 8] {
+                    let limited = format!("{sql} LIMIT {k} WITH (enable_hnsw = {indexed})");
+                    if k == 4 {
+                        let explained =
+                            run_sql(&mut executor, &catalog, &format!("EXPLAIN {limited}"));
+                        let ExecutionResult::Query(explained) = explained.last().unwrap() else {
+                            panic!("expected explain result");
+                        };
+                        let alopex_sql::storage::SqlValue::Text(plan) = &explained.rows[0][0]
+                        else {
+                            panic!("expected explain text");
+                        };
+                        let expected_path = if indexed {
+                            "HnswSearch"
+                        } else {
+                            "ExactKnnScan"
+                        };
+                        assert!(plan.contains(expected_path), "{limited}: {plan}");
+                    }
+                    let actual = run_sql(&mut executor, &catalog, &limited);
+                    let ExecutionResult::Query(actual) = actual.last().unwrap() else {
+                        panic!("expected limited query result");
+                    };
+                    assert_eq!(
+                        actual.rows,
+                        ordinary.rows[..ordinary.rows.len().min(k)],
+                        "{limited}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn null_vectors_are_skipped_by_distance_and_hnsw() {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
@@ -308,7 +433,7 @@ fn null_vectors_are_skipped_by_distance_and_hnsw() {
     txn.commit_self().unwrap();
     let knn_sql =
         "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 4";
-    assert_query_ids(&mut executor, &catalog, knn_sql, &[1, 2, 3]);
+    assert_query_ids(&mut executor, &catalog, knn_sql, &[1, 2, 3, 4]);
 
     run_sql(
         &mut executor,
@@ -323,7 +448,29 @@ fn null_vectors_are_skipped_by_distance_and_hnsw() {
         vec![1u64.to_be_bytes().to_vec(), 3u64.to_be_bytes().to_vec()]
     );
     txn.commit_self().unwrap();
-    assert_query_ids(&mut executor, &catalog, knn_sql, &[1, 3]);
+    let results = run_sql(&mut executor, &catalog, knn_sql);
+    let ExecutionResult::Query(result) = results.last().unwrap() else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        &result.rows[..2],
+        &[
+            vec![alopex_sql::storage::SqlValue::Integer(1)],
+            vec![alopex_sql::storage::SqlValue::Integer(3)]
+        ]
+    );
+    let mut null_ids = result.rows[2..].to_vec();
+    null_ids.sort_by_key(|row| match row[0] {
+        alopex_sql::storage::SqlValue::Integer(id) => id,
+        _ => panic!("expected id"),
+    });
+    assert_eq!(
+        null_ids,
+        vec![
+            vec![alopex_sql::storage::SqlValue::Integer(2)],
+            vec![alopex_sql::storage::SqlValue::Integer(4)]
+        ]
+    );
 
     // Reinsertion after deletion must restore the same row's persisted entry.
     run_sql(
@@ -348,7 +495,7 @@ fn null_vectors_are_skipped_by_distance_and_hnsw() {
         ],
     );
     txn.commit_self().unwrap();
-    assert_query_ids(&mut executor, &catalog, knn_sql, &[1, 2, 3]);
+    assert_query_ids(&mut executor, &catalog, knn_sql, &[1, 2, 3, 4]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
