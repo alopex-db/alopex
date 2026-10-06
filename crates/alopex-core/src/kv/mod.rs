@@ -158,6 +158,12 @@ pub trait KVTransaction<'a> {
         None
     }
 
+    /// Visit every currently buffered write key without copying values.
+    /// Returns false when the backend cannot provide the complete set.
+    fn visit_pending_write_keys(&self, _visitor: &mut dyn FnMut(&[u8])) -> bool {
+        false
+    }
+
     /// Commits the transaction, applying all buffered writes.
     ///
     /// This method consumes the transaction. On success, all writes become

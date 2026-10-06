@@ -131,6 +131,12 @@ pub trait OwnedKVTransaction: Send {
         None
     }
 
+    /// Visit every currently buffered write key without copying values.
+    /// Returns false when the backend cannot provide the complete set.
+    fn visit_pending_write_keys(&self, _visitor: &mut dyn FnMut(&[u8])) -> bool {
+        false
+    }
+
     /// Commit once.  The caller cannot use this transaction afterwards.
     fn commit(self: Box<Self>) -> Result<()>;
 
@@ -217,6 +223,10 @@ impl<'a> KVTransaction<'a> for OwnedKVTransactionAdapter<'a> {
 
     fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
         self.transaction.journal_pending_writes()
+    }
+
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        self.transaction.visit_pending_write_keys(visitor)
     }
 
     fn commit_self(self) -> Result<()> {
@@ -527,6 +537,15 @@ impl OwnedTransactionSession {
         self.finish_transaction(true)
     }
 
+    /// Observe the final transaction after closing all session access, then commit once.
+    /// The observation is returned only when the backend commit succeeds.
+    pub fn commit_with_observer<T>(
+        &self,
+        observe: impl FnOnce(&dyn OwnedKVTransaction) -> T,
+    ) -> Result<(OwnedTransactionSessionStatus, T)> {
+        self.finish_transaction_observed(true, observe)
+    }
+
     /// Roll back this owned transaction once.
     pub fn rollback(&self) -> Result<OwnedTransactionSessionStatus> {
         self.finish_transaction(false)
@@ -548,6 +567,15 @@ impl OwnedTransactionSession {
     }
 
     fn finish_transaction(&self, commit: bool) -> Result<OwnedTransactionSessionStatus> {
+        self.finish_transaction_observed(commit, |_| ())
+            .map(|(status, ())| status)
+    }
+
+    fn finish_transaction_observed<T>(
+        &self,
+        commit: bool,
+        observe: impl FnOnce(&dyn OwnedKVTransaction) -> T,
+    ) -> Result<(OwnedTransactionSessionStatus, T)> {
         let transaction = {
             let mut inner = self.lock();
             let allowed = if commit {
@@ -562,6 +590,7 @@ impl OwnedTransactionSession {
             inner.transaction.take().ok_or(Error::TxnClosed)?
         };
 
+        let observation = observe(transaction.as_ref());
         let result = if commit {
             transaction.commit()
         } else {
@@ -578,7 +607,7 @@ impl OwnedTransactionSession {
             OwnedTransactionSessionStatus::Closed
         };
         match result {
-            Ok(()) => Ok(inner.status),
+            Ok(()) => Ok((inner.status, observation)),
             Err(error) => Err(error),
         }
     }
@@ -857,5 +886,88 @@ mod tests {
             .unwrap();
         assert_eq!(value, Some(b"value".to_vec()));
         lease.finish(OwnedLeaseOutcome::Exhausted).unwrap();
+    }
+
+    #[test]
+    fn commit_observer_runs_once_after_session_access_closes() {
+        let calls = Arc::new(Calls::default());
+        let session = OwnedTransactionSession::new(Box::new(TestTransaction::new(
+            calls.clone(),
+            TxnMode::ReadWrite,
+        )));
+        let observed = AtomicUsize::new(0);
+        let lease = session.acquire_lease().unwrap();
+        assert!(matches!(
+            session.commit_with_observer(|_| observed.fetch_add(1, Ordering::SeqCst)),
+            Err(crate::Error::TxnClosed)
+        ));
+        assert_eq!(observed.load(Ordering::SeqCst), 0);
+        assert_eq!(session.status(), OwnedTransactionSessionStatus::LeaseActive);
+        lease.finish(OwnedLeaseOutcome::Exhausted).unwrap();
+        let (status, value) = session
+            .commit_with_observer(|transaction| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(session.status(), OwnedTransactionSessionStatus::Closed);
+                assert!(session.with_transaction(|_| Ok(())).is_err());
+                assert!(!transaction
+                    .visit_pending_write_keys(&mut |_| panic!("default visitor must not visit")));
+                7
+            })
+            .unwrap();
+        assert_eq!(
+            (status, value),
+            (OwnedTransactionSessionStatus::Committed, 7)
+        );
+        assert!(session
+            .commit_with_observer(|_| observed.fetch_add(1, Ordering::SeqCst))
+            .is_err());
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.commits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn commit_observer_backend_failure_keeps_session_closed() {
+        let store = Arc::new(MemoryKV::new());
+        let session = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        session
+            .with_transaction(|transaction| {
+                transaction.put(b"conflict".to_vec(), b"loser".to_vec())
+            })
+            .unwrap();
+        let winner = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        winner
+            .with_transaction(|transaction| {
+                transaction.put(b"conflict".to_vec(), b"winner".to_vec())
+            })
+            .unwrap();
+        winner.commit().unwrap();
+        let observed = AtomicUsize::new(0);
+        let result = session.commit_with_observer(|transaction| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let mut keys = Vec::new();
+            assert!(transaction.visit_pending_write_keys(&mut |key| keys.push(key.to_vec())));
+            assert_eq!(keys, vec![b"conflict".to_vec()]);
+        });
+        assert!(matches!(result, Err(crate::Error::TxnConflict)));
+        assert_eq!(session.status(), OwnedTransactionSessionStatus::Closed);
+        assert!(session.rollback().is_err());
+        assert!(session
+            .commit_with_observer(|_| observed.fetch_add(1, Ordering::SeqCst))
+            .is_err());
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        let reader = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
+        assert_eq!(
+            reader
+                .with_transaction(|transaction| transaction.get(&b"conflict".to_vec()))
+                .unwrap(),
+            Some(b"winner".to_vec())
+        );
+        reader.rollback().unwrap();
     }
 }
