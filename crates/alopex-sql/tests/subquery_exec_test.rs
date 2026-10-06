@@ -48,6 +48,292 @@ fn setup_sql(select: &str) -> String {
     )
 }
 
+fn joined_subquery_setup(statement: &str) -> String {
+    format!(
+        "CREATE TABLE target (id INT PRIMARY KEY, v INT);
+         CREATE TABLE source (id INT PRIMARY KEY, v INT);
+         CREATE TABLE lookup (id INT PRIMARY KEY, bonus INT);
+         INSERT INTO target VALUES (1, 10), (2, 20);
+         INSERT INTO source VALUES (1, 100), (2, 200);
+         INSERT INTO lookup VALUES (1, 10), (2, 20);
+         {statement};
+         SELECT id, v FROM target ORDER BY id;"
+    )
+}
+
+#[test]
+fn joined_subquery_update_scalar_assignment() {
+    let result = last_query(&joined_subquery_setup(
+        "UPDATE target SET v = source.v + (SELECT MAX(bonus) FROM lookup)
+         FROM source WHERE target.id = source.id",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(120)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(220)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_update_correlated_assignment() {
+    let result = last_query(&joined_subquery_setup(
+        "UPDATE target SET v = source.v +
+            (SELECT bonus FROM lookup WHERE lookup.id = target.id AND lookup.id = source.id)
+         FROM source WHERE target.id = source.id",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(110)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(220)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_update_scalar_condition() {
+    let result = last_query(&joined_subquery_setup(
+        "UPDATE target SET v = source.v FROM source
+         WHERE target.id = source.id AND target.id = (SELECT MAX(id) FROM lookup)",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(200)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_update_in_condition() {
+    let result = last_query(&joined_subquery_setup(
+        "UPDATE target SET v = source.v FROM source
+         WHERE target.id = source.id AND source.id IN (SELECT id FROM lookup WHERE bonus = 20)",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(200)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_delete_scalar_condition() {
+    let result = last_query(&joined_subquery_setup(
+        "DELETE FROM target USING source
+         WHERE target.id = source.id AND source.id = (SELECT MAX(id) FROM lookup)",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+    );
+}
+
+#[test]
+fn joined_subquery_delete_correlated_in_condition() {
+    let result = last_query(&joined_subquery_setup(
+        "DELETE FROM target USING source WHERE target.id = source.id
+         AND target.id IN (SELECT id FROM lookup WHERE lookup.id = source.id AND bonus = 20)",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+    );
+}
+
+#[test]
+fn joined_subquery_merge_scalar_update_and_insert() {
+    let result = last_query(&joined_subquery_setup(
+        "INSERT INTO source VALUES (3, 300);
+         INSERT INTO lookup VALUES (3, 30);
+         MERGE INTO target USING source ON target.id = source.id
+         WHEN MATCHED THEN UPDATE SET v = source.v + (SELECT MAX(bonus) FROM lookup)
+         WHEN NOT MATCHED THEN INSERT (id, v) VALUES (source.id, (SELECT MAX(bonus) FROM lookup))",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(130)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(230)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_merge_correlated_on_and_clause() {
+    let result = last_query(&joined_subquery_setup(
+        "MERGE INTO target USING source ON target.id = source.id
+         AND source.id IN (SELECT id FROM lookup WHERE lookup.id = target.id)
+         WHEN MATCHED AND (SELECT bonus FROM lookup WHERE lookup.id = source.id) > 15
+         THEN UPDATE SET v = source.v + (SELECT bonus FROM lookup WHERE lookup.id = source.id)",
+    ));
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(220)],
+        ]
+    );
+}
+
+#[test]
+fn joined_subquery_rejects_multiple_columns_with_actual_arity() {
+    for statement in [
+        "UPDATE target SET v = (SELECT id, bonus FROM lookup) FROM source WHERE target.id = source.id",
+        "UPDATE target SET v = 1 FROM source WHERE target.id = (SELECT id, bonus FROM lookup)",
+        "DELETE FROM target USING source WHERE target.id IN (SELECT id, bonus FROM lookup)",
+        "MERGE INTO target USING source ON target.id = (SELECT id, bonus FROM lookup) WHEN MATCHED THEN UPDATE SET v = source.v",
+    ] {
+        let error = execute_sql(&joined_subquery_setup(statement)).unwrap_err();
+        assert!(
+            matches!(error,
+                ExecutorError::Planner(alopex_sql::planner::PlannerError::TypeMismatch { ref expected, ref found, .. })
+                    if expected == "one-column subquery" && found == "2 columns"
+            ),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn joined_condition_update_rejects_non_boolean_scalar() {
+    let error = execute_sql(&joined_subquery_setup(
+        "UPDATE target SET v = source.v FROM source WHERE (SELECT MAX(id) FROM lookup)",
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error,
+            ExecutorError::Planner(alopex_sql::planner::PlannerError::TypeMismatch { ref expected, ref found, .. })
+                if expected == "Boolean" && found == "INTEGER"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn joined_condition_delete_rejects_non_boolean_scalar() {
+    let error = execute_sql(&joined_subquery_setup(
+        "DELETE FROM target USING source WHERE (SELECT MAX(id) FROM lookup)",
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error,
+            ExecutorError::Planner(alopex_sql::planner::PlannerError::TypeMismatch { ref expected, ref found, .. })
+                if expected == "Boolean" && found == "INTEGER"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn joined_condition_plain_boolean_controls() {
+    assert_eq!(
+        last_query(&joined_subquery_setup(
+            "UPDATE target SET v = source.v FROM source WHERE target.id = source.id AND source.id = 2",
+        )).rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(200)],
+        ]
+    );
+    assert_eq!(
+        last_query(&joined_subquery_setup(
+            "DELETE FROM target USING source WHERE target.id = source.id AND source.id = 2",
+        ))
+        .rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+    );
+}
+
+#[test]
+fn joined_source_batch_late_match_and_no_match() {
+    let values = (1..=514)
+        .map(|id| format!("({id}, {id})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for statement in [
+        "UPDATE target SET v = source.v FROM source WHERE source.id >= 513 AND target.id = (SELECT MAX(id) FROM lookup)",
+        "DELETE FROM target USING source WHERE source.id >= 513 AND target.id = (SELECT MAX(id) FROM lookup)",
+    ] {
+        let rows = last_query(&format!(
+            "CREATE TABLE target (id INT PRIMARY KEY, v INT);
+             CREATE TABLE source (id INT PRIMARY KEY, v INT);
+             CREATE TABLE lookup (id INT);
+             INSERT INTO target VALUES (1,10),(2,20);
+             INSERT INTO source VALUES {values};
+             INSERT INTO lookup VALUES (2);
+             {statement}; SELECT id,v FROM target ORDER BY id;"
+        ))
+        .rows;
+        let expected = if statement.starts_with("UPDATE") {
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+                vec![SqlValue::Integer(2), SqlValue::Integer(513)],
+            ]
+        } else {
+            vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+        };
+        assert_eq!(rows, expected, "{statement}");
+    }
+}
+
+#[test]
+fn joined_source_internal_row_id_max_terminates() {
+    use alopex_core::{KVStore, KVTransaction, TxnMode};
+    use alopex_sql::catalog::Catalog;
+    use alopex_sql::storage::TableStorage;
+
+    for action in [
+        "UPDATE target SET v = source.v FROM source",
+        "DELETE FROM target USING source",
+    ] {
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let store = Arc::new(MemoryKV::new());
+        let mut executor = Executor::new(store.clone(), catalog.clone());
+        for stmt in Parser::parse_sql(
+            &AlopexDialect,
+            "CREATE TABLE target (id INT, v INT); CREATE TABLE source (id INT, v INT);
+             INSERT INTO target VALUES (1,10),(2,20);",
+        )
+        .unwrap()
+        {
+            let plan = Planner::new(&*catalog.read().unwrap()).plan(&stmt).unwrap();
+            executor.execute(plan).unwrap();
+        }
+        let source = catalog.read().unwrap().get_table("source").unwrap().clone();
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        TableStorage::new(&mut txn, &source)
+            .insert(u64::MAX, &[SqlValue::Integer(2), SqlValue::Integer(200)])
+            .unwrap();
+        txn.commit_self().unwrap();
+        for stmt in Parser::parse_sql(
+            &AlopexDialect,
+            &format!("{action} WHERE target.id = source.id; SELECT id,v FROM target ORDER BY id;"),
+        )
+        .unwrap()
+        {
+            let plan = Planner::new(&*catalog.read().unwrap()).plan(&stmt).unwrap();
+            if let ExecutionResult::Query(query) = executor.execute(plan).unwrap() {
+                let expected = if action.starts_with("UPDATE") {
+                    vec![
+                        vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+                        vec![SqlValue::Integer(2), SqlValue::Integer(200)],
+                    ]
+                } else {
+                    vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+                };
+                assert_eq!(query.rows, expected, "{action}");
+            }
+        }
+    }
+}
+
 #[test]
 fn scalar_and_correlated_exists_subqueries_execute() {
     let query = last_query(&setup_sql(
