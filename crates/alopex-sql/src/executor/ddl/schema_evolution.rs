@@ -291,6 +291,13 @@ pub fn execute_truncate<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
     txn.delete_prefix(&KeyEncoder::table_prefix(table.table_id))?;
     txn.delete_prefix(&KeyEncoder::sequence_key(table.table_id))?;
+    if table.storage_options.storage_type == crate::catalog::StorageType::Columnar {
+        for prefix in
+            alopex_core::columnar::kvs_bridge::key_layout::table_data_prefixes(table.table_id)
+        {
+            txn.delete_prefix(&prefix)?;
+        }
+    }
     for index in catalog.get_indexes_for_table(table_name) {
         if matches!(index.method, Some(IndexMethod::Hnsw)) {
             HnswBridge::drop_index(txn, index, false)?;
