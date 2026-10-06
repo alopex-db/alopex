@@ -3,15 +3,16 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
-use crate::executor::Row;
+use crate::catalog::{Catalog, IndexMetadata, StorageType, TableMetadata};
 use crate::executor::evaluator::coerce_value;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
+use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
 use crate::executor::query::statement_subqueries::DmlSubqueries;
 use crate::executor::query::subquery::contains_subquery;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::executor::{Row, RowIterator};
 use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
 use crate::planner::types::ResolvedType;
@@ -246,6 +247,33 @@ fn find_join_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S
     target_row_id: u64,
     target: &[SqlValue],
 ) -> Result<Option<Vec<SqlValue>>> {
+    if source.storage_options.storage_type == StorageType::Columnar {
+        let scan = ColumnarScan::new(
+            source.table_id,
+            (0..source.column_count()).collect(),
+            None,
+            None,
+        );
+        // Construction releases the transaction borrow before subquery evaluation.
+        // The iterator preloads encoded segments, not all decoded rows.
+        let mut iterator = create_columnar_scan_iterator(txn, source, &scan)?;
+        while let Some(row) = iterator.next_row() {
+            let source_row = row?.values;
+            let mut joined = target.to_vec();
+            joined.extend_from_slice(&source_row);
+            let matches_condition = match condition {
+                None => true,
+                Some(expr) => matches!(
+                    subqueries.evaluate(txn, catalog, expr, &Row::new(target_row_id, joined))?,
+                    SqlValue::Boolean(true)
+                ),
+            };
+            if matches_condition {
+                return Ok(Some(source_row));
+            }
+        }
+        return Ok(None);
+    }
     let mut start = 0;
     loop {
         // Release the storage iterator's transaction borrow before subquery evaluation.

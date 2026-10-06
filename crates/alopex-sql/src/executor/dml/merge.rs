@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use alopex_core::kv::KVStore;
 
-use crate::catalog::{Catalog, TableMetadata};
-use crate::executor::Row;
+use crate::catalog::{Catalog, StorageType, TableMetadata};
+use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
 use crate::executor::query::statement_subqueries::DmlSubqueries;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::executor::{Row, RowIterator};
 use crate::planner::{MergeActionPlan, MergeClausePlan, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
@@ -161,6 +162,21 @@ where
     S: KVStore + 'txn,
     T: SqlTxn<'txn, S>,
 {
+    if table.storage_options.storage_type == StorageType::Columnar {
+        let scan = ColumnarScan::new(
+            table.table_id,
+            (0..table.column_count()).collect(),
+            None,
+            None,
+        );
+        let mut iterator = create_columnar_scan_iterator(txn, table, &scan)?;
+        let mut rows = Vec::new();
+        while let Some(row) = iterator.next_row() {
+            let row = row?;
+            rows.push((row.row_id, row.values));
+        }
+        return Ok(rows);
+    }
     let mut storage = txn.table_storage(table);
     let iterator = storage.range_scan(0, u64::MAX)?;
     let mut rows = Vec::new();
