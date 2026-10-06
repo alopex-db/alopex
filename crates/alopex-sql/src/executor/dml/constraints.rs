@@ -22,6 +22,21 @@ where
     T: SqlTxn<'txn, S>,
 {
     validate_checks(catalog, table, row)?;
+    validate_foreign_keys(txn, catalog, table, row, pending)
+}
+
+pub(super) fn validate_foreign_keys<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    row: &[SqlValue],
+    pending: &[Vec<SqlValue>],
+) -> Result<()>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
     for constraint in &table.constraints {
         match constraint {
             TableConstraint::ForeignKey {
@@ -58,7 +73,7 @@ where
     Ok(())
 }
 
-fn validate_checks<C: Catalog + ?Sized>(
+pub(super) fn validate_checks<C: Catalog + ?Sized>(
     catalog: &C,
     table: &TableMetadata,
     row: &[SqlValue],

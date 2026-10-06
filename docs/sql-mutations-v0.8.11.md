@@ -10,13 +10,28 @@ verifier runs the public Python demo at
 | Area | Supported contract | Deliberate boundary |
 |---|---|---|
 | Constraints | `CHECK`, single/composite `FOREIGN KEY`, `NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`; catalog persistence and `information_schema` | `DEFERRABLE` is rejected; cascade depth is capped at 64 |
-| DML | `RETURNING`, `ON CONFLICT DO NOTHING/UPDATE`, `MERGE`, `UPDATE ... FROM`, `DELETE ... USING` | A target row matched more than once is rejected atomically; triggers are not implemented |
+| DML | `RETURNING`, `ON CONFLICT DO NOTHING/UPDATE`, `MERGE`, `UPDATE ... FROM`, `DELETE ... USING` | `DO UPDATE` and joined mutations reject repeated target matches atomically; triggers are not implemented |
 | COPY | Embedded/CLI local CSV and Parquet files; CLI CSV `STDIN`/`STDOUT`; application-owned Rust readers/writers and Python `BinaryIO`; atomic file replacement | JSON and unknown formats are rejected; Parquet is file-only; HTTP/gRPC SQL rejects every local path and process-stdio COPY target |
 | Sequences | `CREATE/ALTER/DROP SEQUENCE`, `NEXTVAL`, `CURRVAL`, `SERIAL`, `GENERATED ... AS IDENTITY`, bounds, cycle, ownership | Allocation is transactional, so rollback permits reuse; `CACHE` is a persisted hint and does not preallocate; `CURRVAL` reports the durable last committed allocation rather than PostgreSQL session-local state; distributed allocation is outside v0.8.11 |
 
 All four areas use statement atomicity. A failed constraint, multiple-match
 `MERGE`, unsupported `COPY` format, or exhausted non-cycling sequence leaves
 the statement's target data unchanged.
+
+## ON CONFLICT boundary in v0.8.16
+
+Alopex treats targetless `ON CONFLICT DO NOTHING` as handling every primary-key,
+UNIQUE-constraint, and UNIQUE-index conflict. Alopex skips only conflicting rows
+within a batch; nullable UNIQUE keys remain distinct. An explicit conflict
+target does not suppress violations of other unique constraints.
+
+Alopex retains its existing targetless `DO UPDATE` extension: only primary-key
+conflicts select an existing row for update. Other UNIQUE conflicts remain
+errors, including on tables without a primary key. PostgreSQL instead requires
+an explicit conflict target for `DO UPDATE`.
+
+Alopex validates input NOT NULL and CHECK constraints before skipping a row.
+Alopex checks foreign keys only for rows that the INSERT actually accepts.
 
 ## Example
 

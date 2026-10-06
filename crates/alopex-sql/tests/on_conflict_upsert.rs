@@ -25,10 +25,245 @@ fn execute_sql_on(
         .map(|statement| {
             let plan = Planner::new(&*catalog.read().expect("catalog read"))
                 .plan(&statement)
-                .expect("plan SQL");
+                .map_err(alopex_sql::executor::ExecutorError::from)?;
             executor.execute(plan)
         })
         .collect()
+}
+
+fn assert_targetless_unique_conflict(setup: &str, conflicting_insert: &str) {
+    let results = execute_sql(&format!(
+        "{setup} {conflicting_insert} ON CONFLICT DO NOTHING; SELECT id FROM items ORDER BY id;"
+    ));
+    assert_eq!(results[results.len() - 2], ExecutionResult::RowsAffected(0));
+    let ExecutionResult::Query(query) = results.last().unwrap() else {
+        panic!("expected unchanged rows");
+    };
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn targetless_do_nothing_handles_unique_constraint() {
+    assert_targetless_unique_conflict(
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE); INSERT INTO items VALUES (1, 'a');",
+        "INSERT INTO items VALUES (2, 'a')",
+    );
+}
+
+#[test]
+fn targetless_do_nothing_handles_unique_index() {
+    assert_targetless_unique_conflict(
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT); CREATE UNIQUE INDEX items_code ON items(code); INSERT INTO items VALUES (1, 'a');",
+        "INSERT INTO items VALUES (2, 'a')",
+    );
+}
+
+#[test]
+fn targetless_do_nothing_handles_composite_unique() {
+    assert_targetless_unique_conflict(
+        "CREATE TABLE items (id INT PRIMARY KEY, a TEXT, b INT, UNIQUE(a,b)); INSERT INTO items VALUES (1, 'a', 7);",
+        "INSERT INTO items VALUES (2, 'a', 7)",
+    );
+}
+
+#[test]
+fn targetless_do_nothing_skips_only_conflicting_batch_rows() {
+    let results = execute_sql(
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE);
+         INSERT INTO items VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(4,NULL),(5,NULL),(5,'d')
+             ON CONFLICT DO NOTHING RETURNING id;
+         SELECT id,code FROM items ORDER BY id;",
+    );
+    let ExecutionResult::Query(returned) = &results[1] else {
+        panic!("expected inserted rows only");
+    };
+    assert_eq!(
+        returned.rows,
+        [1, 3, 4, 5]
+            .into_iter()
+            .map(|id| vec![SqlValue::Integer(id)])
+            .collect::<Vec<_>>()
+    );
+    let ExecutionResult::Query(query) = &results[2] else {
+        panic!("expected retained rows");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(3), SqlValue::Text("c".into())],
+            vec![SqlValue::Integer(4), SqlValue::Null],
+            vec![SqlValue::Integer(5), SqlValue::Null],
+        ]
+    );
+}
+
+#[test]
+fn targetless_do_nothing_preserves_other_constraint_errors() {
+    use alopex_sql::executor::{ConstraintViolation, ExecutorError};
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE NOT NULL, qty INT, CHECK(qty > 0));
+         INSERT INTO items VALUES (1,'a',1);",
+    )
+    .unwrap();
+    let error = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO items VALUES (2,'a',2) ON CONFLICT(id) DO NOTHING;",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+    ));
+    for (sql, expected) in [
+        (
+            "INSERT INTO items VALUES (2,CAST(NULL AS TEXT),2) ON CONFLICT DO NOTHING;",
+            ConstraintViolation::NotNull {
+                column: "code".into(),
+            },
+        ),
+        (
+            "INSERT INTO items VALUES (2,'b',0) ON CONFLICT DO NOTHING;",
+            ConstraintViolation::Check {
+                constraint: "CHECK".into(),
+            },
+        ),
+        (
+            "INSERT INTO items VALUES (1,CAST(NULL AS TEXT),2) ON CONFLICT DO NOTHING;",
+            ConstraintViolation::NotNull {
+                column: "code".into(),
+            },
+        ),
+        (
+            "INSERT INTO items VALUES (1,'a',0) ON CONFLICT DO NOTHING;",
+            ConstraintViolation::Check {
+                constraint: "CHECK".into(),
+            },
+        ),
+    ] {
+        let error = execute_sql_on(&mut executor, &catalog, sql).unwrap_err();
+        let ExecutorError::ConstraintViolation(actual) = error else {
+            panic!("expected {expected:?}, got {error:?}: {sql}");
+        };
+        assert_eq!(actual, expected, "{sql}");
+    }
+    let results = execute_sql_on(&mut executor, &catalog, "SELECT id FROM items;").unwrap();
+    let ExecutionResult::Query(query) = &results[0] else {
+        panic!("expected unchanged rows");
+    };
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn targetless_do_update_keeps_primary_key_only_contract() {
+    use alopex_sql::executor::{ConstraintViolation, ExecutorError};
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let results = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE, qty INT);
+         INSERT INTO items VALUES (1,'a',10);
+         INSERT INTO items VALUES (1,'b',20) ON CONFLICT DO UPDATE SET qty = EXCLUDED.qty;
+         SELECT id,code,qty FROM items;",
+    )
+    .unwrap();
+    assert_eq!(results[2], ExecutionResult::RowsAffected(1));
+    let expected = vec![vec![
+        SqlValue::Integer(1),
+        SqlValue::Text("a".into()),
+        SqlValue::Integer(20),
+    ]];
+    let ExecutionResult::Query(query) = &results[3] else {
+        panic!("expected PK update");
+    };
+    assert_eq!(query.rows, expected);
+    let error = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO items VALUES (2,'a',30) ON CONFLICT DO UPDATE SET qty = EXCLUDED.qty;",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+    ));
+    let result = execute_sql_on(&mut executor, &catalog, "SELECT id,code,qty FROM items;").unwrap();
+    let ExecutionResult::Query(query) = &result[0] else {
+        panic!("expected unchanged rows");
+    };
+    assert_eq!(query.rows, expected);
+
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE no_pk (code TEXT UNIQUE, qty INT); INSERT INTO no_pk VALUES ('a',10);",
+    )
+    .unwrap();
+    let error = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO no_pk VALUES ('a',30) ON CONFLICT DO UPDATE SET qty = EXCLUDED.qty;",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+    ));
+    let result = execute_sql_on(&mut executor, &catalog, "SELECT code,qty FROM no_pk;").unwrap();
+    let ExecutionResult::Query(query) = &result[0] else {
+        panic!("expected unchanged no-PK rows");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Text("a".into()), SqlValue::Integer(10)]]
+    );
+}
+
+#[test]
+fn targetless_do_nothing_checks_foreign_keys_only_for_accepted_rows() {
+    use alopex_sql::executor::{ConstraintViolation, ExecutorError};
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(&mut executor, &catalog,
+        "CREATE TABLE parents (id INT PRIMARY KEY);
+         CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY(parent_id) REFERENCES parents(id));
+         INSERT INTO parents VALUES (10); INSERT INTO children VALUES (1,10);").unwrap();
+    let skipped = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO children VALUES (1,999) ON CONFLICT DO NOTHING;",
+    )
+    .unwrap();
+    assert_eq!(skipped[0], ExecutionResult::RowsAffected(0));
+    let error = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO children VALUES (2,999) ON CONFLICT DO NOTHING;",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutorError::ConstraintViolation(ConstraintViolation::ForeignKey { .. })
+    ));
+    let result = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "SELECT id,parent_id FROM children;",
+    )
+    .unwrap();
+    let ExecutionResult::Query(query) = &result[0] else {
+        panic!("expected unchanged child rows");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+    );
 }
 
 #[test]
