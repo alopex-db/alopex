@@ -13,6 +13,9 @@ use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use alopex_sql::executor::{ExecutionResult, Executor};
 use alopex_sql::storage::TxnBridge;
 
+#[path = "support/legacy_index_recovery.rs"]
+mod legacy_recovery;
+
 fn run_sql_in_txn(
     store: Arc<MemoryKV>,
     catalog: Arc<RwLock<PersistentCatalog<MemoryKV>>>,
@@ -168,6 +171,143 @@ fn persistence_test_default_survives_restart() {
     assert_eq!(query.rows[1][1], SqlValue::Integer(0));
     assert!(matches!(query.rows[0][2], SqlValue::Timestamp(_)));
     assert!(matches!(query.rows[1][2], SqlValue::Timestamp(_)));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_metadata_properties_do_not_escape_after_reload() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7, CHECK (qty >= 0));",
+    );
+    let mut before = catalog.read().unwrap().get_table("items").unwrap().clone();
+    before
+        .properties
+        .insert("app.owner".to_owned(), "catalog-test".to_owned());
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    catalog
+        .write()
+        .unwrap()
+        .persist_create_table(&mut txn, &before)
+        .unwrap();
+    txn.commit_self().unwrap();
+    let loaded = PersistentCatalog::load(store).unwrap();
+    let after = loaded.get_table("items").unwrap();
+    assert_eq!(after.properties, before.properties);
+    assert_eq!(
+        serde_json::to_value(&after.constraints).unwrap(),
+        serde_json::to_value(&before.constraints).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&after.columns[1].default).unwrap(),
+        serde_json::to_value(&before.columns[1].default).unwrap()
+    );
+    assert!(after.columns[1].default.is_some());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_invalid_properties_fail_instead_of_losing_defaults() {
+    use alopex_core::storage::format::bincode_config;
+    use alopex_sql::ast::expr::{Expr, ExprKind};
+    use alopex_sql::catalog::RELATIONAL_CONSTRAINTS_PROPERTY;
+    use alopex_sql::catalog::persistent::{PersistedTableMeta, TABLES_PREFIX};
+    use bincode::Options;
+    use std::collections::HashMap;
+
+    // This is the JSON produced by the previous writer for a non-finite vector.
+    let non_finite_default = serde_json::to_string(&HashMap::from([(
+        "qty",
+        Expr::new(
+            ExprKind::VectorLiteral {
+                values: vec![f64::NAN],
+            },
+            Default::default(),
+        ),
+    )]))
+    .unwrap();
+    for (property, payload) in [
+        ("alopex.column.defaults", "not valid JSON".to_owned()),
+        ("alopex.column.defaults", non_finite_default),
+        (RELATIONAL_CONSTRAINTS_PROPERTY, "not valid JSON".to_owned()),
+    ] {
+        let store = Arc::new(MemoryKV::new());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7);",
+        );
+        let table = catalog.read().unwrap().get_table("items").unwrap().clone();
+        let mut persisted = PersistedTableMeta::try_from(&table).unwrap();
+        persisted.properties.insert(property.to_owned(), payload);
+        let mut key = TABLES_PREFIX.to_vec();
+        key.extend_from_slice(
+            format!(
+                "{}/{}/{}",
+                table.catalog_name, table.namespace_name, table.name
+            )
+            .as_bytes(),
+        );
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(key, bincode_config().serialize(&persisted).unwrap())
+            .unwrap();
+        txn.commit_self().unwrap();
+
+        assert!(
+            PersistentCatalog::load(store).is_err(),
+            "invalid {property} must not silently load a table with missing defaults/constraints"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_unrepresentable_expression_is_rejected_before_write() {
+    use alopex_sql::ast::expr::{Expr, ExprKind};
+    use alopex_sql::catalog::persistent::TABLES_PREFIX;
+
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7, v VECTOR(1));",
+    );
+    let mut table = catalog.read().unwrap().get_table("items").unwrap().clone();
+    table.columns[2].default = Some(Expr::new(
+        ExprKind::VectorLiteral {
+            values: vec![f64::NAN],
+        },
+        Default::default(),
+    ));
+    let mut key = TABLES_PREFIX.to_vec();
+    key.extend_from_slice(
+        format!(
+            "{}/{}/{}",
+            table.catalog_name, table.namespace_name, table.name
+        )
+        .as_bytes(),
+    );
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let before = txn.get(&key).unwrap();
+    assert!(before.is_some());
+    assert!(
+        catalog
+            .write()
+            .unwrap()
+            .persist_create_table(&mut txn, &table)
+            .is_err(),
+        "unrepresentable defaults must be rejected before replacing valid metadata"
+    );
+    assert_eq!(txn.get(&key).unwrap(), before);
+    txn.rollback_self().unwrap();
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
