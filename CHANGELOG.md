@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
+- Catalog loading now rejects invalid DEFAULT or constraint metadata instead
+  of silently discarding it. Internal encoding properties no longer appear in
+  public table properties. Rust callers converting `PersistedTableMeta` and
+  `TableMetadata` must use `TryFrom` and handle conversion errors (#472).
 - Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
   Keep a backup created before upgrading if rollback to v0.8.15 is required;
   reopening newly written segments with v0.8.15 fails with a decoding error

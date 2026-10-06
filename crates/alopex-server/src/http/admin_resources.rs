@@ -180,7 +180,10 @@ fn list_sql_resources_from_store(
         let persisted: PersistedTableMeta = bincode_config()
             .deserialize(&value)
             .map_err(|err| ServerError::BadRequest(format!("catalog entry invalid: {err}")))?;
-        tables.push(TableMetadata::from(persisted));
+        tables.push(
+            TableMetadata::try_from(persisted)
+                .map_err(|err| ServerError::BadRequest(format!("catalog entry invalid: {err}")))?,
+        );
     }
     txn.commit_self()?;
     Ok(tables)
