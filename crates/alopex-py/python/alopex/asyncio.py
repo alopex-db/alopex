@@ -10,7 +10,7 @@ worker, while single-thread handles retain their documented owner-thread guard.
 from __future__ import annotations
 
 import asyncio as _asyncio
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 
 from . import AlopexError, Database, LocalScan, ThreadMode, Transaction, TxnMode
 
@@ -144,6 +144,33 @@ class AsyncTransaction(_AsyncLocalHandle):
 
     async def delete(self, key: bytes) -> None:
         self._handle.delete(key)
+
+    async def scan_prefix(self, prefix: bytes) -> Iterator[Tuple[bytes, bytes]]:
+        """Return the synchronous snapshot iterator after awaiting the scan."""
+        return self._handle.scan_prefix(prefix)
+
+    async def scan_range(self, start: bytes, end: bytes) -> Iterator[Tuple[bytes, bytes]]:
+        """Return the synchronous snapshot iterator for the half-open range."""
+        return self._handle.scan_range(start, end)
+
+    async def search_keys(
+        self,
+        pattern: Union[bytes, str],
+        mode: str = "glob",
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10_000,
+        max_bytes: int = 16_777_216,
+    ) -> dict[str, Any]:
+        """Return a bounded native key-search page with its continuation cursor."""
+        return self._handle.search_keys(
+            pattern,
+            mode=mode,
+            limit=limit,
+            cursor=cursor,
+            scan_budget=scan_budget,
+            max_bytes=max_bytes,
+        )
 
     async def execute_sql(
         self, sql: str, params: Optional[Sequence[Any]] = None
