@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-use alopex_sql::{AlopexDialect, Parser, SqlValue, StatementKind};
+use alopex_sql::{AlopexDialect, Parser, SqlValue};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
 use pyo3::IntoPyObjectExt;
@@ -45,61 +45,6 @@ pub struct PyPreparedStatement {
     finalized: bool,
 }
 
-fn is_transaction_control_statement(sql: &str) -> bool {
-    let keyword = leading_sql_keyword(sql);
-    let starts_with_transaction_control = [
-        "BEGIN",
-        "START",
-        "SET",
-        "COMMIT",
-        "ROLLBACK",
-        "SAVEPOINT",
-        "RELEASE",
-    ]
-    .iter()
-    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
-    if !starts_with_transaction_control && !sql.contains(';') {
-        return false;
-    }
-
-    Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| {
-        statements.iter().any(|statement| {
-            matches!(
-                statement.kind,
-                StatementKind::Begin { .. }
-                    | StatementKind::SetTransaction { .. }
-                    | StatementKind::Commit
-                    | StatementKind::Rollback
-                    | StatementKind::Savepoint { .. }
-                    | StatementKind::RollbackToSavepoint { .. }
-                    | StatementKind::ReleaseSavepoint { .. }
-            )
-        })
-    })
-}
-
-fn leading_sql_keyword(mut sql: &str) -> &str {
-    loop {
-        sql = sql.trim_start();
-        if let Some(comment) = sql.strip_prefix("--") {
-            let Some(newline) = comment.find('\n') else {
-                return "";
-            };
-            sql = &comment[newline + 1..];
-        } else if let Some(comment) = sql.strip_prefix("/*") {
-            let Some(end) = comment.find("*/") else {
-                return "";
-            };
-            sql = &comment[end + 2..];
-        } else {
-            break;
-        }
-    }
-
-    sql.split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .unwrap_or_default()
-}
 struct PythonReader(Py<PyAny>);
 
 impl Read for PythonReader {
@@ -453,7 +398,7 @@ impl PyDatabase {
         let bindings = sql::prepared_bindings(params.as_ref())?;
         let validated_sql =
             crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
-        if is_transaction_control_statement(sql) {
+        if sql::is_transaction_control_statement(sql) {
             return Err(error::to_py_err(
                 "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
             ));
