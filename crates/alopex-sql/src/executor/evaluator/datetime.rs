@@ -407,8 +407,13 @@ fn date_diff(values: &[SqlValue]) -> Result<SqlValue> {
     let unit = text(values.first(), "date_diff")?.to_ascii_lowercase();
     let start = timestamp(values.get(1), "date_diff")?;
     let end = timestamp(values.get(2), "date_diff")?;
-    let result = match unit.as_str() {
-        "day" | "days" => end.div_euclid(86_400_000_000) - start.div_euclid(86_400_000_000),
+    let scale = match unit.as_str() {
+        "day" | "days" => 86_400_000_000,
+        "hour" | "hours" => 3_600_000_000,
+        "minute" | "minutes" => 60_000_000,
+        "second" | "seconds" => 1_000_000,
+        "millisecond" | "milliseconds" => 1_000,
+        "microsecond" | "microseconds" => 1,
         _ => {
             return Err(invalid(
                 "date_diff",
@@ -416,6 +421,10 @@ fn date_diff(values: &[SqlValue]) -> Result<SqlValue> {
             ));
         }
     };
+    let result = end
+        .div_euclid(scale)
+        .checked_sub(start.div_euclid(scale))
+        .ok_or(EvaluationError::Overflow)?;
     Ok(SqlValue::BigInt(result))
 }
 
