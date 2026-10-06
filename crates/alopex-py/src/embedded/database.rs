@@ -39,10 +39,10 @@ pub struct PyDatabase {
 
 #[pyclass(name = "PreparedStatement")]
 pub struct PyPreparedStatement {
-    database: Arc<alopex_embedded::Database>,
+    database: Option<Arc<alopex_embedded::Database>>,
+    control: Arc<DatabaseControl>,
     sql: String,
     bindings: Vec<Option<PyPreparedBinding>>,
-    finalized: bool,
 }
 
 fn is_transaction_control_statement(sql: &str) -> bool {
@@ -181,14 +181,17 @@ impl PyPreparedStatement {
     }
 
     fn finalize(&mut self) -> PyResult<()> {
-        self.ensure_open()?;
+        // Finalization must remain possible after Database.close(). Taking the
+        // handle both marks this statement finalized and releases its lock owner.
+        self.database
+            .take()
+            .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
         self.bindings.clear();
-        self.finalized = true;
         Ok(())
     }
 
     fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let database = Arc::clone(self.ensure_open()?);
         let bindings = self
             .bindings
             .iter()
@@ -199,7 +202,6 @@ impl PyPreparedStatement {
                     .ok_or_else(|| error::to_py_err(format!("parameter ?{} is unbound", index + 1)))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let database = Arc::clone(&self.database);
         let sql = self.sql.clone();
         let result = if bindings
             .iter()
@@ -235,9 +237,8 @@ impl PyPreparedStatement {
 
     /// Execute native parameter rows atomically in one transaction.
     fn execute_many(&mut self, py: Python<'_>, rows: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let database = Arc::clone(self.ensure_open()?);
         let rows = prepared_native_rows(&rows, self.bindings.len())?;
-        let database = Arc::clone(&self.database);
         let sql = self.sql.clone();
         let results = py
             .detach(move || database.prepare(&sql)?.execute_many(rows))
@@ -303,12 +304,13 @@ fn prepared_native_rows(
 }
 
 impl PyPreparedStatement {
-    fn ensure_open(&self) -> PyResult<()> {
-        if self.finalized {
-            Err(error::to_py_err("prepared statement is finalized"))
-        } else {
-            Ok(())
-        }
+    fn ensure_open(&self) -> PyResult<&Arc<alopex_embedded::Database>> {
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
+        self.control.ensure_open()?;
+        Ok(database)
     }
 }
 
@@ -527,10 +529,10 @@ impl PyDatabase {
             .map_err(error::embedded_err)?
             .parameter_count();
         Ok(PyPreparedStatement {
-            database,
+            database: Some(database),
+            control: Arc::clone(&self.control),
             sql: sql.to_owned(),
             bindings: vec![None; parameter_count],
-            finalized: false,
         })
     }
 
