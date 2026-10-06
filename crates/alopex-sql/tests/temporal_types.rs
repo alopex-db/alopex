@@ -3,7 +3,9 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor, QueryResult};
+use alopex_sql::executor::{
+    EvaluationError, ExecutionResult, Executor, ExecutorError, QueryResult,
+};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::planner::types::ResolvedType;
@@ -178,6 +180,153 @@ fn interval_epoch_positive_year_uses_year_days() {
             .rows,
         vec![vec![SqlValue::Double(31_557_600.0)]]
     );
+}
+
+// DuckDB v1.4.0 date_diff.cpp: TIMESTAMP specializations count floor-boundaries,
+// rather than dividing an elapsed duration; microseconds use checked subtraction.
+fn assert_fixed_date_diff(unit: &str, start: &str, end: &str, same_bucket_end: &str) {
+    let mut harness = Harness::new();
+    let before_epoch = "1969-12-31 23:59:59.999999";
+    let epoch = "1970-01-01 00:00:00";
+    for (label, part, left, right, expected) in [
+        ("boundary", unit.to_owned(), start, end, 1),
+        ("reverse", unit.to_owned(), end, start, -1),
+        (
+            "negative epoch floor",
+            unit.to_owned(),
+            before_epoch,
+            epoch,
+            1,
+        ),
+        (
+            "negative epoch reverse",
+            unit.to_owned(),
+            epoch,
+            before_epoch,
+            -1,
+        ),
+        ("same bucket", unit.to_owned(), epoch, same_bucket_end, 0),
+        (
+            "uppercase plural",
+            format!("{}S", unit.to_ascii_uppercase()),
+            start,
+            end,
+            1,
+        ),
+    ] {
+        let sql = format!("SELECT DATE_DIFF('{part}', TIMESTAMP '{left}', TIMESTAMP '{right}')");
+        assert_eq!(
+            harness.query(&sql).rows,
+            vec![vec![SqlValue::BigInt(expected)]],
+            "{unit}: {label}: {sql}"
+        );
+    }
+    let sql = format!(
+        "SELECT DATE_DIFF('{unit}', CAST(NULL AS TIMESTAMP), TIMESTAMP '{end}'), \
+                DATE_DIFF('{unit}', TIMESTAMP '{start}', CAST(NULL AS TIMESTAMP))"
+    );
+    assert_eq!(
+        harness.query(&sql).rows,
+        vec![vec![SqlValue::Null, SqlValue::Null]],
+        "{unit}: typed NULL"
+    );
+}
+
+#[test]
+fn date_diff_fixed_hour_boundaries() {
+    assert_fixed_date_diff(
+        "hour",
+        "1970-01-01 00:59:59.999999",
+        "1970-01-01 01:00:00",
+        "1970-01-01 00:00:00.000001",
+    );
+    // The answer fits even though subtracting raw microseconds first would overflow.
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT DATE_DIFF('hour', \
+                CAST(CAST('-9000000000000000000' AS BIGINT) AS TIMESTAMP), \
+                CAST(CAST('9000000000000000000' AS BIGINT) AS TIMESTAMP))"
+            )
+            .rows,
+        vec![vec![SqlValue::BigInt(5_000_000_000)]]
+    );
+}
+
+#[test]
+fn date_diff_fixed_minute_boundaries() {
+    assert_fixed_date_diff(
+        "minute",
+        "1970-01-01 00:00:59.999999",
+        "1970-01-01 00:01:00",
+        "1970-01-01 00:00:00.000001",
+    );
+}
+
+#[test]
+fn date_diff_fixed_second_boundaries() {
+    assert_fixed_date_diff(
+        "second",
+        "1970-01-01 00:00:00.999999",
+        "1970-01-01 00:00:01",
+        "1970-01-01 00:00:00.000001",
+    );
+}
+
+#[test]
+fn date_diff_fixed_millisecond_boundaries() {
+    assert_fixed_date_diff(
+        "millisecond",
+        "1970-01-01 00:00:00.000999",
+        "1970-01-01 00:00:00.001000",
+        "1970-01-01 00:00:00.000001",
+    );
+}
+
+#[test]
+fn date_diff_fixed_microsecond_boundaries() {
+    assert_fixed_date_diff(
+        "microsecond",
+        "1970-01-01 00:00:00.000000",
+        "1970-01-01 00:00:00.000001",
+        "1970-01-01 00:00:00",
+    );
+}
+
+fn assert_microsecond_overflow(start: &str, end: &str) {
+    let mut harness = Harness::new();
+    // These are finite timestamps, not the i64 extrema used for infinity by DuckDB.
+    let sql = format!(
+        "SELECT DATE_DIFF('microsecond', \
+            CAST(CAST('{start}' AS BIGINT) AS TIMESTAMP), \
+            CAST(CAST('{end}' AS BIGINT) AS TIMESTAMP))"
+    );
+    let statement = Parser::parse_sql(&AlopexDialect, &sql)
+        .expect("parse SQL")
+        .pop()
+        .expect("one statement");
+    let plan = Planner::new(&*harness.catalog.read().expect("catalog read"))
+        .plan(&statement)
+        .expect("plan SQL");
+    let error = harness
+        .executor
+        .execute(plan)
+        .expect_err("microsecond overflow");
+    assert!(
+        matches!(error, ExecutorError::Evaluation(EvaluationError::Overflow)),
+        "expected numeric overflow, got {error:?}"
+    );
+}
+
+#[test]
+fn date_diff_fixed_microsecond_positive_overflow() {
+    assert_microsecond_overflow("-9000000000000000000", "9000000000000000000");
+}
+
+#[test]
+fn date_diff_fixed_microsecond_negative_overflow() {
+    assert_microsecond_overflow("9000000000000000000", "-9000000000000000000");
 }
 
 #[test]
