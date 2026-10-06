@@ -4,6 +4,186 @@ use std::time::Instant;
 use alopex_embedded::{Database, Error};
 use alopex_sql::{ExecutionResult, SqlValue};
 
+fn assert_decimal_query(result: ExecutionResult, expected: SqlValue) {
+    let ExecutionResult::Query(rows) = result else {
+        panic!("decimal SELECT must return rows");
+    };
+    // SqlValue equality checks the Decimal variant and coefficient/scale, not f64 equality.
+    assert_eq!(rows.rows, vec![vec![expected]]);
+}
+
+fn check_native_decimal(coefficient: i128, scale: u8, literal: &str, stored: i128) {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    let value = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+    assert_decimal_query(
+        database
+            .execute_sql(&format!("SELECT DECIMAL '{literal}'"))
+            .unwrap(),
+        value.clone(),
+    );
+    let mut select = database.prepare("SELECT ?").unwrap();
+    select.bind(1, value.clone()).unwrap();
+    assert_decimal_query(select.execute().unwrap(), value.clone());
+
+    database
+        .execute_sql("CREATE TABLE amounts (amount DECIMAL(30,2))")
+        .unwrap();
+    let expected = SqlValue::Decimal(DecimalValue::new(stored, 2));
+    assert_decimal_query(
+        database
+            .execute_sql(&format!("SELECT CAST('{literal}' AS DECIMAL(30,2))"))
+            .unwrap(),
+        expected.clone(),
+    );
+    let mut session = database.sql_session();
+    session.execute_sql("BEGIN").unwrap();
+    {
+        let mut insert = session.prepare("INSERT INTO amounts VALUES (?)").unwrap();
+        insert.bind(1, value).unwrap();
+        insert.execute().unwrap();
+    }
+    assert_decimal_query(
+        session.execute_sql("SELECT amount FROM amounts").unwrap(),
+        expected.clone(),
+    );
+    session.execute_sql("COMMIT").unwrap();
+    assert_decimal_query(
+        database.execute_sql("SELECT amount FROM amounts").unwrap(),
+        expected,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_preserves_fraction_beyond_f64_precision() {
+    check_native_decimal(
+        1_234_567_890_123_456_789,
+        2,
+        "12345678901234567.89",
+        1_234_567_890_123_456_789,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_preserves_valid_precision_and_scale_boundaries() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    for (coefficient, scale, literal) in [
+        (
+            99_999_999_999_999_999_999_999_999_999_999_999_999i128,
+            0,
+            "99999999999999999999999999999999999999",
+        ),
+        (1, 38, "0.00000000000000000000000000000000000001"),
+        (0, 38, "0.00000000000000000000000000000000000000"),
+    ] {
+        let expected = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+        assert_decimal_query(
+            database
+                .execute_sql(&format!("SELECT DECIMAL '{literal}'"))
+                .unwrap(),
+            expected.clone(),
+        );
+        let mut select = database.prepare("SELECT ?").unwrap();
+        select.bind(1, expected.clone()).unwrap();
+        assert_decimal_query(select.execute().unwrap(), expected);
+    }
+}
+
+#[test]
+fn issue582_native_decimal_rejects_unchecked_invalid_values_without_panic() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    let mut failures = Vec::new();
+    for (coefficient, scale) in [(1, 39), (i128::MAX, 0), (i128::MIN, 0)] {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut select = database.prepare("SELECT ?").unwrap();
+            select
+                .bind(1, SqlValue::Decimal(DecimalValue::new(coefficient, scale)))
+                .unwrap();
+            select.execute()
+        }));
+        match outcome {
+            Ok(Err(Error::Sql(error)))
+                if error.to_string().to_ascii_lowercase().contains("decimal") => {}
+            other => failures.push(format!(
+                "coefficient={coefficient} scale={scale}: {other:?}"
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue582_native_decimal_preserves_integer_beyond_i64() {
+    check_native_decimal(
+        9_223_372_036_854_775_808,
+        0,
+        "9223372036854775808",
+        922_337_203_685_477_580_800,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_rounds_positive_tie_away_from_zero() {
+    check_native_decimal(1005, 3, "1.005", 101);
+}
+
+#[test]
+fn issue582_native_decimal_rounds_negative_tie_away_from_zero() {
+    check_native_decimal(-1005, 3, "-1.005", -101);
+}
+
+#[test]
+fn issue582_native_decimal_precision_overflow_preserves_existing_rows() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    database.execute_sql("CREATE TABLE amounts (amount DECIMAL(3,2)); INSERT INTO amounts VALUES (DECIMAL '1.25')").unwrap();
+    // 9.995 rounds to 10.00, which exceeds DECIMAL(3,2).
+    let reference = database
+        .execute_sql("INSERT INTO amounts VALUES (CAST('9.995' AS DECIMAL(3,2)))")
+        .unwrap_err();
+    assert!(
+        matches!(&reference, Error::Sql(_)) && reference.to_string().contains("precision overflow"),
+        "{reference}"
+    );
+    let mut insert = database.prepare("INSERT INTO amounts VALUES (?)").unwrap();
+    insert
+        .bind(1, SqlValue::Decimal(DecimalValue::new(9995, 3)))
+        .unwrap();
+    let error = insert.execute().unwrap_err();
+    assert!(
+        matches!(&error, Error::Sql(_)) && error.to_string().contains("precision overflow"),
+        "{error}"
+    );
+    assert_decimal_query(
+        database.execute_sql("SELECT amount FROM amounts").unwrap(),
+        SqlValue::Decimal(DecimalValue::new(125, 2)),
+    );
+}
+
+#[test]
+fn issue582_native_decimal_change_preserves_double_parameters() {
+    let database = Arc::new(Database::new());
+    for value in [5.0, 1e20, -0.0, 1e-20, 1.5e300] {
+        let mut select = database.prepare("SELECT ?").unwrap();
+        select.bind(1, SqlValue::Double(value)).unwrap();
+        let ExecutionResult::Query(rows) = select.execute().unwrap() else {
+            panic!("SELECT rows")
+        };
+        let SqlValue::Double(actual) = rows.rows[0][0] else {
+            panic!("parameter lost Double type")
+        };
+        assert_eq!(actual.to_bits(), value.to_bits());
+    }
+    let mut division = database.prepare("SELECT ? / 2").unwrap();
+    division.bind(1, SqlValue::Double(5.0)).unwrap();
+    let ExecutionResult::Query(rows) = division.execute().unwrap() else {
+        panic!("SELECT rows")
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::Double(2.5)]]);
+}
+
 #[test]
 fn empty_binding_is_a_noop_for_parameter_free_batches() {
     let sql = "CREATE TABLE t (id INTEGER); SHOW TABLES";
