@@ -44,6 +44,9 @@ pub enum CatalogError {
 
     #[error("invalid catalog key: {0}")]
     InvalidKey(String),
+
+    #[error("invalid catalog metadata: {0}")]
+    InvalidMetadata(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,15 +477,84 @@ struct PersistedTableMetaV1 {
     storage_options: PersistedStorageOptions,
 }
 
-impl From<&TableMetadata> for PersistedTableMeta {
-    fn from(value: &TableMetadata) -> Self {
+// v0.8.4 already used catalog-qualified table metadata, but its columns had
+// not yet gained generated-sequence fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedTableMetaV2 {
+    table_id: u32,
+    name: String,
+    catalog_name: String,
+    namespace_name: String,
+    table_type: TableType,
+    data_source_format: DataSourceFormat,
+    columns: Vec<PersistedColumnMetaV2>,
+    primary_key: Option<Vec<String>>,
+    storage_options: PersistedStorageOptions,
+    storage_location: Option<String>,
+    comment: Option<String>,
+    properties: HashMap<String, String>,
+}
+
+impl From<PersistedTableMetaV2> for PersistedTableMeta {
+    fn from(value: PersistedTableMetaV2) -> Self {
+        Self {
+            table_id: value.table_id,
+            name: value.name,
+            catalog_name: value.catalog_name,
+            namespace_name: value.namespace_name,
+            table_type: value.table_type,
+            data_source_format: value.data_source_format,
+            columns: value.columns.into_iter().map(Into::into).collect(),
+            primary_key: value.primary_key,
+            storage_options: value.storage_options,
+            storage_location: value.storage_location,
+            comment: value.comment,
+            properties: value.properties,
+        }
+    }
+}
+
+fn encode_table_property<T: Serialize + serde::de::DeserializeOwned>(
+    table: &str,
+    property: &str,
+    value: &T,
+) -> Result<String, CatalogError> {
+    let invalid = |err| CatalogError::InvalidMetadata(format!("table {table}, {property}: {err}"));
+    let json = serde_json::to_string(value).map_err(invalid)?;
+    // JSON can encode non-finite numbers as null. Reject such a lossy payload
+    // before it replaces the last readable catalog entry.
+    let _: T = serde_json::from_str(&json).map_err(invalid)?;
+    Ok(json)
+}
+
+fn take_table_property<T: serde::de::DeserializeOwned + Default>(
+    table: &str,
+    properties: &mut HashMap<String, String>,
+    property: &str,
+) -> Result<T, CatalogError> {
+    match properties.remove(property) {
+        Some(json) => serde_json::from_str(&json).map_err(|err| {
+            CatalogError::InvalidMetadata(format!("table {table}, {property}: {err}"))
+        }),
+        None => Ok(T::default()),
+    }
+}
+
+impl TryFrom<&TableMetadata> for PersistedTableMeta {
+    type Error = CatalogError;
+
+    fn try_from(value: &TableMetadata) -> Result<Self, Self::Error> {
         let mut properties = value.properties.clone();
         properties.remove(COLUMN_DEFAULTS_PROPERTY);
+        properties.remove(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY);
         if !value.constraints.is_empty() {
             properties.insert(
                 crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
-                serde_json::to_string(&value.constraints)
-                    .expect("relational constraints must serialize"),
+                encode_table_property(
+                    &value.name,
+                    crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY,
+                    &value.constraints,
+                )?,
             );
         }
         let defaults: HashMap<_, _> = value
@@ -492,16 +564,16 @@ impl From<&TableMetadata> for PersistedTableMeta {
                 column
                     .default
                     .as_ref()
-                    .map(|default| (column.name.clone(), default))
+                    .map(|default| (column.name.clone(), default.clone()))
             })
             .collect();
         if !defaults.is_empty() {
             properties.insert(
                 COLUMN_DEFAULTS_PROPERTY.to_string(),
-                serde_json::to_string(&defaults).expect("column defaults must serialize"),
+                encode_table_property(&value.name, COLUMN_DEFAULTS_PROPERTY, &defaults)?,
             );
         }
-        Self {
+        Ok(Self {
             table_id: value.table_id,
             name: value.name.clone(),
             catalog_name: value.catalog_name.clone(),
@@ -518,17 +590,21 @@ impl From<&TableMetadata> for PersistedTableMeta {
             storage_location: value.storage_location.clone(),
             comment: value.comment.clone(),
             properties,
-        }
+        })
     }
 }
 
-impl From<PersistedTableMeta> for TableMetadata {
-    fn from(value: PersistedTableMeta) -> Self {
-        let defaults: HashMap<String, crate::ast::expr::Expr> = value
-            .properties
-            .get(COLUMN_DEFAULTS_PROPERTY)
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+impl TryFrom<PersistedTableMeta> for TableMetadata {
+    type Error = CatalogError;
+
+    fn try_from(mut value: PersistedTableMeta) -> Result<Self, Self::Error> {
+        let defaults: HashMap<String, crate::ast::expr::Expr> =
+            take_table_property(&value.name, &mut value.properties, COLUMN_DEFAULTS_PROPERTY)?;
+        let constraints = take_table_property(
+            &value.name,
+            &mut value.properties,
+            crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY,
+        )?;
         let mut table = TableMetadata::new(
             value.name,
             value
@@ -547,17 +623,13 @@ impl From<PersistedTableMeta> for TableMetadata {
         table.storage_location = value.storage_location;
         table.comment = value.comment;
         table.properties = value.properties;
-        table.constraints = table
-            .properties
-            .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        table.constraints = constraints;
         for column in &mut table.columns {
             if let Some(default) = defaults.get(&column.name) {
                 column.default = Some(default.clone());
             }
         }
-        table
+        Ok(table)
     }
 }
 
@@ -1129,7 +1201,7 @@ impl<S: KVStore> PersistentCatalog<S> {
             if persisted.table_type == TableType::Temporary {
                 continue;
             }
-            let table: TableMetadata = persisted.into();
+            let table = TableMetadata::try_from(persisted)?;
             inner.insert_table_unchecked(table);
         }
 
@@ -1577,7 +1649,7 @@ impl<S: KVStore> PersistentCatalog<S> {
         txn: &mut S::Transaction<'_>,
         table: &TableMetadata,
     ) -> Result<(), CatalogError> {
-        let persisted = PersistedTableMeta::from(table);
+        let persisted = PersistedTableMeta::try_from(table)?;
         let value = bincode::serialize(&persisted)?;
         txn.put(
             table_key(&table.catalog_name, &table.namespace_name, &table.name),

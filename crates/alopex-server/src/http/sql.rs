@@ -887,7 +887,8 @@ pub(crate) fn sync_catalog_to_store(state: &ServerState) -> Result<()> {
     let mut txn = state.store.begin(TxnMode::ReadWrite)?;
     delete_prefix(&mut txn, TABLES_PREFIX)?;
     for table in tables {
-        let persisted = PersistedTableMeta::from(&table);
+        let persisted = PersistedTableMeta::try_from(&table)
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
         let value = bincode_config()
             .serialize(&persisted)
             .map_err(|err| ServerError::Internal(err.to_string()))?;
