@@ -134,7 +134,7 @@ impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
         Ok(next)
     }
 
-    fn validate_row(&self, row: &[SqlValue]) -> Result<()> {
+    pub(crate) fn validate_row(&self, row: &[SqlValue]) -> Result<()> {
         let expected = self.table_meta.column_count();
         if row.len() != expected {
             return Err(StorageError::TypeMismatch {
