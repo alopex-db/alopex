@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::KVStore;
@@ -10,8 +11,8 @@ use alopex_sql::Parser;
 use alopex_sql::Planner;
 use alopex_sql::SqlValue;
 use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
-use alopex_sql::executor::{ExecutionResult, Executor};
-use alopex_sql::storage::TxnBridge;
+use alopex_sql::executor::{ConstraintViolation, ExecutionResult, Executor, ExecutorError};
+use alopex_sql::storage::{BorrowedSqlTransaction, SqlTxn, TxnBridge};
 
 #[path = "support/legacy_index_recovery.rs"]
 mod legacy_recovery;
@@ -55,6 +56,252 @@ fn run_sql_in_txn(
     }
 
     last
+}
+
+fn postload_unique_csv(contents: &str) -> (tempfile::NamedTempFile, String) {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(contents.as_bytes()).unwrap();
+    file.flush().unwrap();
+    let sql = format!(
+        "COPY events FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
+        file.path().to_str().unwrap().replace('\'', "''")
+    );
+    (file, sql)
+}
+
+fn postload_kv<'a>(txn: &mut impl KVTransaction<'a>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    txn.scan_prefix(&[]).unwrap().collect()
+}
+
+fn postload_execute_borrowed(
+    executor: &mut Executor<MemoryKV, PersistentCatalog<MemoryKV>>,
+    catalog: &Arc<RwLock<PersistentCatalog<MemoryKV>>>,
+    borrowed: &mut BorrowedSqlTransaction<'_, '_, '_, MemoryKV>,
+    sql: &str,
+) -> Result<ExecutionResult, ExecutorError> {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+    assert_eq!(statements.len(), 1);
+    let plan = {
+        let guard = catalog.read().unwrap();
+        let (_, overlay) = borrowed.split_parts();
+        Planner::new(&TxnCatalogView::new(&*guard, overlay))
+            .plan(&statements[0])
+            .unwrap()
+    };
+    executor.execute_in_txn(plan, borrowed)
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_columnar_unique_rejection_preserves_borrowed_prior_write() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE events (id INT) WITH (storage='columnar'); \
+         CREATE TABLE keeper (id INT PRIMARY KEY, note TEXT);",
+    );
+    let (_csv, copy_sql) = postload_unique_csv("id\n1\n1\n");
+    assert_eq!(
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            &copy_sql
+        ),
+        ExecutionResult::RowsAffected(2)
+    );
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let committed_before = postload_kv(&mut txn);
+    let mut overlay = CatalogOverlay::new();
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let pending;
+    {
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        assert_eq!(
+            postload_execute_borrowed(
+                &mut executor,
+                &catalog,
+                &mut borrowed,
+                "INSERT INTO keeper VALUES (7, 'prior')",
+            )
+            .unwrap(),
+            ExecutionResult::RowsAffected(1)
+        );
+        pending = {
+            let (mut sql_txn, _) = borrowed.split_parts();
+            postload_kv(sql_txn.inner_mut())
+        };
+        assert_ne!(pending, committed_before, "prior write must be pending");
+        let result = postload_execute_borrowed(
+            &mut executor,
+            &catalog,
+            &mut borrowed,
+            "CREATE UNIQUE INDEX uq_events ON events(id)",
+        );
+        eprintln!("borrowed CREATE UNIQUE result={result:?}");
+        assert!(matches!(
+            &result,
+            Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique {
+                index_name, columns, ..
+            })) if index_name == "uq_events" && columns == &["id"]
+        ));
+        let (mut sql_txn, overlay) = borrowed.split_parts();
+        assert_eq!(postload_kv(sql_txn.inner_mut()), pending);
+        let guard = catalog.read().unwrap();
+        assert!(
+            TxnCatalogView::new(&*guard, overlay)
+                .get_index("uq_events")
+                .is_none()
+        );
+        assert!(guard.get_index("uq_events").is_none());
+    }
+    // The caller commits its earlier INSERT instead of rolling back the transaction.
+    txn.commit_self().unwrap();
+    catalog.write().unwrap().apply_overlay(overlay);
+    let reloaded = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert!(reloaded.read().unwrap().get_index("uq_events").is_none());
+    let mut read = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(postload_kv(&mut read), pending);
+    read.rollback_self().unwrap();
+    let ExecutionResult::Query(keeper) = run_sql_in_txn(
+        store.clone(),
+        reloaded.clone(),
+        TxnMode::ReadOnly,
+        "SELECT id, note FROM keeper ORDER BY id",
+    ) else {
+        panic!("expected committed prior write");
+    };
+    assert_eq!(
+        keeper.rows,
+        vec![vec![SqlValue::Integer(7), SqlValue::Text("prior".into())]]
+    );
+    let ExecutionResult::Query(events) = run_sql_in_txn(
+        store,
+        reloaded,
+        TxnMode::ReadOnly,
+        "SELECT id FROM events ORDER BY id",
+    ) else {
+        panic!("expected preserved columnar rows");
+    };
+    assert_eq!(
+        events.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_columnar_unique_reload_rejects_duplicate_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("columnar_unique.wal");
+    let expected_index_id = {
+        let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            "CREATE TABLE events (id INT) WITH (storage='columnar')",
+        );
+        let (_csv, copy_sql) = postload_unique_csv("id\n1\n2\n");
+        assert_eq!(
+            run_sql_in_txn(
+                store.clone(),
+                catalog.clone(),
+                TxnMode::ReadWrite,
+                &copy_sql
+            ),
+            ExecutionResult::RowsAffected(2)
+        );
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let mut overlay = CatalogOverlay::new();
+        let index_id;
+        {
+            let mut borrowed =
+                TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+            let mut executor = Executor::new(store.clone(), catalog.clone());
+            assert_eq!(
+                postload_execute_borrowed(
+                    &mut executor,
+                    &catalog,
+                    &mut borrowed,
+                    "CREATE UNIQUE INDEX uq_events ON events(id)",
+                )
+                .unwrap(),
+                ExecutionResult::Success
+            );
+            let guard = catalog.read().unwrap();
+            assert!(guard.get_index("uq_events").is_none());
+            let (_, overlay) = borrowed.split_parts();
+            let view = TxnCatalogView::new(&*guard, overlay);
+            let index = view.get_index("uq_events").unwrap();
+            assert!(index.unique);
+            index_id = index.index_id;
+        }
+        txn.commit_self().unwrap();
+        catalog.write().unwrap().apply_overlay(overlay);
+        index_id
+    };
+
+    // Reopen the real WAL and reconstruct catalog metadata; do not reuse its cache.
+    let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    {
+        let guard = catalog.read().unwrap();
+        let index = guard.get_index("uq_events").unwrap();
+        assert!(index.unique);
+        assert_eq!(index.index_id, expected_index_id);
+        assert_eq!(index.table, "events");
+        assert_eq!(index.columns, vec!["id"]);
+        assert_eq!(index.column_indices, vec![0]);
+    }
+    let (_csv, copy_sql) = postload_unique_csv("id\n2\n3\n");
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let before = postload_kv(&mut txn);
+    let mut overlay = CatalogOverlay::new();
+    {
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let mut executor = Executor::new(store.clone(), catalog.clone());
+        let result = postload_execute_borrowed(&mut executor, &catalog, &mut borrowed, &copy_sql);
+        eprintln!("reloaded UNIQUE duplicate COPY result={result:?}");
+        assert!(matches!(
+            &result,
+            Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique {
+                index_name, columns, ..
+            })) if index_name == "uq_events" && columns == &["id"]
+        ));
+        let (mut sql_txn, overlay) = borrowed.split_parts();
+        assert_eq!(postload_kv(sql_txn.inner_mut()), before);
+        let guard = catalog.read().unwrap();
+        assert!(
+            TxnCatalogView::new(&*guard, overlay)
+                .get_index("uq_events")
+                .unwrap()
+                .unique
+        );
+    }
+    txn.commit_self().unwrap();
+    catalog.write().unwrap().apply_overlay(overlay);
+    let mut read = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(postload_kv(&mut read), before);
+    read.rollback_self().unwrap();
+    let ExecutionResult::Query(events) = run_sql_in_txn(
+        store,
+        catalog,
+        TxnMode::ReadOnly,
+        "SELECT id FROM events ORDER BY id",
+    ) else {
+        panic!("expected unchanged columnar rows after rejected COPY");
+    };
+    assert_eq!(
+        events.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
