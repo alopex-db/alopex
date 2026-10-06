@@ -171,6 +171,79 @@ fn date_diff_rejects_unsupported_units() {
 }
 
 #[test]
+fn interval_epoch_positive_year_uses_year_days() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT EXTRACT(EPOCH FROM INTERVAL '1' YEAR)")
+            .rows,
+        vec![vec![SqlValue::Double(31_557_600.0)]]
+    );
+}
+
+#[test]
+fn interval_epoch_negative_year_preserves_sign() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT EXTRACT(EPOCH FROM INTERVAL '-1' YEAR)")
+            .rows,
+        vec![vec![SqlValue::Double(-31_557_600.0)]]
+    );
+}
+
+#[test]
+fn interval_epoch_positive_thirteen_months_splits_year_and_month() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT EXTRACT(EPOCH FROM INTERVAL '13' MONTH)")
+            .rows,
+        vec![vec![SqlValue::Double(34_149_600.0)]]
+    );
+}
+
+#[test]
+fn interval_epoch_negative_thirteen_months_truncates_toward_zero() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT EXTRACT(EPOCH FROM INTERVAL '-13' MONTH)")
+            .rows,
+        vec![vec![SqlValue::Double(-34_149_600.0)]]
+    );
+}
+
+#[test]
+fn interval_epoch_single_month_keeps_thirty_days() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT EXTRACT(EPOCH FROM INTERVAL '1' MONTH)")
+            .rows,
+        vec![vec![SqlValue::Double(2_592_000.0)]]
+    );
+}
+
+#[test]
+fn interval_epoch_mixed_sign_preserves_fraction_and_null() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT EXTRACT(EPOCH FROM INTERVAL '-1 month 2 days 03:04:05.000006'), \
+                EXTRACT(EPOCH FROM CAST(NULL AS INTERVAL))",
+    );
+    assert_eq!(query.rows.len(), 1);
+    assert_eq!(query.rows[0].len(), 2);
+    let SqlValue::Double(actual) = query.rows[0][0] else {
+        panic!("expected Double epoch, got {:?}", query.rows[0][0]);
+    };
+    // REL_18_0 interval_part_common: years use 365.25 days, remaining months 30.
+    // Allow only floating-point rounding, not loss of the microsecond fraction.
+    assert!((actual - (-2_408_154.999_994)).abs() <= 1e-9, "{actual}");
+    assert_eq!(query.rows[0][1], SqlValue::Null);
+}
+
+#[test]
 fn temporal_storage_comparison_and_month_end_arithmetic_round_trip() {
     assert!(ResolvedType::Text.can_cast_to(&ResolvedType::Date));
     let mut harness = Harness::new();

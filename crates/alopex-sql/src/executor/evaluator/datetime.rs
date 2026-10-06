@@ -392,7 +392,8 @@ fn extract_interval_part(
     function: &str,
 ) -> Result<f64> {
     match unit.to_ascii_lowercase().as_str() {
-        "epoch" => Ok(f64::from(months) * 2_592_000.0
+        "epoch" => Ok(f64::from(months / 12) * 31_557_600.0
+            + f64::from(months % 12) * 2_592_000.0
             + f64::from(days) * 86_400.0
             + micros as f64 / 1_000_000.0),
         _ => Err(invalid(
