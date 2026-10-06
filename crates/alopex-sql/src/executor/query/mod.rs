@@ -78,6 +78,29 @@ fn index_predicate(
         _ => return None,
     };
 
+    // Index keys encode the stored type. Cross-type SQL comparisons must use
+    // the evaluator: converting a boundary can lose precision or change which
+    // rows match, even when a numeric cast is accepted by the planner.
+    if value.resolved_type() != table.columns.get(column)?.data_type {
+        return None;
+    }
+
+    // Candidate lookup must preserve the evaluator's comparison semantics.
+    // FLOAT/DOUBLE keys distinguish signed zero. TEXT's NUL terminator and
+    // BLOB's length prefix do not preserve SQL
+    // range order, although their equality lookups are safe with the residual
+    // filter below. Keep unsupported encodings and the existing conservative
+    // BIGINT fallback on the ordinary scan path.
+    match &value {
+        SqlValue::Integer(_)
+        | SqlValue::Boolean(_)
+        | SqlValue::Timestamp(_)
+        | SqlValue::Date(_)
+        | SqlValue::Time(_) => {}
+        SqlValue::Text(_) | SqlValue::Blob(_) if *op == BinaryOp::Eq => {}
+        _ => return None,
+    }
+
     let predicate = match (op, reversed) {
         (BinaryOp::Eq, _) => IndexPredicate::Equality(value),
         (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => IndexPredicate::Range {

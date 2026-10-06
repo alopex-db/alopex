@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+#[path = "support/integer_primary_key_boundaries.rs"]
+mod integer_primary_key_boundaries;
+
 fn create_executor() -> (
     Executor<MemoryKV, MemoryCatalog>,
     Arc<RwLock<MemoryCatalog>>,
@@ -605,4 +608,272 @@ fn create_table_with_duplicate_option_errors() {
         .unwrap_err();
 
     assert!(matches!(err, ExecutorError::DuplicateOption(_)));
+}
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn btree_cross_type_literals_preserve_scan_results_and_ordered_limits() {
+    use alopex_sql::ast::expr::{BinaryOp, Literal};
+    use alopex_sql::catalog::IndexMetadata;
+    use alopex_sql::planner::typed_expr::SortExpr;
+
+    // The same public executor plans run before and after CREATE INDEX. Each
+    // case also checks EXPLAIN so a fallback cannot advertise an index lookup.
+    for column_type in [ResolvedType::Integer, ResolvedType::Double] {
+        let (mut executor, _) = create_executor();
+        executor
+            .execute(LogicalPlan::CreateTable {
+                table: TableMetadata::new(
+                    "numbers",
+                    vec![ColumnMetadata::new("n", column_type.clone())],
+                ),
+                if_not_exists: false,
+                with_options: vec![],
+            })
+            .unwrap();
+        executor
+            .execute(LogicalPlan::Insert {
+                table: "numbers".into(),
+                columns: vec!["n".into()],
+                values: (1..=4)
+                    .map(|n| {
+                        vec![literal(
+                            TypedExprKind::Literal(Literal::Number(n.to_string())),
+                            column_type.clone(),
+                        )]
+                    })
+                    .collect(),
+                conflict: None,
+                returning: None,
+            })
+            .unwrap();
+        let column = TypedExpr {
+            kind: TypedExprKind::ColumnRef {
+                table: "numbers".into(),
+                column: "n".into(),
+                column_index: 0,
+            },
+            resolved_type: column_type.clone(),
+            span: Span::default(),
+        };
+        let mut cases = Vec::new();
+        for (op, number, expected_count) in [
+            (BinaryOp::Eq, "3.0", 1),
+            (BinaryOp::Gt, "2.5", 2),
+            (BinaryOp::Lt, "2.5", 2),
+            (BinaryOp::GtEq, "3.0", 2),
+            (BinaryOp::LtEq, "3.0", 3),
+        ] {
+            // DOUBLE n = 3 uses an INTEGER literal; the other cases exercise
+            // INTEGER comparisons against fractional/integral DOUBLE literals.
+            let (number, literal_type) = if column_type == ResolvedType::Double {
+                if number == "2.5" {
+                    continue;
+                }
+                ("3", ResolvedType::Integer)
+            } else {
+                (number, ResolvedType::Double)
+            };
+            for reversed in [false, true] {
+                let value = literal(
+                    TypedExprKind::Literal(Literal::Number(number.into())),
+                    literal_type.clone(),
+                );
+                let (left, right, op) = if reversed {
+                    let op = match op {
+                        BinaryOp::Gt => BinaryOp::Lt,
+                        BinaryOp::GtEq => BinaryOp::LtEq,
+                        BinaryOp::Lt => BinaryOp::Gt,
+                        BinaryOp::LtEq => BinaryOp::GtEq,
+                        op => op,
+                    };
+                    (value, column.clone(), op)
+                } else {
+                    (column.clone(), value, op)
+                };
+                let plan = LogicalPlan::filter(
+                    LogicalPlan::scan("numbers".into(), Projection::All(vec!["n".into()])),
+                    literal(
+                        TypedExprKind::BinaryOp {
+                            left: Box::new(left),
+                            op,
+                            right: Box::new(right),
+                        },
+                        ResolvedType::Boolean,
+                    ),
+                );
+                cases.push((plan.clone(), expected_count));
+                cases.push((
+                    LogicalPlan::limit(
+                        LogicalPlan::sort(plan, vec![SortExpr::desc(column.clone())]),
+                        Some(1),
+                        Some(0),
+                    ),
+                    1,
+                ));
+            }
+        }
+        let baseline: Vec<_> = cases
+            .iter()
+            .map(|(plan, expected_count)| {
+                let ExecutionResult::Query(result) = executor.execute(plan.clone()).unwrap() else {
+                    panic!("expected rows")
+                };
+                assert_eq!(result.rows.len(), *expected_count);
+                result.rows
+            })
+            .collect();
+        executor
+            .execute(LogicalPlan::CreateIndex {
+                index: IndexMetadata::new(0, "idx_numbers_n", "numbers", vec!["n".into()]),
+                if_not_exists: false,
+            })
+            .unwrap();
+        for ((plan, _), expected) in cases.into_iter().zip(baseline) {
+            let ExecutionResult::Query(result) = executor.execute(plan.clone()).unwrap() else {
+                panic!("expected rows")
+            };
+            assert_eq!(
+                result.rows, expected,
+                "column type {column_type:?}, plan {plan:?}"
+            );
+            for format in [ExplainFormat::Text, ExplainFormat::Json] {
+                let ExecutionResult::Query(result) = executor
+                    .execute(LogicalPlan::Explain {
+                        analyze: false,
+                        format,
+                        input: Box::new(plan.clone()),
+                    })
+                    .unwrap()
+                else {
+                    panic!("expected EXPLAIN")
+                };
+                let alopex_sql::storage::SqlValue::Text(explain) = &result.rows[0][0] else {
+                    panic!("expected plan text")
+                };
+                assert!(!explain.contains("IndexScan"), "{explain}");
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn btree_same_type_boundaries_preserve_scan_comparison_semantics() {
+    use alopex_sql::ast::expr::{BinaryOp, Literal};
+    use alopex_sql::catalog::IndexMetadata;
+
+    for (column_type, values, boundary, equality_count) in [
+        (ResolvedType::Float, vec!["-0.0", "0.0", "1.0"], "0.0", 2),
+        (ResolvedType::Double, vec!["-0.0", "0.0", "1.0"], "0.0", 2),
+        (
+            ResolvedType::BigInt,
+            vec!["9007199254740992", "9007199254740993", "9007199254740994"],
+            "9007199254740992",
+            1,
+        ),
+        (ResolvedType::Text, vec!["a", "a\0b", "b"], "a", 1),
+    ] {
+        let (mut executor, _) = create_executor();
+        let value = |text: &str| {
+            literal(
+                TypedExprKind::Literal(if column_type == ResolvedType::Text {
+                    Literal::String(text.into())
+                } else {
+                    Literal::Number(text.into())
+                }),
+                column_type.clone(),
+            )
+        };
+        executor
+            .execute(LogicalPlan::CreateTable {
+                table: TableMetadata::new(
+                    "boundaries",
+                    vec![ColumnMetadata::new("n", column_type.clone())],
+                ),
+                if_not_exists: false,
+                with_options: vec![],
+            })
+            .unwrap();
+        executor
+            .execute(LogicalPlan::Insert {
+                table: "boundaries".into(),
+                columns: vec!["n".into()],
+                values: values.into_iter().map(|n| vec![value(n)]).collect(),
+                conflict: None,
+                returning: None,
+            })
+            .unwrap();
+        let column = literal(
+            TypedExprKind::ColumnRef {
+                table: "boundaries".into(),
+                column: "n".into(),
+                column_index: 0,
+            },
+            column_type.clone(),
+        );
+        let mut cases = Vec::new();
+        for op in [
+            BinaryOp::Eq,
+            BinaryOp::Gt,
+            BinaryOp::GtEq,
+            BinaryOp::Lt,
+            BinaryOp::LtEq,
+        ] {
+            for reversed in [false, true] {
+                let (left, right) = if reversed {
+                    (value(boundary), column.clone())
+                } else {
+                    (column.clone(), value(boundary))
+                };
+                let plan = LogicalPlan::filter(
+                    LogicalPlan::scan("boundaries".into(), Projection::All(vec!["n".into()])),
+                    literal(
+                        TypedExprKind::BinaryOp {
+                            left: Box::new(left),
+                            op,
+                            right: Box::new(right),
+                        },
+                        ResolvedType::Boolean,
+                    ),
+                );
+                let ExecutionResult::Query(result) = executor.execute(plan.clone()).unwrap() else {
+                    panic!("expected baseline rows")
+                };
+                if op == BinaryOp::Eq {
+                    assert_eq!(result.rows.len(), equality_count);
+                }
+                cases.push((
+                    plan,
+                    result.rows,
+                    column_type == ResolvedType::Text && op == BinaryOp::Eq,
+                ));
+            }
+        }
+        executor
+            .execute(LogicalPlan::CreateIndex {
+                index: IndexMetadata::new(0, "idx_boundaries_n", "boundaries", vec!["n".into()]),
+                if_not_exists: false,
+            })
+            .unwrap();
+        for (plan, expected, uses_index) in cases {
+            let ExecutionResult::Query(result) = executor.execute(plan.clone()).unwrap() else {
+                panic!("expected indexed rows")
+            };
+            assert_eq!(result.rows, expected, "{column_type:?}: {plan:?}");
+            let ExecutionResult::Query(result) = executor
+                .execute(LogicalPlan::Explain {
+                    analyze: false,
+                    format: ExplainFormat::Text,
+                    input: Box::new(plan),
+                })
+                .unwrap()
+            else {
+                panic!("expected EXPLAIN")
+            };
+            let alopex_sql::storage::SqlValue::Text(explain) = &result.rows[0][0] else {
+                panic!("expected plan text")
+            };
+            assert_eq!(explain.contains("IndexScan"), uses_index, "{explain}");
+        }
+    }
 }
