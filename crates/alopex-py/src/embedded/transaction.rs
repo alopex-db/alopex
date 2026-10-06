@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use alopex_sql::{AlopexDialect, Parser};
 use pyo3::exceptions::PyValueError;
@@ -27,6 +27,85 @@ enum TxnState {
 pub(crate) struct PyTransactionInner {
     pub(crate) txn: Mutex<Option<alopex_embedded::OwnedEmbeddedTransaction>>,
     state: Mutex<TxnState>,
+}
+
+/// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
+pub(super) fn rollback_tracked_for_database_close(
+    py: Python<'_>,
+    tracked: &Mutex<Vec<Weak<PyTransactionInner>>>,
+    #[cfg(test)] rollback_fail_count: &std::sync::atomic::AtomicUsize,
+) -> PyResult<()> {
+    enum CloseError {
+        TrackingLock,
+        StateLock,
+        TransactionLock,
+        Native(alopex_embedded::Error),
+        #[cfg(test)]
+        Injected,
+    }
+
+    let result = py.detach(|| {
+        let mut tracked = tracked.lock().map_err(|_| CloseError::TrackingLock)?;
+        let mut first_error = None;
+        tracked.retain(|weak| {
+            let Some(handle) = weak.upgrade() else {
+                return false;
+            };
+            // Match commit's state -> transaction order. The tracking guard is also
+            // acquired and released in this detached phase, before any Python error.
+            let mut state = match handle.state.lock() {
+                Ok(state) => state,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::StateLock);
+                    return true;
+                }
+            };
+            let mut transaction = match handle.txn.lock() {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::TransactionLock);
+                    return true;
+                }
+            };
+            #[cfg(test)]
+            if rollback_fail_count
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                first_error.get_or_insert(CloseError::Injected);
+                return true;
+            }
+            if let Some(txn) = transaction.as_mut() {
+                if let Err(error) = txn.rollback() {
+                    // Preserve the error and handle, not a promise that the consuming
+                    // native rollback can be retried after a backend failure.
+                    first_error.get_or_insert(CloseError::Native(error));
+                    return true;
+                }
+            }
+            *transaction = None;
+            if *state == TxnState::Active {
+                *state = TxnState::RolledBack;
+            }
+            false
+        });
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    });
+    result.map_err(|error| match error {
+        CloseError::TrackingLock => error::to_py_err("transaction tracking lock poisoned"),
+        CloseError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CloseError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CloseError::Native(error) => error::embedded_err(error),
+        #[cfg(test)]
+        CloseError::Injected => error::to_py_err("ロールバック失敗（テスト注入）"),
+    })
 }
 
 #[pyclass(name = "Transaction")]
