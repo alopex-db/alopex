@@ -713,6 +713,14 @@ impl<'a> KVTransaction<'a> for AnyKVTransaction<'a> {
         }
     }
 
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        match self {
+            Self::Memory(tx) => tx.visit_pending_write_keys(visitor),
+            Self::Lsm(tx) => tx.visit_pending_write_keys(visitor),
+            Self::Owned(tx) => tx.visit_pending_write_keys(visitor),
+        }
+    }
+
     fn commit_self(self) -> Result<()> {
         match self {
             Self::Memory(tx) => tx.commit_self(),

@@ -1062,6 +1062,13 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         )
     }
 
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        for key in self.writes.keys() {
+            visitor(key);
+        }
+        true
+    }
+
     fn commit_self(mut self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(Error::TxnClosed);
@@ -1436,6 +1443,17 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
                 })
                 .collect(),
         )
+    }
+
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        for key in state.writes.keys() {
+            visitor(key);
+        }
+        true
     }
 
     fn commit(self: Box<Self>) -> Result<()> {

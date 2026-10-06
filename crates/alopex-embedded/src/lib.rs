@@ -212,6 +212,9 @@ pub struct Database {
     pub(crate) hnsw_cache_epoch: AtomicU64,
     pub(crate) hnsw_cache_gate: RwLock<()>,
     #[cfg(test)]
+    pub(crate) hnsw_cache_publication_progress:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
     pub(crate) hnsw_cache_after_executor_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
     #[cfg(test)]
     pub(crate) hnsw_cache_write_gate_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
@@ -443,6 +446,8 @@ impl Database {
             hnsw_cache_epoch: AtomicU64::new(0),
             hnsw_cache_gate: RwLock::new(()),
             #[cfg(test)]
+            hnsw_cache_publication_progress: std::sync::Mutex::new(None),
+            #[cfg(test)]
             hnsw_cache_after_executor_barrier: std::sync::Mutex::new(None),
             #[cfg(test)]
             hnsw_cache_write_gate_barrier: std::sync::Mutex::new(None),
@@ -544,15 +549,41 @@ impl Database {
         epoch: u64,
         entries: Vec<(String, HnswIndex)>,
     ) {
+        #[cfg(test)]
+        let publication_progress = self
+            .hnsw_cache_publication_progress
+            .lock()
+            .expect("publication progress lock poisoned")
+            .clone();
         if entries.is_empty() || self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
             return;
         }
+        #[cfg(test)]
+        if matches!(
+            self.hnsw_cache_gate.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            if let Some(sender) = &publication_progress {
+                let _ = sender.send(());
+            }
+        }
+        // Publication must not enter between a writer's key classification and
+        // selective invalidation, even when the cache was empty at classification.
+        let _gate = self
+            .hnsw_cache_gate
+            .read()
+            .expect("hnsw cache gate lock poisoned");
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
         if self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
             return;
         }
         for (name, index) in entries {
             cache.entry(name).or_insert_with(|| Arc::new(index));
+        }
+        drop(cache);
+        #[cfg(test)]
+        if let Some(sender) = publication_progress {
+            let _ = sender.send(());
         }
     }
 
@@ -566,6 +597,14 @@ impl Database {
     pub(crate) fn commit_with_hnsw_cache_update<T, E>(
         &self,
         commit: impl FnOnce() -> std::result::Result<T, E>,
+        update: impl FnOnce(),
+    ) -> std::result::Result<T, E> {
+        self.commit_with_hnsw_cache_changes(|| commit().map(|value| (value, None)), update)
+    }
+
+    fn commit_with_hnsw_cache_changes<T, E>(
+        &self,
+        commit: impl FnOnce() -> std::result::Result<(T, Option<HashSet<String>>), E>,
         update: impl FnOnce(),
     ) -> std::result::Result<T, E> {
         #[cfg(test)]
@@ -621,18 +660,57 @@ impl Database {
                 .send(())
                 .expect("hnsw cache write gate acquired receiver dropped");
         }
-        let result = commit();
-        if result.is_ok() {
-            self.invalidate_hnsw_cache_while_write_locked();
-            update();
+        let (value, changed) = commit()?;
+        self.hnsw_cache_epoch.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+            match changed {
+                Some(names) => cache.retain(|name, _| !names.contains(name)),
+                None => cache.clear(),
+            }
         }
-        result
+        update();
+        Ok(value)
     }
 
-    fn invalidate_hnsw_cache_while_write_locked(&self) {
-        self.hnsw_cache_epoch.fetch_add(1, Ordering::AcqRel);
-        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-        cache.clear();
+    // Called under the commit write gate, using the final backend write set.
+    fn hnsw_cache_changes(
+        &self,
+        visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
+    ) -> Option<HashSet<String>> {
+        let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
+        if cache.is_empty() {
+            return Some(HashSet::new());
+        }
+        let mut changed = HashSet::new();
+        let mut unknown = false;
+        let complete = visit(&mut |key| {
+            if !key.starts_with(b"hnsw:") {
+                return;
+            }
+            let mut recognized = false;
+            for name in cache.keys() {
+                let matches = key
+                    .strip_prefix(b"hnsw:meta:")
+                    .is_some_and(|suffix| suffix == name.as_bytes())
+                    || [b"hnsw:node:".as_slice(), b"hnsw:key:".as_slice()]
+                        .iter()
+                        .any(|prefix| {
+                            key.strip_prefix(*prefix)
+                                .and_then(|suffix| suffix.strip_prefix(name.as_bytes()))
+                                .is_some_and(|suffix| suffix.starts_with(b":"))
+                        });
+                if matches {
+                    recognized = true;
+                    if !changed.contains(name) {
+                        changed.insert(name.clone());
+                    }
+                }
+            }
+            // Unknown names/formats cannot justify retaining a cached graph.
+            unknown |= !recognized;
+        });
+        (complete && !unknown).then_some(changed)
     }
 
     /// Returns the current table info cache epoch.
@@ -1654,8 +1732,15 @@ impl<'a> Transaction<'a> {
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
         let overlay = std::mem::take(&mut self.overlay);
         let catalog_modified = self.catalog_modified;
-        self.db.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.db.commit_with_hnsw_cache_changes(
+            || {
+                let changed = self
+                    .db
+                    .hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 // KV commit 成功後のみ、カタログと対応するHNSW cacheを公開する。
                 let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
