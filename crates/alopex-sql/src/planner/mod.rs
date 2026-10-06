@@ -6403,12 +6403,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }) = stmt.from.first()
         {
             let source = self.name_resolver.resolve_table(name, *span)?;
-            let ctes = CtePlans::default();
-            // Rename only the visible relation; physical source lookup keeps its catalog name.
             let mut source_scope = source.clone();
             if let Some(alias) = alias {
                 source_scope.name = alias.clone();
             }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
                 ScopedTable::new(source_scope, table.column_count()),
@@ -6727,12 +6726,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }) = stmt.using.first()
         {
             let source = self.name_resolver.resolve_table(name, *span)?;
-            let ctes = CtePlans::default();
-            // Rename only the visible relation; physical source lookup keeps its catalog name.
             let mut source_scope = source.clone();
             if let Some(alias) = alias {
                 source_scope.name = alias.clone();
             }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
                 ScopedTable::new(source_scope, table.column_count()),

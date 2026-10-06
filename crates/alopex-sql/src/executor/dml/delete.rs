@@ -7,7 +7,8 @@ use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::Row;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::query::subquery::evaluate_expr_with_subqueries;
+use crate::executor::query::statement_subqueries::DmlSubqueries;
+use crate::executor::query::subquery::contains_subquery;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::Projection;
@@ -45,11 +46,22 @@ pub fn execute_delete_with_returning<
     super::reject_columnar_dml(&table, "DELETE")?;
     let mut rows_affected = 0u64;
     let mut deleted_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
-    let mut next_row_id = 0u64;
+    let mut next_row_id = Some(0u64);
     const BATCH: usize = 512;
+    let mut staged = (_join_source.is_some() || filter.as_ref().is_some_and(contains_subquery))
+        .then(|| super::statement_spool::StatementSpool::new(txn.memory_policy()));
+    let subqueries = DmlSubqueries::new(
+        txn,
+        catalog,
+        filter.iter().chain(
+            _join_source
+                .iter()
+                .filter_map(|source| source.condition.as_ref()),
+        ),
+    );
 
-    loop {
-        let batch = fetch_batch(txn, &table, next_row_id, BATCH)?;
+    while let Some(start_row_id) = next_row_id {
+        let batch = fetch_batch(txn, &table, start_row_id, BATCH)?;
 
         if batch.is_empty() {
             break;
@@ -58,7 +70,7 @@ pub fn execute_delete_with_returning<
         let mut deletes = Vec::new();
 
         for (row_id, row) in batch {
-            next_row_id = row_id.saturating_add(1);
+            next_row_id = row_id.checked_add(1);
             let joined = if let Some(source) = &_join_source {
                 let source_table = catalog
                     .get_table(&source.table)
@@ -66,6 +78,7 @@ pub fn execute_delete_with_returning<
                 find_join_row(
                     txn,
                     catalog,
+                    &subqueries,
                     source_table,
                     source.condition.as_ref(),
                     row_id,
@@ -85,7 +98,7 @@ pub fn execute_delete_with_returning<
                     values
                 },
             );
-            if !predicate_matches(txn, catalog, &filter, row_id, &eval_row)? {
+            if !predicate_matches(txn, catalog, &subqueries, &filter, row_id, &eval_row)? {
                 continue;
             }
 
@@ -96,14 +109,42 @@ pub fn execute_delete_with_returning<
             continue;
         }
 
-        for (_, row) in &deletes {
-            super::constraints::apply_parent_delete::<S, C, T>(txn, catalog, &table, row, 0)?;
+        if let Some(spool) = &mut staged {
+            for deletion in deletes {
+                spool.push(&deletion)?;
+            }
+            continue;
         }
-        apply_deletes(txn, catalog, &table, &deletes)?;
+        apply_validated_deletes(txn, catalog, &table, &deletes)?;
 
         rows_affected += deletes.len() as u64;
         if returning.is_some() {
             deleted_rows.extend(deletes);
+        }
+    }
+
+    subqueries.finish()?;
+    if let Some(spool) = staged {
+        let mut deletes = Vec::with_capacity(BATCH);
+        let mut apply = |deletes: &mut Vec<(u64, Vec<SqlValue>)>| -> Result<()> {
+            apply_validated_deletes(txn, catalog, &table, deletes)?;
+            rows_affected += deletes.len() as u64;
+            if returning.is_some() {
+                deleted_rows.append(deletes);
+            } else {
+                deletes.clear();
+            }
+            Ok(())
+        };
+        spool.replay(|deletion| {
+            deletes.push(deletion);
+            if deletes.len() == BATCH {
+                apply(&mut deletes)?;
+            }
+            Ok(())
+        })?;
+        if !deletes.is_empty() {
+            apply(&mut deletes)?;
         }
     }
 
@@ -127,9 +168,22 @@ pub fn execute_delete_with_returning<
     }
 }
 
+fn apply_validated_deletes<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for (_, row) in deletes {
+        super::constraints::apply_parent_delete::<S, C, T>(txn, catalog, table, row, 0)?;
+    }
+    apply_deletes(txn, catalog, table, deletes)
+}
+
 fn find_join_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     source: &TableMetadata,
     condition: Option<&TypedExpr>,
     target_row_id: u64,
@@ -149,12 +203,7 @@ fn find_join_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S
             let matches_condition = match condition {
                 None => true,
                 Some(expr) => matches!(
-                    evaluate_expr_with_subqueries(
-                        txn,
-                        catalog,
-                        expr,
-                        &Row::new(target_row_id, joined)
-                    )?,
+                    subqueries.evaluate(txn, catalog, expr, &Row::new(target_row_id, joined))?,
                     SqlValue::Boolean(true)
                 ),
             };
@@ -233,13 +282,13 @@ fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
 fn predicate_matches<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     filter: &Option<TypedExpr>,
     row_id: u64,
     row: &[SqlValue],
 ) -> Result<bool> {
     if let Some(expr) = filter {
-        let value =
-            evaluate_expr_with_subqueries(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
+        let value = subqueries.evaluate(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
         Ok(matches!(value, SqlValue::Boolean(true)))
     } else {
         Ok(true)

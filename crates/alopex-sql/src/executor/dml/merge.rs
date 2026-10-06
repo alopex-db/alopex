@@ -4,7 +4,7 @@ use alopex_core::kv::KVStore;
 
 use crate::catalog::{Catalog, TableMetadata};
 use crate::executor::Row;
-use crate::executor::query::subquery::evaluate_expr_with_subqueries;
+use crate::executor::query::statement_subqueries::DmlSubqueries;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::{MergeActionPlan, MergeClausePlan, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue};
@@ -34,6 +34,19 @@ where
     let target_rows = read_rows(txn, &target)?;
     let source_rows = read_rows(txn, &source)?;
 
+    let mut expressions = vec![&on];
+    for clause in &clauses {
+        expressions.extend(clause.condition.iter());
+        match &clause.action {
+            MergeActionPlan::Update { assignments } => {
+                expressions.extend(assignments.iter().map(|assignment| &assignment.value));
+            }
+            MergeActionPlan::Insert { values, .. } => expressions.extend(values.iter()),
+            MergeActionPlan::DoNothing => {}
+        }
+    }
+    let subqueries = DmlSubqueries::new(txn, catalog, expressions);
+
     let mut matched_targets = HashSet::new();
     let mut changes = Vec::new();
     let mut inserts: Vec<(Vec<String>, Vec<Vec<SqlValue>>)> = Vec::new();
@@ -42,7 +55,7 @@ where
         let mut matches = Vec::new();
         for (row_id, target_row) in &target_rows {
             let joined = Row::new(*row_id, joined_row(target_row, &source_row));
-            if expression_is_true(txn, catalog, &on, &joined)? {
+            if expression_is_true(txn, catalog, &subqueries, &on, &joined)? {
                 matches.push((*row_id, target_row));
             }
         }
@@ -52,14 +65,14 @@ where
             joined.extend(source_row);
             // No target row exists for an unmatched source row.
             let joined = Row::new(source_row_id, joined);
-            if let Some(clause) = applicable_clause(txn, catalog, &clauses, false, &joined)? {
+            if let Some(clause) =
+                applicable_clause(txn, catalog, &subqueries, &clauses, false, &joined)?
+            {
                 match &clause.action {
                     MergeActionPlan::Insert { columns, values } => {
                         let row = values
                             .iter()
-                            .map(|value| {
-                                evaluate_expr_with_subqueries(txn, catalog, value, &joined)
-                            })
+                            .map(|value| subqueries.evaluate(txn, catalog, value, &joined))
                             .collect::<Result<Vec<_>>>()?;
                         if let Some((_, rows)) = inserts
                             .iter_mut()
@@ -85,19 +98,17 @@ where
                 });
             }
             let joined = Row::new(row_id, joined_row(target_row, &source_row));
-            let Some(clause) = applicable_clause(txn, catalog, &clauses, true, &joined)? else {
+            let Some(clause) =
+                applicable_clause(txn, catalog, &subqueries, &clauses, true, &joined)?
+            else {
                 continue;
             };
             match &clause.action {
                 MergeActionPlan::Update { assignments } => {
                     let mut new_row = target_row.clone();
                     for assignment in assignments {
-                        let value = evaluate_expr_with_subqueries(
-                            txn,
-                            catalog,
-                            &assignment.value,
-                            &joined,
-                        )?;
+                        let value =
+                            subqueries.evaluate(txn, catalog, &assignment.value, &joined)?;
                         let column = &target.columns[assignment.column_index];
                         let value = super::normalize_assignment_value(value, &column.data_type)?;
                         if (column.not_null || column.primary_key) && value.is_null() {
@@ -118,6 +129,7 @@ where
         }
     }
 
+    subqueries.finish()?;
     for (_, _, new_row) in &changes {
         super::constraints::validate_row::<S, C, T>(txn, catalog, &target, new_row, &[])?;
     }
@@ -161,6 +173,7 @@ where
 fn applicable_clause<'a, 'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     clauses: &'a [MergeClausePlan],
     matched: bool,
     row: &Row,
@@ -169,7 +182,7 @@ fn applicable_clause<'a, 'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn
         if clause
             .condition
             .as_ref()
-            .map(|condition| expression_is_true(txn, catalog, condition, row))
+            .map(|condition| expression_is_true(txn, catalog, subqueries, condition, row))
             .transpose()?
             .unwrap_or(true)
         {
@@ -189,11 +202,12 @@ fn joined_row(target: &[SqlValue], source: &[SqlValue]) -> Vec<SqlValue> {
 fn expression_is_true<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     expression: &TypedExpr,
     row: &Row,
 ) -> Result<bool> {
     Ok(matches!(
-        evaluate_expr_with_subqueries(txn, catalog, expression, row)?,
+        subqueries.evaluate(txn, catalog, expression, row)?,
         SqlValue::Boolean(true)
     ))
 }
