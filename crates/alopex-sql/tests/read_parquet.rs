@@ -29,6 +29,104 @@ fn write_parquet(file: &tempfile::NamedTempFile, schema: Arc<Schema>, batch: Rec
 }
 
 #[test]
+fn parquet_columnar_bigint_boundaries_preserve_exact_rows() {
+    // Deliberately unsorted; every expected value/comparison stays in native i64.
+    let values = [
+        9_007_199_254_740_993_i64,
+        -9_007_199_254_740_992,
+        9_007_199_254_740_992,
+        -9_007_199_254_740_993,
+    ];
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(values.to_vec()))],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let literals = values
+        .iter()
+        .map(|value| format!("(CAST('{value}' AS BIGINT))"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    run(
+        &mut executor,
+        &catalog,
+        &format!(
+            "CREATE TABLE row_values (id BIGINT);
+             INSERT INTO row_values VALUES {literals};
+             CREATE TABLE column_values (id BIGINT) WITH (storage='columnar');
+             COPY column_values FROM '{}' WITH (FORMAT PARQUET)",
+            file.path().display()
+        ),
+    )
+    .unwrap();
+
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    let mut check = |sql: String, expected: Vec<i64>| {
+        checked += 1;
+        let expected = expected
+            .into_iter()
+            .map(|value| vec![SqlValue::BigInt(value)])
+            .collect::<Vec<_>>();
+        match run(&mut executor, &catalog, &sql) {
+            Ok(Some(result)) if result.rows == expected => {}
+            actual => failures.push(format!("{sql}: expected {expected:?}, got {actual:?}")),
+        }
+    };
+    for source in [
+        format!("read_parquet('{}')", file.path().display()),
+        "row_values".to_string(),
+        "column_values".to_string(),
+    ] {
+        let mut ascending = values.to_vec();
+        ascending.sort_unstable();
+        check(
+            format!("SELECT id FROM {source} ORDER BY id ASC"),
+            ascending,
+        );
+        let mut descending = values.to_vec();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        descending.truncate(2);
+        check(
+            format!("SELECT id FROM {source} ORDER BY id DESC LIMIT 2"),
+            descending,
+        );
+        for threshold in values {
+            for operator in ["=", "!=", "<", ">="] {
+                let mut expected = values
+                    .iter()
+                    .copied()
+                    .filter(|value| match operator {
+                        "=" => *value == threshold,
+                        "!=" => *value != threshold,
+                        "<" => *value < threshold,
+                        ">=" => *value >= threshold,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
+                expected.sort_unstable();
+                expected.truncate(3);
+                check(
+                    format!(
+                        "SELECT id FROM {source} WHERE id {operator} CAST('{threshold}' AS BIGINT) \
+                         ORDER BY id ASC LIMIT 3"
+                    ),
+                    expected,
+                );
+            }
+        }
+    }
+    assert_eq!(checked, 54);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn restricted_parquet_copy_preserves_columnar_unique_and_pending_rows() {
     use alopex_core::kv::KVTransaction;
     use alopex_sql::executor::ConstraintViolation;

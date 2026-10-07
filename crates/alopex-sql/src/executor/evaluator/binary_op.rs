@@ -544,6 +544,16 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
             kind,
         )));
     }
+    // Integer comparisons must not collapse distinct i64 values into the same
+    // f64 value. Keep floating-point mixtures on the existing promotion path.
+    let integral_ordering = match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(lhs, rhs)) => Some(lhs.cmp(&rhs)),
+        Some(NumericOperands::BigInt(lhs, rhs)) => Some(lhs.cmp(&rhs)),
+        _ => None,
+    };
+    if let Some(cmp) = integral_ordering {
+        return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
+    }
     if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
         let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
             EvaluationError::TypeMismatch {

@@ -321,6 +321,19 @@ fn normalize_primary_key_value(
     primary_key_index: usize,
     value: SqlValue,
 ) -> Option<SqlValue> {
+    // Assignment casts are not comparison bounds: truncating a fractional
+    // value changes range inclusivity, and BIGINT-to-float promotion can make
+    // several distinct integer keys compare equal. Only integral operands can
+    // safely narrow to an integer key; otherwise retain the ordinary scan.
+    if matches!(
+        table.columns[primary_key_index].data_type,
+        crate::planner::types::ResolvedType::Integer | crate::planner::types::ResolvedType::BigInt
+    ) && !matches!(
+        value,
+        SqlValue::Null | SqlValue::Integer(_) | SqlValue::BigInt(_)
+    ) {
+        return None;
+    }
     if value.is_null() || value.resolved_type() == table.columns[primary_key_index].data_type {
         Some(value)
     } else {
