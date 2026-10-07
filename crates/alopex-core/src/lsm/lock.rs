@@ -65,9 +65,10 @@ const LOCK_FILE_SUFFIX: &str = ".lock";
 
 /// A held data-directory lock.
 ///
-/// The lock lives for as long as this value does. Dropping it explicitly unlocks
-/// before closing the descriptor: an unrelated forked child can still hold the
-/// same open file description until exec, even with CLOEXEC. The lock file
+/// The lock lives for as long as this value does in the acquiring process.
+/// Dropping it there explicitly unlocks before closing the descriptor: a forked
+/// child can still hold the same open file description until exec, even with
+/// CLOEXEC. A child's Drop only closes its inherited descriptor. The lock file
 /// itself is intentionally left on disk (裁定 D8):
 /// deleting it would let `A unlink -> B creates a new inode and locks it -> C
 /// locks the same new inode` slip two writers through.
@@ -83,6 +84,9 @@ pub(crate) struct DirectoryLock {
     /// Closing the last descriptor also releases it after an abnormal exit.
     #[cfg(not(target_arch = "wasm32"))]
     _file: Option<std::fs::File>,
+    /// Only the acquiring process may explicitly unlock the shared description.
+    #[cfg(not(target_arch = "wasm32"))]
+    owner_pid: u32,
     #[cfg(target_arch = "wasm32")]
     _wasm: (),
 }
@@ -90,6 +94,11 @@ pub(crate) struct DirectoryLock {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for DirectoryLock {
     fn drop(&mut self) {
+        // A forked child shares the parent's open file description. Closing
+        // its descriptor is safe; unlocking it would release the parent's lock.
+        if self.owner_pid != std::process::id() {
+            return;
+        }
         if let Some(file) = &self._file {
             // Best effort in Drop; closing the file remains the fallback.
             let _ = file.unlock();
@@ -107,6 +116,8 @@ impl DirectoryLock {
             path: None,
             #[cfg(not(target_arch = "wasm32"))]
             _file: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            owner_pid: std::process::id(),
             #[cfg(target_arch = "wasm32")]
             _wasm: (),
         }
@@ -220,6 +231,7 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
         #[cfg(all(test, not(target_arch = "wasm32")))]
         path: Some(lock_path.to_path_buf()),
         _file: Some(file),
+        owner_pid: std::process::id(),
     })
 }
 
@@ -398,6 +410,132 @@ mod tests {
         assert!(
             lock_path.exists(),
             "the lock file is left behind on purpose (裁定 D8)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "spawned by the forked lock drop regression"]
+    fn child_checks_lock_after_forked_drop() {
+        let data_dir = PathBuf::from(std::env::var_os("ALOPEX_FORK_LOCK_DIR").unwrap());
+        let result = acquire(&data_dir, &data_dir.join(LOCK_FILE_NAME));
+        if std::env::var_os("ALOPEX_FORK_LOCK_EXPECT_HELD").is_some() {
+            assert!(matches!(result, Err(Error::AlreadyOpen { .. })));
+        } else {
+            assert!(
+                result.is_ok(),
+                "owner drop must release the lock: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forked_child_drop_preserves_the_parent_lock() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("db");
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let mut held = acquire(&data_dir, &lock_path).unwrap();
+        // Remove test-only heap storage before fork so the child's Drop only
+        // calls the OS process/descriptor operations used in production.
+        held.path = None;
+        // SAFETY: the child only drops the descriptor-only lock and calls
+        // _exit. It never returns to the multithreaded test runtime or runs
+        // unrelated destructors, and the parent reaps it before assertions.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            drop(held);
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let waited = loop {
+            // SAFETY: pid is our child and status is valid writable storage.
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == pid {
+                break Ok(());
+            }
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    break Err(error);
+                }
+            }
+            if Instant::now() >= deadline {
+                break Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if let Err(error) = waited {
+            // ECHILD means the PID is no longer ours; do not signal a reused PID.
+            if error.raw_os_error() != Some(libc::ECHILD) {
+                // SAFETY: this unreaped child still belongs to this test.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                loop {
+                    // SAFETY: status is writable and pid names our child.
+                    let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+                    if reaped == pid
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+            }
+            panic!("forked lock-drop child did not complete: {error}");
+        }
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+
+        let check = |expect_held: bool| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "lsm::lock::tests::child_checks_lock_after_forked_drop",
+                "--exact",
+                "--ignored",
+            ]);
+            command.env("ALOPEX_FORK_LOCK_DIR", &data_dir);
+            command.env_remove("ALOPEX_FORK_LOCK_EXPECT_HELD");
+            if expect_held {
+                command.env("ALOPEX_FORK_LOCK_EXPECT_HELD", "1");
+            }
+            command.stdin(Stdio::null());
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(error);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let while_held = check(true);
+        drop(held);
+        let after_drop = check(false);
+        assert!(
+            while_held
+                .expect("held-lock check child must complete")
+                .success(),
+            "another process must reject acquire after the forked child drops"
+        );
+        assert!(
+            after_drop
+                .expect("released-lock check child must complete")
+                .success(),
+            "owner drop must permit acquire"
         );
     }
 
