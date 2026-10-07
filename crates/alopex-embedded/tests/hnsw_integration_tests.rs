@@ -12,6 +12,210 @@ fn config() -> HnswConfig {
         .with_ef_construction(32)
 }
 
+const MIXED_INDEX: &str = "idx_items_embedding";
+
+fn seed_borrowed_sql_hnsw(db: &Database) -> (Vec<u8>, Vec<u8>) {
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));
+        INSERT INTO items VALUES (1, [0,0]), (2, [5,0]);
+        CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    )
+    .unwrap();
+    let (hits, _) = db
+        .search_hnsw(MIXED_INDEX, &[0.0, 0.0], 2, Some(16))
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    (hits[0].key.clone(), hits[0].metadata.clone())
+}
+
+fn query_rows(result: alopex_sql::ExecutionResult) -> Vec<Vec<alopex_sql::storage::SqlValue>> {
+    match result {
+        alopex_sql::ExecutionResult::Query(result) => result.rows,
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+fn assert_borrowed_sql_hnsw_state(db: &Database, expected: &[(i32, f32)]) {
+    use alopex_sql::storage::SqlValue;
+    // Observe the warmed cache before another SQL call can invalidate it.
+    let (hits, _) = db
+        .search_hnsw(MIXED_INDEX, &[0.0, 0.0], 10, Some(16))
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        expected.len(),
+        "direct graph must retain every SQL row"
+    );
+    for &(_, x) in expected {
+        let (hits, _) = db.search_hnsw(MIXED_INDEX, &[x, 0.0], 1, Some(16)).unwrap();
+        assert_eq!(hits[0].distance, 0.0, "graph lacks vector {x}");
+    }
+    assert_eq!(
+        query_rows(
+            db.execute_sql("SELECT id, embedding FROM items ORDER BY id")
+                .unwrap()
+        ),
+        expected
+            .iter()
+            .map(|&(id, x)| vec![SqlValue::Integer(id), SqlValue::Vector(vec![x, 0.0])])
+            .collect::<Vec<_>>()
+    );
+    let sql = format!("SELECT id FROM items ORDER BY vector_distance(embedding, [0,0], 'l2') ASC LIMIT {} WITH (enable_hnsw = true)", expected.len());
+    let plan = query_rows(db.execute_sql(&format!("EXPLAIN {sql}")).unwrap());
+    assert!(matches!(&plan[0][0], SqlValue::Text(plan) if plan.contains("HnswSearch")));
+    let mut sorted = expected.to_vec();
+    sorted.sort_by(|left, right| left.1.total_cmp(&right.1));
+    assert_eq!(
+        query_rows(db.execute_sql(&sql).unwrap()),
+        sorted
+            .iter()
+            .map(|&(id, _)| vec![SqlValue::Integer(id)])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_sql_insert_commit_survives_reopen() {
+    let dir = tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let (key, metadata) = seed_borrowed_sql_hnsw(&db);
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw(MIXED_INDEX, &key, &[0.0, 0.0], &metadata)
+            .unwrap();
+        txn.execute_sql("INSERT INTO items VALUES (3, [1,0])")
+            .unwrap();
+        txn.commit().unwrap();
+        assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0), (3, 1.0)]);
+    }
+    let db = Database::open(dir.path()).unwrap();
+    assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0), (3, 1.0)]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_sql_update_commit_survives_reopen() {
+    let dir = tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let (key, metadata) = seed_borrowed_sql_hnsw(&db);
+        let (second, _) = db
+            .search_hnsw(MIXED_INDEX, &[5.0, 0.0], 1, Some(16))
+            .unwrap();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw(MIXED_INDEX, &key, &[0.0, 0.0], &metadata)
+            .unwrap();
+        txn.execute_sql("UPDATE items SET embedding = [9,0] WHERE id = 1")
+            .unwrap();
+        // A later direct operation must reload SQL's latest graph, not resurrect
+        // the graph from before the UPDATE.
+        txn.upsert_to_hnsw(
+            MIXED_INDEX,
+            &second[0].key,
+            &[5.0, 0.0],
+            &second[0].metadata,
+        )
+        .unwrap();
+        txn.execute_sql("SELECT 1").unwrap();
+        txn.commit().unwrap();
+        assert_borrowed_sql_hnsw_state(&db, &[(1, 9.0), (2, 5.0)]);
+        let (hits, _) = db
+            .search_hnsw(MIXED_INDEX, &[9.0, 0.0], 1, Some(16))
+            .unwrap();
+        assert_eq!((&hits[0].key, &hits[0].metadata), (&key, &metadata));
+    }
+    let db = Database::open(dir.path()).unwrap();
+    assert_borrowed_sql_hnsw_state(&db, &[(1, 9.0), (2, 5.0)]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_sql_read_commit_refreshes_cache() {
+    use alopex_sql::storage::SqlValue;
+    let dir = tempdir().unwrap();
+    let key;
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let (row_key, metadata) = seed_borrowed_sql_hnsw(&db);
+        key = row_key;
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw(MIXED_INDEX, &key, &[9.0, 0.0], &metadata)
+            .unwrap();
+        assert_eq!(
+            query_rows(txn.execute_sql("SELECT 1").unwrap()),
+            vec![vec![SqlValue::Integer(1)]]
+        );
+        txn.commit().unwrap();
+        let (hits, _) = db
+            .search_hnsw(MIXED_INDEX, &[9.0, 0.0], 1, Some(16))
+            .unwrap();
+        assert_eq!((&hits[0].key, hits[0].distance), (&key, 0.0));
+        // Direct graph writes do not update the relational row.
+        assert_eq!(
+            query_rows(
+                db.execute_sql("SELECT embedding FROM items WHERE id = 1")
+                    .unwrap()
+            ),
+            vec![vec![SqlValue::Vector(vec![0.0, 0.0])]]
+        );
+    }
+    let db = Database::open(dir.path()).unwrap();
+    let (hits, _) = db
+        .search_hnsw(MIXED_INDEX, &[9.0, 0.0], 1, Some(16))
+        .unwrap();
+    assert_eq!((&hits[0].key, hits[0].distance), (&key, 0.0));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_sql_reads_direct_changes() {
+    use alopex_sql::storage::SqlValue;
+    let dir = tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let (key, _) = seed_borrowed_sql_hnsw(&db);
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        assert!(txn.delete_from_hnsw(MIXED_INDEX, &key).unwrap());
+        let sql = "SELECT id FROM items ORDER BY vector_distance(embedding, [0,0], 'l2') ASC LIMIT 1 WITH (enable_hnsw = true)";
+        let plan = query_rows(txn.execute_sql(&format!("EXPLAIN {sql}")).unwrap());
+        assert!(matches!(&plan[0][0], SqlValue::Text(plan) if plan.contains("HnswSearch")));
+        assert_eq!(
+            query_rows(txn.execute_sql(sql).unwrap()),
+            vec![vec![SqlValue::Integer(2)]]
+        );
+        assert_eq!(
+            query_rows(txn.execute_sql("SELECT id FROM items ORDER BY id").unwrap()),
+            vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+        );
+        txn.rollback().unwrap();
+        assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
+    }
+    let db = Database::open(dir.path()).unwrap();
+    assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_sql_rollback_preserves_committed_state() {
+    let dir = tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let (key, metadata) = seed_borrowed_sql_hnsw(&db);
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw(MIXED_INDEX, &key, &[9.0, 0.0], &metadata)
+            .unwrap();
+        txn.execute_sql(
+            "INSERT INTO items VALUES (3, [1,0]); UPDATE items SET embedding = [7,0] WHERE id = 2;",
+        )
+        .unwrap();
+        txn.rollback().unwrap();
+        assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
+    }
+    let db = Database::open(dir.path()).unwrap();
+    assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn owned_direct_hnsw_update_then_sql_read_invalidates_shared_cache() {
