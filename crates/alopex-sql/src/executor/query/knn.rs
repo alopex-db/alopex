@@ -261,15 +261,16 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
     let mut effective_ef_search = 0;
 
     loop {
-        let ef_search = configured_ef_search.unwrap_or_else(|| requested.max(50));
-        effective_ef_search = effective_ef_search.max(ef_search);
-        let (hits, search_stats) = HnswBridge::search_knn(
+        let (hits, search_stats, actual_ef) = HnswBridge::search_knn(
             txn,
             &index.name,
             &pattern.query_vector,
             requested,
-            Some(ef_search),
+            configured_ef_search,
         )?;
+        // Report the largest breadth actually searched across retry attempts,
+        // not the configured value or the uncapped internal request.
+        effective_ef_search = effective_ef_search.max(actual_ef);
         hnsw_stats.nodes_visited = hnsw_stats
             .nodes_visited
             .saturating_add(search_stats.nodes_visited);
@@ -295,7 +296,9 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
                 }
             }
         }
-        if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
+        let next = requested.saturating_mul(2);
+        if filter.is_none() || entries.len() >= pattern.k as usize || exhausted || next == requested
+        {
             // The index stores only non-NULL vectors. A short result must use
             // the SQL scan to include eligible NULL rows after scored rows,
             // even when this query has no WHERE predicate.
@@ -320,17 +323,6 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
             }
             order_entries(&mut entries);
             entries.truncate(pattern.k as usize);
-            return Ok((
-                entries,
-                KnnExecutionStats {
-                    hnsw_stats: Some(hnsw_stats),
-                    ef_search: Some(effective_ef_search),
-                    fallback: false,
-                },
-            ));
-        }
-        let next = requested.saturating_mul(2);
-        if next == requested {
             return Ok((
                 entries,
                 KnnExecutionStats {

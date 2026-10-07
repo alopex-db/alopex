@@ -151,18 +151,36 @@ impl HnswIndex {
         k: usize,
         ef_search: Option<usize>,
     ) -> Result<(Vec<HnswSearchResult>, SearchStats)> {
+        self.search_with_effective_ef(query, k, ef_search)
+            .map(|(results, stats, _)| (results, stats))
+    }
+
+    /// Searches and returns the actual layer-zero breadth as the third value.
+    ///
+    /// The breadth is measured under the same graph read lock as the search.
+    /// It is zero when no layer-zero search runs. Explicit `ef_search` values
+    /// retain the public bounds; an omitted value is derived internally from
+    /// `k` and capped by the graph's active node count.
+    pub fn search_with_effective_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Result<(Vec<HnswSearchResult>, SearchStats, usize)> {
         let start = Instant::now();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ef) = ef_search {
+            validate_ef_search(ef)?;
+        }
         let ef = ef_search.unwrap_or(k.max(50));
-        validate_ef_search(ef)?;
-        let (results, mut stats) = graph.search(query, k, ef)?;
+        let (results, mut stats, effective_ef) = graph.search_with_effective_ef(query, k, ef)?;
         stats.search_time_us = start.elapsed().as_micros() as u64;
 
         if let Some(callback) = &self.on_search {
             callback(&stats);
         }
 
-        Ok((results, stats))
+        Ok((results, stats, effective_ef))
     }
 
     /// 指定キーを論理削除する。

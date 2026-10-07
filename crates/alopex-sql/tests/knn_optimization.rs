@@ -7,6 +7,228 @@ use alopex_sql::executor::{ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 
+#[test]
+fn effective_ef_core_large_internal_k_uses_active_nodes() {
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, MAX_HNSW_EF_SEARCH};
+    let mut index = HnswIndex::create(
+        "small",
+        HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(alopex_core::vector::Metric::L2),
+    )
+    .expect("create graph");
+    for id in 0..4u8 {
+        index.upsert(&[id], &[f32::from(id), 0.0], &[]).unwrap();
+    }
+    assert!(index.delete(&[3]).unwrap());
+    for ef in [None, Some(16)] {
+        let (hits, _) = index
+            .search(&[0.0, 0.0], MAX_HNSW_EF_SEARCH + 1, ef)
+            .unwrap();
+        let mut keys: Vec<_> = hits.into_iter().map(|hit| hit.key).collect();
+        keys.sort();
+        assert_eq!(keys, vec![vec![0], vec![1], vec![2]]);
+    }
+}
+
+#[test]
+fn effective_ef_core_explicit_limits_survive_empty_and_zero_k() {
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, MAX_HNSW_EF_SEARCH};
+    let index = HnswIndex::create(
+        "empty",
+        HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(alopex_core::vector::Metric::L2),
+    )
+    .unwrap();
+    for k in [0, 1] {
+        for ef in [0, MAX_HNSW_EF_SEARCH + 1] {
+            assert!(matches!(index.search(&[0.0, 0.0], k, Some(ef)),
+                Err(alopex_core::Error::InvalidParameter { param, .. }) if param == "ef_search"));
+        }
+    }
+}
+
+#[test]
+fn effective_ef_stats_preserve_existing_serialization_shape() {
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, SearchStats};
+    let literal = SearchStats {
+        nodes_visited: 2,
+        distance_computations: 3,
+        search_time_us: 4,
+    };
+    let old: SearchStats =
+        serde_json::from_str(r#"{"nodes_visited":2,"distance_computations":3,"search_time_us":4}"#)
+            .unwrap();
+    assert_eq!(
+        (
+            old.nodes_visited,
+            old.distance_computations,
+            old.search_time_us
+        ),
+        (2, 3, 4)
+    );
+    assert_eq!(
+        serde_json::to_value(&old).unwrap(),
+        serde_json::json!({
+            "nodes_visited": 2, "distance_computations": 3, "search_time_us": 4
+        })
+    );
+    let old_bytes = bincode::serialize(&(2u64, 3u64, 4u64)).unwrap();
+    assert_eq!(bincode::serialize(&literal).unwrap(), old_bytes);
+    assert_eq!(bincode::serialize(&old).unwrap(), old_bytes);
+    let decoded: SearchStats = bincode::deserialize(&old_bytes).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap(),
+        serde_json::to_value(old).unwrap()
+    );
+    let index = HnswIndex::create(
+        "empty",
+        HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(alopex_core::vector::Metric::L2),
+    )
+    .unwrap();
+    let (hits, stats) = index.search(&[0.0, 0.0], 10, None).unwrap();
+    assert!(hits.is_empty());
+    let measured_time = stats.search_time_us;
+    assert_eq!(
+        serde_json::to_value(stats).unwrap(),
+        serde_json::json!({
+            "nodes_visited": 0, "distance_computations": 0, "search_time_us": measured_time
+        })
+    );
+}
+
+#[test]
+fn effective_ef_detailed_api_reports_actual_breadth_without_changing_callbacks() {
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, MAX_HNSW_EF_SEARCH};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut index = HnswIndex::create(
+        "details",
+        HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(alopex_core::vector::Metric::L2),
+    )
+    .unwrap();
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let observed = callbacks.clone();
+    index.on_search(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    });
+    let (hits, _, effective) = index
+        .search_with_effective_ef(&[0.0, 0.0], 10, None)
+        .unwrap();
+    assert!(hits.is_empty());
+    assert_eq!(effective, 0);
+    for id in 0..4u8 {
+        index.upsert(&[id], &[f32::from(id), 0.0], &[]).unwrap();
+    }
+    assert!(index.delete(&[3]).unwrap());
+    for (k, ef, expected) in [
+        (0, None, 0),
+        (2, Some(1), 2),
+        (MAX_HNSW_EF_SEARCH + 1, None, 3),
+        (MAX_HNSW_EF_SEARCH + 1, Some(16), 3),
+    ] {
+        let (hits, _, effective) = index.search_with_effective_ef(&[0.0, 0.0], k, ef).unwrap();
+        assert_eq!(effective, expected);
+        assert_eq!(hits.len(), k.min(3));
+        assert!(hits.iter().all(|hit| hit.key != vec![3]));
+    }
+    let (legacy, _) = index.search(&[0.0, 0.0], 2, Some(1)).unwrap();
+    assert_eq!(
+        legacy.iter().map(|hit| hit.key.clone()).collect::<Vec<_>>(),
+        vec![vec![0], vec![1]]
+    );
+    assert_eq!(callbacks.load(Ordering::SeqCst), 6);
+    for ef in [0, MAX_HNSW_EF_SEARCH + 1] {
+        assert!(
+            matches!(index.search_with_effective_ef(&[0.0, 0.0], 0, Some(ef)),
+            Err(alopex_core::Error::InvalidParameter { param, .. }) if param == "ef_search")
+        );
+    }
+    assert_eq!(callbacks.load(Ordering::SeqCst), 6);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn effective_ef_large_limit_preserves_null_completion() {
+    let (mut executor, catalog) = run_sql(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         INSERT INTO items VALUES (1, [0.0, 0.0]), (2, [1.0, 0.0]), (3, [2.0, 0.0]), (4, NULL);
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    );
+    let query = "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1000001 WITH (enable_hnsw = true)";
+    assert_eq!(query_ids(&mut executor, &catalog, query), vec![1, 2, 3, 4]);
+    let text = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(text.contains("ef_search=3 fallback=ExactKnnScan"), "{text}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn effective_ef_large_post_filter_request_falls_back_exactly() {
+    let (mut executor, catalog) = run_sql(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         INSERT INTO items VALUES (1, [0.0, 0.0]), (2, [1.0, 0.0]), (3, [2.0, 0.0]), (4, NULL);
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    );
+    let query = "SELECT id FROM items WHERE id = 3 ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 250001 WITH (enable_hnsw = true)";
+    assert_eq!(query_ids(&mut executor, &catalog, query), vec![3]);
+    let text = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(text.contains("ef_search=3 fallback=ExactKnnScan"), "{text}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn effective_ef_post_filter_growth_reports_actual_breadth() {
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let values = (0..128)
+        .map(|id| format!("({id}, [{id}.0, 0.0])"))
+        .collect::<Vec<_>>()
+        .join(",");
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!(
+            "INSERT INTO items VALUES {values}; CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;"
+        ),
+    );
+    let query = "SELECT id FROM items WHERE id < 0 ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)";
+    assert!(query_ids(&mut executor, &catalog, query).is_empty());
+    let text = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(
+        text.contains("ef_search=128 fallback=ExactKnnScan"),
+        "{text}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn effective_ef_explain_reports_k_floor_not_user_setting() {
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let values = (0..20)
+        .map(|id| format!("({id}, [{id}.0, 0.0])"))
+        .collect::<Vec<_>>()
+        .join(",");
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!(
+            "INSERT INTO items VALUES {values}; CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;"
+        ),
+    );
+    let query = "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 10 WITH (enable_hnsw = true, ef_search = 1)";
+    assert_eq!(
+        query_ids(&mut executor, &catalog, query),
+        (0..10).collect::<Vec<_>>()
+    );
+    let text = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(text.contains("ef_search=10 fallback=none"), "{text}");
+}
+
 fn run_sql(
     sql: &str,
 ) -> (
@@ -510,7 +732,7 @@ fn knn_query_ef_search_changes_recall_against_exact_path() {
                 "{plan}"
             );
             assert!(
-                plan.contains(&format!("ef_search={ef} fallback=none")),
+                plan.contains(&format!("ef_search={} fallback=none", ef.max(K))),
                 "{plan}"
             );
             assert!(
@@ -621,10 +843,13 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    let tail = std::iter::repeat_n("0.0", DIMENSIONS - 1)
+        .collect::<Vec<_>>()
+        .join(", ");
     for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
         let end = (start + BATCH_SIZE - 1).min(ROWS);
         let values = (start..=end)
-            .map(|id| format!("({id}, {vector})"))
+            .map(|id| format!("({id}, [{id}.0, {tail}])"))
             .collect::<Vec<_>>()
             .join(", ");
         execute_sql(
@@ -641,6 +866,10 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
 
     let query = format!(
         "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
+    assert_eq!(
+        query_ids(&mut executor, &catalog, &query),
+        (1..=10).collect::<Vec<_>>()
     );
     let indexed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
     assert!(
@@ -705,7 +934,7 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
         "{post_filter}"
     );
     assert!(
-        post_filter.contains("ef_search=64 fallback=ExactKnnScan"),
+        post_filter.contains(&format!("ef_search={ROWS} fallback=ExactKnnScan")),
         "{post_filter}"
     );
 
@@ -718,4 +947,37 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
         ),
         "{exact}"
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explain_identical_vectors_preserves_exact_fallback_results_and_actual_ef() {
+    // Identical vectors can leave the approximate graph with a short result.
+    // Keep that degenerate case separate from the ordinary breadth controls.
+    const ROWS: i32 = 36;
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let values = (1..=ROWS)
+        .map(|id| format!("({id}, [0.0, 0.0])"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!(
+            "INSERT INTO items VALUES {values}; CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64);"
+        ),
+    );
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT {ROWS} WITH (enable_hnsw = true)"
+    );
+    let mut ids = query_ids(&mut executor, &catalog, &query);
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=ROWS).collect::<Vec<_>>());
+    let text = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(
+        text.contains(&format!("ef_search={ROWS} fallback=ExactKnnScan")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("rows={ROWS}\n")), "{text}");
 }
