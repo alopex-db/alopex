@@ -1,4 +1,11 @@
-#![cfg(target_os = "linux")]
+// These tests exercise the portable native parser ABI on every supported host.
+
+#[path = "../src/parser_contract.rs"]
+mod contract_gate;
+#[path = "../src/nim_ffi.rs"]
+mod contract_native;
+
+use alopex_sql::error;
 
 use alopex_sql::{
     AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExplainFormat, ExprKind,
@@ -11,6 +18,95 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
+
+#[test]
+fn wire_contract_real_payload_carries_semantic_fields() {
+    for (sql, key, expected) in [
+        ("CREATE UNIQUE INDEX ix ON t (k)", "unique", json!(true)),
+        ("CREATE INDEX ix ON t (k)", "unique", json!(false)),
+        ("CREATE TABLE copy AS SELECT 1", "query", Value::Null),
+        ("SELECT INTERVAL '1' DAY", "projection", Value::Null),
+        ("SELECT * FROM a NATURAL JOIN b", "from", Value::Null),
+    ] {
+        let result = contract_native::parse_sql(sql).unwrap();
+        assert_eq!(result.kind, contract_native::ParseResultKind::Ok, "{sql}");
+        let buffer = contract_native::OwnedBuffer::new(result.buffer_ptr, result.buffer_len);
+        let value: Value = rmp_serde::from_slice(buffer.as_slice()).unwrap();
+        let decoded: Vec<Statement> = rmp_serde::from_slice(buffer.as_slice()).unwrap();
+        assert_eq!(decoded.len(), 1);
+        let kind = &value[0]["kind"];
+        match key {
+            "unique" => assert_eq!(kind[key], expected),
+            "query" => assert!(kind[key].is_object()),
+            "projection" => {
+                assert_eq!(kind[key][0]["expr"]["kind"]["literal"]["value"], "1 DAY");
+                assert!(kind[key][0]["alias"].is_null());
+            }
+            "from" => assert_eq!(kind[key][0]["natural"], true),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn wire_contract_real_producer_exports_cutover() {
+    assert_eq!(contract_native::parser_contract_version(), "0.27.0");
+}
+
+#[test]
+fn wire_contract_actual_payload_matches_versioned_golden_and_rust_decoder() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/parser_wire_v027.json")).unwrap();
+    assert_eq!(
+        fixture["contract"],
+        contract_native::parser_contract_version()
+    );
+    for case in fixture["cases"].as_array().unwrap() {
+        let sql = case["sql"].as_str().unwrap();
+        let expected = hex::decode(case["payload_hex"].as_str().unwrap()).unwrap();
+        let result = contract_native::parse_sql(sql).unwrap();
+        assert_eq!(result.kind, contract_native::ParseResultKind::Ok, "{sql}");
+        let buffer = contract_native::OwnedBuffer::new(result.buffer_ptr, result.buffer_len);
+        let actual: Value = rmp_serde::from_slice(buffer.as_slice()).unwrap();
+        let golden: Value = rmp_serde::from_slice(&expected).unwrap();
+        assert_eq!(actual, golden, "versioned wire shape drift: {sql}");
+        let actual_ast: Vec<Statement> = rmp_serde::from_slice(buffer.as_slice()).unwrap();
+        let golden_ast: Vec<Statement> = rmp_serde::from_slice(&expected).unwrap();
+        assert_eq!(
+            serde_json::to_value(actual_ast).unwrap(),
+            serde_json::to_value(golden_ast).unwrap()
+        );
+    }
+}
+
+#[test]
+fn wire_contract_runtime_gate_rejects_mixed_versions_in_both_directions() {
+    let old: Value =
+        serde_json::from_str(include_str!("fixtures/parser_wire_v026_120f.json")).unwrap();
+    let old_version = old["contract"].as_str().unwrap();
+    let current = contract_native::parser_contract_version();
+    assert!(contract_gate::ensure_linked_parser_contract(old_version).is_err());
+    assert!(contract_gate::ensure_parser_contract(old_version, &current).is_err());
+    contract_gate::ensure_linked_parser_contract(&current).unwrap();
+}
+
+#[test]
+fn wire_contract_old_export_fails_before_payload_decode() {
+    let old: Value =
+        serde_json::from_str(include_str!("fixtures/parser_wire_v026_120f.json")).unwrap();
+    // This public decoder uses the same exported-contract gate as SQL parsing.
+    // Invalid MessagePack must not win over the incompatible producer identity.
+    let error = CreateContinuousAggregate::decode_staged_messagepack(
+        old["contract"].as_str().unwrap(),
+        &[0xc1],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("linked Nim parser contract 0.26.0")
+    );
+}
 const MAX_MESSAGEPACK_PAYLOAD_BYTES: usize = 1_048_576;
 const MINIMAL_CONTINUOUS_AGGREGATE_SQL: &str = "CREATE CONTINUOUS AGGREGATE cpu_hourly AS SELECT 1 FROM cpu_metrics \
      WITH (retention = '30d', refresh_interval = '1h')";
@@ -358,7 +454,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.26.0");
+    assert_eq!(parser_contract_version(), "0.27.0");
 }
 
 #[test]
@@ -500,7 +596,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.26.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.27.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -508,7 +604,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.26.0");
+    assert_eq!(parser_contract_version(), "0.27.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

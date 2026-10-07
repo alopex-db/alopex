@@ -3935,8 +3935,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         return Err(PlannerError::lateral_join_type_unsupported(kind, *span));
                     }
                 }
+                // A join executes against its own concatenated input row.
+                // Its parent's output offset belongs only to the returned
+                // name-resolution scope, not to this join's condition.
                 let left_relation =
-                    self.plan_from_item(left, start_index, outer_scope, lateral_scope, ctes)?;
+                    self.plan_from_item(left, 0, outer_scope, lateral_scope, ctes)?;
                 // A LATERAL right side is planned against the left row, which
                 // is the row the executor supplies as its outer row. An
                 // ordinary right side never reads this scope, so the rebase is
@@ -3944,14 +3947,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let right_lateral_scope = right_lateral.then(|| {
                     lateral_outer_scope(
                         &left_relation.scope,
-                        start_index,
+                        0,
                         left_relation.schema.len(),
                         outer_scope,
                     )
                 });
                 let right_relation = self.plan_from_item(
                     right,
-                    start_index + left_relation.schema.len(),
+                    left_relation.schema.len(),
                     outer_scope,
                     right_lateral_scope.as_deref().unwrap_or(lateral_scope),
                     ctes,
@@ -3992,7 +3995,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     )?
                 };
-                if right_lateral {
+                let mut relation = if right_lateral {
                     self.combine_lateral_join_relation(
                         left_relation,
                         right_relation,
@@ -4000,7 +4003,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         typed_condition,
                         using.as_deref(),
                         *span,
-                    )
+                    )?
                 } else {
                     self.combine_join_relation(
                         left_relation,
@@ -4009,8 +4012,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         typed_condition,
                         using,
                         *span,
-                    )
+                    )?
+                };
+                for table in &mut relation.scope {
+                    table.start_index += start_index;
+                    for partners in table.merged_column_partners.values_mut() {
+                        for index in partners {
+                            *index += start_index;
+                        }
+                    }
                 }
+                Ok(relation)
             }
             FromItem::Derived {
                 subquery,

@@ -6,7 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- The Nim parser wire contract is `0.26.0`; `Select` now carries query-level
+- The Nim parser wire contract is `0.27.0`; JOIN nodes now carry their NATURAL
+  attribute directly, and the contract covers UNIQUE indexes, CTAS, and
+  unit-bearing INTERVAL literals. Incompatible parser/consumer versions are
+  rejected before decoding. Comma FROM items preserve explicit JOIN precedence.
+- The Nim parser wire contract `0.26.0` added query-level
   HNSW options.
 - `FTS_SEARCH` includes the primary-key column in its result. Queries using
   `SELECT *` therefore return an additional column; consumers that require a
