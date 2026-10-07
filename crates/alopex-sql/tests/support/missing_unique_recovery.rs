@@ -76,6 +76,124 @@ fn attempt_sql(
 
 #[test]
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue572_targetless_uses_recovered_unique_and_primary_indexes() {
+    let (store, catalog) = fixture(
+        "CREATE TABLE items (obsolete INTEGER, id INTEGER PRIMARY KEY, value INTEGER, \
+         CONSTRAINT uq_value UNIQUE(value)); INSERT INTO items VALUES (0, 1, 10);",
+    );
+    let old_unique_id = {
+        let guard = catalog.read().unwrap();
+        assert_eq!(
+            guard.get_index("__pk_items").unwrap().column_indices,
+            vec![1]
+        );
+        let unique = guard.get_index("uq_value").unwrap();
+        assert_eq!(unique.column_indices, vec![2]);
+        assert_eq!(
+            snapshot(&store, &KeyEncoder::index_prefix(unique.index_id)).len(),
+            1
+        );
+        unique.index_id
+    };
+
+    // Synthetic old metadata: stale PK ordinal plus missing named UNIQUE.
+    // This is not an old-producer fixture or an execution of fixed ALTER DDL.
+    let table_id = legacy_drop(&store, &catalog, "items", 0);
+    remove_unique_indexes(&store);
+    let persisted: Vec<PersistedIndexMeta> = snapshot(&store, INDEXES_PREFIX)
+        .iter()
+        .map(|(_, bytes)| bincode::deserialize(bytes).unwrap())
+        .collect();
+    assert!(!persisted.iter().any(|index| index.name == "uq_value"));
+    assert_eq!(
+        persisted
+            .iter()
+            .find(|index| index.name == "__pk_items")
+            .unwrap()
+            .column_indices,
+        vec![1]
+    );
+    assert!(snapshot(&store, &KeyEncoder::index_prefix(old_unique_id)).is_empty());
+    let rows = snapshot(&store, &KeyEncoder::table_prefix(table_id));
+    let sequence = snapshot(&store, &KeyEncoder::sequence_key(table_id));
+    let before_load = snapshot(&store, b"");
+    let recovered = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert_ne!(
+        snapshot(&store, b""),
+        before_load,
+        "load must actually repair metadata"
+    );
+    {
+        let guard = recovered.read().unwrap();
+        let primary = guard.get_index("__pk_items").unwrap();
+        let unique = guard.get_index("uq_value").unwrap();
+        assert_eq!(primary.column_indices, vec![0]);
+        assert_eq!(unique.column_indices, vec![1]);
+        assert!(primary.unique && unique.unique);
+        assert_ne!(primary.index_id, unique.index_id);
+        assert_ne!(old_unique_id, unique.index_id);
+        let key = KeyEncoder::index_value_prefix(unique.index_id, &SqlValue::Integer(10)).unwrap();
+        assert_eq!(snapshot(&store, &key).len(), 1);
+    }
+    assert_eq!(snapshot(&store, &KeyEncoder::table_prefix(table_id)), rows);
+    assert_eq!(
+        snapshot(&store, &KeyEncoder::sequence_key(table_id)),
+        sequence
+    );
+
+    // Both successful skip operations commit: rollback cannot hide a write.
+    for sql in [
+        "INSERT INTO items VALUES (2, 10) ON CONFLICT DO NOTHING",
+        "INSERT INTO items VALUES (1, 20) ON CONFLICT DO NOTHING",
+    ] {
+        let before = snapshot(&store, b"");
+        let result = attempt_sql(store.clone(), recovered.clone(), sql);
+        assert!(
+            matches!(result, Ok(ExecutionResult::RowsAffected(0))),
+            "{sql}: {result:?}"
+        );
+        assert_eq!(
+            snapshot(&store, b""),
+            before,
+            "successful skip changed KV: {sql}"
+        );
+    }
+    let result = attempt_sql(
+        store.clone(),
+        recovered.clone(),
+        "INSERT INTO items VALUES (2, 20) ON CONFLICT DO NOTHING",
+    );
+    assert!(
+        matches!(result, Ok(ExecutionResult::RowsAffected(1))),
+        "{result:?}"
+    );
+    let expected = vec![
+        vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+        vec![SqlValue::Integer(2), SqlValue::Integer(20)],
+    ];
+    let before_reload = snapshot(&store, b"");
+    let reopened = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert_eq!(
+        snapshot(&store, b""),
+        before_reload,
+        "second load must not write"
+    );
+    for active in [recovered, reopened] {
+        let result = run_sql_in_txn(
+            store.clone(),
+            active,
+            TxnMode::ReadOnly,
+            "SELECT id, value FROM items ORDER BY id",
+        );
+        let ExecutionResult::Query(query) = result else {
+            panic!("expected rows");
+        };
+        assert_eq!(query.rows, expected);
+    }
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 fn issue585_missing_unique_backfills_rows_and_is_idempotent() {
     for definition in [
         "id INTEGER PRIMARY KEY, value INTEGER UNIQUE, tail INTEGER",

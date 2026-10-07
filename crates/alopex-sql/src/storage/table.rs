@@ -134,7 +134,7 @@ impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
         Ok(next)
     }
 
-    fn validate_row(&self, row: &[SqlValue]) -> Result<()> {
+    pub(crate) fn validate_row(&self, row: &[SqlValue]) -> Result<()> {
         validate_row(&self.table_meta, row)
     }
 
