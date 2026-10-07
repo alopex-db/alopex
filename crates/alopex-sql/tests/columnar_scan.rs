@@ -17,6 +17,79 @@ use alopex_sql::planner::typed_expr::{ProjectedColumn, Projection, TypedExpr};
 use alopex_sql::storage::TxnBridge;
 use alopex_sql::{Catalog, Span};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn vector_copy_sorted_and_unsorted_rows_roundtrip() {
+    use alopex_sql::executor::ExecutionResult;
+    use alopex_sql::storage::SqlValue;
+    let rows = [
+        "1,\"[0,0]\",1\n",
+        "2,NULL,1\n",
+        "3,\"[2,0]\",1\n",
+        "4,\"[3,0]\",0\n",
+    ];
+    let expected = vec![
+        vec![
+            SqlValue::Integer(1),
+            SqlValue::Vector(vec![0.0, 0.0]),
+            SqlValue::Integer(1),
+        ],
+        vec![SqlValue::Integer(2), SqlValue::Null, SqlValue::Integer(1)],
+        vec![
+            SqlValue::Integer(3),
+            SqlValue::Vector(vec![2.0, 0.0]),
+            SqlValue::Integer(1),
+        ],
+        vec![
+            SqlValue::Integer(4),
+            SqlValue::Vector(vec![3.0, 0.0]),
+            SqlValue::Integer(0),
+        ],
+    ];
+    for order in [[0, 1, 2, 3], [2, 0, 1, 3]] {
+        let store = Arc::new(MemoryKV::new());
+        let bridge = TxnBridge::new(store.clone());
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut executor = Executor::new(store, catalog.clone());
+        let statement = Parser::parse_sql(&AlopexDialect, "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2), s INT) WITH (storage='columnar');").unwrap().pop().unwrap();
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        executor.execute(plan).unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"id,embedding,s\n").unwrap();
+        for index in order {
+            file.write_all(rows[index].as_bytes()).unwrap();
+        }
+        let mut txn = bridge.begin_write().unwrap();
+        execute_copy(
+            &mut txn,
+            &*catalog.read().unwrap(),
+            "items",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap_or_else(|error| panic!("COPY order={order:?}: {error}"));
+        txn.commit().unwrap();
+        let statement = Parser::parse_sql(
+            &AlopexDialect,
+            "SELECT id, embedding, s FROM items ORDER BY id",
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+            panic!("expected SELECT result");
+        };
+        assert_eq!(result.rows, expected, "COPY order={order:?}");
+    }
+}
+
 fn create_table(
     executor: &mut Executor<MemoryKV, MemoryCatalog>,
     catalog: &Arc<RwLock<MemoryCatalog>>,
