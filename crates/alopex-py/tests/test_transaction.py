@@ -103,3 +103,59 @@ def test_failed_transaction_rejects_new_savepoints_but_can_roll_back_to_existing
         assert db.execute_sql("SELECT id FROM items") == [{"id": 1}]
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("control", [
+    "BEGIN", "START TRANSACTION", "SET TRANSACTION READ ONLY", "COMMIT",
+    "ROLLBACK", "SAVEPOINT retry", "ROLLBACK TO SAVEPOINT retry",
+    "RELEASE SAVEPOINT retry",
+])
+@pytest.mark.parametrize("prefix, params", [
+    ("", None), ("-- transaction control\n/* retry */ ", None),
+    ("INSERT INTO items (id) VALUES (99); /* retry */ ", None),
+    ("INSERT INTO items (id) VALUES (?); /* retry */ ", [99]),
+])
+def test_transaction_sql_control_rejection_preserves_writes(control, prefix, params):
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.put(b"before", b"kept")
+        txn.execute_sql("INSERT INTO items (id) VALUES (1)")
+        txn.savepoint("retry")
+        with pytest.raises(AlopexError) as rejected:
+            txn.execute_sql(prefix + control, params)
+
+        # Rejection must neither run preceding DML nor poison/finish the txn.
+        assert txn.get(b"before") == b"kept"
+        assert txn.execute_sql("SELECT id FROM items ORDER BY id") == [{"id": 1}]
+        txn.put(b"after", b"also kept")
+        txn.execute_sql("INSERT INTO items (id) VALUES (2)")
+        txn.commit()
+        with db.begin(TxnMode.READ_ONLY) as reader:
+            assert reader.get(b"before") == b"kept"
+            assert reader.get(b"after") == b"also kept"
+        assert db.execute_sql("SELECT id FROM items ORDER BY id") == [
+            {"id": 1}, {"id": 2},
+        ]
+        message = str(rejected.value)
+        for method in ("savepoint", "rollback_to", "release", "commit", "rollback"):
+            assert f"Transaction.{method}()" in message
+    finally:
+        db.close()
+
+
+def test_transaction_sql_control_words_in_data_comments_and_explain_are_allowed():
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.execute_sql("/* SAVEPOINT retry */ INSERT INTO items VALUES (1, 'SAVEPOINT retry; COMMIT')")
+        txn.execute_sql("INSERT INTO items VALUES (?, ?)", [2, "ROLLBACK; BEGIN"])
+        assert txn.execute_sql("EXPLAIN SELECT * FROM items")
+        txn.commit()
+        assert db.execute_sql("SELECT value FROM items ORDER BY id") == [
+            {"value": "SAVEPOINT retry; COMMIT"}, {"value": "ROLLBACK; BEGIN"},
+        ]
+    finally:
+        db.close()

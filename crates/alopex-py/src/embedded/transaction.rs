@@ -556,6 +556,11 @@ impl PyTransaction {
         let bindings = sql::prepared_bindings(params.as_ref())?;
         sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         self.ensure_active()?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Transaction.execute_sql does not accept transaction control SQL; use Transaction.savepoint(), Transaction.rollback_to(), Transaction.release(), Transaction.commit(), or Transaction.rollback()",
+            ));
+        }
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
         // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
