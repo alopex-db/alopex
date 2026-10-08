@@ -219,56 +219,109 @@ where
     T: SqlTxn<'txn, S>,
 {
     ensure_cascade_depth(depth)?;
-    for child in catalog.list_tables() {
-        for constraint in child.constraints.clone() {
-            let TableConstraint::ForeignKey {
-                name,
-                columns,
-                referenced_table,
-                referenced_columns,
-                on_update,
-                ..
-            } = constraint
-            else {
-                continue;
-            };
-            if referenced_table != parent.name {
-                continue;
-            }
-            let old_key = column_values(parent, &referenced_columns, old_parent)?;
-            let new_key = column_values(parent, &referenced_columns, new_parent)?;
-            if old_key == new_key {
-                continue;
-            }
-            let child_indexes = column_indexes(&child, &columns)?;
-            let matches = matching_rows::<S, T>(txn, &child, &child_indexes, &old_key)?;
-            if matches.is_empty() {
-                continue;
-            }
-            if matches!(
-                on_update,
-                ReferentialAction::NoAction | ReferentialAction::Restrict
-            ) {
-                return Err(foreign_key_error(name, &child, &columns));
-            }
-            let mut changes = Vec::with_capacity(matches.len());
-            for (row_id, old) in matches {
-                let mut new = old.clone();
-                for (position, &index) in child_indexes.iter().enumerate() {
-                    new[index] = if on_update == ReferentialAction::SetNull {
-                        SqlValue::Null
-                    } else {
-                        new_key[position].clone()
-                    };
-                }
-                validate_checks(catalog, &child, &new)?;
-                apply_parent_update::<S, C, T>(txn, catalog, &child, &old, &new, depth + 1)?;
-                changes.push((row_id, old, new));
-            }
-            super::update::apply_changes::<S, C, T>(txn, catalog, &child, &changes)?;
-        }
+    ParentUpdateContext::new(catalog).apply::<S, T>(txn, parent, old_parent, new_parent, depth)
+}
+
+pub(super) fn apply_parent_updates<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    parent: &TableMetadata,
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let context = ParentUpdateContext::new(catalog);
+    for (_, old, new) in changes {
+        context.apply::<S, T>(txn, parent, old, new, 0)?;
     }
     Ok(())
+}
+
+/// Only immutable metadata is shared by a batch and its recursive updates.
+/// Child rows are still read from the current transaction for each action.
+struct ParentUpdateContext<'a, C: Catalog + ?Sized> {
+    catalog: &'a C,
+    tables: Vec<TableMetadata>,
+}
+
+impl<'a, C: Catalog + ?Sized> ParentUpdateContext<'a, C> {
+    fn new(catalog: &'a C) -> Self {
+        Self {
+            catalog,
+            tables: catalog.list_tables(),
+        }
+    }
+
+    fn apply<'txn, S, T>(
+        &self,
+        txn: &mut T,
+        parent: &TableMetadata,
+        old_parent: &[SqlValue],
+        new_parent: &[SqlValue],
+        depth: usize,
+    ) -> Result<()>
+    where
+        S: KVStore + 'txn,
+        T: SqlTxn<'txn, S>,
+    {
+        ensure_cascade_depth(depth)?;
+        for child in &self.tables {
+            for constraint in &child.constraints {
+                let TableConstraint::ForeignKey {
+                    name,
+                    columns,
+                    referenced_table,
+                    referenced_columns,
+                    on_update,
+                    ..
+                } = constraint
+                else {
+                    continue;
+                };
+                if referenced_table != &parent.name {
+                    continue;
+                }
+                let old_key = column_values(parent, referenced_columns, old_parent)?;
+                let new_key = column_values(parent, referenced_columns, new_parent)?;
+                if old_key == new_key {
+                    continue;
+                }
+                let child_indexes = column_indexes(child, columns)?;
+                let matches = matching_rows::<S, T>(txn, child, &child_indexes, &old_key)?;
+                if matches.is_empty() {
+                    continue;
+                }
+                if matches!(
+                    on_update,
+                    ReferentialAction::NoAction | ReferentialAction::Restrict
+                ) {
+                    return Err(foreign_key_error(name.clone(), child, columns));
+                }
+                let mut changes = Vec::with_capacity(matches.len());
+                for (row_id, old) in matches {
+                    let mut new = old.clone();
+                    for (position, &index) in child_indexes.iter().enumerate() {
+                        new[index] = if *on_update == ReferentialAction::SetNull {
+                            SqlValue::Null
+                        } else {
+                            new_key[position].clone()
+                        };
+                    }
+                    validate_checks(self.catalog, child, &new)?;
+                    self.apply::<S, T>(txn, child, &old, &new, depth + 1)?;
+                    changes.push((row_id, old, new));
+                }
+                super::update::apply_changes::<S, C, T>(txn, self.catalog, child, &changes)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn matching_rows<'txn, S, T>(

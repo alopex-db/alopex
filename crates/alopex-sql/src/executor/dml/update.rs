@@ -8,7 +8,8 @@ use crate::executor::Row;
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::query::subquery::evaluate_expr_with_subqueries;
+use crate::executor::query::statement_subqueries::DmlSubqueries;
+use crate::executor::query::subquery::contains_subquery;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::Projection;
@@ -56,6 +57,21 @@ pub fn execute_update_with_returning<
     };
     let primary_key_lookup = primary_key_rows.is_some();
     const BATCH: usize = 512;
+    // Subqueries and joined sources can read rows changed by an earlier
+    // batch. Evaluate the entire statement before applying those writes.
+    // Ordinary row-local UPDATE keeps its existing bounded batch path.
+    let mut staged = (_join_source.is_some()
+        || filter.as_ref().is_some_and(contains_subquery)
+        || assignments.iter().any(|a| contains_subquery(&a.value)))
+    .then(|| super::statement_spool::StatementSpool::new(txn.memory_policy()));
+    let subqueries = DmlSubqueries::new(
+        txn,
+        catalog,
+        assignments
+            .iter()
+            .map(|assignment| &assignment.value)
+            .chain(filter.iter()),
+    );
 
     loop {
         let batch = if primary_key_lookup {
@@ -96,7 +112,7 @@ pub fn execute_update_with_returning<
             if _join_source.is_some() && joined.is_none() {
                 continue;
             }
-            if !predicate_matches(txn, catalog, &filter, row_id, &eval_row)? {
+            if !predicate_matches(txn, catalog, &subqueries, &filter, row_id, &eval_row)? {
                 continue;
             }
 
@@ -104,8 +120,7 @@ pub fn execute_update_with_returning<
             let mut new_row = row.clone();
 
             for assignment in &assignments {
-                let mut value =
-                    evaluate_expr_with_subqueries(txn, catalog, &assignment.value, &eval_row)?;
+                let mut value = subqueries.evaluate(txn, catalog, &assignment.value, &eval_row)?;
                 let target_type = &table.columns[assignment.column_index].data_type;
                 let compatible_vector = matches!(
                     (target_type, &value),
@@ -132,12 +147,13 @@ pub fn execute_update_with_returning<
             continue;
         }
 
-        for (_, old_row, new_row) in &changes {
-            super::constraints::apply_parent_update::<S, C, T>(
-                txn, catalog, &table, old_row, new_row, 0,
-            )?;
+        if let Some(spool) = &mut staged {
+            for change in changes {
+                spool.push(&change)?;
+            }
+            continue;
         }
-        apply_changes(txn, catalog, &table, &changes)?;
+        apply_validated_changes(txn, catalog, &table, &changes)?;
 
         rows_affected += changes.len() as u64;
         if returning.is_some() {
@@ -146,6 +162,31 @@ pub fn execute_update_with_returning<
                     .into_iter()
                     .map(|(row_id, _, new_row)| (row_id, new_row)),
             );
+        }
+    }
+
+    subqueries.finish()?;
+    if let Some(spool) = staged {
+        let mut changes = Vec::with_capacity(BATCH);
+        let mut apply = |changes: &mut Vec<(u64, Vec<SqlValue>, Vec<SqlValue>)>| -> Result<()> {
+            apply_validated_changes(txn, catalog, &table, changes)?;
+            rows_affected += changes.len() as u64;
+            if returning.is_some() {
+                updated_rows.extend(changes.drain(..).map(|(id, _, row)| (id, row)));
+            } else {
+                changes.clear();
+            }
+            Ok(())
+        };
+        spool.replay(|change| {
+            changes.push(change);
+            if changes.len() == BATCH {
+                apply(&mut changes)?;
+            }
+            Ok(())
+        })?;
+        if !changes.is_empty() {
+            apply(&mut changes)?;
         }
     }
 
@@ -167,6 +208,16 @@ pub fn execute_update_with_returning<
     } else {
         Ok(ExecutionResult::RowsAffected(rows_affected))
     }
+}
+
+fn apply_validated_changes<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    super::constraints::apply_parent_updates::<S, C, T>(txn, catalog, table, changes)?;
+    apply_changes(txn, catalog, table, changes)
 }
 
 fn find_join_row<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
@@ -259,13 +310,13 @@ fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
 fn predicate_matches<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     filter: &Option<TypedExpr>,
     row_id: u64,
     row: &[SqlValue],
 ) -> Result<bool> {
     if let Some(expr) = filter {
-        let value =
-            evaluate_expr_with_subqueries(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
+        let value = subqueries.evaluate(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
         Ok(matches!(value, SqlValue::Boolean(true)))
     } else {
         Ok(true)
