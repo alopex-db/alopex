@@ -963,3 +963,83 @@ fn copy_columnar_named_unique_supporting_pk_reports_primary_key() {
         vec![vec![SqlValue::Integer(1), SqlValue::Text("prior".into())]]
     );
 }
+
+fn assert_postload_columnar_unique_rejects_duplicates(public_sql: bool) {
+    use alopex_sql::catalog::IndexMetadata;
+    use alopex_sql::planner::LogicalPlan;
+
+    let (store, catalog, mut executor) = constraint_fixture("id INT");
+    let file = constraint_csv("id\n1\n1\n");
+    assert_eq!(
+        constraint_execute(&mut executor, &catalog, &constraint_copy_sql(&file)).unwrap(),
+        ExecutionResult::RowsAffected(2)
+    );
+    let expected = vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]];
+    let ExecutionResult::Query(before_rows) =
+        constraint_execute(&mut executor, &catalog, "SELECT id FROM users ORDER BY id").unwrap()
+    else {
+        panic!("expected existing columnar rows");
+    };
+    assert_eq!(before_rows.rows, expected);
+    let before = constraint_snapshot(&store);
+    let table_before = catalog.read().unwrap().get_table("users").unwrap().clone();
+    let plan = if public_sql {
+        let statement =
+            Parser::parse_sql(&AlopexDialect, "CREATE UNIQUE INDEX uq_users ON users(id)")
+                .unwrap()
+                .pop()
+                .unwrap();
+        assert!(matches!(
+            &statement.kind,
+            alopex_sql::ast::StatementKind::CreateIndex(index) if index.unique
+        ));
+        Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap()
+    } else {
+        LogicalPlan::CreateIndex {
+            index: IndexMetadata::new(0, "uq_users", "users", vec!["id".into()]).with_unique(true),
+            if_not_exists: false,
+        }
+    };
+    assert!(matches!(&plan, LogicalPlan::CreateIndex { index, .. } if index.unique));
+    let result = executor.execute(plan);
+    let after = constraint_snapshot(&store);
+    let index_absent = catalog.read().unwrap().get_index("uq_users").is_none();
+    let table_after = catalog.read().unwrap().get_table("users").unwrap().clone();
+    let ExecutionResult::Query(after_rows) =
+        constraint_execute(&mut executor, &catalog, "SELECT id FROM users ORDER BY id").unwrap()
+    else {
+        panic!("expected preserved columnar rows");
+    };
+    eprintln!(
+        "public_sql={public_sql} result={result:?} all_kv_unchanged={} index_absent={index_absent} rows={:?}",
+        before == after,
+        after_rows.rows
+    );
+    assert!(
+        matches!(&result, Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, columns, .. }))
+            if index_name == "uq_users" && columns == &["id"]),
+        "existing duplicate columnar rows must reject UNIQUE creation: {result:?}"
+    );
+    assert_eq!(after, before);
+    assert!(index_absent);
+    assert_eq!(table_after.table_id, table_before.table_id);
+    assert_eq!(table_after.name, table_before.name);
+    assert_eq!(table_after.primary_key, table_before.primary_key);
+    assert_eq!(table_after.properties, table_before.properties);
+    assert_eq!(table_after.storage_options, table_before.storage_options);
+    assert_eq!(after_rows.rows, expected);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_postload_unique_sql_rejects_existing_duplicates() {
+    assert_postload_columnar_unique_rejects_duplicates(true);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_postload_unique_typed_plan_rejects_existing_duplicates() {
+    assert_postload_columnar_unique_rejects_duplicates(false);
+}
