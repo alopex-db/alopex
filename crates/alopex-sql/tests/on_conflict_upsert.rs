@@ -43,6 +43,10 @@ fn multi_row_upsert_uses_excluded_values() {
         ",
     );
 
+    assert!(matches!(
+        results.get(2),
+        Some(ExecutionResult::RowsAffected(2))
+    ));
     let ExecutionResult::Query(query) = results.last().expect("select result") else {
         panic!("expected query result");
     };

@@ -714,15 +714,17 @@ async fn http_ingestion_measurement() {
             let vectors = (1..=rows)
                 .map(|id| json!({ "id": id, "vector": [id % 97, (id + 1) % 97] }))
                 .collect::<Vec<_>>();
-            let (status, _, body) = send_json(
-                router.clone(),
-                Method::POST,
-                "/vector/upsert-batch",
-                json!({ "table": "items", "vectors": vectors }),
-                &[],
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            for vectors in vectors.chunks(10_000) {
+                let (status, _, body) = send_json(
+                    router.clone(),
+                    Method::POST,
+                    "/vector/upsert-batch",
+                    json!({ "table": "items", "vectors": vectors }),
+                    &[],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            }
         }
         let started = Instant::now();
         match operation {

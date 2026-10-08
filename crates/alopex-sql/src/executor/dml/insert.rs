@@ -313,6 +313,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         .transpose()?;
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
+    let mut update_changes: Vec<(u64, Vec<SqlValue>, Vec<SqlValue>)> = Vec::new();
     for mut row in rows {
         for (index, column) in table.columns.iter().enumerate() {
             if row[index].is_null()
@@ -362,12 +363,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
                         super::constraints::apply_parent_update::<S, C, T>(
                             txn, catalog, table, &old_row, &new_row, 0,
                         )?;
-                        super::update::apply_changes(
-                            txn,
-                            catalog,
-                            table,
-                            &[(row_id, old_row, new_row.clone())],
-                        )?;
+                        update_changes.push((row_id, old_row, new_row.clone()));
                         updated_rows.push((row_id, new_row));
                         continue;
                     }
@@ -376,6 +372,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         }
         super::constraints::validate_row::<S, C, T>(txn, catalog, table, &row, &insert_rows)?;
         insert_rows.push(row);
+    }
+    if !update_changes.is_empty() {
+        super::update::apply_changes(txn, catalog, table, &update_changes)?;
     }
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)
@@ -443,7 +442,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
             columns, rows,
         )))
     } else {
-        Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+        Ok(ExecutionResult::RowsAffected(
+            (staged.len() + updated_rows.len()) as u64,
+        ))
     }
 }
 

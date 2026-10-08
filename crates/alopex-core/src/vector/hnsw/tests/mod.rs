@@ -23,3 +23,34 @@ fn staged_batch_updates_stats_once_and_rollback_restores_the_graph() {
     index.rollback(&mut state).expect("rollback succeeds");
     assert_eq!(index.stats().node_count, 0);
 }
+
+#[test]
+fn staged_existing_batch_reconnects_updated_vectors() {
+    const COUNT: usize = 64;
+    let mut index = HnswIndex::create("staged-existing", HnswConfig::default().with_dimension(2))
+        .expect("valid configuration creates an index");
+    for value in 0..COUNT {
+        index
+            .upsert(&(value as u64).to_be_bytes(), &[value as f32, 0.0], b"")
+            .expect("initial vector inserts");
+    }
+
+    let keys: Vec<_> = (0..COUNT)
+        .map(|value| (value as u64).to_be_bytes())
+        .collect();
+    let vectors: Vec<_> = (0..COUNT).map(|value| [value as f32, 1.0]).collect();
+    let entries: Vec<_> = keys
+        .iter()
+        .zip(&vectors)
+        .map(|(key, vector)| (&key[..], &vector[..], &b""[..]))
+        .collect();
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged_batch(entries, &mut state)
+        .expect("existing vectors are updated in one batch");
+
+    for value in 0..COUNT {
+        let (results, _) = index.search(&[value as f32, 1.0], 1, Some(COUNT)).unwrap();
+        assert_eq!(results[0].key, (value as u64).to_be_bytes());
+    }
+}

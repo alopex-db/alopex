@@ -183,15 +183,33 @@ impl HnswIndex {
     {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        let entries: Vec<_> = entries.into_iter().collect();
+        let mut existing_ids = HashSet::with_capacity(entries.len());
+        let all_existing_once = entries.iter().all(|(key, _, _)| {
+            graph
+                .find_node_id(key)
+                .is_some_and(|node_id| existing_ids.insert(node_id))
+        });
+
+        if all_existing_once {
+            state.ensure_snapshot(&graph);
+            for node_id in graph.upsert_existing_batch(&entries)? {
+                state.record_upsert(node_id, false, None, false);
+            }
+            if !entries.is_empty() {
+                self.stats_cache = Self::compute_stats(&graph);
+            }
+            return Ok(());
+        }
         let mut changed = false;
         for (key, vector, metadata) in entries {
             state.ensure_snapshot(&graph);
             let existed = graph.find_node_id(key).is_some();
             let node_id = graph.upsert(key, vector, metadata)?;
             if existed {
-                state.record_upsert(node_id, false, None);
+                state.record_upsert(node_id, false, None, true);
             } else {
-                state.record_upsert(node_id, true, None);
+                state.record_upsert(node_id, true, None, true);
             }
             changed = true;
         }
@@ -398,13 +416,18 @@ impl HnswTransactionState {
         }
     }
 
-    fn record_upsert(&mut self, node_id: u32, is_new: bool, old_key: Option<Vec<u8>>) {
+    fn record_upsert(
+        &mut self,
+        node_id: u32,
+        is_new: bool,
+        old_key: Option<Vec<u8>>,
+        rewired: bool,
+    ) {
         if is_new {
             self.inserted_nodes.insert(node_id);
         } else {
             self.modified_nodes.insert(node_id);
-            // Reconnecting an existing node can rewrite every neighbor list.
-            self.requires_full_save = true;
+            self.requires_full_save |= rewired;
         }
         if let Some(key) = old_key {
             self.deleted_key_indices.push(key);

@@ -368,9 +368,7 @@ fn update_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
 ) -> Result<()> {
     for index in indexes {
-        for (row_id, old_row, new_row) in changes {
-            HnswBridge::on_update(txn, table, index, *row_id, old_row, new_row)?;
-        }
+        HnswBridge::on_update_batch(txn, table, index, changes)?;
     }
     Ok(())
 }

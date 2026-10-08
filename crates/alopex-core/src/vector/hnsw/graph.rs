@@ -213,6 +213,43 @@ impl HnswGraph {
         }
     }
 
+    /// Updates existing keys together while retaining their existing graph topology.
+    pub(crate) fn upsert_existing_batch(
+        &mut self,
+        entries: &[(&[u8], &[f32], &[u8])],
+    ) -> Result<Vec<u32>> {
+        let mut node_ids = Vec::with_capacity(entries.len());
+        for (key, vector, _) in entries {
+            validate_dimensions(self.config.dimension, vector.len())?;
+            validate_hnsw_vector(self.config.metric, vector)?;
+            let node_id = self
+                .find_node_id(key)
+                .ok_or_else(|| Error::InvalidParameter {
+                    param: "key".to_string(),
+                    reason: "missing existing key".to_string(),
+                })?;
+            node_ids.push(node_id);
+        }
+
+        for ((_, vector, metadata), node_id) in entries.iter().zip(&node_ids) {
+            let node = self.nodes[*node_id as usize]
+                .as_mut()
+                .expect("existing HNSW key has a node");
+            node.vector.clear();
+            node.vector.extend_from_slice(vector);
+            node.norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+            node.metadata.clear();
+            node.metadata.extend_from_slice(metadata);
+            if node.deleted {
+                node.deleted = false;
+                self.deleted_count = self.deleted_count.saturating_sub(1);
+                self.active_count = self.active_count.saturating_add(1);
+            }
+        }
+
+        Ok(node_ids)
+    }
+
     fn reconnect_existing(&mut self, node_id: u32) -> Result<()> {
         let Some(node) = self.node(node_id) else {
             return Ok(());

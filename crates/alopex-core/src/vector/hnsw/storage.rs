@@ -152,10 +152,12 @@ impl HnswStorage {
                 let node_bytes = bincode::serialize(&node_data)
                     .map_err(|e| Error::InvalidFormat(e.to_string()))?;
                 txn.put(self.node_key(node_id), node_bytes)?;
-                txn.put(
-                    self.key_index_key(&node.key),
-                    node_id.to_le_bytes().to_vec(),
-                )?;
+                if inserted_nodes.contains(&node_id) {
+                    txn.put(
+                        self.key_index_key(&node.key),
+                        node_id.to_le_bytes().to_vec(),
+                    )?;
+                }
             }
         }
 
@@ -165,9 +167,11 @@ impl HnswStorage {
         }
 
         // 存在しないノードIDのデータは削除して、空きリストと整合させる。
-        for (node_id, node_opt) in graph.nodes.iter().enumerate() {
-            if node_opt.is_none() {
-                txn.delete(self.node_key(node_id as u32))?;
+        if !inserted_nodes.is_empty() || !deleted_key_indices.is_empty() {
+            for (node_id, node_opt) in graph.nodes.iter().enumerate() {
+                if node_opt.is_none() {
+                    txn.delete(self.node_key(node_id as u32))?;
+                }
             }
         }
 
@@ -181,7 +185,9 @@ impl HnswStorage {
         }
 
         // 期待されるキーインデックスだけを残し、余剰を削除する。
-        self.sync_key_indices(txn, graph)?;
+        if !inserted_nodes.is_empty() || !deleted_key_indices.is_empty() {
+            self.sync_key_indices(txn, graph)?;
+        }
 
         let mut metadata = HnswMetadata {
             version: HNSW_FORMAT_VERSION,
