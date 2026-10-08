@@ -1,10 +1,12 @@
 # Cargo dependency duplicate policy
 
-## Invariant and current baseline
+## Invariant and exception inventory
 
 > New duplicate crate versions fail CI. Existing duplicate versions may remain only as exact, reasoned exceptions that become errors when stale.
 
-`deny.toml` is the machine-facing source of truth. The current configured graph has 43 duplicate crate families and 58 exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. This baseline is debt to remove, not a permitted count to refill after an exception disappears.
+`deny.toml` is the sole current inventory of exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. Read its `bans.skip` entries for the current inventory; counts are not duplicated in this runbook. The exceptions are debt to remove, not a permitted count to refill after an exception disappears.
+
+The following table records historical reduction milestones, not the current inventory.
 
 | Inventory point | Configured graph families | Exact exceptions | Lockfile families | Lockfile packages |
 |---|---:|---:|---:|---:|
@@ -69,14 +71,14 @@ Update the nearest workspace-controlled owner, regenerate `Cargo.lock`, remove t
 | Path | Current responsibility | Target responsibility | Action | Removal condition | Verification method |
 |---|---|---|---|---|---|
 | `deny.toml` | canonical duplicate policy and exact exception inventory | shrink-only duplicate debt | maintain | never while Cargo is used | blocking `cargo deny check bans` |
-| `ci.yml:security-audit` | duplicate policy followed by RustSec audit | same blocking ownership | maintain | replace only if another required owner preserves both checks | workflow contract plus GitHub run |
+| `ci.yml:security-audit` | duplicate policy followed by RustSec audit | same blocking ownership | maintain | replace only if another required owner preserves both checks | source review and blocking cargo-deny/RustSec run evidence |
 | exact `bans.skip` entry | acknowledge one existing version | shrink-only temporary debt | delete | version is absent or family converges | denied unmatched/unnecessary skip diagnostics |
-| `bans.skip-tree` | absent | illegal broad suppression | keep absent | always | contract test and source review |
-| this runbook | operator procedure and ownership map | same maintained guidance | maintain | only with an equivalent maintained runbook | documentation contract |
+| `bans.skip-tree` | absent | illegal broad suppression | keep absent | always | policy source review |
+| this runbook | operator procedure and ownership map | same maintained guidance | maintain | only with an equivalent maintained runbook | operator review against the canonical policy and actual gate |
 
 ## Failure, rollback, and operations
 
 - A new duplicate, stale exception, malformed config, or unavailable pinned action is a mandatory blocker. It is not advisory and has no `continue-on-error` path.
 - RustSec remains an independent check in the same job; passing duplicate policy cannot conceal an advisory failure.
-- Rollback means reverting `deny.toml`, its blocking step, contracts, and this runbook as one unit. Do not leave a non-executed exception file or an action without a reviewed policy.
+- Rollback means reverting `deny.toml`, its blocking step, and this runbook as one unit. Do not leave a non-executed exception file or an action without a reviewed policy.
 - If the pinned action revision becomes unavailable, update it to another reviewed immutable revision and prove the same local cargo-deny command first. Do not replace it with an unpinned moving tag.
