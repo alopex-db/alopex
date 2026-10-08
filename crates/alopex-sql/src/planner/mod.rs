@@ -6398,11 +6398,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.from.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.from.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let assignments = stmt
                 .assignments
@@ -6413,14 +6421,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &assignment.column,
                         assignment.span,
                     )?;
-                    let value = self.type_checker.infer_type_with_scope(
-                        &assignment.value,
-                        &scope,
-                        &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        },
-                    )?;
+                    let value = self.infer_expr_with_scope(&assignment.value, &scope, &ctes)?;
                     self.validate_type_assignment(
                         &value,
                         &column_meta.data_type,
@@ -6441,11 +6442,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .selection
                 .as_ref()
                 .map(|expr| {
-                    self.type_checker
-                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        })
+                    let predicate = self.infer_expr_with_scope(expr, &scope, &ctes)?;
+                    if predicate.resolved_type != ResolvedType::Boolean {
+                        return Err(PlannerError::type_mismatch(
+                            "Boolean",
+                            predicate.resolved_type.to_string(),
+                            expr.span,
+                        ));
+                    }
+                    Ok(predicate)
                 })
                 .transpose()?;
             return Ok(LogicalPlan::Update {
@@ -6584,13 +6589,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             ScopedTable::new(target.clone(), 0),
             ScopedTable::new(source.clone(), target.column_count()),
         ];
-        let infer = |expr: &Expr| {
-            self.type_checker
-                .infer_type_with_scope(expr, &scope, &|statement, _| {
-                    let plan = Planner::new(self.catalog).plan(statement)?;
-                    Ok((plan, Vec::new()))
-                })
-        };
+        let ctes = CtePlans::default();
+        let infer = |expr: &Expr| self.infer_expr_with_scope(expr, &scope, &ctes);
 
         let on = infer(&stmt.on)?;
         if on.resolved_type != ResolvedType::Boolean {
@@ -6721,21 +6721,33 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "DELETE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.using.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.using.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let condition = stmt
                 .selection
                 .as_ref()
                 .map(|expr| {
-                    self.type_checker
-                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        })
+                    let predicate = self.infer_expr_with_scope(expr, &scope, &ctes)?;
+                    if predicate.resolved_type != ResolvedType::Boolean {
+                        return Err(PlannerError::type_mismatch(
+                            "Boolean",
+                            predicate.resolved_type.to_string(),
+                            expr.span,
+                        ));
+                    }
+                    Ok(predicate)
                 })
                 .transpose()?;
             return Ok(LogicalPlan::Delete {

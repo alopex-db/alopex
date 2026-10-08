@@ -624,16 +624,37 @@ where
                 table,
                 assignments,
                 filter,
-                ..
+                join_source,
+                returning,
             } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_update(txn, &*guard, &table, assignments, filter)?
+                dml::execute_update_with_returning(
+                    txn,
+                    &*guard,
+                    &table,
+                    assignments,
+                    filter,
+                    join_source,
+                    returning,
+                )?
             }
-            LogicalPlan::Delete { table, filter, .. } => {
+            LogicalPlan::Delete {
+                table,
+                filter,
+                join_source,
+                returning,
+            } => {
                 ensure_write(mode, op_name)?;
                 let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_delete(txn, &*guard, &table, filter)?
+                dml::execute_delete_with_returning(
+                    txn,
+                    &*guard,
+                    &table,
+                    filter,
+                    join_source,
+                    returning,
+                )?
             }
             LogicalPlan::Merge {
                 target,
@@ -995,6 +1016,10 @@ impl<'txn, T> crate::storage::bridge::SqlTxn<'txn, BlockingKVStore<T>> for Block
 where
     T: for<'a> AsyncKVTransaction<'a> + 'txn,
 {
+    fn memory_policy(&self) -> Option<&MemoryPolicy> {
+        self.memory_policy.as_ref()
+    }
+
     fn read_security(&self) -> Option<&bulk::CopySecurityConfig> {
         self.read_security.as_ref()
     }

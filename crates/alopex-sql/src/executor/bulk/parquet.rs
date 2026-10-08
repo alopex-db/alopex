@@ -1,5 +1,6 @@
 use std::fs::File;
 
+use alopex_core::sql::stream::ByteSized;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
@@ -10,7 +11,8 @@ use arrow_array::{
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
-use crate::catalog::TableMetadata;
+use crate::catalog::{ColumnMetadata, TableMetadata};
+use crate::executor::memory::{MemoryPolicy, map_core_memory_error};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::SqlValue;
@@ -119,12 +121,58 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
     Ok((schema, rows))
 }
 
-pub(crate) fn read_parquet_with_security(
+/// Read against SQL's planned types, accounting for decoded value payloads.
+/// This does not bound Arrow decoding allocations or row/container overhead.
+pub(crate) fn read_parquet_with_plan(
     path: &str,
-    config: &CopySecurityConfig,
-) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
-    validate_file_path(path, config)?;
-    read_parquet(path)
+    planned: &[ColumnMetadata],
+    security: Option<&CopySecurityConfig>,
+    memory: Option<&MemoryPolicy>,
+) -> Result<Vec<Vec<SqlValue>>> {
+    if let Some(config) = security {
+        validate_file_path(path, config)?;
+    }
+    let table = TableMetadata::new("read_parquet", planned.to_vec());
+    let mut reader = ParquetReader::open(path, &table, false)?;
+    let actual = reader.schema();
+    if actual.fields.len() != planned.len() {
+        return Err(ExecutorError::SchemaMismatch {
+            expected: planned.len(),
+            actual: actual.fields.len(),
+            reason: "READ_PARQUET column count changed after planning".into(),
+        });
+    }
+    for (position, (field, column)) in actual.fields.iter().zip(planned).enumerate() {
+        // SQL aliases change planned names, not the source's positional types.
+        if field.data_type.as_ref() != Some(&column.data_type) {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: planned.len(),
+                actual: actual.fields.len(),
+                reason: format!("READ_PARQUET column {position} type changed after planning"),
+            });
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut payload_bytes = 0_u64;
+    while let Some(batch) = reader.next_batch(1024)? {
+        for row in batch {
+            if let Some(policy) = memory {
+                for value in &row {
+                    payload_bytes = payload_bytes
+                        .checked_add(value.estimated_bytes())
+                        .ok_or_else(|| ExecutorError::ResourceExhausted {
+                            message: "READ_PARQUET payload size overflow".into(),
+                        })?;
+                }
+                policy
+                    .enforce(payload_bytes)
+                    .map_err(map_core_memory_error)?;
+            }
+            rows.push(row);
+        }
+    }
+    Ok(rows)
 }
 
 impl BulkReader for ParquetReader {
