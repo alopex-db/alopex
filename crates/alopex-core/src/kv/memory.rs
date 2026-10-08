@@ -1004,6 +1004,23 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         Ok(())
     }
 
+    fn update_existing(&mut self, key: Key, value: Value) -> Result<bool> {
+        // Keep get's state check, read tracking and SST read-through unchanged.
+        let Some(before) = self.get(&key)? else {
+            return Ok(false);
+        };
+        if self.mode == TxnMode::ReadOnly {
+            return Err(Error::TxnReadOnly);
+        }
+        // Repeated writes retain the original before-image, not an intermediate
+        // value from this transaction's pending writes.
+        self.journal_before
+            .entry(key.clone())
+            .or_insert(Some(before));
+        self.writes.insert(key, Some(value));
+        Ok(true)
+    }
+
     fn delete(&mut self, key: Key) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(Error::TxnClosed);

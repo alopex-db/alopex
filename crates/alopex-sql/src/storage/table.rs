@@ -69,14 +69,13 @@ impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
     pub fn update(&mut self, row_id: u64, row: &[SqlValue]) -> Result<()> {
         self.validate_row(row)?;
         let key = self.row_key(row_id);
-        if self.txn.get(&key)?.is_none() {
+        let encoded = RowCodec::encode(row);
+        if !self.txn.update_existing(key, encoded)? {
             return Err(StorageError::RowNotFound {
                 table_id: self.table_id,
                 row_id,
             });
         }
-        let encoded = RowCodec::encode(row);
-        self.txn.put(key, encoded)?;
         Ok(())
     }
 

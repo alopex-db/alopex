@@ -85,6 +85,24 @@ pub trait KVTransaction<'a> {
     /// Returns an error if the transaction is read-only.
     fn put(&mut self, key: Key, value: Value) -> Result<()>;
 
+    /// Stage a replacement only when the key exists in this transaction's view.
+    ///
+    /// Returns `false` without staging a write when the key is absent, including
+    /// a pending deletion. Existing backends inherit the `get` then `put`
+    /// implementation; overrides must preserve read tracking, the first-write
+    /// before-image, and the backend's commit/conflict and rollback semantics.
+    /// This is not a compare-and-swap or a stronger isolation guarantee.
+    ///
+    /// Errors follow `get` before `put`: a missing key in a read-only transaction
+    /// returns `false`, while replacing an existing key returns the write error.
+    fn update_existing(&mut self, key: Key, value: Value) -> Result<bool> {
+        if self.get(&key)?.is_none() {
+            return Ok(false);
+        }
+        self.put(key, value)?;
+        Ok(true)
+    }
+
     /// Deletes a key-value pair.
     /// This operation is buffered and will be applied on commit.
     ///

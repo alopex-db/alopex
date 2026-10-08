@@ -36,6 +36,300 @@ fn last_query(sql: &str) -> alopex_sql::executor::QueryResult {
         .expect("query result")
 }
 
+fn dml_statement_fixture(count: i32) -> String {
+    let mut sql = String::from("CREATE TABLE hw (id INTEGER PRIMARY KEY, v INTEGER);");
+    // Keep each INSERT inside the parser's MessagePack collection budget.
+    for first in (1..=count).step_by(128) {
+        let values = (first..=(first + 127).min(count))
+            .map(|id| format!("({id},{id})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!("INSERT INTO hw VALUES {values};"));
+    }
+    sql
+}
+
+#[test]
+fn dml_statement_distinct_subqueries_inside_case_keep_distinct_results() {
+    let query = last_query(&format!(
+        "{} UPDATE hw SET v=CASE WHEN id<=512 \
+         THEN CAST((SELECT MAX(v) FROM hw)+1 AS INTEGER) \
+         ELSE (SELECT MIN(v) FROM hw)+1 END; SELECT id,v FROM hw ORDER BY id;",
+        dml_statement_fixture(600)
+    ));
+    assert_eq!(query.rows.len(), 600);
+    for (row, id) in query.rows.iter().zip(1..=600) {
+        assert_eq!(
+            row,
+            &[
+                SqlValue::Integer(id),
+                SqlValue::Integer(if id <= 512 { 601 } else { 2 })
+            ]
+        );
+    }
+}
+
+#[test]
+fn dml_statement_executor_joined_plans_read_before_all_batches() {
+    for (sql, is_update) in [
+        (
+            "UPDATE hw SET v=source.v+1 FROM source WHERE source.id=1",
+            true,
+        ),
+        ("DELETE FROM hw USING source WHERE source.id=1", false),
+    ] {
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+        let setup = format!(
+            "{} CREATE TABLE source(id INTEGER PRIMARY KEY, v INTEGER);",
+            dml_statement_fixture(600)
+        );
+        for statement in Parser::parse_sql(&AlopexDialect, &setup).unwrap() {
+            let plan = Planner::new(&*catalog.read().unwrap())
+                .plan(&statement)
+                .unwrap();
+            executor.execute(plan).unwrap();
+        }
+        let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+        let mut plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        // This tests the public LogicalPlan/Executor contract, not SQL alias or
+        // joined scalar-subquery planning. Both tables have identical schemas;
+        // reuse the typed source indexes with the target as the physical source.
+        let (alopex_sql::LogicalPlan::Update { join_source, .. }
+        | alopex_sql::LogicalPlan::Delete { join_source, .. }) = &mut plan
+        else {
+            panic!("expected joined DML plan")
+        };
+        join_source.as_mut().unwrap().table = "hw".into();
+        let result = executor.execute(plan).unwrap();
+        // UPDATE reports changed rows: id=2 already has its final value 2.
+        let expected_changes = if is_update { 599 } else { 600 };
+        assert_eq!(
+            result,
+            ExecutionResult::RowsAffected(expected_changes),
+            "{sql}"
+        );
+        let statement = Parser::parse_sql(&AlopexDialect, "SELECT id,v FROM hw ORDER BY id")
+            .unwrap()
+            .remove(0);
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        let ExecutionResult::Query(query) = executor.execute(plan).unwrap() else {
+            panic!("expected query")
+        };
+        if is_update {
+            assert_eq!(query.rows.len(), 600);
+            for (row, id) in query.rows.iter().zip(1..=600) {
+                assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(2)]);
+            }
+        } else {
+            assert!(query.rows.is_empty());
+        }
+    }
+}
+
+#[test]
+fn dml_statement_auto_transaction_rolls_back_late_apply_error() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let mut run = |sql: &str| -> Result<Vec<ExecutionResult>, ExecutorError> {
+        Parser::parse_sql(&AlopexDialect, sql)
+            .unwrap()
+            .iter()
+            .map(|statement| {
+                let plan = Planner::new(&*catalog.read().unwrap()).plan(statement)?;
+                executor.execute(plan)
+            })
+            .collect()
+    };
+    run(&dml_statement_fixture(600)).unwrap();
+    // Batch one can insert ids 1001..1512. Batch two conflicts with id 1001.
+    let error = run(
+        "UPDATE hw SET id=CASE WHEN id<=512 THEN id+1000 ELSE 1001 END, \
+        v=(SELECT MAX(v) FROM hw)",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ExecutorError::ConstraintViolation(_)),
+        "{error}"
+    );
+    let results = run("SELECT id,v FROM hw ORDER BY id").unwrap();
+    let ExecutionResult::Query(query) = &results[0] else {
+        panic!("expected rows")
+    };
+    assert_eq!(query.rows.len(), 600);
+    for (row, id) in query.rows.iter().zip(1..=600) {
+        assert_eq!(row, &vec![SqlValue::Integer(id); 2]);
+    }
+}
+
+#[test]
+fn dml_statement_scalar_update_reads_before_all_batches() {
+    for count in [600, 1025] {
+        let query = last_query(&format!(
+            "{} UPDATE hw SET v=(SELECT MAX(v) FROM hw)+1; SELECT id,v FROM hw ORDER BY id;",
+            dml_statement_fixture(count)
+        ));
+        assert_eq!(query.rows.len(), count as usize);
+        for (row, id) in query.rows.iter().zip(1..=count) {
+            assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(count + 1)]);
+        }
+    }
+}
+
+#[test]
+fn dml_statement_delete_membership_reads_before_all_batches() {
+    for count in [600, 1025] {
+        let query = last_query(&format!(
+            "{} DELETE FROM hw WHERE id<=512 OR v IN \
+             (SELECT id+512 FROM hw WHERE id<={}); SELECT id FROM hw ORDER BY id;",
+            dml_statement_fixture(count),
+            count - 512
+        ));
+        assert_eq!(query.rows.len(), 0, "row count {count}");
+    }
+}
+
+#[test]
+fn dml_statement_correlated_update_and_delete_read_original_rows() {
+    let query = last_query(&format!(
+        "{} UPDATE hw SET v=(SELECT MAX(s.v) FROM hw s WHERE s.id<=hw.id)+1000; \
+         SELECT id,v FROM hw ORDER BY id;",
+        dml_statement_fixture(600)
+    ));
+    assert_eq!(query.rows.len(), 600);
+    for (row, id) in query.rows.iter().zip(1..=600) {
+        assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(id + 1000)]);
+    }
+    let query = last_query(&format!(
+        "{} DELETE FROM hw WHERE EXISTS \
+         (SELECT 1 FROM hw s WHERE s.id=1 AND hw.id>=s.id); SELECT id FROM hw;",
+        dml_statement_fixture(600)
+    ));
+    assert!(query.rows.is_empty());
+}
+
+#[test]
+fn dml_statement_sees_previous_uncommitted_statement_and_resets_cache() {
+    use alopex_core::kv::{KVStore, KVTransaction};
+    use alopex_core::types::TxnMode;
+    use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
+    use alopex_sql::storage::TxnBridge;
+
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut overlay = CatalogOverlay::new();
+    let mut borrowed =
+        TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+    let sql = format!(
+        "{} UPDATE hw SET v=v+1000; \
+         UPDATE hw SET v=(SELECT MAX(v) FROM hw)+1; \
+         SELECT DISTINCT v FROM hw; \
+         UPDATE hw SET v=(SELECT MAX(v) FROM hw)+1; SELECT DISTINCT v FROM hw;",
+        dml_statement_fixture(600)
+    );
+    let mut observed = Vec::new();
+    for statement in Parser::parse_sql(&AlopexDialect, &sql).unwrap() {
+        let plan = {
+            let guard = catalog.read().unwrap();
+            let (_, overlay) = borrowed.split_parts();
+            Planner::new(&TxnCatalogView::new(&*guard, overlay))
+                .plan(&statement)
+                .unwrap()
+        };
+        if let ExecutionResult::Query(result) =
+            executor.execute_in_txn(plan, &mut borrowed).unwrap()
+        {
+            observed.push(result.rows);
+        }
+    }
+    assert_eq!(
+        observed,
+        vec![
+            vec![vec![SqlValue::Integer(1601)]],
+            vec![vec![SqlValue::Integer(1602)]],
+        ]
+    );
+    drop(borrowed);
+    txn.rollback_self().unwrap();
+}
+
+#[test]
+fn dml_statement_returning_preserves_updated_and_deleted_rows() {
+    let updated = last_query(&format!(
+        "{} UPDATE hw SET v=(SELECT MAX(v) FROM hw)+1 RETURNING id,v;",
+        dml_statement_fixture(600)
+    ));
+    assert_eq!(updated.rows.len(), 600);
+    for (row, id) in updated.rows.iter().zip(1..=600) {
+        assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(601)]);
+    }
+    let deleted = last_query(&format!(
+        "{} DELETE FROM hw WHERE id<=512 OR v IN \
+         (SELECT id+512 FROM hw WHERE id<=88) RETURNING id,v;",
+        dml_statement_fixture(600)
+    ));
+    assert_eq!(deleted.rows.len(), 600);
+    for (row, id) in deleted.rows.iter().zip(1..=600) {
+        assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(id)]);
+    }
+}
+
+#[test]
+fn dml_statement_late_scalar_error_preserves_prior_uncommitted_writes() {
+    use alopex_core::kv::{KVStore, KVTransaction};
+    use alopex_core::types::TxnMode;
+    use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
+    use alopex_sql::storage::TxnBridge;
+
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut overlay = CatalogOverlay::new();
+    let mut borrowed =
+        TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+    let mut run = |sql: &str| -> Result<Vec<ExecutionResult>, ExecutorError> {
+        let mut results = Vec::new();
+        for statement in Parser::parse_sql(&AlopexDialect, sql).unwrap() {
+            let plan = {
+                let guard = catalog.read().unwrap();
+                let (_, overlay) = borrowed.split_parts();
+                Planner::new(&TxnCatalogView::new(&*guard, overlay))
+                    .plan(&statement)
+                    .unwrap()
+            };
+            results.push(executor.execute_in_txn(plan, &mut borrowed)?);
+        }
+        Ok(results)
+    };
+    run(&format!(
+        "{} UPDATE hw SET v=v+1000;",
+        dml_statement_fixture(600)
+    ))
+    .unwrap();
+    let error = run("UPDATE hw SET v=(SELECT s.v FROM hw s \
+         WHERE s.id=hw.id OR (hw.id>512 AND s.id=1))+1;")
+    .unwrap_err();
+    assert!(matches!(error, ExecutorError::InvalidOperation { .. }));
+    let rows = run("SELECT id,v FROM hw ORDER BY id").unwrap();
+    let ExecutionResult::Query(query) = &rows[0] else {
+        panic!("expected original rows");
+    };
+    assert_eq!(query.rows.len(), 600);
+    for (row, id) in query.rows.iter().zip(1..=600) {
+        assert_eq!(row, &[SqlValue::Integer(id), SqlValue::Integer(id + 1000)]);
+    }
+    drop(run);
+    drop(borrowed);
+    txn.rollback_self().unwrap();
+}
+
 fn setup_sql(select: &str) -> String {
     format!(
         r#"
