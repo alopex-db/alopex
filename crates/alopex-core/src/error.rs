@@ -241,7 +241,7 @@ pub enum Error {
 fn already_open_owner(holder: &str) -> &'static str {
     let current_pid = format!("pid={}", std::process::id());
     if holder.split_whitespace().next() == Some(current_pid.as_str()) {
-        "in this process; release remaining Database or Transaction handles"
+        "in this process; release remaining Database, Transaction or PreparedStatement handles"
     } else {
         "by another process"
     }
@@ -268,7 +268,7 @@ mod tests {
             let message = error.to_string();
             if same_process {
                 assert!(message.contains("already open in this process"));
-                assert!(message.contains("Database or Transaction handles"));
+                assert!(message.contains("Database, Transaction or PreparedStatement handles"));
                 assert!(!message.contains("another process"));
             } else {
                 assert!(message.contains("already open by another process"));

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use alopex_sql::{AlopexDialect, Parser};
 use pyo3::exceptions::PyValueError;
@@ -27,6 +27,136 @@ enum TxnState {
 pub(crate) struct PyTransactionInner {
     pub(crate) txn: Mutex<Option<alopex_embedded::OwnedEmbeddedTransaction>>,
     state: Mutex<TxnState>,
+}
+
+/// Borrow the existing owner for one finite call; never create a rollback-on-drop wrapper.
+pub(super) fn with_prepared_transaction<T: Send>(
+    py: Python<'_>,
+    inner: &Arc<PyTransactionInner>,
+    executing: bool,
+    operation: impl FnOnce(&mut alopex_embedded::OwnedEmbeddedTransaction) -> alopex_embedded::Result<T>
+        + Send,
+) -> PyResult<T> {
+    enum CallError {
+        StateLock,
+        TransactionLock,
+        Closed,
+        StreamActive,
+        MustAbort,
+        Native(alopex_embedded::Error),
+    }
+    let result = py.detach(|| {
+        let state = inner.state.lock().map_err(|_| CallError::StateLock)?;
+        if *state != TxnState::Active {
+            return Err(CallError::Closed);
+        }
+        let mut guard = inner.txn.lock().map_err(|_| CallError::TransactionLock)?;
+        let txn = guard.as_mut().ok_or(CallError::Closed)?;
+        if executing {
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CallError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CallError::MustAbort);
+                }
+                _ => {}
+            }
+        }
+        operation(txn).map_err(CallError::Native)
+    });
+    result.map_err(|err| match err {
+        CallError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CallError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CallError::Closed => error::to_py_err("transaction is closed"),
+        CallError::StreamActive => {
+            error::stream_error("stream_active", "transaction stream is active")
+        }
+        CallError::MustAbort => error::stream_error(
+            "stream_abort_required",
+            "transaction stream requires rollback",
+        ),
+        CallError::Native(err) => error::embedded_err(err),
+    })
+}
+
+/// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
+pub(super) fn rollback_tracked_for_database_close(
+    py: Python<'_>,
+    tracked: &Mutex<Vec<Weak<PyTransactionInner>>>,
+    #[cfg(test)] rollback_fail_count: &std::sync::atomic::AtomicUsize,
+) -> PyResult<()> {
+    enum CloseError {
+        TrackingLock,
+        StateLock,
+        TransactionLock,
+        Native(alopex_embedded::Error),
+        #[cfg(test)]
+        Injected,
+    }
+
+    let result = py.detach(|| {
+        let mut tracked = tracked.lock().map_err(|_| CloseError::TrackingLock)?;
+        let mut first_error = None;
+        tracked.retain(|weak| {
+            let Some(handle) = weak.upgrade() else {
+                return false;
+            };
+            // Match commit's state -> transaction order. The tracking guard is also
+            // acquired and released in this detached phase, before any Python error.
+            let mut state = match handle.state.lock() {
+                Ok(state) => state,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::StateLock);
+                    return true;
+                }
+            };
+            let mut transaction = match handle.txn.lock() {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::TransactionLock);
+                    return true;
+                }
+            };
+            #[cfg(test)]
+            if rollback_fail_count
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                first_error.get_or_insert(CloseError::Injected);
+                return true;
+            }
+            if let Some(txn) = transaction.as_mut() {
+                if let Err(error) = txn.rollback() {
+                    // Preserve the error and handle, not a promise that the consuming
+                    // native rollback can be retried after a backend failure.
+                    first_error.get_or_insert(CloseError::Native(error));
+                    return true;
+                }
+            }
+            *transaction = None;
+            if *state == TxnState::Active {
+                *state = TxnState::RolledBack;
+            }
+            false
+        });
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    });
+    result.map_err(|error| match error {
+        CloseError::TrackingLock => error::to_py_err("transaction tracking lock poisoned"),
+        CloseError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CloseError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CloseError::Native(error) => error::embedded_err(error),
+        #[cfg(test)]
+        CloseError::Injected => error::to_py_err("ロールバック失敗（テスト注入）"),
+    })
 }
 
 #[pyclass(name = "Transaction")]
@@ -556,6 +686,11 @@ impl PyTransaction {
         let bindings = sql::prepared_bindings(params.as_ref())?;
         sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         self.ensure_active()?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Transaction.execute_sql does not accept transaction control SQL; use Transaction.savepoint(), Transaction.rollback_to(), Transaction.release(), Transaction.commit(), or Transaction.rollback()",
+            ));
+        }
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
         // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
@@ -613,6 +748,30 @@ impl PyTransaction {
             ExecError::Embedded(err) => error::embedded_err(err),
         })?;
         sql::execution_result_to_py(py, result)
+    }
+
+    /// Prepare one native-bound statement owned by this transaction.
+    fn prepare(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+    ) -> PyResult<crate::embedded::database::PyPreparedStatement> {
+        crate::embedded::database::PyPreparedStatement::for_transaction(
+            py,
+            sql,
+            Arc::clone(&self.inner),
+            Arc::clone(&self.control),
+        )
+    }
+
+    /// Execute native rows without committing. Execution errors require explicit rollback.
+    fn execute_many(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        rows: Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.prepare(py, sql)?.execute_many(py, rows)
     }
 
     /// Create a named savepoint within this transaction.
@@ -763,50 +922,68 @@ impl PyTransaction {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
-        if *state != TxnState::Active {
-            return Err(error::to_py_err("transaction is closed"));
+        enum CommitError {
+            StateLock,
+            TransactionLock,
+            Closed,
+            StreamActive,
+            StreamAbortRequired,
+            Native(alopex_embedded::Error),
         }
-        let mut guard = self
-            .inner
-            .txn
-            .lock()
-            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
-        match txn.session().status() {
-            alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
-                return Err(error::stream_error(
-                    "stream_active",
-                    "commit is not allowed while a transaction stream is active",
-                ));
+
+        // No Python error may be constructed while these guards are held: doing
+        // so could reacquire the GIL before another Python caller releases it.
+        let result = py.detach(|| {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| CommitError::StateLock)?;
+            if *state != TxnState::Active {
+                return Err(CommitError::Closed);
             }
-            alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
-                return Err(error::stream_error(
-                    "stream_abort_required",
-                    "transaction stream requires rollback before commit",
-                ));
+            let mut guard = self
+                .inner
+                .txn
+                .lock()
+                .map_err(|_| CommitError::TransactionLock)?;
+            let txn = guard.as_mut().ok_or(CommitError::Closed)?;
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CommitError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CommitError::StreamAbortRequired);
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        let result = py.detach(|| txn.commit());
-        match result {
-            Ok(()) => {
-                *guard = None;
-                *state = TxnState::Committed;
-                Ok(())
+            match txn.commit() {
+                Ok(()) => {
+                    *guard = None;
+                    *state = TxnState::Committed;
+                    Ok(())
+                }
+                Err(err) => {
+                    *guard = None;
+                    *state = TxnState::RolledBack;
+                    Err(CommitError::Native(err))
+                }
             }
-            Err(err) => {
-                *guard = None;
-                *state = TxnState::RolledBack;
-                Err(error::embedded_err(err))
-            }
-        }
+        });
+        result.map_err(|err| match err {
+            CommitError::StateLock => error::to_py_err("transaction state lock poisoned"),
+            CommitError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+            CommitError::Closed => error::to_py_err("transaction is closed"),
+            CommitError::StreamActive => error::stream_error(
+                "stream_active",
+                "commit is not allowed while a transaction stream is active",
+            ),
+            CommitError::StreamAbortRequired => error::stream_error(
+                "stream_abort_required",
+                "transaction stream requires rollback before commit",
+            ),
+            CommitError::Native(err) => error::embedded_err(err),
+        })
     }
 
     fn rollback(&self) -> PyResult<()> {
@@ -1007,6 +1184,115 @@ mod tests {
             txn.commit(py).expect("commit");
         });
         assert!(txn.get(b"key").is_err());
+    }
+
+    #[test]
+    fn commit_releases_gil_while_waiting_and_locks_before_reattaching() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        Python::initialize();
+        let deadline = Duration::from_secs(3);
+        let mut outcomes = Vec::new();
+        for lock_state in [true, false] {
+            let db = Arc::new(alopex_embedded::Database::new());
+            let txn = Arc::new(transaction(Arc::clone(&db), TxnMode::ReadWrite));
+            txn.put(b"committed-key", b"committed-value").unwrap();
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let holder_inner = Arc::clone(&txn.inner);
+            let holder = thread::spawn(move || {
+                if lock_state {
+                    let _guard = holder_inner.state.lock().unwrap();
+                    let _ = held_tx.send(());
+                    // The native coordinator releases this guard even on a failed probe.
+                    let _ = release_rx.recv();
+                } else {
+                    let _guard = holder_inner.txn.lock().unwrap();
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                }
+            });
+            if held_rx.recv_timeout(deadline).is_err() {
+                let _ = release_tx.send(());
+                holder.join().unwrap();
+                panic!("mutex holder did not become ready");
+            }
+
+            let (started_tx, started_rx) = mpsc::channel();
+            let commit_txn = Arc::clone(&txn);
+            let commit = thread::spawn(move || {
+                Python::attach(|py| {
+                    // Notify only after acquiring the GIL, before entering the real method.
+                    let _ = started_tx.send(());
+                    commit_txn.commit(py).map_err(|error| error.to_string())
+                })
+            });
+            let started = started_rx.recv_timeout(deadline).is_ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (observe_tx, observe_rx) = mpsc::channel();
+            let (unlocked_tx, unlocked_rx) = mpsc::channel();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let observer_inner = Arc::clone(&txn.inner);
+            // Never let a probe which acquired the GIL before commit count as progress.
+            let observer = started.then(|| {
+                thread::spawn(move || {
+                    Python::attach(|_| {
+                        let _ = ready_tx.send(());
+                        if observe_rx.recv() != Ok(true) {
+                            return;
+                        }
+                        // Keep the GIL: commit can finish only its detached native phase.
+                        // All timeouts belong to the GIL-free coordinator, not this worker.
+                        loop {
+                            if let Ok(state) = observer_inner.state.try_lock() {
+                                if *state == super::TxnState::Committed {
+                                    if let Ok(transaction) = observer_inner.txn.try_lock() {
+                                        if transaction.is_none() {
+                                            let _ = unlocked_tx.send(());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            match stop_rx.try_recv() {
+                                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                                Err(mpsc::TryRecvError::Empty) => thread::yield_now(),
+                            }
+                        }
+                    });
+                })
+            });
+            let gil_progress = started && ready_rx.recv_timeout(deadline).is_ok();
+            // Release the only contended mutex before waiting for or asserting any result.
+            let _ = release_tx.send(());
+            let _ = observe_tx.send(gil_progress);
+            let locks_released = gil_progress && unlocked_rx.recv_timeout(deadline).is_ok();
+            let _ = stop_tx.send(());
+            // On RED the observer can now acquire the GIL and consume the queued false.
+            holder.join().unwrap();
+            if let Some(observer) = observer {
+                observer.join().unwrap();
+            }
+            let committed = commit.join().unwrap();
+            let mut reader = db.begin(TxnMode::ReadOnly).unwrap();
+            assert_eq!(
+                reader.get(b"committed-key").unwrap(),
+                Some(b"committed-value".to_vec())
+            );
+            assert!(committed.is_ok(), "commit result: {committed:?}");
+            assert_eq!(*txn.inner.state.lock().unwrap(), super::TxnState::Committed);
+            assert!(txn.inner.txn.lock().unwrap().is_none());
+            outcomes.push((lock_state, started, gil_progress, locks_released));
+        }
+        // Both state/txn cells run and every worker joins before a regression can fail.
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, started, progress, unlocked)| *started && *progress && *unlocked),
+            "(state_mutex, started, GIL_progress, locks_before_GIL_return): {outcomes:?}"
+        );
     }
 
     #[test]

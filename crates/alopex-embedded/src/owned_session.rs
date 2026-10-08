@@ -238,7 +238,9 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_prepared_owned(self, statement, parameters)
     }
 
-    pub(crate) fn execute_prepared_many<I, V, F>(
+    /// Execute validated parameter rows in this transaction without committing.
+    /// An execution error fails the transaction; callers must explicitly roll back.
+    pub fn execute_prepared_many<I, V, F>(
         &mut self,
         statement: &alopex_sql::Statement,
         rows: I,

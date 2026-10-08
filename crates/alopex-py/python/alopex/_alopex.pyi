@@ -658,6 +658,15 @@ class Database:
 
 
 class Transaction:
+    def prepare(self, sql: str) -> PreparedStatement: ...
+    def execute_many(
+        self,
+        sql: str,
+        rows: Union[
+            List[Union[List[Any], Tuple[Any, ...]]],
+            Tuple[Union[List[Any], Tuple[Any, ...]], ...],
+        ],
+    ) -> List[Union[List[Dict[str, Any]], int, None]]: ...
     @property
     def status(self) -> Dict[str, str]: ...
 

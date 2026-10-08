@@ -154,6 +154,80 @@ def test_prepared_execute_many_is_atomic(db):
         statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
 
 
+@pytest.mark.parametrize("close_first", [False, True])
+def test_prepared_finalize_releases_database_handle(tmp_path, close_first):
+    path = str(tmp_path / "prepared-finalize")
+    database = Database.open(path)
+    database.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+    database.execute_sql("INSERT INTO items VALUES (1)")
+    statement = database.prepare("SELECT id FROM items")
+    if close_first:
+        database.close()
+    statement.finalize()
+    if not close_first:
+        database.close()
+
+    # Keep both wrappers alive: garbage collection must not release this lock.
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id FROM items") == [{"id": 1}]
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.finalize()
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.execute()
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.parameter_count()
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("operation", ["select", "native", "rendered", "many"])
+def test_prepared_rejects_execute_after_database_close(tmp_path, operation):
+    path = str(tmp_path / "prepared-closed")
+    database = Database.open(path)
+    database.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, at TIMESTAMP)")
+    database.execute_sql("INSERT INTO items VALUES (1, NULL)")
+    sql = "SELECT id FROM items" if operation == "select" else "INSERT INTO items VALUES (?, ?)"
+    statement = database.prepare(sql)
+    if operation in ("native", "rendered"):
+        statement.bind(1, 2)
+        statement.bind(2, dt.datetime(2024, 5, 4, 3, 2, 1) if operation == "rendered" else None)
+    database.close()
+    try:
+        with pytest.raises(AlopexError, match="database is closed"):
+            statement.parameter_count()
+        with pytest.raises(AlopexError, match="database is closed"):
+            if operation == "many":
+                statement.execute_many([[2, None], [3, None]])
+            else:
+                statement.execute()
+    finally:
+        statement.finalize()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id FROM items ORDER BY id") == [{"id": 1}]
+    finally:
+        reopened.close()
+
+
+def test_prepared_active_handle_guides_reopen_error(tmp_path):
+    path = str(tmp_path / "prepared-owner")
+    database = Database.open(path)
+    statement = database.prepare("SELECT 1 AS value")
+    database.close()
+    try:
+        with pytest.raises(AlopexError, match="PreparedStatement"):
+            Database.open(path)
+    finally:
+        statement.finalize()
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT 1 AS value") == [{"value": 1}]
+    finally:
+        reopened.close()
+
+
 def test_execute_sql_portable_metadata_exact_rows(db):
     db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
 

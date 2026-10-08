@@ -16,9 +16,67 @@ use pyo3::types::{
 use pyo3::IntoPyObjectExt;
 
 use alopex_sql::storage::SqlValue;
-use alopex_sql::ExecutionResult;
+use alopex_sql::{AlopexDialect, ExecutionResult, Parser, StatementKind};
 
 use crate::error::AlopexError;
+
+/// Detect transaction control anywhere in a valid SQL batch before execution.
+/// Both Python execution surfaces require their explicit transaction methods.
+pub(crate) fn is_transaction_control_statement(sql: &str) -> bool {
+    let keyword = leading_sql_keyword(sql);
+    let starts_with_transaction_control = [
+        "BEGIN",
+        "START",
+        "SET",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+    ]
+    .iter()
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
+    if !starts_with_transaction_control && !sql.contains(';') {
+        return false;
+    }
+
+    Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement.kind,
+                StatementKind::Begin { .. }
+                    | StatementKind::SetTransaction { .. }
+                    | StatementKind::Commit
+                    | StatementKind::Rollback
+                    | StatementKind::Savepoint { .. }
+                    | StatementKind::RollbackToSavepoint { .. }
+                    | StatementKind::ReleaseSavepoint { .. }
+            )
+        })
+    })
+}
+
+fn leading_sql_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(newline) = comment.find('\n') else {
+                return "";
+            };
+            sql = &comment[newline + 1..];
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return "";
+            };
+            sql = &comment[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    sql.split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
+}
 
 /// One Python binding after classifying whether it can use the native
 /// prepared-statement transport or needs the SQL-literal compatibility path.
@@ -251,7 +309,7 @@ enum ScanState {
 }
 
 /// SQL を「引用符・コメント外の `?`」で分割する。戻り値の長さは `プレースホルダ数 + 1`。
-fn split_on_placeholders(sql: &str) -> Vec<&str> {
+pub(super) fn split_on_placeholders(sql: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     let mut state = ScanState::Normal;
