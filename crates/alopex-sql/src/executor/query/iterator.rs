@@ -158,6 +158,19 @@ enum SortOutput {
     External(ExternalSortState),
 }
 
+// Own complete runs while construction can still fail. Readers take ownership
+// only after every run has been opened successfully.
+#[derive(Default)]
+struct PendingSortRuns(Vec<PathBuf>);
+
+impl Drop for PendingSortRuns {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl<I: RowIterator> SortIterator<I> {
     /// Creates a new sort iterator.
     ///
@@ -201,7 +214,7 @@ impl<I: RowIterator> SortIterator<I> {
             .as_ref()
             .and_then(|policy| policy.spill_directory())
             .is_some();
-        let mut runs: Vec<PathBuf> = Vec::new();
+        let mut runs = PendingSortRuns::default();
         let mut keyed: Vec<(Row, Vec<SqlValue>)> = Vec::new();
 
         while let Some(result) = input.next_row() {
@@ -227,14 +240,14 @@ impl<I: RowIterator> SortIterator<I> {
                         reason: "spill policy missing".into(),
                     })?;
                 let path = spill_run(&mut keyed, order_by, policy)?;
-                runs.push(path);
+                runs.0.push(path);
                 if let Some(tracker) = &mut tracker {
                     tracker.reset();
                 }
             }
         }
 
-        if runs.is_empty() {
+        if runs.0.is_empty() {
             keyed.sort_by(|a, b| compare_key_values(&a.1, &b.1, order_by));
             let sorted: Vec<Row> = keyed.into_iter().map(|(row, _)| row).collect();
             return Ok(Self {
@@ -252,10 +265,11 @@ impl<I: RowIterator> SortIterator<I> {
                     reason: "spill policy missing".into(),
                 })?;
             let path = spill_run(&mut keyed, order_by, policy)?;
-            runs.push(path);
+            runs.0.push(path);
         }
 
-        let external = ExternalSortState::new(order_by.to_vec(), runs)?;
+        let external = ExternalSortState::new(order_by.to_vec(), runs.0.clone())?;
+        runs.0.clear();
 
         Ok(Self {
             output: SortOutput::External(external),
