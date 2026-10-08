@@ -285,14 +285,21 @@ impl OwnedEmbeddedTransaction {
 
     /// Restore direct HNSW state to the set present when the savepoint was created.
     fn rollback_hnsw_to_savepoint(&mut self, retained: &HashSet<String>) -> Result<()> {
-        let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-        let mut restored = HashMap::with_capacity(retained.len());
-        for (name, (mut index, mut state)) in hnsw_indices {
-            index.rollback(&mut state).map_err(Error::Core)?;
-            if retained.contains(&name) {
-                restored.insert(name, (index, state));
-            }
-        }
+        // A newer savepoint stages HNSW changes and clears their undo snapshot.
+        // The core transaction has already rolled back to the requested point;
+        // reload that version instead of using the latest graph's undo state.
+        let restored = self
+            .session
+            .with_transaction(|transaction| {
+                let mut transaction = OwnedKVTransactionAdapter::new(transaction);
+                let mut restored = HashMap::with_capacity(retained.len());
+                for name in retained {
+                    let index = HnswIndex::load(name, &mut transaction)?;
+                    restored.insert(name.clone(), (index, HnswTransactionState::default()));
+                }
+                Ok(restored)
+            })
+            .map_err(Error::Core)?;
         self.hnsw_indices = restored;
         Ok(())
     }
@@ -536,6 +543,42 @@ mod tests {
             Some(vec![0.0, 1.0])
         );
         reader.rollback().unwrap();
+    }
+
+    #[test]
+    fn owned_embedded_nested_savepoint_rollback_discards_staged_hnsw_mutations() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("s1").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        // Capturing s2 stages the HNSW delta into the core transaction. An
+        // older savepoint must still restore the graph that existed at s1.
+        transaction.create_savepoint("s2").unwrap();
+        transaction.rollback_to_savepoint("s1").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let mut keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        keys.sort();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
     }
 
     #[test]
