@@ -1355,6 +1355,38 @@ fn test_check_vector_distance_wrong_arg_count() {
 }
 
 #[test]
+fn test_check_vector_functions_accept_null_vectors() {
+    let catalog = create_vector_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let null = TypedExpr::literal(Literal::Null, ResolvedType::Null, test_span());
+    let vector = TypedExpr::vector_literal(vec![1.0, 0.0], 2, test_span());
+    let metric = TypedExpr::literal(
+        Literal::String("cosine".into()),
+        ResolvedType::Text,
+        test_span(),
+    );
+    for (first, second) in [
+        (null.clone(), vector.clone()),
+        (vector, null.clone()),
+        (null.clone(), null),
+    ] {
+        let args = vec![first, second, metric.clone()];
+        assert_eq!(
+            type_checker
+                .check_vector_distance(&args, test_span())
+                .unwrap(),
+            ResolvedType::Double,
+        );
+        assert_eq!(
+            type_checker
+                .check_vector_similarity(&args, test_span())
+                .unwrap(),
+            ResolvedType::Double,
+        );
+    }
+}
+
+#[test]
 fn test_check_vector_distance_dimension_mismatch() {
     let catalog = create_vector_catalog();
     let type_checker = TypeChecker::new(&catalog);
