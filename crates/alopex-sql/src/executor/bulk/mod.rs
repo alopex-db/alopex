@@ -38,11 +38,18 @@ use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 mod csv;
+mod input_file;
 mod parquet;
+
+use input_file::open_input_file;
+#[cfg(all(test, unix))]
+use input_file::open_input_file_with_after_validation;
+#[cfg(all(test, unix))]
+mod input_file_tests;
 
 pub use csv::CsvReader;
 pub use parquet::{ParquetReader, parquet_schema, read_parquet};
-pub(crate) use parquet::{parquet_schema_with_security, read_parquet_with_security};
+pub(crate) use parquet::{parquet_schema_with_security, read_parquet_with_plan};
 
 /// ファイル形式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,27 +690,27 @@ fn csv_value(value: &SqlValue) -> String {
 pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
 
-    // 先に存在確認を行い、設計どおり FileNotFound を優先する。
-    if !path.exists() {
-        return Err(ExecutorError::FileNotFound(file_path.into()));
-    }
-
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| ExecutorError::PathValidationFailed {
-            path: file_path.into(),
-            reason: format!("failed to canonicalize: {e}"),
-        })?;
-
-    if let Some(base_dirs) = &config.allowed_base_dirs {
-        let allowed = base_dirs.iter().any(|base| canonical.starts_with(base));
-        if !allowed {
-            return Err(ExecutorError::PathValidationFailed {
+    let canonical = if let Some(base_dirs) = &config.allowed_base_dirs {
+        // Restricted callers must not distinguish an unresolved path from a
+        // resolved path outside the allowlist, or learn the configured roots.
+        path.canonicalize()
+            .ok()
+            .filter(|canonical| base_dirs.iter().any(|base| canonical.starts_with(base)))
+            .ok_or_else(|| ExecutorError::PathValidationFailed {
                 path: file_path.into(),
-                reason: format!("path not in allowed directories: {:?}", base_dirs),
-            });
+                reason: "path not in allowed directories".into(),
+            })?
+    } else {
+        // Preserve the existing diagnostics for trusted, unrestricted callers.
+        if !path.exists() {
+            return Err(ExecutorError::FileNotFound(file_path.into()));
         }
-    }
+        path.canonicalize()
+            .map_err(|e| ExecutorError::PathValidationFailed {
+                path: file_path.into(),
+                reason: format!("failed to canonicalize: {e}"),
+            })?
+    };
 
     if !config.allow_symlinks && path.is_symlink() {
         return Err(ExecutorError::PathValidationFailed {
