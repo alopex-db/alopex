@@ -5,7 +5,7 @@ use alopex_core::kv::KVStore;
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::Row;
-use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
+use crate::executor::evaluator::coerce_value;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::query::subquery::evaluate_expr_with_subqueries;
@@ -81,7 +81,14 @@ pub fn execute_update_with_returning<
                 let source_table = catalog
                     .get_table(&source.table)
                     .ok_or_else(|| ExecutorError::TableNotFound(source.table.clone()))?;
-                find_join_row(txn, source_table, source.condition.as_ref(), &row)?
+                find_join_row(
+                    txn,
+                    catalog,
+                    source_table,
+                    source.condition.as_ref(),
+                    row_id,
+                    &row,
+                )?
             } else {
                 None
             };
@@ -169,30 +176,46 @@ pub fn execute_update_with_returning<
     }
 }
 
-fn find_join_row<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+fn find_join_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
+    catalog: &C,
     source: &TableMetadata,
     condition: Option<&TypedExpr>,
+    target_row_id: u64,
     target: &[SqlValue],
 ) -> Result<Option<Vec<SqlValue>>> {
-    let mut storage = txn.table_storage(source);
-    let mut iter = storage.range_scan(0, u64::MAX)?;
-    while let Some(item) = iter.next() {
-        let (_, source_row) = item?;
-        let mut joined = target.to_vec();
-        joined.extend(source_row.clone());
-        let matches_condition = match condition {
-            None => true,
-            Some(expr) => matches!(
-                evaluate(expr, &EvalContext::new(&joined))?,
-                SqlValue::Boolean(true)
-            ),
+    let mut start = 0;
+    loop {
+        // Release the storage iterator's transaction borrow before subquery evaluation.
+        let batch = fetch_batch(txn, source, start, 512)?;
+        let Some((last_row_id, _)) = batch.last() else {
+            return Ok(None);
         };
-        if matches_condition {
-            return Ok(Some(source_row));
+        let next = last_row_id.checked_add(1);
+        for (_, source_row) in batch {
+            let mut joined = target.to_vec();
+            joined.extend_from_slice(&source_row);
+            let matches_condition = match condition {
+                None => true,
+                Some(expr) => matches!(
+                    evaluate_expr_with_subqueries(
+                        txn,
+                        catalog,
+                        expr,
+                        &Row::new(target_row_id, joined)
+                    )?,
+                    SqlValue::Boolean(true)
+                ),
+            };
+            if matches_condition {
+                return Ok(Some(source_row));
+            }
         }
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        start = next;
     }
-    Ok(None)
 }
 
 pub(super) fn apply_changes<'txn, S, C, T>(
