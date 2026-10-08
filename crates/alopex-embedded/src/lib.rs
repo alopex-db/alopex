@@ -209,6 +209,13 @@ pub struct Database {
     pub(crate) store: Arc<AnyKV>,
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_after_executor_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_write_gate_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_write_gate_acquired:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
     /// Table info cache for scan/write operations.
     pub(crate) table_info_cache: RwLock<HashMap<String, CachedTableInfo>>,
@@ -425,6 +432,12 @@ impl Database {
             store,
             sql_catalog,
             hnsw_cache: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            hnsw_cache_after_executor_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hnsw_cache_write_gate_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hnsw_cache_write_gate_acquired: std::sync::Mutex::new(None),
             vector_cache: RwLock::new(None),
             table_info_cache: RwLock::new(HashMap::new()),
             table_info_cache_epoch: AtomicU64::new(0),

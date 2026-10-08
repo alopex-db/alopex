@@ -647,6 +647,18 @@ impl Database {
                     .execute_in_txn(plan, &mut borrowed)
                     .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
             );
+            #[cfg(test)]
+            if mode == TxnMode::ReadOnly {
+                if let Some(barrier) = self
+                    .hnsw_cache_after_executor_barrier
+                    .lock()
+                    .expect("hnsw cache after executor barrier lock poisoned")
+                    .clone()
+                {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
         }
 
         let hnsw_cache_entries = if mode == TxnMode::ReadOnly {
@@ -680,6 +692,27 @@ impl Database {
             self.invalidate_table_info_cache();
         }
         if requires_write {
+            #[cfg(test)]
+            if let Some(barrier) = self
+                .hnsw_cache_write_gate_barrier
+                .lock()
+                .expect("hnsw cache write gate barrier lock poisoned")
+                .clone()
+            {
+                barrier.wait();
+                barrier.wait();
+            }
+            #[cfg(test)]
+            if let Some(sender) = self
+                .hnsw_cache_write_gate_acquired
+                .lock()
+                .expect("hnsw cache write gate acquired sender lock poisoned")
+                .clone()
+            {
+                sender
+                    .send(())
+                    .expect("hnsw cache write gate acquired receiver dropped");
+            }
             let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
             cache.clear();
             let mut vector_cache = self
@@ -1023,6 +1056,8 @@ mod tests {
     use super::*;
     use alopex_core::kv::decode_range_change;
     use alopex_core::kv::RangeChangePayload;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
 
     #[test]
     fn auto_commit_stages_sql_row_and_index_changes_before_visibility() {
@@ -1116,5 +1151,94 @@ mod tests {
             .cloned()
             .expect("the cached index must remain available");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    fn hnsw_cache_test_fixture() -> (Database, String, String, i32) {
+        const DIMENSION: usize = 1024;
+        const ROWS: usize = 1025;
+
+        let db = Database::open_in_memory().unwrap();
+        let stored_vector = format!("[{}]", vec!["1.0"; DIMENSION].join(", "));
+        let query_vector = format!("[{}]", vec!["0.0"; DIMENSION].join(", "));
+        db.execute_sql(&format!(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR({DIMENSION}, L2));\
+             CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;"
+        ))
+        .unwrap();
+        for start in (0..ROWS).step_by(16) {
+            let end = (start + 16).min(ROWS);
+            let values = (start..end)
+                .map(|id| format!("({id}, {stored_vector})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            db.execute_sql(&format!(
+                "INSERT INTO items (id, embedding) VALUES {values}"
+            ))
+            .unwrap();
+        }
+        let query = format!(
+            "SELECT id FROM items \
+             ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 1"
+        );
+        (db, query_vector, query, ROWS as i32)
+    }
+
+    #[test]
+    fn auto_commit_knn_query_does_not_republish_stale_cache_after_write() {
+        let (db, query_vector, query, new_id) = hnsw_cache_test_fixture();
+        let db = Arc::new(db);
+        db.execute_sql(&query).unwrap();
+
+        let after_executor_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() =
+            Some(Arc::clone(&after_executor_barrier));
+        let write_gate_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
+        let (write_gate_acquired_tx, write_gate_acquired_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_acquired.lock().unwrap() = Some(write_gate_acquired_tx);
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+        let (write_done_tx, write_done_rx) = mpsc::channel();
+
+        let write_gate_acquired_before_reader_release = std::thread::scope(|scope| {
+            let reader_db = Arc::clone(&db);
+            let reader_query = query.clone();
+            scope.spawn(move || {
+                reader_db.execute_sql(&reader_query).unwrap();
+                read_done_tx.send(()).unwrap();
+            });
+            after_executor_barrier.wait();
+
+            let writer_db = Arc::clone(&db);
+            scope.spawn(move || {
+                writer_db
+                    .execute_sql(&format!(
+                        "INSERT INTO items (id, embedding) VALUES ({new_id}, {query_vector})"
+                    ))
+                    .unwrap();
+                write_done_tx.send(()).unwrap();
+            });
+
+            write_gate_barrier.wait();
+            write_gate_barrier.wait();
+            let write_gate_acquired_before_reader_release = write_gate_acquired_rx
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok();
+            after_executor_barrier.wait();
+            read_done_rx.recv().unwrap();
+            write_done_rx.recv().unwrap();
+            write_gate_acquired_before_reader_release
+        });
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_acquired.lock().unwrap() = None;
+
+        let ExecutionResult::Query(result) = db.execute_sql(&query).unwrap() else {
+            panic!("kNN SELECT must return a query result");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Integer(new_id)]]);
+        assert!(
+            !write_gate_acquired_before_reader_release,
+            "a write commit must not overtake an in-flight auto-commit kNN read"
+        );
     }
 }
