@@ -148,6 +148,7 @@ pub const REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS: &[&str] = &[
     "current_timestamp",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "make_date",
@@ -179,6 +180,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "currval",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "json",
@@ -1058,7 +1060,7 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::ast::expr::Literal;
-    use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
     use crate::planner::{
         Planner, Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr,
     };
@@ -1161,6 +1163,34 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "values_local_only"
         ));
+    }
+
+    #[test]
+    fn date_diff_queries_remain_local_only_before_remote_transport() {
+        let mut catalog = MemoryCatalog::new();
+        catalog
+            .create_table(TableMetadata::new(
+                "users",
+                vec![ColumnMetadata::new("created_at", ResolvedType::Timestamp)],
+            ))
+            .unwrap();
+        let planner = Planner::new(&catalog);
+
+        for sql in [
+            "SELECT DATE_DIFF('day', created_at, TIMESTAMP '2017-01-09') FROM users",
+            "SELECT created_at FROM users WHERE date_diff('day', created_at, TIMESTAMP '2017-01-09') > 0",
+        ] {
+            let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+            let plan = planner.plan(&statement).unwrap();
+            assert!(
+                matches!(
+                    classify(&plan, &references()),
+                    RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                        if code == "stateful_function_local_only"
+                ),
+                "DATE_DIFF must remain local-only: {sql}"
+            );
+        }
     }
 
     #[test]
