@@ -967,6 +967,14 @@ impl CatalogOverlay {
         Self::default()
     }
 
+    /// Whether publication removes existing catalog objects.
+    pub fn has_deletions(&self) -> bool {
+        !self.dropped_catalogs.is_empty()
+            || !self.dropped_namespaces.is_empty()
+            || !self.dropped_tables.is_empty()
+            || !self.dropped_indexes.is_empty()
+    }
+
     pub fn add_catalog(&mut self, meta: CatalogMeta) {
         self.dropped_catalogs.remove(&meta.name);
         self.added_catalogs.insert(meta.name.clone(), meta);
@@ -2621,6 +2629,22 @@ impl<S: KVStore> PersistentCatalog<S> {
     }
 
     pub fn apply_overlay(&mut self, overlay: CatalogOverlay) {
+        if !overlay.dropped_catalogs.is_empty() || !overlay.dropped_namespaces.is_empty() {
+            let removed: Vec<_> = self
+                .inner
+                .table_names()
+                .into_iter()
+                .filter(|name| {
+                    self.inner
+                        .get_table(name)
+                        .is_some_and(|table| self.table_hidden_by_overlay(table, &overlay))
+                })
+                .map(str::to_owned)
+                .collect();
+            for name in removed {
+                self.inner.remove_table_unchecked(&name);
+            }
+        }
         let CatalogOverlay {
             added_catalogs,
             dropped_catalogs,

@@ -1737,12 +1737,17 @@ impl<'a> Transaction<'a> {
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
         let overlay = std::mem::take(&mut self.overlay);
+        let catalog_deleted = overlay.has_deletions();
         let catalog_modified = self.catalog_modified;
         self.db.commit_with_hnsw_cache_changes(
             || {
-                let changed = self
-                    .db
-                    .hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                // ponytail: deletions clear all graphs; track affected names if DDL cost matters.
+                let changed = if catalog_deleted {
+                    None
+                } else {
+                    self.db
+                        .hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor))
+                };
                 txn.commit_self()
                     .map(|()| ((), changed))
                     .map_err(Error::Core)
@@ -1752,7 +1757,7 @@ impl<'a> Transaction<'a> {
                 let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
                 catalog.apply_overlay(overlay);
                 drop(catalog);
-                if !hnsw_indices.is_empty() {
+                if !catalog_deleted && !hnsw_indices.is_empty() {
                     let mut cache = self
                         .db
                         .hnsw_cache
