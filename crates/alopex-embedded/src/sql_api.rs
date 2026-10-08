@@ -1424,6 +1424,105 @@ mod tests {
     }
 
     #[test]
+    fn uncached_hnsw_commit_preserves_other_warmed_indexes() {
+        let mut observations = Vec::new();
+        for owned in [false, true] {
+            let db = two_warmed_direct_hnsw_indexes();
+            let config = alopex_core::HnswConfig::default()
+                .with_dimension(2)
+                .with_metric(alopex_core::Metric::L2)
+                .with_m(8)
+                .with_ef_construction(32);
+            db.create_hnsw_index("cache_c", config).unwrap();
+            let mut seed = db.begin(TxnMode::ReadWrite).unwrap();
+            seed.upsert_to_hnsw("cache_c", b"key", &[0.0, 0.0], b"seed")
+                .unwrap();
+            seed.commit().unwrap();
+            // Establish a cold C independently of transaction commit's cache publication.
+            db.hnsw_cache.write().unwrap().remove("cache_c");
+            for name in ["cache_a", "cache_b"] {
+                db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            }
+            let before = db.hnsw_cache.read().unwrap().clone();
+            assert!(!before.contains_key("cache_c"));
+            if owned {
+                let mut txn = Arc::clone(&db)
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.upsert_to_hnsw("cache_c", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.upsert_to_hnsw("cache_c", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            }
+            let retained = {
+                let after = db.hnsw_cache.read().unwrap();
+                ["cache_a", "cache_b"].map(|name| {
+                    after
+                        .get(name)
+                        .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                })
+            };
+            for (name, query) in [
+                ("cache_a", [0.0, 0.0]),
+                ("cache_b", [0.0, 0.0]),
+                ("cache_c", [9.0, 0.0]),
+            ] {
+                let (rows, _) = db.search_hnsw(name, &query, 1, Some(8)).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, b"key");
+                assert_eq!(rows[0].distance, 0.0);
+            }
+            eprintln!(
+                "uncached HNSW commit owned={owned}: retained={retained:?}; latest search verified"
+            );
+            observations.push(retained);
+        }
+        assert_eq!(observations, vec![[true, true], [true, true]]);
+    }
+
+    #[test]
+    fn hnsw_cache_key_classification_preserves_storage_boundaries() {
+        let db = two_warmed_direct_hnsw_indexes();
+        // The encoding does not forbid colons in index names. A node/key write
+        // can match more than one cached prefix, so retain conservative matching.
+        {
+            let mut cache = db.hnsw_cache.write().unwrap();
+            let index = Arc::clone(&cache["cache_a"]);
+            cache.insert("cache_a:part".to_string(), index);
+        }
+        let cases: &[(&[u8], Option<&[&str]>)] = &[
+            (b"hnsw:meta:cache_c", Some(&[])),
+            (b"hnsw:meta:", Some(&[])),
+            (b"hnsw:node:cache_c:part:0", Some(&[])),
+            (b"hnsw:key:cache_c:\xff:\0", Some(&[])),
+            (b"hnsw:key::", Some(&[])),
+            (b"hnsw:node:cache_a_extra:0", Some(&[])),
+            (b"hnsw:meta:cache_a:part", Some(&["cache_a:part"])),
+            (
+                b"hnsw:node:cache_a:part:0",
+                Some(&["cache_a", "cache_a:part"]),
+            ),
+            (b"hnsw:key:cache_a:\xff:\0", Some(&["cache_a"])),
+            (b"hnsw:node:cache_c", None),
+            (b"hnsw:key:cache_c", None),
+            (b"hnsw:future-format:cache_c", None),
+        ];
+        for (key, expected) in cases {
+            let changed = db.hnsw_cache_changes(|visitor| {
+                visitor(key);
+                true
+            });
+            let expected =
+                expected.map(|names| names.iter().map(|name| (*name).to_string()).collect());
+            assert_eq!(changed, expected, "key={key:?}");
+        }
+    }
+
+    #[test]
     fn raw_session_hnsw_write_invalidates_its_cached_graph() {
         let db = two_warmed_direct_hnsw_indexes();
         let before = db.hnsw_cache.read().unwrap().clone();

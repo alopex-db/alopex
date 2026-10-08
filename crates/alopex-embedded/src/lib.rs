@@ -688,7 +688,16 @@ impl Database {
             if !key.starts_with(b"hnsw:") {
                 return;
             }
-            let mut recognized = false;
+            // A valid namespace need not belong to an already-cached index.
+            // Node/key suffixes retain their separator: names may contain colons,
+            // and application keys are arbitrary bytes (including empty keys).
+            let recognized = key.starts_with(b"hnsw:meta:")
+                || [b"hnsw:node:".as_slice(), b"hnsw:key:".as_slice()]
+                    .iter()
+                    .any(|prefix| {
+                        key.strip_prefix(*prefix)
+                            .is_some_and(|suffix| suffix.contains(&b':'))
+                    });
             for name in cache.keys() {
                 let matches = key
                     .strip_prefix(b"hnsw:meta:")
@@ -700,14 +709,11 @@ impl Database {
                                 .and_then(|suffix| suffix.strip_prefix(name.as_bytes()))
                                 .is_some_and(|suffix| suffix.starts_with(b":"))
                         });
-                if matches {
-                    recognized = true;
-                    if !changed.contains(name) {
-                        changed.insert(name.clone());
-                    }
+                if matches && !changed.contains(name) {
+                    changed.insert(name.clone());
                 }
             }
-            // Unknown names/formats cannot justify retaining a cached graph.
+            // Unknown namespaces or missing separators require the fallback.
             unknown |= !recognized;
         });
         (complete && !unknown).then_some(changed)
