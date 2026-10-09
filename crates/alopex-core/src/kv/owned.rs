@@ -109,15 +109,30 @@ pub trait OwnedKVTransaction: Send {
         request: &KeySearchRequest,
         cancellation: &KeySearchCancellation,
     ) -> Result<KeySearchPage> {
+        self.search_keys_filtered(request, cancellation, &|_| true)
+    }
+
+    /// Apply a caller-owned visibility rule before filling a page. Hidden keys still
+    /// consume the physical scan and byte budgets, but never become continuation keys.
+    fn search_keys_filtered(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+        include: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<KeySearchPage> {
         let prepared = search::PreparedKeySearch::new(request)?;
         let mut cursor_start = request.cursor.clone().unwrap_or_default();
         let mut scan = if request.cursor.is_some() {
             cursor_start.push(0);
+            if cursor_start.as_slice() < prepared.prefix() {
+                cursor_start = prepared.prefix().to_vec();
+            }
             self.scan_from(&cursor_start)?
         } else {
             self.scan_prefix(prepared.prefix())?
         };
-        let result = prepared.collect(|| scan.next_search_entry(), request, cancellation);
+        let result =
+            prepared.collect_filtered(|| scan.next_search_entry(), request, cancellation, include);
         match (result, scan.close()) {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             (Ok(page), Ok(())) => Ok(page),

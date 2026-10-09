@@ -1319,11 +1319,10 @@ impl LsmKV {
         self.owned_snapshot_gate.acquire_reader()
     }
 
-    /// Open one incremental reader for every persisted table overlapping an owned cursor bound.
+    /// Enumerate physical keys in overlapping tables; callers resolve values at their snapshot.
     pub(crate) fn open_owned_sstable_cursors(
         &self,
         bounds: &OwnedLsmScanBounds,
-        read_timestamp: u64,
     ) -> Result<Vec<SSTableCursor>> {
         let tables = {
             let levels = self.levels.read().expect("lsm levels lock poisoned");
@@ -1354,19 +1353,18 @@ impl LsmKV {
                 file_id,
                 bounds.start().clone(),
                 bounds.end().cloned(),
-                read_timestamp,
+                u64::MAX,
             )?);
         }
         Ok(cursors)
     }
 
-    /// Find the least next visible key among active and immutable MemTables without collecting a
-    /// whole scan result.
+    /// Find the next physical key without skipping post-snapshot keys outside the scan budget.
+    /// Callers resolve the candidate's value separately at their actual read timestamp.
     pub(crate) fn owned_next_memtable_key_after(
         &self,
         after: Option<&Key>,
         bounds: &OwnedLsmScanBounds,
-        read_timestamp: u64,
     ) -> Option<Key> {
         let mut candidate = self
             .active_memtable
@@ -1377,7 +1375,7 @@ impl LsmKV {
                 bounds.start(),
                 bounds.end().map(Vec::as_slice),
                 bounds.prefix_constraint().map(Vec::as_slice),
-                read_timestamp,
+                u64::MAX,
             )
             .map(|(key, _)| key);
 
@@ -1391,7 +1389,7 @@ impl LsmKV {
                 bounds.start(),
                 bounds.end().map(Vec::as_slice),
                 bounds.prefix_constraint().map(Vec::as_slice),
-                read_timestamp,
+                u64::MAX,
             ) else {
                 continue;
             };
@@ -1867,11 +1865,9 @@ impl<'a> LsmTransaction<'a> {
         &mut self,
         state: &mut LsmSearchState,
     ) -> Result<Option<(Key, Option<Value>)>> {
-        let memory_key = self.store.owned_next_memtable_key_after(
-            state.last_key.as_ref(),
-            &state.bounds,
-            self.start_ts,
-        );
+        let memory_key = self
+            .store
+            .owned_next_memtable_key_after(state.last_key.as_ref(), &state.bounds);
         let table_key = state.table_candidate(self.store)?;
         let base_key = match (memory_key, table_key) {
             (Some(memory), Some(table)) => Some(memory.min(table)),
@@ -1892,29 +1888,28 @@ impl<'a> LsmTransaction<'a> {
         .filter(|(key, _)| state.bounds.contains(key))
         .map(|(key, value)| (key.clone(), value.clone()));
 
-        let (key, value) = match (base_key, write) {
+        let (key, value, observed) = match (base_key, write) {
             (Some(base), Some((write_key, write_value))) if base == write_key => {
-                (base, write_value)
+                (base, write_value, true)
             }
             (Some(base), Some((write_key, _))) if base < write_key => {
-                let value = self
-                    .store
-                    .owned_visible_at(&base, self.start_ts)?
-                    .and_then(|entry| entry.value);
-                (base, value)
+                let entry = self.store.owned_visible_at(&base, self.start_ts)?;
+                let observed = entry.is_some();
+                (base, entry.and_then(|entry| entry.value), observed)
             }
-            (Some(_), Some(write)) => write,
+            (Some(_), Some((key, value))) => (key, value, true),
             (Some(base), None) => {
-                let value = self
-                    .store
-                    .owned_visible_at(&base, self.start_ts)?
-                    .and_then(|entry| entry.value);
-                (base, value)
+                let entry = self.store.owned_visible_at(&base, self.start_ts)?;
+                let observed = entry.is_some();
+                (base, entry.and_then(|entry| entry.value), observed)
             }
-            (None, Some(write)) => write,
+            (None, Some((key, value))) => (key, value, true),
             (None, None) => return Ok(None),
         };
-        self.read_set.insert(key.clone());
+        // Physical candidates newer than the snapshot consume work, not the read set.
+        if observed {
+            self.read_set.insert(key.clone());
+        }
         state.last_key = Some(key.clone());
         Ok(Some((key, value)))
     }
@@ -2079,6 +2074,9 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         let bounds = if let Some(cursor) = &request.cursor {
             let mut start = cursor.clone();
             start.push(0);
+            if start.as_slice() < prepared.prefix() {
+                start = prepared.prefix().to_vec();
+            }
             OwnedLsmScanBounds::from(start)
         } else {
             OwnedLsmScanBounds::prefix(prepared.prefix().to_vec())
@@ -2086,7 +2084,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         let snapshot = self.store.acquire_owned_snapshot_reader();
         let tables = self
             .store
-            .open_owned_sstable_cursors(&bounds, self.start_ts)?
+            .open_owned_sstable_cursors(&bounds)?
             .into_iter()
             .map(|cursor| LsmSearchTableCursor {
                 cursor,

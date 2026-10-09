@@ -145,13 +145,27 @@ class AsyncTransaction(_AsyncLocalHandle):
     async def delete(self, key: bytes) -> None:
         self._handle.delete(key)
 
-    async def scan_prefix(self, prefix: bytes) -> Iterator[Tuple[bytes, bytes]]:
-        """Return the synchronous snapshot iterator after awaiting the scan."""
-        return self._handle.scan_prefix(prefix)
+    async def scan_prefix(
+        self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,
+        scan_budget: int = 10_000, max_bytes: int = 16_777_216,
+        include_internal: bool = False,
+    ) -> Iterator[Tuple[bytes, bytes]]:
+        """Return one bounded snapshot page; resume after its last key with cursor."""
+        return self._handle.scan_prefix(
+            prefix, limit=limit, cursor=cursor, scan_budget=scan_budget,
+            max_bytes=max_bytes, include_internal=include_internal,
+        )
 
-    async def scan_range(self, start: bytes, end: bytes) -> Iterator[Tuple[bytes, bytes]]:
-        """Return the synchronous snapshot iterator for the half-open range."""
-        return self._handle.scan_range(start, end)
+    async def scan_range(
+        self, start: bytes, end: bytes, *, limit: int = 100,
+        cursor: Optional[bytes] = None, scan_budget: int = 10_000,
+        max_bytes: int = 16_777_216, include_internal: bool = False,
+    ) -> Iterator[Tuple[bytes, bytes]]:
+        """Return one bounded snapshot page for the half-open range."""
+        return self._handle.scan_range(
+            start, end, limit=limit, cursor=cursor, scan_budget=scan_budget,
+            max_bytes=max_bytes, include_internal=include_internal,
+        )
 
     async def search_keys(
         self,
@@ -161,6 +175,8 @@ class AsyncTransaction(_AsyncLocalHandle):
         cursor: Optional[bytes] = None,
         scan_budget: int = 10_000,
         max_bytes: int = 16_777_216,
+        *,
+        include_internal: bool = False,
     ) -> dict[str, Any]:
         """Return a bounded native key-search page with its continuation cursor."""
         return self._handle.search_keys(
@@ -170,6 +186,7 @@ class AsyncTransaction(_AsyncLocalHandle):
             cursor=cursor,
             scan_budget=scan_budget,
             max_bytes=max_bytes,
+            include_internal=include_internal,
         )
 
     async def execute_sql(

@@ -11,6 +11,31 @@ def _error_code(error: BaseException) -> str:
 
 
 @pytest.mark.parametrize("thread_mode", ["single", "multi"])
+def test_async_kv_scan_bounds_and_internal_visibility(thread_mode):
+    async def scenario():
+        db = await AsyncDatabase.new(thread_mode=thread_mode)
+        try:
+            txn = await db.begin(TxnMode.READ_WRITE)
+            await txn.put(b"__catalog__/hidden", b"raw")
+            await txn.put(b"user:1", b"one")
+            await txn.put(b"user:2", b"two")
+            assert list(await txn.scan_prefix(b"", limit=1)) == [(b"user:1", b"one")]
+            assert list(await txn.scan_range(b"user:", b"user;", limit=1, cursor=b"user:1")) == [(b"user:2", b"two")]
+            assert (await txn.search_keys(b"*", limit=1))["entries"] == [(b"user:1", b"one")]
+            assert dict(await txn.scan_prefix(b"__catalog__/", include_internal=True))[b"__catalog__/hidden"] == b"raw"
+            assert dict((await txn.search_keys(b"__catalog__/*", include_internal=True))["entries"])[b"__catalog__/hidden"] == b"raw"
+            for method, args in [(txn.scan_prefix, (b"user:",)), (txn.scan_range, (b"user:", b"user;"))]:
+                with pytest.raises(AlopexError):
+                    await method(*args, max_bytes=1)
+                with pytest.raises(AlopexError):
+                    await method(*args, scan_budget=1)
+            await txn.rollback()
+        finally:
+            await db.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("thread_mode", ["single", "multi"])
 def test_async_kv_scans_preserve_transaction_visibility(thread_mode):
     async def scenario():
         db = await AsyncDatabase.new(thread_mode=thread_mode)

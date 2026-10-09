@@ -138,6 +138,9 @@ pub trait KVTransaction<'a> {
         let mut cursor_start = request.cursor.clone().unwrap_or_default();
         let mut scan = if request.cursor.is_some() {
             cursor_start.push(0);
+            if cursor_start.as_slice() < prepared.prefix() {
+                cursor_start = prepared.prefix().to_vec();
+            }
             self.scan_from(&cursor_start)?
         } else {
             self.scan_prefix(prepared.prefix())?

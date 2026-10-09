@@ -325,20 +325,68 @@ impl PyTransaction {
         self.with_txn_mut(|txn| txn.delete(key))
     }
 
-    fn scan_prefix(&self, py: Python<'_>, prefix: &[u8]) -> PyResult<Py<PyAny>> {
-        let prefix = prefix.to_vec();
-        let entries = py.detach(move || self.with_txn_mut(|txn| txn.scan_prefix(&prefix)))?;
+    #[pyo3(signature = (prefix, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_prefix(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = alopex_embedded::KeyScanOptions {
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+        };
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_prefix_page(prefix, &options)
+        })?;
+        let entries = page
+            .entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value));
         Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
     }
 
-    fn scan_range(&self, py: Python<'_>, start: &[u8], end: &[u8]) -> PyResult<Py<PyAny>> {
-        let start = start.to_vec();
-        let end = end.to_vec();
-        let entries = py.detach(move || self.with_txn_mut(|txn| txn.scan_range(&start, &end)))?;
+    #[pyo3(signature = (start, end, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_range(
+        &self,
+        py: Python<'_>,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = alopex_embedded::KeyScanOptions {
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+        };
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_range_page(start, end, &options)
+        })?;
+        let entries = page
+            .entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value));
         Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
     }
 
-    #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216))]
+    #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, *, include_internal = false))]
     #[allow(clippy::too_many_arguments)]
     fn search_keys(
         &self,
@@ -349,6 +397,7 @@ impl PyTransaction {
         cursor: Option<Vec<u8>>,
         scan_budget: usize,
         max_bytes: usize,
+        include_internal: bool,
     ) -> PyResult<Py<PyDict>> {
         let pattern = match mode {
             "glob" => alopex_embedded::KeyPattern::glob(pattern.extract::<Vec<u8>>()?),
@@ -366,7 +415,10 @@ impl PyTransaction {
             scan_budget,
             max_bytes,
         };
-        let page = py.detach(move || self.with_txn_mut(|txn| txn.search_keys(&request)))?;
+        self.control.ensure_open()?;
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.search_keys_visible(&request, include_internal)
+        })?;
         let alopex_embedded::KeySearchPage {
             entries,
             next_cursor,
