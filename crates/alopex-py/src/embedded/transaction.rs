@@ -1296,6 +1296,165 @@ mod tests {
     }
 
     #[test]
+    fn prepared_execution_serializes_with_close_and_commit_without_gil_deadlock() {
+        use std::sync::{atomic::AtomicUsize, mpsc, Mutex};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        Python::initialize();
+        let deadline = Duration::from_secs(3);
+        for close in [true, false] {
+            let db = Arc::new(alopex_embedded::Database::new());
+            db.execute_sql("CREATE TABLE prepared_race (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            let txn = Arc::new(transaction(Arc::clone(&db), TxnMode::ReadWrite));
+            let tracked = Arc::new(Mutex::new(vec![Arc::downgrade(&txn.inner)]));
+            let statement = alopex_sql::Parser::parse_sql(
+                &alopex_sql::AlopexDialect,
+                "INSERT INTO prepared_race VALUES (?)",
+            )
+            .unwrap()
+            .remove(0);
+            let expected = if close {
+                super::TxnState::RolledBack
+            } else {
+                super::TxnState::Committed
+            };
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (executed_tx, executed_rx) = mpsc::channel();
+            let prepared_inner = Arc::clone(&txn.inner);
+            let prepared = thread::spawn(move || {
+                let result = Python::attach(|py| {
+                    super::with_prepared_transaction(
+                        py,
+                        &prepared_inner,
+                        true,
+                        move |transaction| {
+                            // Both guards are held: close/commit must first wait for state.
+                            let _ = held_tx.send(());
+                            if release_rx.recv_timeout(deadline * 4).is_err() {
+                                return Ok(None);
+                            }
+                            transaction
+                                .execute_prepared_statement(
+                                    &statement,
+                                    &[alopex_sql::SqlValue::Integer(1)],
+                                )
+                                .map(Some)
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+                });
+                let _ = executed_tx.send(result);
+            });
+            let held = held_rx.recv_timeout(deadline).is_ok();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let finish_txn = Arc::clone(&txn);
+            let finish_tracked = Arc::clone(&tracked);
+            let finisher = thread::spawn(move || {
+                let result = Python::attach(|py| {
+                    // This notification precedes the method's state-lock acquisition.
+                    let _ = started_tx.send(());
+                    if close {
+                        super::rollback_tracked_for_database_close(
+                            py,
+                            &finish_tracked,
+                            &AtomicUsize::new(0),
+                        )
+                    } else {
+                        finish_txn.commit(py)
+                    }
+                    .map_err(|error| error.to_string())
+                });
+                let _ = finished_tx.send(result);
+            });
+            let started = started_rx.recv_timeout(deadline).is_ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (observe_tx, observe_rx) = mpsc::channel();
+            let (unlocked_tx, unlocked_rx) = mpsc::channel();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let observer_inner = Arc::clone(&txn.inner);
+            let observer = thread::spawn(move || {
+                Python::attach(|_| {
+                    let _ = ready_tx.send(());
+                    if observe_rx.recv_timeout(deadline * 4) != Ok(true) {
+                        return;
+                    }
+                    // Keep the GIL until every native guard is observable as released.
+                    let until = Instant::now() + deadline;
+                    while Instant::now() < until {
+                        if let Ok(registry) = tracked.try_lock() {
+                            if registry.is_empty() == close {
+                                if let Ok(state) = observer_inner.state.try_lock() {
+                                    if *state == expected {
+                                        if let Ok(transaction) = observer_inner.txn.try_lock() {
+                                            if transaction.is_none() {
+                                                let _ = unlocked_tx.send(());
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                            break;
+                        }
+                        thread::yield_now();
+                    }
+                });
+            });
+            let gil_progress = started && ready_rx.recv_timeout(deadline).is_ok();
+            // Release both workers even if a GIL probe failed; never assert while blocked.
+            let _ = release_tx.send(());
+            let _ = observe_tx.send(held && gil_progress);
+            let unlocked = held && gil_progress && unlocked_rx.recv_timeout(deadline).is_ok();
+            let _ = stop_tx.send(());
+            let executed = executed_rx.recv_timeout(deadline);
+            let finished = finished_rx.recv_timeout(deadline);
+            let mut joined = true;
+            for worker in [prepared, finisher, observer] {
+                let until = Instant::now() + deadline;
+                while !worker.is_finished() && Instant::now() < until {
+                    thread::yield_now();
+                }
+                // Bound join waits; the runner's process timeout still guards lock regressions.
+                joined &= worker.is_finished() && worker.join().is_ok();
+            }
+            assert!(
+                held && gil_progress && unlocked && joined,
+                "close={close}: held={held}, GIL_progress={gil_progress}, guards_released={unlocked}, joined={joined}"
+            );
+            assert!(
+                matches!(
+                    executed,
+                    Ok(Ok(Some(alopex_sql::ExecutionResult::RowsAffected(1))))
+                ),
+                "prepared: {executed:?}"
+            );
+            assert!(
+                matches!(finished, Ok(Ok(()))),
+                "close={close}: {finished:?}"
+            );
+            assert_eq!(*txn.inner.state.lock().unwrap(), expected);
+            assert!(txn.inner.txn.lock().unwrap().is_none());
+            assert_eq!(
+                query_row_count(&db, "SELECT id FROM prepared_race"),
+                usize::from(!close)
+            );
+            let late = Python::attach(|py| {
+                super::with_prepared_transaction::<()>(py, &txn.inner, true, |_| {
+                    panic!("late prepared execution must not enter a completed transaction")
+                })
+                .map_err(|error| error.to_string())
+            });
+            assert!(late.is_err_and(|error| error.contains("transaction is closed")));
+        }
+    }
+
+    #[test]
     fn committed_transaction_does_not_keep_database_locked() {
         pyo3::Python::initialize();
         let dir = tempdir().expect("tempdir");
