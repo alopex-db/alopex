@@ -679,8 +679,19 @@ impl Database {
         //
         // commit_self は `txn` を消費するため、失敗時に rollback はできない。
         if mode == TxnMode::ReadWrite {
-            self.commit_with_hnsw_cache_update(
-                || txn.commit_self().map_err(Error::Core),
+            let catalog_deleted = overlay.has_deletions();
+            self.commit_with_hnsw_cache_changes(
+                || {
+                    // ponytail: deletions clear all graphs; track affected names if DDL cost matters.
+                    let changed = if catalog_deleted {
+                        None
+                    } else {
+                        self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor))
+                    };
+                    txn.commit_self()
+                        .map(|()| ((), changed))
+                        .map_err(Error::Core)
+                },
                 || {
                     let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
                     catalog.apply_overlay(overlay);
@@ -1100,6 +1111,189 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn auto_sql_commits_preserve_unmodified_hnsw_caches() {
+        let mut observations = Vec::new();
+        for persistent in [false, true] {
+            for indexed in [false, true] {
+                for api in ["single", "multi", "prepared"] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let db = warmed_sql_hnsw_indexes(if persistent {
+                        Database::open(directory.path()).unwrap()
+                    } else {
+                        Database::open_in_memory().unwrap()
+                    });
+                    let before = db.hnsw_cache.read().unwrap().clone();
+                    let (epoch, stale) = db.hnsw_cache_snapshot();
+                    let sql = if indexed {
+                        "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = 1"
+                    } else {
+                        "INSERT INTO cache_plain VALUES (1)"
+                    };
+                    match api {
+                        "single" => {
+                            db.execute_sql(sql).unwrap();
+                        }
+                        "multi" => {
+                            db.execute_sql_multi(&format!("{sql}; SELECT 1")).unwrap();
+                        }
+                        "prepared" => {
+                            let sql = if indexed {
+                                "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = ?"
+                            } else {
+                                "INSERT INTO cache_plain VALUES (?)"
+                            };
+                            let mut statement = db.prepare(sql).unwrap();
+                            statement.bind(1, SqlValue::Integer(1)).unwrap();
+                            statement.execute().unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    let retained = {
+                        let after = db.hnsw_cache.read().unwrap();
+                        ["cache_sql_a", "cache_sql_b"].map(|name| {
+                            after
+                                .get(name)
+                                .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                        })
+                    };
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch + 1
+                    );
+                    db.hnsw_cache_insert_if_current(epoch, stale);
+                    for (name, distance) in [
+                        ("cache_sql_a", if indexed { 9.0 } else { 0.0 }),
+                        ("cache_sql_b", 0.0),
+                    ] {
+                        let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].distance, distance);
+                    }
+                    let ExecutionResult::Query(rows) = db.execute_sql(if indexed {
+                        "SELECT id FROM cache_items_a ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') LIMIT 1"
+                    } else {
+                        "SELECT id FROM cache_plain"
+                    }).unwrap() else { panic!("expected query rows"); };
+                    assert_eq!(
+                        rows.rows,
+                        vec![vec![SqlValue::Integer(if indexed { 2 } else { 1 })]]
+                    );
+                    if indexed {
+                        let ExecutionResult::Query(rows) = db
+                            .execute_sql("SELECT embedding FROM cache_items_a WHERE id = 1")
+                            .unwrap()
+                        else {
+                            panic!("expected stored vector");
+                        };
+                        assert_eq!(rows.rows, vec![vec![SqlValue::Vector(vec![20.0, 0.0])]]);
+                    }
+                    eprintln!("auto SQL persistent={persistent} indexed={indexed} api={api}: retained={retained:?}; epoch/storage/search verified");
+                    observations.push((retained, [!indexed, true]));
+                }
+            }
+        }
+        for (actual, expected) in observations {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn warmed_sql_hnsw_indexes(database: Database) -> Arc<Database> {
+        let db = Arc::new(database);
+        db.execute_sql("CREATE TABLE cache_plain (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        for suffix in ["a", "b"] {
+            db.execute_sql(&format!(
+                "CREATE TABLE cache_items_{suffix} (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));\
+                 CREATE INDEX cache_sql_{suffix} ON cache_items_{suffix} (embedding) USING HNSW;\
+                 INSERT INTO cache_items_{suffix} VALUES (1, [0.0, 0.0]), (2, [9.0, 0.0]);"
+            )).unwrap();
+        }
+        for name in ["cache_sql_a", "cache_sql_b"] {
+            let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].distance, 0.0);
+        }
+        db
+    }
+
+    #[test]
+    fn auto_sql_failed_write_and_catalog_deletion_preserve_cache_contracts() {
+        for persistent in [false, true] {
+            for operation in ["failed_multi", "drop_index", "drop_table"] {
+                let directory = tempfile::tempdir().unwrap();
+                let db = warmed_sql_hnsw_indexes(if persistent {
+                    Database::open(directory.path()).unwrap()
+                } else {
+                    Database::open_in_memory().unwrap()
+                });
+                let before = db.hnsw_cache.read().unwrap().clone();
+                let (epoch, stale) = db.hnsw_cache_snapshot();
+                if operation == "failed_multi" {
+                    assert!(db
+                        .execute_sql_multi(
+                            "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = 1;\
+                         INSERT INTO cache_items_a VALUES (1, [30.0, 0.0]);"
+                        )
+                        .is_err());
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch
+                    );
+                    for name in ["cache_sql_a", "cache_sql_b"] {
+                        assert!(Arc::ptr_eq(
+                            &db.hnsw_cache.read().unwrap()[name],
+                            &before[name]
+                        ));
+                        assert_eq!(
+                            db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap().0[0].distance,
+                            0.0
+                        );
+                    }
+                    let ExecutionResult::Query(rows) = db.execute_sql(
+                        "SELECT id FROM cache_items_a ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') LIMIT 1"
+                    ).unwrap() else { panic!("expected query rows"); };
+                    assert_eq!(rows.rows, vec![vec![SqlValue::Integer(1)]]);
+                    let ExecutionResult::Query(rows) = db
+                        .execute_sql("SELECT embedding FROM cache_items_a WHERE id = 1")
+                        .unwrap()
+                    else {
+                        panic!("expected stored vector");
+                    };
+                    assert_eq!(rows.rows, vec![vec![SqlValue::Vector(vec![0.0, 0.0])]]);
+                } else {
+                    db.execute_sql(if operation == "drop_index" {
+                        "DROP INDEX cache_sql_a"
+                    } else {
+                        "DROP TABLE cache_items_a"
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch + 1
+                    );
+                    assert!(db.hnsw_cache.read().unwrap().is_empty());
+                    db.hnsw_cache_insert_if_current(epoch, stale);
+                    assert!(db.hnsw_cache.read().unwrap().is_empty());
+                    assert!(db
+                        .search_hnsw("cache_sql_a", &[0.0, 0.0], 1, Some(8))
+                        .is_err());
+                    assert_eq!(
+                        db.search_hnsw("cache_sql_b", &[0.0, 0.0], 1, Some(8))
+                            .unwrap()
+                            .0[0]
+                            .distance,
+                        0.0
+                    );
+                }
+                eprintln!("auto SQL control persistent={persistent} operation={operation}: PASS");
+            }
+        }
     }
 
     #[test]
