@@ -1305,7 +1305,11 @@ mod tests {
     }
 
     fn two_warmed_direct_hnsw_indexes() -> Arc<Database> {
-        let db = Arc::new(Database::open_in_memory().unwrap());
+        warm_direct_hnsw_indexes(Database::open_in_memory().unwrap())
+    }
+
+    fn warm_direct_hnsw_indexes(database: Database) -> Arc<Database> {
+        let db = Arc::new(database);
         let config = alopex_core::HnswConfig::default()
             .with_dimension(2)
             .with_metric(alopex_core::Metric::L2)
@@ -1332,10 +1336,102 @@ mod tests {
     }
 
     #[test]
+    fn direct_hnsw_lifecycle_preserves_unrelated_cached_graphs() {
+        let mut retained = Vec::new();
+        for persistent in [false, true] {
+            for operation in ["create", "replace", "drop", "compact"] {
+                let directory = tempfile::tempdir().unwrap();
+                let db = warm_direct_hnsw_indexes(if persistent {
+                    Database::open(directory.path()).unwrap()
+                } else {
+                    Database::open_in_memory().unwrap()
+                });
+                if operation == "compact" {
+                    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                    txn.upsert_to_hnsw("cache_a", b"deleted", &[1.0, 0.0], b"")
+                        .unwrap();
+                    txn.commit().unwrap();
+                    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                    assert!(txn.delete_from_hnsw("cache_a", b"deleted").unwrap());
+                    txn.commit().unwrap();
+                    db.search_hnsw("cache_b", &[0.0, 0.0], 1, Some(8)).unwrap();
+                }
+                let before = db.hnsw_cache.read().unwrap().clone();
+                let (epoch, stale) = db.hnsw_cache_snapshot();
+                let config = alopex_core::HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(alopex_core::Metric::L2);
+                match operation {
+                    "create" => db.create_hnsw_index("cache_c", config).unwrap(),
+                    "replace" => db.create_hnsw_index("cache_a", config).unwrap(),
+                    "drop" => db.drop_hnsw_index("cache_a").unwrap(),
+                    "compact" => {
+                        assert_eq!(db.compact_hnsw_index("cache_a").unwrap().vectors_removed, 1);
+                    }
+                    _ => unreachable!(),
+                }
+                // Inspect before a search can hide an unnecessary graph reload.
+                let kept = db
+                    .hnsw_cache
+                    .read()
+                    .unwrap()
+                    .get("cache_b")
+                    .is_some_and(|index| Arc::ptr_eq(index, &before["cache_b"]));
+                retained.push(kept);
+                assert_eq!(
+                    db.hnsw_cache_epoch
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    epoch + 1
+                );
+                db.hnsw_cache_insert_if_current(epoch, stale);
+                if operation == "drop" {
+                    assert!(db.search_hnsw("cache_a", &[0.0, 0.0], 1, Some(8)).is_err());
+                } else {
+                    let name = if operation == "create" {
+                        "cache_c"
+                    } else {
+                        "cache_a"
+                    };
+                    let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+                    assert_eq!(rows.len(), usize::from(operation == "compact"));
+                }
+                // Bypass the cache to prove committed storage agrees with warm reads.
+                let mut read = db.store.begin(TxnMode::ReadOnly).unwrap();
+                for name in ["cache_a", "cache_b", "cache_c"] {
+                    let persisted = alopex_core::vector::hnsw::HnswIndex::load(name, &mut read);
+                    if (name == "cache_a" && operation == "drop")
+                        || (name == "cache_c" && operation != "create")
+                    {
+                        assert!(persisted.is_err());
+                    } else {
+                        let (rows, _) = persisted.unwrap().search(&[0.0, 0.0], 1, Some(8)).unwrap();
+                        let expected = usize::from(
+                            name == "cache_b" || (name == "cache_a" && operation != "replace"),
+                        );
+                        assert_eq!(rows.len(), expected);
+                        if expected == 1 {
+                            assert_eq!(rows[0].key, b"key");
+                            assert_eq!(rows[0].distance, 0.0);
+                        }
+                    }
+                }
+                read.rollback_self().unwrap();
+                eprintln!("persistent={persistent} lifecycle={operation} unrelated_cache_retained={kept}; storage/epoch verified");
+            }
+        }
+        assert_eq!(retained, vec![true; 8]);
+    }
+
+    #[test]
     fn unrelated_kv_commit_preserves_warmed_hnsw_cache() {
         let mut observations = Vec::new();
-        for owned in [false, true] {
-            let db = two_warmed_direct_hnsw_indexes();
+        for (owned, persistent) in [(false, false), (true, false), (false, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = warm_direct_hnsw_indexes(if persistent {
+                Database::open(directory.path()).unwrap()
+            } else {
+                Database::open_in_memory().unwrap()
+            });
             let before = db.hnsw_cache.read().unwrap().clone();
             if owned {
                 let mut txn = Arc::clone(&db)
@@ -1370,19 +1466,24 @@ mod tests {
                 assert_eq!(rows[0].distance, 0.0);
             }
             eprintln!(
-                "unrelated KV commit owned={owned}: retained={retained:?}; committed value/search verified"
+                "unrelated KV commit owned={owned} persistent={persistent}: retained={retained:?}; committed value/search verified"
             );
             observations.push(retained);
         }
         // Both public transaction owners reach the oracle even on the old clear-all implementation.
-        assert_eq!(observations, vec![[true, true], [true, true]]);
+        assert_eq!(observations, vec![[true, true]; 3]);
     }
 
     #[test]
     fn direct_hnsw_commit_invalidates_only_changed_index() {
         let mut observations = Vec::new();
-        for owned in [false, true] {
-            let db = two_warmed_direct_hnsw_indexes();
+        for (owned, persistent) in [(false, false), (true, false), (false, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = warm_direct_hnsw_indexes(if persistent {
+                Database::open(directory.path()).unwrap()
+            } else {
+                Database::open_in_memory().unwrap()
+            });
             let before = db.hnsw_cache.read().unwrap().clone();
             if owned {
                 let mut txn = Arc::clone(&db)
@@ -1415,12 +1516,12 @@ mod tests {
                 assert_eq!(rows[0].distance, 0.0);
             }
             eprintln!(
-                "direct HNSW commit owned={owned}: stale_a={stale_a_retained}, retained_b={untouched_b_retained}; latest search verified"
+                "direct HNSW commit owned={owned} persistent={persistent}: stale_a={stale_a_retained}, retained_b={untouched_b_retained}; latest search verified"
             );
             observations.push((stale_a_retained, untouched_b_retained));
         }
         // A may be evicted or replaced; B must retain its already-loaded graph.
-        assert_eq!(observations, vec![(false, true), (false, true)]);
+        assert_eq!(observations, vec![(false, true); 3]);
     }
 
     #[test]
