@@ -907,8 +907,14 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::create(name, config).map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 self.hnsw_cache_insert(name, index);
             },
@@ -921,7 +927,16 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_invalidation(|| txn.commit_self().map_err(Error::Core))?;
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
+            || {},
+        )?;
         Ok(())
     }
 
@@ -952,8 +967,14 @@ impl Database {
         let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 self.hnsw_cache_insert(name, index);
             },
