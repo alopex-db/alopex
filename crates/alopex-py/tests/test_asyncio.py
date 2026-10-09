@@ -10,6 +10,96 @@ def _error_code(error: BaseException) -> str:
     return getattr(error, "code", "")
 
 
+@pytest.mark.parametrize("thread_mode", ["single", "multi"])
+def test_async_kv_scans_preserve_transaction_visibility(thread_mode):
+    async def scenario():
+        db = await AsyncDatabase.new(thread_mode=thread_mode)
+        try:
+            seed = await db.begin(TxnMode.READ_WRITE)
+            await seed.put(b"cart:1", b"old")
+            await seed.put(b"cart:2", b"deleted")
+            await seed.commit()
+            txn = await db.begin(TxnMode.READ_WRITE)
+            await txn.put(b"cart:1", b"changed")
+            await txn.delete(b"cart:2")
+            await txn.put(b"cart:3", b"new")
+            expected = [(b"cart:1", b"changed"), (b"cart:3", b"new")]
+            prefix = await txn.scan_prefix(b"cart:")
+            bounded = await txn.scan_range(b"cart:", b"cart;")
+            assert iter(prefix) is prefix
+            assert iter(bounded) is bounded
+            assert list(await txn.scan_range(b"cart:1", b"cart:3")) == expected[:1]
+            assert list(await txn.scan_prefix(b"missing:")) == []
+            await txn.put(b"cart:1", b"later")
+            await txn.commit()
+            assert list(prefix) == expected
+            assert list(bounded) == expected
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("thread_mode", ["single", "multi"])
+def test_async_kv_search_preserves_pagination_and_limits(thread_mode):
+    async def scenario():
+        db = await AsyncDatabase.new(thread_mode=thread_mode)
+        try:
+            txn = await db.begin(TxnMode.READ_WRITE)
+            for suffix in (b"1", b"2", b"3"):
+                await txn.put(b"cart:" + suffix, suffix)
+            first = await txn.search_keys(b"cart:*", limit=2)
+            assert first == {
+                "entries": [(b"cart:1", b"1"), (b"cart:2", b"2")],
+                "next_cursor": b"cart:2",
+                "scanned": 2,
+            }
+            second = await txn.search_keys(b"cart:*", limit=2, cursor=first["next_cursor"])
+            assert second["entries"] == [(b"cart:3", b"3")]
+            assert second["next_cursor"] is None
+            assert (await txn.search_keys(r"^cart:[13]$", mode="regex"))["entries"] == [
+                (b"cart:1", b"1"), (b"cart:3", b"3")
+            ]
+            assert await txn.search_keys(b"cart:*", cursor=b"cart:3") == {
+                "entries": [], "next_cursor": None, "scanned": 0,
+            }
+            with pytest.raises(AlopexError, match="budget"):
+                await txn.search_keys(b"cart:*", scan_budget=1)
+            with pytest.raises(AlopexError, match="response size"):
+                await txn.search_keys(b"cart:*", max_bytes=1)
+            assert len((await txn.search_keys(b"cart:*", max_bytes=100))["entries"]) == 3
+            for option in ("limit", "scan_budget", "max_bytes"):
+                with pytest.raises(AlopexError, match=option):
+                    await txn.search_keys(b"cart:*", **{option: 0})
+            with pytest.raises(ValueError, match="mode"):
+                await txn.search_keys(b"cart:*", mode="literal")
+            await txn.rollback()
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method,args", [
+    ("scan_prefix", (b"cart:",)),
+    ("scan_range", (b"cart:", b"cart;")),
+    ("search_keys", (b"cart:*",)),
+])
+@pytest.mark.parametrize("finish", ["commit", "rollback"])
+def test_async_kv_methods_reject_completed_transaction(method, args, finish):
+    async def scenario():
+        db = await AsyncDatabase.new()
+        try:
+            txn = await db.begin(TxnMode.READ_WRITE)
+            await getattr(txn, finish)()
+            with pytest.raises(AlopexError, match="closed"):
+                await getattr(txn, method)(*args)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_async_sql_stream_consumes_owned_local_rows_and_single_thread_stays_local():
     async def scenario() -> None:
         db = await AsyncDatabase.new(thread_mode="single")

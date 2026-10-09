@@ -1,4 +1,4 @@
-from typing import Any, AsyncIterator, Dict, Literal, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Dict, Iterator, Literal, Optional, Sequence, Tuple, Union, overload
 
 from ._alopex import DataFrame, LocalScan, ThreadMode, TxnMode
 
@@ -29,6 +29,28 @@ class AsyncTransaction:
     async def get(self, key: bytes) -> Optional[bytes]: ...
     async def put(self, key: bytes, value: bytes) -> None: ...
     async def delete(self, key: bytes) -> None: ...
+    async def scan_prefix(self, prefix: bytes) -> Iterator[Tuple[bytes, bytes]]: ...
+    async def scan_range(self, start: bytes, end: bytes) -> Iterator[Tuple[bytes, bytes]]: ...
+    @overload
+    async def search_keys(
+        self,
+        pattern: bytes,
+        mode: Literal["glob"] = "glob",
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+    ) -> Dict[str, Any]: ...
+    @overload
+    async def search_keys(
+        self,
+        pattern: str,
+        mode: Literal["regex"],
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+    ) -> Dict[str, Any]: ...
     async def execute_sql(self, sql: str, params: Optional[Sequence[Any]] = None) -> Union[list[dict[str, Any]], int, None]: ...
     async def savepoint(self, name: str) -> None: ...
     async def rollback_to(self, name: str) -> None: ...

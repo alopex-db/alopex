@@ -172,31 +172,30 @@ pub(crate) fn prepared_binding(
     if value.is_instance_of::<PyBytes>() || value.is_instance_of::<PyByteArray>() {
         return Ok(PyPreparedBinding::Rendered(render_param(value, index)?));
     }
-    if value.cast::<PyDict>().is_err() {
-        if let Ok(iter) = value.try_iter() {
-            let mut values = Vec::new();
-            for (position, item) in iter.enumerate() {
-                let value = item?.extract::<f64>().map_err(|_| {
-                    PyErr::from(AlopexError::SqlParamUnsupportedType(format!(
-                        "params[{index}][{position}] を数値へ変換できません"
-                    )))
-                })?;
-                if !value.is_finite() || !(value as f32).is_finite() {
-                    return Err(AlopexError::SqlParamInvalidValue(format!(
-                        "params[{index}][{position}] は有限の f32 である必要があります"
-                    ))
-                    .into());
-                }
-                values.push(value as f32);
-            }
-            if values.is_empty() {
+    reject_mapping_or_set(value, index)?;
+    if let Ok(iter) = value.try_iter() {
+        let mut values = Vec::new();
+        for (position, item) in iter.enumerate() {
+            let value = item?.extract::<f64>().map_err(|_| {
+                PyErr::from(AlopexError::SqlParamUnsupportedType(format!(
+                    "params[{index}][{position}] を数値へ変換できません"
+                )))
+            })?;
+            if !value.is_finite() || !(value as f32).is_finite() {
                 return Err(AlopexError::SqlParamInvalidValue(format!(
-                    "params[{index}]: 空のベクトルリテラルは使用できません"
+                    "params[{index}][{position}] は有限の f32 である必要があります"
                 ))
                 .into());
             }
-            return Ok(native_binding(SqlValue::Vector(values)));
+            values.push(value as f32);
         }
+        if values.is_empty() {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: 空のベクトルリテラルは使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Vector(values)));
     }
     Ok(PyPreparedBinding::Rendered(render_param(value, index)?))
 }
@@ -310,7 +309,7 @@ enum ScanState {
 }
 
 /// SQL を「引用符・コメント外の `?`」で分割する。戻り値の長さは `プレースホルダ数 + 1`。
-fn split_on_placeholders(sql: &str) -> Vec<&str> {
+pub(super) fn split_on_placeholders(sql: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     let mut state = ScanState::Normal;
@@ -438,10 +437,7 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
         ))
         .into());
     }
-    // dict などのマッピングはベクトルとして反復するとキーのみが展開されるため明示的に拒否する。
-    if value.cast::<PyDict>().is_ok() || value.hasattr("keys")? {
-        return Err(unsupported_type_error(value, index));
-    }
+    reject_mapping_or_set(value, index)?;
     // 数値シーケンス（list / tuple / numpy 配列など）はベクトルリテラルへ展開する。
     if let Ok(iter) = value.try_iter() {
         return render_vector(iter, index);
@@ -454,6 +450,17 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
         return render_f64(v).ok_or_else(|| non_finite_error(index, v));
     }
     Err(unsupported_type_error(value, index))
+}
+
+fn reject_mapping_or_set(value: &Bound<'_, PyAny>, index: usize) -> PyResult<()> {
+    if value.hasattr("keys")? {
+        return Err(unsupported_type_error(value, index));
+    }
+    let set_type = PyModule::import(value.py(), "collections.abc")?.getattr("Set")?;
+    if value.is_instance(&set_type)? {
+        return Err(unsupported_type_error(value, index));
+    }
+    Ok(())
 }
 
 /// Return true for Python's naive `datetime.datetime` values.
@@ -661,6 +668,94 @@ mod tests {
 
     fn params_list<'py>(py: Python<'py>, values: Vec<Bound<'py, PyAny>>) -> Bound<'py, PyAny> {
         PyList::new(py, values).expect("params list").into_any()
+    }
+
+    fn container_expression<'py>(py: Python<'py>, expression: &str) -> Bound<'py, PyAny> {
+        let expression = std::ffi::CString::new(expression).unwrap();
+        py.eval(expression.as_c_str(), None, None).unwrap()
+    }
+
+    fn assert_container_bindings_rejected(py: Python<'_>, expressions: &[&str]) {
+        let mut failures = Vec::new();
+        for expression in expressions {
+            let value = container_expression(py, expression);
+            match super::prepared_binding(&value, 0) {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {}
+                Err(error) => failures.push(format!("prepared {expression}: {error}")),
+                Ok(_) => failures.push(format!("prepared {expression}: incorrectly accepted")),
+            }
+            let value = container_expression(py, expression);
+            match super::render_param(&value, 0) {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {}
+                Err(error) => failures.push(format!("rendered {expression}: {error}")),
+                Ok(value) => failures.push(format!("rendered {expression}: accepted as {value}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue582_mapping_bindings_are_rejected_in_both_paths() {
+        with_py(|py| {
+            assert_container_bindings_rejected(
+                py,
+                &[
+                    "{1: 'x'}",
+                    "__import__('collections').UserDict({1: 'x'})",
+                    "__import__('types').MappingProxyType({1: 'x'})",
+                    "type('MappingLike', (), {'keys': lambda self: [1], '__iter__': lambda self: iter([1])})()",
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn issue582_set_bindings_are_rejected_in_both_paths() {
+        with_py(|py| {
+            assert_container_bindings_rejected(
+                py,
+                &[
+                    "{1, 2}",
+                    "frozenset([1, 2])",
+                    "{1: 'x', 2: 'y'}.keys()",
+                    "type('NumberSet', (__import__('collections.abc', fromlist=['Set']).Set,), {'__contains__': lambda self, x: x in (1, 2), '__iter__': lambda self: iter([1, 2]), '__len__': lambda self: 2})()",
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn issue582_ordered_numeric_iterables_preserve_vector_values() {
+        with_py(|py| {
+            eprintln!(
+                "runtime Python={} NumPy={}",
+                py.import("sys").unwrap().getattr("version").unwrap(),
+                py.import("numpy").unwrap().getattr("__version__").unwrap()
+            );
+            for expression in [
+                "[1, 2, 3]",
+                "(1, 2, 3)",
+                "range(1, 4)",
+                "(x for x in [1, 2, 3])",
+                "__import__('numpy').array([1, 2, 3], dtype='float32')",
+            ] {
+                let value = container_expression(py, expression);
+                let binding = super::prepared_binding(&value, 0).unwrap();
+                match binding {
+                    super::PyPreparedBinding::Native(SqlValue::Vector(values)) => {
+                        assert_eq!(values, vec![1.0f32, 2.0, 3.0], "{expression}");
+                    }
+                    _ => panic!("ordered vector did not use native binding: {expression}"),
+                }
+                // The prepared owner consumes generators; evaluate a fresh one for rendering.
+                let value = container_expression(py, expression);
+                assert_eq!(
+                    super::render_param(&value, 0).unwrap(),
+                    "[1.0, 2.0, 3.0]",
+                    "{expression}"
+                );
+            }
+        });
     }
 
     #[test]
