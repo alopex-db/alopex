@@ -28,6 +28,51 @@ fn seeded_memory() -> MemoryKV {
 }
 
 #[test]
+fn owned_memory_scans_keep_read_write_conflict_detection() {
+    use alopex_core::kv::OwnedKVStore;
+    use std::sync::Arc;
+
+    for method in ["prefix", "range", "from"] {
+        let store = Arc::new(MemoryKV::new());
+        let mut seed = store
+            .clone()
+            .begin_owned_kv_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        seed.put(b"key".to_vec(), b"old".to_vec()).unwrap();
+        seed.commit().unwrap();
+        let mut reader = store
+            .clone()
+            .begin_owned_kv_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let mut scan = match method {
+            "prefix" => reader.scan_prefix(b"k"),
+            "range" => reader.scan_range(b"k", b"l"),
+            _ => reader.scan_from(b"k"),
+        }
+        .unwrap();
+        assert_eq!(
+            scan.next_entry().unwrap(),
+            Some((b"key".to_vec(), b"old".to_vec()))
+        );
+        scan.close().unwrap();
+        drop(scan);
+        let mut writer = store
+            .clone()
+            .begin_owned_kv_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        writer.put(b"key".to_vec(), b"new".to_vec()).unwrap();
+        writer.commit().unwrap();
+        reader
+            .put(b"independent".to_vec(), b"value".to_vec())
+            .unwrap();
+        assert!(matches!(
+            reader.commit(),
+            Err(alopex_core::Error::TxnConflict)
+        ));
+    }
+}
+
+#[test]
 fn glob_search_is_byte_oriented_ordered_and_paginated() {
     let store = seeded_memory();
     let mut txn = store.begin(TxnMode::ReadOnly).unwrap();

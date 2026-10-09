@@ -1564,14 +1564,14 @@ impl OwnedMemoryCursor {
 
     fn data_candidate(&self, start_version: u64) -> Option<(Key, Option<Value>, u64)> {
         let data = self.manager.state.data.read().unwrap();
-        let mut entries: Box<dyn Iterator<Item = (&Key, &(Value, u64))>> = match &self.last_key {
-            Some(last_key) => Box::new(data.range::<Key, _>((Excluded(last_key), Unbounded))),
+        let entry = match &self.last_key {
+            Some(last_key) => data.range::<Key, _>((Excluded(last_key), Unbounded)).next(),
             None => match &self.start {
-                Some(start) => Box::new(data.range::<Key, _>((Included(start), Unbounded))),
-                None => Box::new(data.iter()),
+                Some(start) => data.range::<Key, _>((Included(start), Unbounded)).next(),
+                None => data.iter().next(),
             },
         };
-        let (key, (value, version)) = entries.next()?;
+        let (key, (value, version)) = entry?;
         self.key_is_in_scope(key).then(|| {
             (
                 key.clone(),
@@ -1603,7 +1603,7 @@ impl OwnedMemoryCursor {
             .then(|| (entry.0.clone(), entry.1.clone()))
     }
 
-    fn record_read(&self, key: Key, version: u64) -> Result<()> {
+    fn record_read(&self, key: &Key, version: u64) -> Result<()> {
         let mut transaction = self
             .transaction
             .lock()
@@ -1616,7 +1616,7 @@ impl OwnedMemoryCursor {
             return Ok(());
         }
         if transaction.mode != TxnMode::ReadOnly {
-            transaction.read_set.insert(key, version);
+            transaction.read_set.insert(key.clone(), version);
         }
         Ok(())
     }
@@ -1657,17 +1657,17 @@ impl OwnedKVScan for OwnedMemoryCursor {
         let next = match (data, write) {
             (Some((data_key, data_value, data_version)), Some((write_key, write_value))) => {
                 if data_key == write_key {
-                    self.record_read(data_key.clone(), data_version)?;
+                    self.record_read(&data_key, data_version)?;
                     (data_key, write_value)
                 } else if data_key < write_key {
-                    self.record_read(data_key.clone(), data_version)?;
+                    self.record_read(&data_key, data_version)?;
                     (data_key, data_value)
                 } else {
                     (write_key, write_value)
                 }
             }
             (Some((data_key, data_value, data_version)), None) => {
-                self.record_read(data_key.clone(), data_version)?;
+                self.record_read(&data_key, data_version)?;
                 (data_key, data_value)
             }
             (None, Some((write_key, write_value))) => (write_key, write_value),
