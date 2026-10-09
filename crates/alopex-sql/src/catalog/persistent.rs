@@ -2183,6 +2183,9 @@ impl<S: KVStore> PersistentCatalog<S> {
     }
 
     fn ensure_overlay_name_uniqueness(&self, overlay: &CatalogOverlay) -> Result<(), CatalogError> {
+        if overlay.added_tables.is_empty() && overlay.added_indexes.is_empty() {
+            return Ok(());
+        }
         let mut table_names: HashMap<String, TableFqn> = HashMap::new();
         for name in self.inner.table_names() {
             let Some(table) = self.inner.get_table(name) else {

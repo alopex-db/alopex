@@ -11,7 +11,9 @@ use alopex_sql::executor::{
     build_streaming_pipeline, ColumnInfo, ExecutionResult, Executor, QueryRowIterator, Row,
 };
 use alopex_sql::planner::typed_expr::Projection;
-use alopex_sql::storage::{LocalRangeChangeJournal, RangeChangeJournalScope, SqlValue, TxnBridge};
+use alopex_sql::storage::{
+    LocalRangeChangeJournal, RangeChangeJournalScope, SqlTxn, SqlValue, TxnBridge,
+};
 use alopex_sql::AlopexDialect;
 use alopex_sql::Parser;
 use alopex_sql::Planner;
@@ -486,10 +488,30 @@ impl Database {
         reader: impl std::io::Read + 'static,
         header: bool,
     ) -> Result<SqlResult> {
-        let executor: Executor<_, _> = Executor::new(self.store.clone(), self.sql_catalog.clone());
-        executor
-            .copy_from_csv_reader(table, reader, header)
-            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))
+        let mut transaction = self.begin(TxnMode::ReadWrite)?;
+        let result = {
+            let mut borrowed = TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(
+                transaction.inner.as_mut().ok_or(Error::TxnCompleted)?,
+                TxnMode::ReadWrite,
+                &mut transaction.overlay,
+            );
+            let (mut txn, overlay) = borrowed.split_parts();
+            let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+            let view = TxnCatalogView::new(&*catalog, overlay);
+            let result = alopex_sql::executor::bulk::execute_copy_from_csv_reader(
+                &mut txn,
+                &view,
+                table,
+                reader,
+                alopex_sql::executor::bulk::CopyOptions { header },
+            )
+            .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))?;
+            txn.flush_hnsw()
+                .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))?;
+            result
+        };
+        transaction.commit()?;
+        Ok(result)
     }
 
     /// Export CSV to an application-owned writer.
@@ -1111,6 +1133,176 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn csv_reader_commit_updates_hnsw_cache_and_journal() {
+        let mut observations = Vec::new();
+        for persistent in [false, true] {
+            for indexed in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let db = warmed_sql_hnsw_indexes(if persistent {
+                    Database::open(directory.path()).unwrap()
+                } else {
+                    Database::open_in_memory().unwrap()
+                });
+                let before = db.hnsw_cache.read().unwrap().clone();
+                let (epoch, stale) = db.hnsw_cache_snapshot();
+                let journal_before = range_change_entries(&db);
+                let (table, csv) = if indexed {
+                    ("cache_items_a", "id,embedding\n3,\"[20.0,0.0]\"\n")
+                } else {
+                    ("cache_plain", "id\n3\n")
+                };
+                assert!(matches!(
+                    db.copy_from_csv_reader(table, std::io::Cursor::new(csv), true)
+                        .unwrap(),
+                    ExecutionResult::RowsAffected(1)
+                ));
+                let retained = {
+                    let after = db.hnsw_cache.read().unwrap();
+                    ["cache_sql_a", "cache_sql_b"].map(|name| {
+                        after
+                            .get(name)
+                            .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                    })
+                };
+                let epoch_advanced = db
+                    .hnsw_cache_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == epoch + 1;
+                db.hnsw_cache_insert_if_current(epoch, stale);
+                let distance = db
+                    .search_hnsw("cache_sql_a", &[20.0, 0.0], 1, Some(8))
+                    .unwrap()
+                    .0[0]
+                    .distance;
+                assert_eq!(
+                    db.search_hnsw("cache_sql_b", &[0.0, 0.0], 1, Some(8))
+                        .unwrap()
+                        .0[0]
+                        .distance,
+                    0.0
+                );
+                let ExecutionResult::Query(rows) = db
+                    .execute_sql(&format!("SELECT id FROM {table} WHERE id = 3"))
+                    .unwrap()
+                else {
+                    panic!("expected imported row");
+                };
+                assert_eq!(rows.rows, vec![vec![SqlValue::Integer(3)]]);
+                if indexed {
+                    let ExecutionResult::Query(rows) = db
+                        .execute_sql("SELECT embedding FROM cache_items_a WHERE id = 3")
+                        .unwrap()
+                    else {
+                        panic!("expected imported vector");
+                    };
+                    assert_eq!(rows.rows, vec![vec![SqlValue::Vector(vec![20.0, 0.0])]]);
+                    let mut read = db.store.begin(TxnMode::ReadOnly).unwrap();
+                    let graph = alopex_core::HnswIndex::load("cache_sql_a", &mut read).unwrap();
+                    assert_eq!(
+                        graph.search(&[20.0, 0.0], 1, Some(8)).unwrap().0[0].distance,
+                        0.0
+                    );
+                    read.rollback_self().unwrap();
+                }
+                let journal_after = range_change_entries(&db);
+                let journal_ok = journal_after.len() == journal_before.len() + 1
+                    && journal_after
+                        .iter()
+                        .filter(|entry| !journal_before.contains(entry))
+                        // Epoch counters share the prefix but are not serialized records.
+                        .filter(|(key, _)| !key.starts_with(b"\x00alopex/range-change/epoch/"))
+                        .any(|(_, bytes)| {
+                            let record = decode_range_change(bytes).unwrap();
+                            record.payload.iter().any(|payload| {
+                                matches!(payload, RangeChangePayload::UpsertRow { .. })
+                            }) && record.payload.iter().any(|payload| {
+                                matches!(payload, RangeChangePayload::UpsertIndex { .. })
+                            })
+                        });
+                eprintln!("CSV persistent={persistent} indexed={indexed}: retained={retained:?} epoch_advanced={epoch_advanced} distance={distance} journal_ok={journal_ok}; stored row verified");
+                observations.push((
+                    retained == [!indexed, true],
+                    epoch_advanced,
+                    distance == if indexed { 0.0 } else { 11.0 },
+                    journal_ok,
+                ));
+            }
+        }
+        assert_eq!(observations, vec![(true, true, true, true); 4]);
+    }
+
+    fn range_change_entries(db: &Database) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut read = db.store.begin(TxnMode::ReadOnly).unwrap();
+        let entries = read
+            .scan_prefix(b"\x00alopex/range-change/")
+            .unwrap()
+            .collect();
+        read.rollback_self().unwrap();
+        entries
+    }
+
+    #[test]
+    fn failed_csv_reader_preserves_rows_graphs_and_journal() {
+        for persistent in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = warmed_sql_hnsw_indexes(if persistent {
+                Database::open(directory.path()).unwrap()
+            } else {
+                Database::open_in_memory().unwrap()
+            });
+            let before = db.hnsw_cache.read().unwrap().clone();
+            let epoch = db
+                .hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            let journal_before = range_change_entries(&db);
+            // Cross the bulk reader's 1024-row batch so KV writes precede the bad row.
+            let mut csv = (3..1027)
+                .map(|id| format!("{id},\"[20.0,0.0]\"\n"))
+                .collect::<String>();
+            csv.push_str("invalid,\"[20.0,0.0]\"\n");
+            assert!(db
+                .copy_from_csv_reader("cache_items_a", std::io::Cursor::new(csv), false)
+                .is_err());
+            assert_eq!(
+                db.hnsw_cache_epoch
+                    .load(std::sync::atomic::Ordering::Acquire),
+                epoch
+            );
+            for name in ["cache_sql_a", "cache_sql_b"] {
+                assert!(Arc::ptr_eq(
+                    &db.hnsw_cache.read().unwrap()[name],
+                    &before[name]
+                ));
+                assert_eq!(
+                    db.search_hnsw(name, &[20.0, 0.0], 1, Some(8)).unwrap().0[0].distance,
+                    11.0
+                );
+            }
+            let ExecutionResult::Query(rows) = db
+                .execute_sql("SELECT id FROM cache_items_a ORDER BY id")
+                .unwrap()
+            else {
+                panic!("expected original rows");
+            };
+            assert_eq!(
+                rows.rows,
+                vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+            );
+            assert_eq!(range_change_entries(&db), journal_before);
+            let mut read = db.store.begin(TxnMode::ReadOnly).unwrap();
+            let graph = alopex_core::HnswIndex::load("cache_sql_a", &mut read).unwrap();
+            assert_eq!(
+                graph.search(&[20.0, 0.0], 1, Some(8)).unwrap().0[0].distance,
+                11.0
+            );
+            read.rollback_self().unwrap();
+            eprintln!(
+                "CSV failure persistent={persistent}: cache/epoch/rows/graph/journal unchanged"
+            );
+        }
     }
 
     #[test]
