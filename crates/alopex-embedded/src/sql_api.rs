@@ -1423,9 +1423,54 @@ mod tests {
     }
 
     #[test]
+    fn owned_lsm_conflict_preserves_hnsw_cache_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = warm_direct_hnsw_indexes(Database::open(directory.path()).unwrap());
+        let mut losing = Arc::clone(&db)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        losing.put(b"conflict", b"loser").unwrap();
+        losing
+            .upsert_to_hnsw("cache_a", b"key", &[9.0, 0.0], b"loser")
+            .unwrap();
+        let mut winning = db.begin(TxnMode::ReadWrite).unwrap();
+        winning.put(b"conflict", b"winner").unwrap();
+        winning.commit().unwrap();
+        let before = db.hnsw_cache.read().unwrap().clone();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(matches!(
+            losing.commit(),
+            Err(Error::Core(alopex_core::Error::TxnConflict))
+        ));
+        assert!(matches!(
+            losing.session().commit(),
+            Err(alopex_core::Error::TxnClosed)
+        ));
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch
+        );
+        for name in ["cache_a", "cache_b"] {
+            assert!(Arc::ptr_eq(
+                &db.hnsw_cache.read().unwrap()[name],
+                &before[name]
+            ));
+            let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            assert_eq!(rows[0].key, b"key");
+            assert_eq!(rows[0].distance, 0.0);
+        }
+        let mut read = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(read.get(b"conflict").unwrap(), Some(b"winner".to_vec()));
+        read.rollback().unwrap();
+    }
+
+    #[test]
     fn unrelated_kv_commit_preserves_warmed_hnsw_cache() {
         let mut observations = Vec::new();
-        for (owned, persistent) in [(false, false), (true, false), (false, true)] {
+        for (owned, persistent) in [(false, false), (true, false), (false, true), (true, true)] {
             let directory = tempfile::tempdir().unwrap();
             let db = warm_direct_hnsw_indexes(if persistent {
                 Database::open(directory.path()).unwrap()
@@ -1471,13 +1516,13 @@ mod tests {
             observations.push(retained);
         }
         // Both public transaction owners reach the oracle even on the old clear-all implementation.
-        assert_eq!(observations, vec![[true, true]; 3]);
+        assert_eq!(observations, vec![[true, true]; 4]);
     }
 
     #[test]
     fn direct_hnsw_commit_invalidates_only_changed_index() {
         let mut observations = Vec::new();
-        for (owned, persistent) in [(false, false), (true, false), (false, true)] {
+        for (owned, persistent) in [(false, false), (true, false), (false, true), (true, true)] {
             let directory = tempfile::tempdir().unwrap();
             let db = warm_direct_hnsw_indexes(if persistent {
                 Database::open(directory.path()).unwrap()
@@ -1521,7 +1566,7 @@ mod tests {
             observations.push((stale_a_retained, untouched_b_retained));
         }
         // A may be evicted or replaced; B must retain its already-loaded graph.
-        assert_eq!(observations, vec![(false, true); 3]);
+        assert_eq!(observations, vec![(false, true); 4]);
     }
 
     #[test]

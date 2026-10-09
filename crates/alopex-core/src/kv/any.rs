@@ -369,6 +369,17 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         self.open_cursor(OwnedLsmScanBounds::from(start.to_vec()))
     }
 
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        for key in state.write_set.keys() {
+            visitor(key);
+        }
+        true
+    }
+
     fn commit(self: Box<Self>) -> Result<()> {
         let (mode, start_timestamp, read_set, write_set) = {
             let mut state = self
@@ -992,15 +1003,26 @@ mod tests {
             .clone()
             .begin_owned_transaction(TxnMode::ReadWrite)
             .unwrap();
-        transaction
+        let (empty_complete, empty_keys, complete, keys) = transaction
             .with_transaction(|transaction| {
+                let mut empty_keys = Vec::new();
+                let empty_complete =
+                    transaction.visit_pending_write_keys(&mut |key| empty_keys.push(key.to_vec()));
                 transaction.put(b"kept".to_vec(), b"before".to_vec())?;
+                transaction.put(b"kept".to_vec(), b"before".to_vec())?;
+                transaction.delete(b"deleted".to_vec())?;
                 let savepoint = transaction.create_savepoint()?;
                 transaction.put(b"discarded".to_vec(), b"after".to_vec())?;
                 transaction.rollback_to_savepoint(savepoint)?;
-                Ok(())
+                let mut keys = Vec::new();
+                let complete =
+                    transaction.visit_pending_write_keys(&mut |key| keys.push(key.to_vec()));
+                Ok((empty_complete, empty_keys, complete, keys))
             })
             .unwrap();
+        assert!(empty_complete && empty_keys.is_empty());
+        assert!(complete);
+        assert_eq!(keys, vec![b"deleted".to_vec(), b"kept".to_vec()]);
         transaction.commit().unwrap();
 
         let read = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
