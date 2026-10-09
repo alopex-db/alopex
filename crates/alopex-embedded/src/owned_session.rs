@@ -326,6 +326,9 @@ impl OwnedEmbeddedTransaction {
         self.session
             .rollback_to_savepoint(savepoint.core_id)
             .map_err(Error::Core)?;
+        // KV has moved back already. Only a complete graph restore can make
+        // this transaction safe to execute or commit again.
+        self.failed = true;
         self.overlay = savepoint.overlay.clone();
         self.catalog_modified = savepoint.catalog_modified;
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
@@ -400,6 +403,7 @@ impl OwnedEmbeddedTransaction {
         // A newer savepoint stages HNSW changes and clears their undo snapshot.
         // The core transaction has already rolled back to the requested point;
         // reload that version instead of using the latest graph's undo state.
+        self.hnsw_indices.clear();
         let restored = self
             .session
             .with_transaction(|transaction| {
@@ -766,6 +770,56 @@ mod tests {
             keys.sort();
             assert_eq!(keys, vec![b"keep".to_vec()]);
         }
+    }
+
+    #[test]
+    fn owned_embedded_failed_hnsw_restore_blocks_commit_and_can_recover() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("clean").unwrap();
+        // The raw KV API can persist an unreadable node. An unchanged graph
+        // does not rewrite nodes when the next savepoint stages its metadata.
+        transaction.put(b"hnsw:node:vec_idx:0", b"invalid").unwrap();
+        transaction.create_savepoint("unreadable").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+
+        assert!(matches!(
+            transaction.rollback_to_savepoint("unreadable"),
+            Err(Error::Core(alopex_core::Error::InvalidFormat(_)))
+        ));
+        let commit = transaction.commit();
+        assert!(matches!(commit, Err(Error::TxnFailed)), "{commit:?}");
+        assert!(matches!(
+            transaction.upsert_to_hnsw("vec_idx", b"after_failure", &[2.0, 0.0], b""),
+            Err(Error::Core(alopex_core::Error::InvalidFormat(_)))
+        ));
+        assert!(matches!(
+            transaction.execute_sql("SELECT 1"),
+            Err(Error::TxnFailed)
+        ));
+        transaction.rollback_to_savepoint("clean").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
     }
 
     #[test]
