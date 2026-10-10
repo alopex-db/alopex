@@ -40,6 +40,153 @@ fn meta_key() -> Vec<u8> {
     format!("hnsw:meta:{}", storage().index_name).into_bytes()
 }
 
+/// One process/case. Build time is a preliminary observation, not acceptance.
+#[test]
+#[ignore = "explicit fixed-order bulk quality and construction observation"]
+fn bulk_order_quality_cost_worker() {
+    let size = std::env::var("HNSW_ORDER_SIZE")
+        .unwrap_or_else(|_| "9600".into())
+        .parse::<usize>()
+        .expect("HNSW_ORDER_SIZE must be an integer");
+    let order = std::env::var("HNSW_ORDER_ORDER").unwrap_or_else(|_| "ascending".into());
+    check_bulk_order_quality(&order, size);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn shuffled_bulk_preserves_tie_aware_recall() {
+    check_bulk_order_quality("shuffled", 9600);
+}
+
+fn check_bulk_order_quality(order: &str, size: usize) {
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::time::Instant;
+
+    const DIM: usize = 128;
+    const K: usize = 10;
+    const EPS: f64 = 1e-7;
+    assert!(
+        (K..=40_000).contains(&size),
+        "size outside bounded diagnostic range"
+    );
+    assert!(matches!(order, "ascending" | "shuffled"));
+    let keys = (0..size)
+        .map(|id| ((id + 1) as u64).to_be_bytes())
+        .collect::<Vec<_>>();
+    let vectors = (0..size)
+        .map(|id| {
+            (0..DIM)
+                .map(|d| ((id + d) % 997) as f32)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut insertion_order = (0..size).collect::<Vec<_>>();
+    if order == "shuffled" {
+        insertion_order.shuffle(&mut StdRng::seed_from_u64(42));
+    }
+    let entries = insertion_order
+        .iter()
+        .map(|&id| (keys[id].as_slice(), vectors[id].as_slice(), &[][..]))
+        .collect::<Vec<_>>();
+    let mut index = HnswIndex::create(
+        "bulk_order",
+        base_config()
+            .with_dimension(DIM)
+            .with_metric(Metric::Cosine),
+    )
+    .unwrap();
+    let started = Instant::now();
+    for batch in entries.chunks(128) {
+        index.upsert_batch(batch).unwrap();
+    }
+    let build_ns = u64::try_from(started.elapsed().as_nanos()).unwrap();
+
+    // Preparation, oracle, query, resource inspection and output are untimed.
+    let scores = vectors
+        .iter()
+        .map(|vector| {
+            let norm = vector
+                .iter()
+                .map(|&v| f64::from(v).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            f64::from(vector[0]) / norm
+        })
+        .collect::<Vec<_>>();
+    let mut ranked = scores.clone();
+    ranked.sort_by(|a, b| b.total_cmp(a));
+    let cutoff = ranked[K - 1];
+    let strict_total = scores.iter().filter(|&&score| score > cutoff + EPS).count();
+    assert!(strict_total <= K);
+    let mut query = vec![0.0; DIM];
+    query[0] = 1.0;
+    let (hits, query_stats, effective_ef) =
+        index.search_with_effective_ef(&query, K, Some(64)).unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| u64::from_be_bytes(hit.key.as_slice().try_into().unwrap()) as usize - 1)
+        .collect::<Vec<_>>();
+    let valid_ids = ids.len() == K
+        && ids.iter().all(|&id| id < size)
+        && ids.iter().copied().collect::<HashSet<_>>().len() == K;
+    let strict_hits = ids
+        .iter()
+        .filter(|&&id| scores.get(id).is_some_and(|&score| score > cutoff + EPS))
+        .count();
+    let boundary_hits = ids
+        .iter()
+        .filter(|&&id| {
+            scores
+                .get(id)
+                .is_some_and(|&score| score >= cutoff - EPS && score <= cutoff + EPS)
+        })
+        .count();
+    let recall = (strict_hits + boundary_hits.min(K - strict_total)) as f64 / K as f64;
+    let stats = index.stats();
+    let graph = index.graph.read().unwrap();
+    let mut edges = 0_usize;
+    let mut max_layer0_degree = 0_usize;
+    let mut max_upper_degree = 0_usize;
+    for node in graph.nodes.iter().flatten() {
+        for (level, neighbors) in node.neighbors.iter().enumerate() {
+            edges += neighbors.len();
+            if level == 0 {
+                max_layer0_degree = max_layer0_degree.max(neighbors.len());
+            } else {
+                max_upper_degree = max_upper_degree.max(neighbors.len());
+            }
+        }
+    }
+    let row = serde_json::json!({
+        "kind": "bulk_order_preliminary", "size": size, "order": order, "seed": 42,
+        "dimension": DIM, "metric": "cosine", "m": 8, "ef_construction": 32,
+        "batch_size": 128, "k": K, "requested_ef": 64, "effective_ef": effective_ef,
+        "ids": ids, "valid_ids": valid_ids, "strict_total": strict_total,
+        "strict_hits": strict_hits, "boundary_hits": boundary_hits, "recall": recall,
+        "query_nodes_visited": query_stats.nodes_visited,
+        "query_distance_computations": query_stats.distance_computations,
+        "build_ns": build_ns, "estimated_graph_heap_bytes": stats.memory_bytes,
+        "node_count": stats.node_count, "avg_edges_per_node": stats.avg_edges_per_node,
+        "edges_all_layers": edges, "max_layer0_degree": max_layer0_degree,
+        "max_upper_degree": max_upper_degree
+    });
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "{row}").unwrap();
+    output.flush().unwrap();
+    assert!(valid_ids, "invalid result IDs; see saved observation");
+    assert_eq!(stats.node_count, size as u64);
+    assert_eq!(effective_ef, 64.min(size));
+    assert!(max_layer0_degree <= 16 && max_upper_degree <= 8);
+    assert!(
+        recall >= 0.95,
+        "recall below fixed threshold; see saved observation"
+    );
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn save_and_load_roundtrip_preserves_graph() {
@@ -84,6 +231,21 @@ fn staged_batch_publishes_stats_only_after_commit() {
     let mut load_txn = kv.begin(TxnMode::ReadOnly).unwrap();
     let loaded = HnswIndex::load("test_index", &mut load_txn).unwrap();
     assert_eq!(loaded.search(&[0.0, 0.0], 2, None).unwrap().0.len(), 2);
+
+    index
+        .upsert_staged_batch(
+            &[(b"c", &[2.0, 0.0], b""), (b"d", &[3.0, 0.0], b"")],
+            &mut state,
+        )
+        .unwrap();
+    assert_eq!(index.search(&[0.0, 0.0], 4, None).unwrap().0.len(), 4);
+    index.rollback(&mut state).unwrap();
+    let restored = index.search(&[0.0, 0.0], 4, None).unwrap().0;
+    assert_eq!(
+        restored.into_iter().map(|hit| hit.key).collect::<Vec<_>>(),
+        vec![b"a".to_vec(), b"b".to_vec()]
+    );
+    assert_eq!(index.stats().node_count, 2);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -133,6 +295,52 @@ fn batch_avoids_per_item_insert_callbacks() {
 
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(index.stats().node_count, 2);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn bulk_batches_find_periodic_cosine_nearest_neighbor() {
+    let config = base_config()
+        .with_dimension(128)
+        .with_metric(Metric::Cosine);
+    let keys: Vec<_> = (0_u64..997).map(|id| (id + 1).to_be_bytes()).collect();
+    let vectors: Vec<Vec<f32>> = (0..997)
+        .map(|id| {
+            (0..128)
+                .map(|dimension| ((id + dimension) % 997) as f32)
+                .collect()
+        })
+        .collect();
+    let entries: Vec<_> = keys
+        .iter()
+        .zip(&vectors)
+        .map(|(key, vector)| (key.as_slice(), vector.as_slice(), &[][..]))
+        .collect();
+    let mut query = vec![0.0; 128];
+    query[0] = 1.0;
+    let mut outcomes = Vec::new();
+    for staged in [false, true] {
+        let mut index = HnswIndex::create("periodic_cosine", config.clone()).unwrap();
+        for batch in entries.chunks(128) {
+            if staged {
+                let mut state = HnswTransactionState::default();
+                index.upsert_staged_batch(batch, &mut state).unwrap();
+            } else {
+                index.upsert_batch(batch).unwrap();
+            }
+        }
+        let (results, _) = index.search(&query, 1, Some(64)).unwrap();
+        outcomes.push(
+            results
+                .into_iter()
+                .map(|result| result.key)
+                .collect::<Vec<_>>(),
+        );
+    }
+    // Collect both modes before asserting so a wrong first result cannot hide
+    // the staged path. External row 996 is stored under internal key 997.
+    eprintln!("periodic cosine batch outcomes (ordinary, staged): {outcomes:?}");
+    assert_eq!(outcomes, vec![vec![997_u64.to_be_bytes().to_vec()]; 2]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
