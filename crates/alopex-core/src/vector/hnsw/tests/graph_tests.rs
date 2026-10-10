@@ -482,7 +482,60 @@ fn additional_base_route_does_not_discard_original_search_results() {
         vec![b"nearest".as_slice(), b"auxiliary".as_slice()]
     );
     assert_eq!(ef, 2);
-    assert_eq!(stats.distance_computations, 11);
+    assert_eq!(stats.distance_computations, 10);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn root_probe_abandons_slow_ladder_that_never_beats_cutoff() {
+    const CHAIN: usize = 40;
+    let mut graph = make_graph();
+    let root = graph.insert(b"root", &[100.0, 0.0], b"").unwrap();
+    let local = graph.insert(b"local", &[1.0, 0.0], b"").unwrap();
+    let chain: Vec<u32> = (1..=CHAIN)
+        .map(|i| {
+            let key = format!("c{i:03}");
+            graph
+                .insert(key.as_bytes(), &[100.0 - i as f32, 0.0], b"")
+                .unwrap()
+        })
+        .collect();
+    graph.entry_point = Some(root);
+    graph.max_level = 1;
+    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![chain[0]], vec![local]];
+    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![root], vec![root]];
+    for (i, &id) in chain.iter().enumerate() {
+        let next = chain.get(i + 1).map_or(vec![], |&n| vec![n]);
+        graph.nodes[id as usize].as_mut().unwrap().neighbors = vec![next];
+    }
+
+    // ef=1, max_level=1: the probe may take 2 hops. The ladder stays far below
+    // the first route's result (`local`), so it is abandoned: descent (3) +
+    // first search (2) + root walk (3). HEAD walks all 40 hops (~47).
+    let (hits, stats, _) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 1).unwrap();
+    assert_eq!(hits[0].key, b"local");
+    assert_eq!(stats.distance_computations, 8);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn root_probe_finds_distinct_basin_that_crosses_cutoff_within_bound() {
+    // The first route is stuck at an isolated `local`; `nearest` is two
+    // base-layer hops from the root, within the probe bound (ef/2 + max_level).
+    let mut graph = make_graph();
+    let root = graph.insert(b"root", &[100.0, 0.0], b"").unwrap();
+    let local = graph.insert(b"local", &[10.0, 0.0], b"").unwrap();
+    let a = graph.insert(b"a", &[50.0, 0.0], b"").unwrap();
+    let nearest = graph.insert(b"nearest", &[0.0, 0.0], b"").unwrap();
+    graph.entry_point = Some(root);
+    graph.max_level = 1;
+    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![a], vec![local]];
+    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![], vec![root]];
+    graph.nodes[a as usize].as_mut().unwrap().neighbors = vec![vec![nearest]];
+    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+
+    let (hits, _, _) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 3).unwrap();
+    assert_eq!(hits[0].key, b"nearest");
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

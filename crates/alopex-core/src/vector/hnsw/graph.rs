@@ -356,13 +356,19 @@ impl HnswGraph {
         // original search before considering another route: adding a seed to
         // its heap could evict a useful entry before that entry is expanded.
         if enter_point != original_entry {
-            let base_entry = self.greedy_search_with_stats(query, original_entry, 0, &mut stats);
             let cutoff = candidates.get(k - 1).map_or(f64::NEG_INFINITY, |c| c.score);
-            if base_entry != enter_point
-                && self.node(base_entry).is_some_and(|node| !node.deleted)
-                && !candidates.iter().any(|c| c.node_id == base_entry)
-                && self.distance(query, base_entry, &mut stats) > cutoff
-            {
+            // The root route only matters if it reaches a base entry that beats
+            // the first route's k-th result. It replaces an abandoned
+            // `max_level`-hop descent plus an ef-wide search, so allow half of
+            // ef hops on top of that; a slower ladder is abandoned.
+            let max_hops = (ef / 2).max(1).saturating_add(max_level);
+            let probed =
+                self.probe_base_entry_above(query, original_entry, cutoff, max_hops, &mut stats);
+            if let Some(base_entry) = probed.filter(|&base_entry| {
+                base_entry != enter_point
+                    && self.node(base_entry).is_some_and(|node| !node.deleted)
+                    && !candidates.iter().any(|c| c.node_id == base_entry)
+            }) {
                 // At most two ef-bounded searches; their retained results and
                 // all additional distance work are part of the resource cost.
                 // Seed the second heap with the first search's candidates so
@@ -549,6 +555,47 @@ impl HnswGraph {
             current_score = best_score;
         }
         current
+    }
+
+    /// Base-layer greedy probe from `start` that succeeds with the first node
+    /// scoring above `cutoff`. Returns `None` if the walk stalls below
+    /// `cutoff` or has not crossed it within `max_hops` moves, so a partial,
+    /// below-cutoff node can never seed another search.
+    fn probe_base_entry_above(
+        &self,
+        target: PreparedQuery<'_>,
+        start: u32,
+        cutoff: f64,
+        max_hops: usize,
+        stats: &mut SearchStats,
+    ) -> Option<u32> {
+        let mut current = start;
+        let mut current_score = self.distance(target, current, stats);
+        for hop in 0..=max_hops {
+            if current_score > cutoff {
+                return Some(current);
+            }
+            if hop == max_hops {
+                break;
+            }
+            let mut best = current;
+            let mut best_score = current_score;
+            if let Some(neighbors) = self.node(current).and_then(|node| node.neighbors.first()) {
+                for &n in neighbors {
+                    let s = self.distance(target, n, stats);
+                    if s > best_score {
+                        best = n;
+                        best_score = s;
+                    }
+                }
+            }
+            if best == current {
+                return None;
+            }
+            current = best;
+            current_score = best_score;
+        }
+        None
     }
 
     fn search_layer(
