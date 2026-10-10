@@ -278,25 +278,143 @@ impl ServerState {
             .catalog
             .write()
             .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+        let mut protected_tables = std::collections::HashSet::new();
+        let mut protected_indexes = std::collections::HashSet::new();
+        let mut result = Ok(());
         for effect in effects.into_iter().rev() {
-            match effect {
-                CatalogRollbackEffect::DropTable { table_name } => {
-                    if catalog.table_exists(&table_name) {
-                        catalog
-                            .drop_table(&table_name)
-                            .map_err(|err| ServerError::Internal(err.to_string()))?;
-                    }
+            let (mut tables, indexes): (Vec<String>, Vec<String>) = match &effect {
+                CatalogRollbackEffect::DropTable { table_name, .. } => (
+                    vec![table_name.clone()],
+                    catalog
+                        .get_indexes_for_table(table_name)
+                        .into_iter()
+                        .map(|index| index.name.clone())
+                        .collect(),
+                ),
+                CatalogRollbackEffect::CreateTable { table, indexes } => (
+                    vec![table.name.clone()],
+                    indexes.iter().map(|index| index.name.clone()).collect(),
+                ),
+                CatalogRollbackEffect::DropIndex { index_name, .. } => {
+                    (Vec::new(), vec![index_name.clone()])
                 }
-                CatalogRollbackEffect::CreateTable { table } => {
-                    if !catalog.table_exists(&table.name) {
-                        catalog
-                            .create_table(*table)
-                            .map_err(|err| ServerError::Internal(err.to_string()))?;
-                    }
+                CatalogRollbackEffect::CreateIndex { index, .. } => {
+                    (vec![index.table.clone()], vec![index.name.clone()])
                 }
+            };
+            tables.extend(
+                indexes
+                    .iter()
+                    .filter_map(|name| catalog.get_index(name).map(|index| index.table.clone())),
+            );
+            // A failed undo must also protect its dependants from later cascades.
+            // Continue only independent undo, preserving the first error.
+            if tables.iter().any(|name| protected_tables.contains(name))
+                || indexes.iter().any(|name| protected_indexes.contains(name))
+            {
+                protected_tables.extend(tables);
+                protected_indexes.extend(indexes);
+                continue;
             }
+            let effect_result = (|| {
+                match effect {
+                    CatalogRollbackEffect::DropTable {
+                        table_name,
+                        table_id,
+                    } => {
+                        if let Some(current) = catalog.get_table(&table_name) {
+                            if current.table_id != table_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback table identity changed: {table_name}"
+                                )));
+                            }
+                            catalog
+                                .drop_table(&table_name)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                    CatalogRollbackEffect::CreateTable { table, indexes } => {
+                        if catalog
+                            .get_table(&table.name)
+                            .is_some_and(|current| current.table_id != table.table_id)
+                        {
+                            return Err(ServerError::Conflict(format!(
+                                "rollback table identity changed: {}",
+                                table.name
+                            )));
+                        }
+                        // Check all dependent identities before changing this table.
+                        for index in &indexes {
+                            if catalog
+                                .get_index(&index.name)
+                                .is_some_and(|current| current.index_id != index.index_id)
+                            {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {}",
+                                    index.name
+                                )));
+                            }
+                        }
+                        if !catalog.table_exists(&table.name) {
+                            catalog
+                                .create_table(*table)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                        for index in indexes {
+                            if !catalog.index_exists(&index.name) {
+                                catalog
+                                    .create_index(index)
+                                    .map_err(|err| ServerError::Internal(err.to_string()))?;
+                            }
+                        }
+                    }
+                    CatalogRollbackEffect::DropIndex {
+                        index_name,
+                        index_id,
+                    } => {
+                        if let Some(current) = catalog.get_index(&index_name) {
+                            if current.index_id != index_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {index_name}"
+                                )));
+                            }
+                            catalog
+                                .drop_index(&index_name)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                    CatalogRollbackEffect::CreateIndex { index, table_id } => {
+                        if catalog.get_table(&index.table).map(|table| table.table_id)
+                            != Some(table_id)
+                        {
+                            return Err(ServerError::Conflict(format!(
+                                "rollback index table identity changed: {}",
+                                index.table
+                            )));
+                        }
+                        if let Some(current) = catalog.get_index(&index.name) {
+                            if current.index_id != index.index_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {}",
+                                    index.name
+                                )));
+                            }
+                        } else {
+                            catalog
+                                .create_index(*index)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if effect_result.is_err() {
+                protected_tables.extend(tables);
+                protected_indexes.extend(indexes);
+            }
+            result = result.and(effect_result);
         }
-        Ok(())
+        result
     }
 
     pub async fn begin_sql_txn(
