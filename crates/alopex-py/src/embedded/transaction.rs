@@ -120,7 +120,7 @@ pub(super) fn rollback_tracked_for_database_close(
             };
             #[cfg(test)]
             if rollback_fail_count
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |remaining| remaining.checked_sub(1),
