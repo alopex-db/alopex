@@ -72,6 +72,34 @@ fn reverse_link_pruning_preserves_near_parallel_diverse_direction() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn reverse_link_pruning_preserves_direction_among_duplicate_vectors() {
+    for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+        let mut graph = HnswGraph::new(base_config().with_metric(metric)).unwrap();
+        let center = graph.insert(b"center", &[1.0, 0.0], b"").unwrap();
+        let a = graph.insert(b"a", &[1.0, 0.0], b"").unwrap();
+        let b = graph.insert(b"b", &[1.0, 0.0], b"").unwrap();
+        let c = graph.insert(b"c", &[1.0, 0.0], b"").unwrap();
+        let bridge = graph.insert(b"bridge", &[0.0, 1.0], b"").unwrap();
+        graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = vec![a, b, bridge];
+        graph.prune_neighbors(center, 0, 2);
+        assert_eq!(
+            graph.nodes[center as usize].as_ref().unwrap().neighbors[0],
+            vec![a, bridge],
+            "identical vectors must not consume the last edge to another direction"
+        );
+
+        graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = vec![a, b, c];
+        graph.prune_neighbors(center, 0, 2);
+        assert_eq!(
+            graph.nodes[center as usize].as_ref().unwrap().neighbors[0],
+            vec![a, b],
+            "distinct keys with duplicate vectors still fill unused neighbor capacity"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn bulk_entry_hint_ignores_invalid_and_duplicate_entries() {
     let mut graph = make_graph();
     graph.insert(b"a", &[0.0, 0.0], b"").unwrap();

@@ -665,9 +665,21 @@ impl HnswGraph {
                 .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         let mut selected = Vec::with_capacity(max);
+        let mut duplicates = Vec::new();
         for candidate in sorted {
             if selected.len() >= max {
                 break;
+            }
+            // Preserve other directions before filling spare edges with duplicate vectors.
+            if selected.iter().any(|&chosen| {
+                self.node(candidate.node_id)
+                    .zip(self.node(chosen))
+                    .is_some_and(|(candidate, chosen)| candidate.vector == chosen.vector)
+            }) {
+                if duplicates.len() < max {
+                    duplicates.push(candidate.node_id);
+                }
+                continue;
             }
             let diverse = selected.iter().all(|&chosen| {
                 let similarity = self.node_similarity(candidate.node_id, chosen);
@@ -677,6 +689,7 @@ impl HnswGraph {
                 selected.push(candidate.node_id);
             }
         }
+        selected.extend(duplicates.into_iter().take(max - selected.len()));
         selected
     }
 

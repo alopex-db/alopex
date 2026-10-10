@@ -58,6 +58,12 @@ fn shuffled_bulk_preserves_tie_aware_recall() {
     check_bulk_order_quality("shuffled", 9600);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn duplicate_saturated_bulk_preserves_tie_aware_recall() {
+    check_bulk_order_quality("ascending", 16000);
+}
+
 fn check_bulk_order_quality(order: &str, size: usize) {
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
