@@ -776,6 +776,8 @@ UNSUPPORTED_TRANSACTION_CALLS = [
     ("get_vector", (b"k", None)),
     ("upsert_to_hnsw", ("idx", b"k", [1.0])),
     ("delete_from_hnsw", ("idx", b"k")),
+    ("prepare", ("SELECT 1",)),
+    ("execute_many", ("INSERT INTO t VALUES (?)", [[1]])),
 ]
 
 
