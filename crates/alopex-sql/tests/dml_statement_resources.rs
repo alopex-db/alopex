@@ -241,6 +241,14 @@ async fn dml_spill_preserves_rows_and_cleans_successful_update_and_delete() {
     }
     assert_eq!(observation.files.load(Ordering::Relaxed), 2);
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    let remaining = executor
+        .execute_async("SELECT id,v FROM hw")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        remaining.is_empty(),
+        "DELETE left rows or a query error: {remaining:?}"
+    );
     executor.into_inner().async_rollback().await.unwrap();
 }
 
