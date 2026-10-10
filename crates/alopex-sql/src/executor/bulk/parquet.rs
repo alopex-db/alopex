@@ -12,7 +12,7 @@ use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::catalog::{ColumnMetadata, TableMetadata};
-use crate::executor::memory::{MemoryPolicy, map_core_memory_error};
+use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::SqlValue;
@@ -194,15 +194,23 @@ pub(crate) fn read_parquet_with_plan(
             } else {
                 rows.capacity()
             };
-            let accounted = |capacity: usize| {
-                (capacity as u64)
+            let enforce_capacity = |capacity: usize| {
+                let bytes = (capacity as u64)
                     .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
                     .and_then(|bytes| retained_bytes.checked_add(bytes))
-                    .ok_or_else(overflow)
+                    .ok_or_else(overflow)?;
+                // This reader retains rows in memory and cannot spill them.
+                if policy.over_limit(bytes) {
+                    return Err(ExecutorError::ResourceExhausted {
+                        message: format!(
+                            "READ_PARQUET requires {bytes} bytes (limit {}); spilling this operator is not supported",
+                            policy.limit_bytes().unwrap_or(u64::MAX)
+                        ),
+                    });
+                }
+                Ok(())
             };
-            policy
-                .enforce(accounted(capacity)?)
-                .map_err(map_core_memory_error)?;
+            enforce_capacity(capacity)?;
             if rows.is_empty() && batch.capacity() == capacity {
                 // Reuse the reader's already-accounted outer allocation.
                 rows = batch;
@@ -214,9 +222,7 @@ pub(crate) fn read_parquet_with_plan(
                         message: format!("READ_PARQUET row allocation failed: {error}"),
                     })?;
                 // An allocator may provide more capacity than requested.
-                policy
-                    .enforce(accounted(rows.capacity())?)
-                    .map_err(map_core_memory_error)?;
+                enforce_capacity(rows.capacity())?;
             }
         }
         rows.extend(batch);

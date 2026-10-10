@@ -505,6 +505,57 @@ fn issue577_read_parquet_null_rows_consume_memory_budget() {
 }
 
 #[test]
+fn issue577_read_parquet_unimplemented_spill_respects_memory_budget() {
+    let row_count = 4_usize;
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(vec![None::<i64>; row_count]))],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+    let mut txn = bridge.begin_write().unwrap();
+    let retained_bytes = (row_count
+        * (std::mem::size_of::<Vec<SqlValue>>() + std::mem::size_of::<SqlValue>()))
+        as u64;
+    let spill_policy = SpillPolicy::SpillToDisk {
+        directory: spill.path().to_path_buf(),
+    };
+    for limit in [None, Some(4096), Some(retained_bytes)] {
+        let policy = MemoryPolicy::new(limit, spill_policy.clone());
+        let result =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy)).unwrap();
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected all NULL rows within the memory budget");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Null]; row_count]);
+    }
+    let fail_fast = MemoryPolicy::new(Some(retained_bytes - 1), SpillPolicy::FailFast);
+    assert!(matches!(
+        execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&fail_fast)),
+        Err(ExecutorError::ResourceExhausted { .. })
+    ));
+
+    // Like window materialization, this operator cannot spill its retained rows.
+    // A spill policy must not silently permit it to exceed the finite budget.
+    let insufficient = MemoryPolicy::new(Some(retained_bytes - 1), spill_policy);
+    let result = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient));
+    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
+    assert!(
+        matches!(result, Err(ExecutorError::ResourceExhausted { .. })),
+        "READ_PARQUET unsupported spill must reject retained rows above the finite budget"
+    );
+}
+
+#[test]
 fn issue577_runtime_schema_change_rejected() {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
