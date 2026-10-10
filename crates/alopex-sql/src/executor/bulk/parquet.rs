@@ -23,6 +23,7 @@ use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_fi
 pub struct ParquetReader {
     schema: CopySchema,
     target_types: Vec<ResolvedType>,
+    declared_rows: i64,
     reader: ParquetRecordBatchReader,
     buffer: Option<Vec<Vec<SqlValue>>>,
     row_offset: usize,
@@ -51,6 +52,7 @@ impl ParquetReader {
             });
         }
 
+        let declared_rows = builder.metadata().file_metadata().num_rows();
         let reader = builder
             .with_batch_size(1024)
             .build()
@@ -66,6 +68,7 @@ impl ParquetReader {
         Ok(Self {
             schema: CopySchema { fields },
             target_types,
+            declared_rows,
             reader,
             buffer: None,
             row_offset: 0,
@@ -167,6 +170,25 @@ pub(crate) fn read_parquet_with_plan(
     let overflow = || ExecutorError::ResourceExhausted {
         message: "READ_PARQUET retained size overflow".into(),
     };
+    if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
+        // Reject a declared result that cannot fit even its row/value slots
+        // before reading pages. Payloads and decoder allocations are not bounded here.
+        let count = u64::try_from(reader.declared_rows)
+            .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
+        let minimum = (planned.len() as u64)
+            .checked_mul(std::mem::size_of::<SqlValue>() as u64)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
+            .and_then(|bytes| bytes.checked_mul(count))
+            .ok_or_else(overflow)?;
+        if policy.over_limit(minimum) {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!(
+                    "READ_PARQUET requires at least {minimum} bytes for declared rows (limit {}); spilling this operator is not supported",
+                    policy.limit_bytes().unwrap_or(u64::MAX)
+                ),
+            });
+        }
+    }
     while let Some(batch) = reader.next_batch(1024)? {
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             for row in &batch {
@@ -260,7 +282,7 @@ impl BulkReader for ParquetReader {
             for col_idx in 0..self.schema.fields.len() {
                 let value = arrow_value_to_sql(
                     batch.column(col_idx).as_ref(),
-                    batch.schema().field(col_idx).data_type(),
+                    batch.schema_ref().field(col_idx).data_type(),
                     self.target_types
                         .get(col_idx)
                         .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,

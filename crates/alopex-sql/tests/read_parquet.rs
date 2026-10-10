@@ -412,6 +412,105 @@ fn run(
 }
 
 #[test]
+fn issue577_parquet_metadata_budget_precedes_page_decode() {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let values = vec![11_i64, 22, 33, 44];
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(values.clone()))],
+    )
+    .unwrap();
+    write_parquet(&file, Arc::clone(&schema), batch);
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap()).unwrap();
+    assert_eq!(
+        builder.metadata().file_metadata().num_rows(),
+        values.len() as i64
+    );
+    let column = builder.metadata().row_group(0).column(0);
+    // The existing writer may emit a dictionary. Corrupt the first page,
+    // not just the later data page, so no earlier page decode is needed.
+    let page_offset = u64::try_from(
+        column
+            .dictionary_page_offset()
+            .unwrap_or(column.data_page_offset()),
+    )
+    .unwrap();
+    let decoded = builder.build().unwrap().next().unwrap().unwrap();
+    let ids = decoded
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(ids.values().as_ref(), values.as_slice());
+    drop(decoded);
+
+    let mut writable = std::fs::OpenOptions::new()
+        .write(true)
+        .open(file.path())
+        .unwrap();
+    writable.seek(SeekFrom::Start(page_offset)).unwrap();
+    // Thrift STOP before mandatory PageHeader fields produces a normal error.
+    // Footer, schema, row count and file length remain unchanged.
+    writable.write_all(&[0]).unwrap();
+    drop(writable);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap())
+        .expect("fixture footer must remain valid");
+    assert_eq!(builder.schema().as_ref(), schema.as_ref());
+    assert_eq!(
+        builder.metadata().file_metadata().num_rows(),
+        values.len() as i64
+    );
+    assert!(builder.build().unwrap().next().unwrap().is_err());
+
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog)
+        .plan(&statement)
+        .expect("planning reads the valid footer, not the broken page");
+    let mut txn = bridge.begin_write().unwrap();
+    let minimum = (values.len()
+        * (std::mem::size_of::<Vec<SqlValue>>() + std::mem::size_of::<SqlValue>()))
+        as u64;
+    let sufficient = minimum + (values.len() * std::mem::size_of::<i64>()) as u64;
+    let mut failures = Vec::new();
+    for (name, spill_policy) in [
+        ("fail_fast", SpillPolicy::FailFast),
+        (
+            "unsupported_spill",
+            SpillPolicy::SpillToDisk {
+                directory: spill.path().to_path_buf(),
+            },
+        ),
+    ] {
+        for (limit, before_decode) in [(minimum - 1, true), (sufficient, false)] {
+            let policy = MemoryPolicy::new(Some(limit), spill_policy.clone());
+            let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy));
+            let matched = if before_decode {
+                matches!(&result, Err(ExecutorError::ResourceExhausted { .. }))
+            } else {
+                matches!(&result, Err(ExecutorError::BulkLoad(_)))
+            };
+            eprintln!(
+                "PARQUET_PREDECODE policy={name} before_decode={before_decode} matched={matched}"
+            );
+            if !matched {
+                failures.push(format!("{name} limit={limit}: {result:?}"));
+            }
+        }
+    }
+    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn issue577_memory_policy_reaches_read_parquet() {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let values = ["a".repeat(128), "b".repeat(128)];
