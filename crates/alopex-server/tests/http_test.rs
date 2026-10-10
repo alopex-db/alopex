@@ -382,7 +382,7 @@ async fn http_sql_vector_session_flow() {
         Method::POST,
         "/sql",
         json!({
-            "sql": "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));"
+            "sql": "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2), CHECK (id > 0));"
         }),
         &[],
     )
@@ -404,6 +404,49 @@ async fn http_sql_vector_session_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    let mut batch_snapshots = Vec::new();
+    for phase in 0..2 {
+        let (status, _, body) = send_json(
+            router.clone(),
+            Method::POST,
+            "/sql",
+            json!({ "sql": "SELECT id, embedding FROM items ORDER BY id;" }),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).expect("batch snapshot");
+        let rows = value["rows"].as_array().expect("snapshot rows");
+        assert_eq!(rows.len(), 2);
+        batch_snapshots.push(rows.clone());
+
+        if phase == 0 {
+            // Updating an existing row stages a write before the later CHECK fails.
+            let (status, _, body) = send_json(
+                router.clone(),
+                Method::POST,
+                "/vector/upsert-batch",
+                json!({
+                    "table": "items",
+                    "vectors": [
+                        { "id": 1, "vector": [9.0, 9.0] },
+                        { "id": 0, "vector": [0.5, 0.5] }
+                    ]
+                }),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let error: Value = serde_json::from_slice(&body).expect("batch CHECK error");
+            assert_eq!(error["error"]["code"].as_str(), Some("ALOPEX-E999"));
+            assert!(error["error"]["message"]
+                .as_str()
+                .expect("CHECK message")
+                .contains("CHECK constraint violated"));
+        }
+    }
+    assert_eq!(batch_snapshots[0], batch_snapshots[1]);
 
     let (status, _, _) = send_json(
         router.clone(),

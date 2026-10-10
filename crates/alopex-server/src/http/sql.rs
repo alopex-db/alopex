@@ -12,7 +12,7 @@ use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::storage::format::bincode_config;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::persistent::{PersistedTableMeta, TableFqn, TABLES_PREFIX};
-use alopex_sql::catalog::TableMetadata;
+use alopex_sql::catalog::{IndexMetadata, TableMetadata};
 use alopex_sql::planner::{
     LogicalPlan, PlannedStatement, TableReference, TableReferenceAccess, TableReferenceSource,
 };
@@ -143,6 +143,7 @@ enum TableLifecycleCandidate {
     Dropped {
         table_name: String,
         before: Option<TableLifecycleState>,
+        indexes: Vec<IndexMetadata>,
     },
     CreateIndex {
         index_name: String,
@@ -150,7 +151,7 @@ enum TableLifecycleCandidate {
     },
     DropIndex {
         index_name: String,
-        before: Option<TableLifecycleState>,
+        before: Option<(TableLifecycleState, IndexMetadata)>,
     },
 }
 
@@ -722,7 +723,16 @@ fn table_lifecycle_candidates(
 ) -> Result<Vec<TableLifecycleCandidate>> {
     let mut candidates = Vec::new();
     for statement in planned {
-        match &statement.plan {
+        let mut plan = &statement.plan;
+        while let LogicalPlan::Explain {
+            analyze: true,
+            input,
+            ..
+        } = plan
+        {
+            plan = input;
+        }
+        match plan {
             LogicalPlan::CreateTable { table, .. } | LogicalPlan::CreateTableAs { table, .. } => {
                 candidates.push(TableLifecycleCandidate::Created {
                     table_name: table.name.clone(),
@@ -730,9 +740,26 @@ fn table_lifecycle_candidates(
                 });
             }
             LogicalPlan::DropTable { name, .. } => {
+                // Capture the table and its dependent indexes under one read guard.
+                // Other statements do not need an all-index snapshot.
+                let guard = state
+                    .catalog
+                    .read()
+                    .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+                let before = guard.get_table(name).map(|table| TableLifecycleState {
+                    table_ref: TableRef::new(table_fqn_string(table)),
+                    table_id: table.table_id,
+                    table: table.clone(),
+                });
+                let indexes = guard
+                    .get_indexes_for_table(name)
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 candidates.push(TableLifecycleCandidate::Dropped {
                     table_name: name.clone(),
-                    before: table_lifecycle_state(state, name)?,
+                    before,
+                    indexes,
                 });
             }
             LogicalPlan::CreateIndex { index, .. } => {
@@ -775,11 +802,16 @@ fn statement_effects_after_execution(
                         });
                         catalog_rollback_effects.push(CatalogRollbackEffect::DropTable {
                             table_name: after.table.name,
+                            table_id: after.table_id,
                         });
                     }
                 }
             }
-            TableLifecycleCandidate::Dropped { table_name, before } => {
+            TableLifecycleCandidate::Dropped {
+                table_name,
+                before,
+                indexes,
+            } => {
                 let after = table_lifecycle_state(state, &table_name)?;
                 if let Some(before) = before {
                     let changed = match after.as_ref() {
@@ -793,6 +825,7 @@ fn statement_effects_after_execution(
                         });
                         catalog_rollback_effects.push(CatalogRollbackEffect::CreateTable {
                             table: Box::new(before.table),
+                            indexes,
                         });
                     }
                 }
@@ -802,19 +835,27 @@ fn statement_effects_after_execution(
                 index_existed_before,
             } => {
                 if !index_existed_before {
-                    if let Some(after) = index_table_lifecycle_state(state, &index_name)? {
+                    if let Some((after, index)) = index_table_lifecycle_state(state, &index_name)? {
                         lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
                             table_ref: after.table_ref,
                             table_id: after.table_id,
+                        });
+                        catalog_rollback_effects.push(CatalogRollbackEffect::DropIndex {
+                            index_name: index.name,
+                            index_id: index.index_id,
                         });
                     }
                 }
             }
             TableLifecycleCandidate::DropIndex { index_name, before } => {
-                if let Some(before) = before {
+                if let Some((before, index)) = before {
                     if !index_exists(state, &index_name)? {
                         lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
                             table_ref: before.table_ref,
+                            table_id: before.table_id,
+                        });
+                        catalog_rollback_effects.push(CatalogRollbackEffect::CreateIndex {
+                            index: Box::new(index),
                             table_id: before.table_id,
                         });
                     }
@@ -845,7 +886,7 @@ fn table_lifecycle_state(
 fn index_table_lifecycle_state(
     state: &ServerState,
     index_name: &str,
-) -> Result<Option<TableLifecycleState>> {
+) -> Result<Option<(TableLifecycleState, IndexMetadata)>> {
     let guard = state
         .catalog
         .read()
@@ -853,13 +894,16 @@ fn index_table_lifecycle_state(
     let Some(index) = guard.get_index(index_name) else {
         return Ok(None);
     };
-    Ok(guard
-        .get_table(&index.table)
-        .map(|table| TableLifecycleState {
-            table_ref: TableRef::new(table_fqn_string(table)),
-            table_id: table.table_id,
-            table: table.clone(),
-        }))
+    Ok(guard.get_table(&index.table).map(|table| {
+        (
+            TableLifecycleState {
+                table_ref: TableRef::new(table_fqn_string(table)),
+                table_id: table.table_id,
+                table: table.clone(),
+            },
+            index.clone(),
+        )
+    }))
 }
 
 fn index_exists(state: &ServerState, index_name: &str) -> Result<bool> {
@@ -1329,7 +1373,7 @@ mod tests {
         ));
         assert!(matches!(
             rollback.as_slice(),
-            [CatalogRollbackEffect::DropTable { table_name }] if table_name == "copied"
+            [CatalogRollbackEffect::DropTable { table_name, .. }] if table_name == "copied"
         ));
 
         let no_op = {

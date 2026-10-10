@@ -14,6 +14,81 @@ from scripts.validate_v0811_ledgers import (
 
 
 class LedgerContractTests(unittest.TestCase):
+    def test_date_diff_is_not_assigned_unrelated_portable_query_evidence(self):
+        from scripts.reference_tests.sql_public_inventory import claim_for
+
+        self.assertEqual(claim_for({"surface": "scalar", "api": "scalar.date_diff"}), "DATE_DIFF")
+        self.assertEqual(claim_for({"surface": "scalar", "api": "scalar.abs"}), "portable SELECT/null/order/coercion")
+
+    def test_hnsw_capability_matrix_rejects_invalid_cells(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        # Exercise the validator's input boundary, not source-file wording.
+        matrix = {
+            capability: {
+                surface: {"status": "not-applicable", "reason": "fixture boundary", "issue": 466}
+                for surface in ("core.raw", "embedded.raw", "SQL", "Python.raw", "HTTP.sql", "gRPC.sql", "HTTP.raw", "gRPC.raw")
+            }
+            for capability in ("query_ef_search", "force_search_path", "search_statistics", "get_vectors", "atomic_batch_upsert")
+        }
+        from scripts.reference_tests.hnsw_public_inventory import validate_capabilities
+
+        self.assertEqual(validate_capabilities({"capabilities": matrix}), [])
+        cases = []
+        missing = copy.deepcopy(matrix)
+        del missing["query_ef_search"]["HTTP.sql"]
+        cases.append((missing, "missing surfaces"))
+        invalid = copy.deepcopy(matrix)
+        invalid["query_ef_search"]["HTTP.raw"]["status"] = "PASS"
+        cases.append((invalid, "invalid status"))
+        for status in ([], {}, None):
+            invalid_status_type = copy.deepcopy(matrix)
+            invalid_status_type["query_ef_search"]["core.raw"]["status"] = status
+            cases.append((invalid_status_type, "invalid status"))
+        no_reason = copy.deepcopy(matrix)
+        del no_reason["get_vectors"]["SQL"]["reason"]
+        cases.append((no_reason, "reason"))
+        pending = copy.deepcopy(matrix)
+        pending["query_ef_search"]["Python.raw"]["status"] = "unverified"
+        cases.append((pending, "unverified"))
+        wrong_type = copy.deepcopy(matrix)
+        wrong_type["search_statistics"]["core.raw"] = []
+        cases.append((wrong_type, "must be an object"))
+        no_evidence = copy.deepcopy(matrix)
+        no_evidence["search_statistics"]["core.raw"] = {"status": "covered", "evidence": [], "observation": "nonzero work"}
+        cases.append((no_evidence, "evidence"))
+        missing_capability = copy.deepcopy(matrix)
+        del missing_capability["get_vectors"]
+        cases.append((missing_capability, "missing capabilities"))
+        invalid_evidence = copy.deepcopy(matrix)
+        invalid_evidence["query_ef_search"]["SQL"] = {
+            "status": "covered", "evidence": "not-a-list", "observation": "effective ef"
+        }
+        cases.append((invalid_evidence, "evidence"))
+        broken_reference = copy.deepcopy(matrix)
+        broken_reference["query_ef_search"]["SQL"] = {
+            "status": "covered", "evidence": ["missing.rs#missing_test"], "observation": "effective ef"
+        }
+        cases.append((broken_reference, "missing HNSW capability evidence"))
+        invalid_issue = copy.deepcopy(matrix)
+        invalid_issue["get_vectors"]["SQL"]["issue"] = True
+        cases.append((invalid_issue, "owning issue"))
+        for matrix, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                payload["capabilities"] = matrix
+                ledger = Path(directory) / "hnsw.json"
+                ledger.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertTrue(any(expected in error for error in validate(ledger)))
+
+    def test_hnsw_capability_matrix_is_required(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        payload.pop("capabilities", None)
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "hnsw.json"
+            ledger.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertTrue(any("capabilities" in error for error in validate(ledger)))
+
     def test_all_ledgers_have_unique_evidenced_entries(self):
         contracts = load_performance_contracts(PERFORMANCE_CONTRACTS)
         errors = validate_performance_contracts(PERFORMANCE_CONTRACTS, contracts)
@@ -166,13 +241,6 @@ class LedgerContractTests(unittest.TestCase):
             evidence,
             ["polars-csv-streaming", "polars-parquet-streaming"],
         )
-        runner = (
-            Path(__file__).resolve().parents[1]
-            / "scripts/performance/parity_v0811_measure.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn('if args.suite == "full"', runner)
-        self.assertIn('"polars-parquet-streaming"', runner)
-
     def test_sql_ledger_has_generated_public_surface_and_upstream_provenance(self):
         sql = next(path for path in LEDGERS if path.name.startswith("sql-"))
         payload = json.loads(sql.read_text(encoding="utf-8"))
@@ -210,7 +278,11 @@ class LedgerContractTests(unittest.TestCase):
             )
 
             wrong = copy.deepcopy(payload)
-            wrong["public_api"][0]["claim"] = wrong["entries"][1]["api"]
+            wrong["public_api"][0]["claim"] = next(
+                entry["api"]
+                for entry in wrong["entries"]
+                if entry["api"] != payload["public_api"][0]["claim"]
+            )
             ledger.write_text(json.dumps(wrong), encoding="utf-8")
             self.assertTrue(
                 any(

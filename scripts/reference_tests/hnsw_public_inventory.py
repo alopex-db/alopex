@@ -4,11 +4,72 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HNSWLIB = "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d"
 PGVECTOR = "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2"
+
+# Schema dimensions, not a second declaration of capability support.
+CAPABILITIES = {"query_ef_search", "force_search_path", "search_statistics", "get_vectors", "atomic_batch_upsert"}
+CAPABILITY_SURFACES = {"core.raw", "embedded.raw", "SQL", "Python.raw", "HTTP.sql", "gRPC.sql", "HTTP.raw", "gRPC.raw"}
+
+
+def validate_capabilities(payload: dict[str, object]) -> list[str]:
+    """Validate declaration schema, not executable selectors or behavior.
+
+    The calling ledger gate checks link consistency only. Review confirms the
+    owning assertions; fixed-selector execution (no skip/zero tests) proves PASS.
+    `covered` is not a passing run. An explicit unverified cell blocks this gate;
+    unsupported/N/A cells retain their reason and issue.
+    """
+    matrix = payload.get("capabilities")
+    if not isinstance(matrix, dict):
+        return ["HNSW capabilities must be an object"]
+    errors = []
+    if missing := CAPABILITIES - matrix.keys():
+        errors.append(f"HNSW missing capabilities: {sorted(missing)}")
+    if extra := matrix.keys() - CAPABILITIES:
+        errors.append(f"HNSW unknown capabilities: {sorted(extra)}")
+    for capability, surfaces in matrix.items():
+        if not isinstance(surfaces, dict):
+            errors.append(f"HNSW {capability}: surfaces must be an object")
+            continue
+        if missing := CAPABILITY_SURFACES - surfaces.keys():
+            errors.append(f"HNSW {capability}: missing surfaces {sorted(missing)}")
+        if extra := surfaces.keys() - CAPABILITY_SURFACES:
+            errors.append(f"HNSW {capability}: unknown surfaces {sorted(extra)}")
+        for surface, cell in surfaces.items():
+            label = f"HNSW {capability}/{surface}"
+            if not isinstance(cell, dict):
+                errors.append(f"{label}: cell must be an object")
+                continue
+            status = cell.get("status")
+            if not isinstance(status, str) or status not in {"covered", "unverified", "unsupported", "not-applicable"}:
+                errors.append(f"{label}: invalid status {status}")
+                continue
+            if status == "covered":
+                evidence = cell.get("evidence")
+                if not isinstance(evidence, list) or not evidence or any(
+                    not isinstance(item, str) or not re.fullmatch(r"[^#\s]+#[A-Za-z_]\w*", item)
+                    for item in evidence
+                ):
+                    errors.append(f"{label}: evidence must name behavior test selectors")
+                if not isinstance(cell.get("observation"), str) or not cell["observation"].strip():
+                    errors.append(f"{label}: missing behavior observation")
+                allowed = {"status", "evidence", "observation"}
+            else:
+                if not isinstance(cell.get("reason"), str) or not cell["reason"].strip():
+                    errors.append(f"{label}: missing reason")
+                if type(cell.get("issue")) is not int or cell["issue"] <= 0:
+                    errors.append(f"{label}: missing owning issue")
+                if status == "unverified":
+                    errors.append(f"{label}: unverified behavior")
+                allowed = {"status", "reason", "issue"}
+            if extra := cell.keys() - allowed:
+                errors.append(f"{label}: unknown fields {sorted(extra)}")
+    return errors
 
 EVIDENCE_BY_CLAIM = {
     "Metric": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
@@ -112,6 +173,7 @@ def claim_for(row: dict[str, object]) -> str:
         "upsert_staged": "upsert reconnect",
         "upsert_staged_batch": "upsert reconnect",
         "search": "cosine distance",
+        "search_with_effective_ef": "HnswIndex.search",
         "delete": "HnswIndex.delete",
         "delete_staged": "HnswIndex staged commit/rollback",
         "drop": "HnswIndex.drop",
@@ -244,6 +306,13 @@ def main() -> int:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return 0
+    # Reuse the owning gate, including existing test-reference integrity checks.
+    # Regeneration above is not validation and never claims behavior PASS.
+    sys.path.insert(0, str(ROOT))
+    from scripts.validate_v0811_ledgers import validate
+
+    if errors := validate(args.ledger):
+        raise RuntimeError("\n".join(errors))
     if payload.get("public_api") != expected:
         raise RuntimeError("HNSW public inventory is stale; run with --write")
     print(f"validated {len(expected)} HNSW public API rows")

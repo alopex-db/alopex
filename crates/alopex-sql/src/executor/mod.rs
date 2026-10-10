@@ -85,13 +85,13 @@ use crate::{ExplainFormat, ResolvedType};
 use std::time::Instant;
 
 #[derive(Clone, Copy)]
-struct ExplainAnalysis<'a> {
-    knn_stats: Option<&'a query::KnnExecutionStats>,
-    elapsed_ns: u64,
-    rows: u64,
+pub(crate) struct ExplainAnalysis<'a> {
+    pub(crate) knn_stats: Option<&'a query::KnnExecutionStats>,
+    pub(crate) elapsed_ns: u64,
+    pub(crate) rows: u64,
 }
 
-fn explain_result(
+pub(crate) fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
     btree_indexes: &[Option<String>],
@@ -246,7 +246,7 @@ fn explain_knn_stats_text(stats: &query::KnnExecutionStats) -> String {
     )
 }
 
-fn result_rows(result: &ExecutionResult) -> u64 {
+pub(crate) fn result_rows(result: &ExecutionResult) -> u64 {
     match result {
         ExecutionResult::Success => 0,
         ExecutionResult::RowsAffected(rows) => *rows,

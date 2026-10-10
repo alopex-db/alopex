@@ -1,5 +1,263 @@
 {
   "schema": "alopex.hnsw-conformance/v1",
+  "capabilities": {
+      "query_ef_search": {
+        "core.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#maximum_ef_search_is_clamped_to_active_node_count"
+          ],
+          "observation": "SearchStats reports the actual node-count-capped search breadth."
+        },
+        "embedded.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-embedded/tests/hnsw_integration_tests.rs#borrowed_hnsw_query_ef_changes_observed_search_work"
+          ],
+          "observation": "Borrowed transaction setup followed by public L2 search retains the self-match and increases visited nodes with higher query ef."
+        },
+        "SQL": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-sql/tests/knn_optimization.rs#knn_query_ef_search_changes_recall_against_exact_path"
+          ],
+          "observation": "Fixed SQL queries compare ef-dependent recall to an independent L2 oracle and report the requested effective breadth with nonzero work."
+        },
+        "Python.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-py/tests/test_hnsw.py#test_hnsw_query_ef_changes_observed_search_work"
+          ],
+          "observation": "The public L2 search retains the self-match and visits more nodes with ef_search=128 than with ef_search=1."
+        },
+        "HTTP.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport EXPLAIN ANALYZE reports effective ef_search=1 then 2 with k=1 and two live vectors; both actual SELECT results match the independent nearest id."
+        },
+        "gRPC.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport EXPLAIN ANALYZE reports effective ef_search=1 then 2 with k=1 and two live vectors; both actual SELECT results match the independent nearest id."
+        },
+        "HTTP.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search request has no ef_search field; SQL WITH remains a separate route.",
+          "issue": 466
+        },
+        "gRPC.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search request has no ef_search field; SQL WITH remains a separate route.",
+          "issue": 466
+        }
+      },
+      "force_search_path": {
+        "core.raw": {
+          "status": "not-applicable",
+          "reason": "Raw HnswIndex search has no SQL planner; direct HNSW and flat-vector APIs are separate entrypoints.",
+          "issue": 466
+        },
+        "embedded.raw": {
+          "status": "not-applicable",
+          "reason": "Raw HnswIndex search has no SQL planner; direct HNSW and flat-vector APIs are separate entrypoints.",
+          "issue": 466
+        },
+        "SQL": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-sql/tests/knn_optimization.rs#enable_hnsw_true_forces_hnsw_plan_below_cost_threshold",
+            "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+          ],
+          "observation": "Explicit enable_hnsw=true executes HNSW below the automatic threshold; false selects ExactKnnScan. This does not claim automatic threshold selection coverage."
+        },
+        "Python.raw": {
+          "status": "not-applicable",
+          "reason": "Raw HnswIndex search has no SQL planner; direct HNSW and flat-vector APIs are separate entrypoints.",
+          "issue": 466
+        },
+        "HTTP.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport SELECT preserves the expected nearest id while EXPLAIN ANALYZE switches ExactKnnScan/HnswSearch via enable_hnsw=false/true. Automatic threshold selection is a separate contract."
+        },
+        "gRPC.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport SELECT preserves the expected nearest id while EXPLAIN ANALYZE switches ExactKnnScan/HnswSearch via enable_hnsw=false/true. Automatic threshold selection is a separate contract."
+        },
+        "HTTP.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search has no enable_hnsw control; SQL WITH remains a separate route.",
+          "issue": 466
+        },
+        "gRPC.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search has no enable_hnsw control; SQL WITH remains a separate route.",
+          "issue": 466
+        }
+      },
+      "search_statistics": {
+        "core.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow"
+          ],
+          "observation": "A real graph search returns nonzero nodes_visited and ordered neighbors."
+        },
+        "embedded.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api"
+          ],
+          "observation": "The embedded search returns the expected neighbor and nonzero visited-node and distance-computation counters."
+        },
+        "SQL": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+          ],
+          "observation": "A real SQL search reports effective ef, nonzero work and exact fallback; enable_hnsw=false selects ExactKnnScan."
+        },
+        "Python.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete"
+          ],
+          "observation": "The public search returns nonzero visited-node and distance-computation counters."
+        },
+        "HTTP.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport EXPLAIN ANALYZE reports nonzero nodes_visited and distance_computations, numeric search_time_us and fallback=none."
+        },
+        "gRPC.sql": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/cross_surface_consistency.rs#cross_surface_consistency_cli_and_server_share_expected_results"
+          ],
+          "observation": "Real SQL transport EXPLAIN ANALYZE reports nonzero nodes_visited and distance_computations, numeric search_time_us and fallback=none."
+        },
+        "HTTP.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search returns results without SearchStats; index HnswStats is not search work.",
+          "issue": 466
+        },
+        "gRPC.raw": {
+          "status": "unsupported",
+          "reason": "Dedicated vector search returns results without SearchStats; index HnswStats is not search work.",
+          "issue": 466
+        }
+      },
+      "get_vectors": {
+        "core.raw": {
+          "status": "not-applicable",
+          "reason": "The ordered get_vectors API belongs to embedded Transaction, not HnswIndex.",
+          "issue": 450
+        },
+        "embedded.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-embedded/tests/in_memory_vector.rs#borrowed_get_vectors_preserves_order_missing_duplicates_and_empty"
+          ],
+          "observation": "The borrowed batch read preserves requested order, missing slots and duplicates, accepts empty keys and rejects a mismatched metric."
+        },
+        "SQL": {
+          "status": "not-applicable",
+          "reason": "This is the ordered raw-key batch API from #450, not SQL SELECT/IN.",
+          "issue": 450
+        },
+        "Python.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-py/tests/test_vector.py#test_get_vectors_preserves_input_order_and_missing_entries"
+          ],
+          "observation": "Batch retrieval preserves requested order and missing entries."
+        },
+        "HTTP.sql": {
+          "status": "not-applicable",
+          "reason": "This is the ordered raw-key batch API from #450, not SQL SELECT/IN.",
+          "issue": 450
+        },
+        "gRPC.sql": {
+          "status": "not-applicable",
+          "reason": "This is the ordered raw-key batch API from #450, not SQL SELECT/IN.",
+          "issue": 450
+        },
+        "HTTP.raw": {
+          "status": "unsupported",
+          "reason": "No ordered raw-key get_vectors operation is exposed; SQL row retrieval is not equivalent.",
+          "issue": 450
+        },
+        "gRPC.raw": {
+          "status": "unsupported",
+          "reason": "No ordered raw-key get_vectors operation is exposed; SQL row retrieval is not equivalent.",
+          "issue": 450
+        }
+      },
+      "atomic_batch_upsert": {
+        "core.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#batch_rejects_an_invalid_later_vector_without_mutation"
+          ],
+          "observation": "A later vector with an invalid dimension rejects the batch and a subsequent search observes no inserted vector."
+        },
+        "embedded.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-embedded/tests/hnsw_integration_tests.rs#borrowed_hnsw_batch_rejects_invalid_inputs_without_partial_writes"
+          ],
+          "observation": "After a successful borrowed batch, duplicate/empty/length/later-dimension failures leave only the successful keys visible after commit."
+        },
+        "SQL": {
+          "status": "not-applicable",
+          "reason": "SQL multi-row INSERT is a separate existing contract, not the raw KV/HNSW batch API requested by #450.",
+          "issue": 450
+        },
+        "Python.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-py/tests/test_hnsw.py#test_hnsw_batch_upsert_rejects_duplicate_keys_atomically",
+            "crates/alopex-py/tests/test_hnsw.py#test_hnsw_batch_upsert_rejects_mismatched_lengths_atomically"
+          ],
+          "observation": "Duplicate keys reject the whole batch; committed search contains only prior successful writes."
+        },
+        "HTTP.sql": {
+          "status": "not-applicable",
+          "reason": "SQL multi-row INSERT is a separate existing contract, not the raw KV/HNSW batch API requested by #450.",
+          "issue": 450
+        },
+        "gRPC.sql": {
+          "status": "not-applicable",
+          "reason": "SQL multi-row INSERT is a separate existing contract, not the raw KV/HNSW batch API requested by #450.",
+          "issue": 450
+        },
+        "HTTP.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/http_test.rs#http_sql_vector_session_flow"
+          ],
+          "observation": "The dedicated table-vector /vector/upsert-batch route succeeds for valid input; a later CHECK failure returns BAD_REQUEST and preserves all preexisting ids and vectors, including an earlier staged update. This is not the SQL endpoint or KV-key HNSW batch API."
+        },
+        "gRPC.raw": {
+          "status": "covered",
+          "evidence": [
+            "crates/alopex-server/tests/grpc_test.rs#grpc_sql_vector_transaction_flow"
+          ],
+          "observation": "The dedicated table-vector VectorUpsertBatch RPC succeeds for valid input; a later CHECK failure returns InvalidArgument and preserves all preexisting ids and vectors, including an earlier staged update. This is not ExecuteSql or KV-key HNSW batch."
+        }
+      }
+    },
   "references": {
     "paper": "arxiv:1603.09320v1",
     "hnswlib": "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d",
@@ -611,6 +869,17 @@
       "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/vector.c",
       "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
       "issue": 302,
+      "performance_contract": "hnsw-pareto-v1",
+      "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Rust",
+      "api": "Rust.HnswIndex.search_with_effective_ef",
+      "claim": "HnswIndex.search",
+      "status": "known-performance-divergence",
+      "reference": "qdrant/qdrant@829abe0ad8c425d4c6c1fd5042db8ea92a01ff84:lib/segment/src/index/hnsw_index",
+      "evidence": "scripts/performance/hnsw_v0811_contract.py#run_benchmark",
+      "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
     },

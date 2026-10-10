@@ -698,7 +698,7 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
     let http_url = format!("http://127.0.0.1:{http_port}");
     let admin_url = format!("http://127.0.0.1:{admin_port}");
     let grpc_url = format!("http://127.0.0.1:{grpc_port}");
-    let (guard, client, _grpc_channel) =
+    let (guard, client, grpc_channel) =
         spawn_server_and_wait(&config_path, &http_url, &admin_url, &grpc_url).await;
 
     let (status, _) = send_json(
@@ -758,6 +758,106 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Exercise options and execution diagnostics through both real SQL transports.
+    // With k=1 and two live vectors, ef=1/2 is neither k-floored nor node-clamped.
+    let (status, body) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({ "sql": "CREATE INDEX surface_embedding ON surface_items (embedding) USING HNSW;" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create HNSW index: {body}");
+    let mut grpc_client =
+        alopex_server::grpc::proto::alopex_service_client::AlopexServiceClient::new(grpc_channel);
+    for (enabled, ef) in [(false, 1), (true, 1), (true, 2)] {
+        let query = format!(
+            "SELECT id FROM surface_items ORDER BY vector_distance(embedding, [0.1, 0.0], 'l2') ASC LIMIT 1 WITH (enable_hnsw = {enabled}, ef_search = {ef})"
+        );
+        for analyze in [false, true] {
+            let sql = if analyze {
+                format!("EXPLAIN ANALYZE {query}")
+            } else {
+                query.clone()
+            };
+            let (status, body) = send_json(
+                &client,
+                Method::POST,
+                &format!("{http_url}/sql"),
+                json!({ "sql": sql }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{sql}: {body}");
+            let http_rows = body["rows"].as_array().expect("HTTP SQL rows");
+            let mut stream = timeout(
+                Duration::from_secs(15),
+                grpc_client.execute_sql(alopex_server::grpc::proto::SqlRequest {
+                    sql: sql.clone(),
+                    session_id: String::new(),
+                }),
+            )
+            .await
+            .expect("gRPC SQL timeout")
+            .expect("gRPC SQL response")
+            .into_inner();
+            let mut grpc_rows = Vec::new();
+            while let Some(result) = timeout(Duration::from_secs(15), stream.message())
+                .await
+                .expect("gRPC SQL stream timeout")
+                .expect("gRPC SQL stream result")
+            {
+                grpc_rows.extend(result.rows);
+            }
+            if !analyze {
+                assert_eq!(http_rows.len(), 1, "{body}");
+                assert_eq!(http_rows[0].as_array().unwrap().len(), 1);
+                assert_eq!(http_sql_value_to_i64(&http_rows[0][0]), 1);
+                assert_eq!(grpc_rows.len(), 1);
+                assert_eq!(grpc_rows[0].values.len(), 1);
+                assert_eq!(grpc_sql_value_to_i64(&grpc_rows[0].values[0]), 1);
+                continue;
+            }
+            let http_plan = http_rows
+                .iter()
+                .map(|row| row[0]["Text"].as_str().expect("HTTP plan text"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let grpc_plan = grpc_rows
+                .iter()
+                .map(|row| match &row.values[0].kind {
+                    Some(alopex_server::grpc::proto::value::Kind::TextValue(text)) => text.as_str(),
+                    other => panic!("unexpected gRPC plan value: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Timings can differ between transports; compare execution contracts,
+            // not byte-identical timing text or a fixed graph traversal count.
+            for plan in [&http_plan, &grpc_plan] {
+                if !enabled {
+                    assert!(plan.contains("ExactKnnScan"), "{plan}");
+                    assert!(!plan.contains("HnswSearch"), "{plan}");
+                    continue;
+                }
+                assert!(
+                    plan.contains("HnswSearch index=surface_embedding k=1"),
+                    "{plan}"
+                );
+                assert!(plan.contains("fallback=none"), "{plan}");
+                let statistic = |name: &str| -> u64 {
+                    plan.split_whitespace()
+                        .find_map(|token| token.strip_prefix(&format!("{name}=")))
+                        .unwrap_or_else(|| panic!("missing {name}: {plan}"))
+                        .parse()
+                        .unwrap_or_else(|_| panic!("invalid {name}: {plan}"))
+                };
+                assert_eq!(statistic("ef_search"), ef);
+                assert!(statistic("nodes_visited") > 0, "{plan}");
+                assert!(statistic("distance_computations") > 0, "{plan}");
+                let _elapsed_us = statistic("search_time_us");
+            }
+        }
+    }
 
     let server_actual = json!({
         "sql_rows": normalize_sql_rows(sql_result.get("rows").unwrap_or(&Value::Null)),

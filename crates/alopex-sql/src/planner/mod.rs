@@ -1430,6 +1430,9 @@ fn unsupported_generic_statement(statement: &Statement) -> PlannerError {
 }
 
 fn table_reference_access(statement: &Statement) -> Result<TableReferenceAccess, PlannerError> {
+    if let StatementKind::Explain { statement, .. } = &statement.kind {
+        return table_reference_access(statement);
+    }
     table_reference_access_for_classified(
         statement,
         classify_generic_host_statement(&statement.kind),

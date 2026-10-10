@@ -340,13 +340,27 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
             from scripts.reference_tests.hnsw_public_inventory import (
                 inventory as hnsw_inventory,
                 materialize as materialize_hnsw,
+                validate_capabilities,
             )
         except ModuleNotFoundError:
             from reference_tests.hnsw_public_inventory import (
                 inventory as hnsw_inventory,
                 materialize as materialize_hnsw,
+                validate_capabilities,
             )
 
+        errors.extend(f"{path}: {error}" for error in validate_capabilities(payload))
+        matrix = payload.get("capabilities", {})
+        if isinstance(matrix, dict):
+            for surfaces in matrix.values():
+                if not isinstance(surfaces, dict):
+                    continue
+                for cell in surfaces.values():
+                    if isinstance(cell, dict) and cell.get("status") == "covered":
+                        evidence = cell.get("evidence")
+                        if isinstance(evidence, list) and all(isinstance(item, str) for item in evidence):
+                            # Link integrity only: this does not execute or pass the owning test.
+                            errors.extend(validate_test_evidence(path, ";".join(evidence), "HNSW capability"))
         public_api = payload.get("public_api", [])
         names = [row.get("api") for row in public_api]
         if not public_api or len(names) != len(set(names)):

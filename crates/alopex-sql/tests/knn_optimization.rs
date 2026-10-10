@@ -846,8 +846,8 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     let tail = std::iter::repeat_n("0.0", DIMENSIONS - 1)
         .collect::<Vec<_>>()
         .join(", ");
-    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
-        let end = (start + BATCH_SIZE - 1).min(ROWS);
+    for start in (1..ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS - 1);
         let values = (start..=end)
             .map(|id| format!("({id}, [{id}.0, {tail}])"))
             .collect::<Vec<_>>()
@@ -867,6 +867,25 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     let query = format!(
         "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
     );
+    // Reuse the existing upper-side fixture at ROWS - 1 before crossing the boundary.
+    assert_eq!(
+        query_ids(&mut executor, &catalog, &query),
+        (1..=10).collect::<Vec<_>>()
+    );
+    let below = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(below.starts_with("ExactKnnScan\n"), "{below}");
+    assert!(
+        below.contains(
+            "nodes_visited=0 distance_computations=0 search_time_us=0 ef_search=none fallback=none"
+        ),
+        "{below}"
+    );
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!("INSERT INTO items (id, embedding) VALUES ({ROWS}, [{ROWS}.0, {tail}]);"),
+    );
+
     assert_eq!(
         query_ids(&mut executor, &catalog, &query),
         (1..=10).collect::<Vec<_>>()

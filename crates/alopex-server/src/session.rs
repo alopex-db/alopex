@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use alopex_cluster::{AuthenticatedSubject, TableLifecycleEffect};
 use alopex_core::async_runtime::{BoxFuture, BoxStream};
-use alopex_sql::catalog::TableMetadata;
+use alopex_sql::catalog::{IndexMetadata, TableMetadata};
 use alopex_sql::executor::{ExecutionResult, ExecutorError, Row};
 use alopex_sql::planner::PlannedStatement;
 use alopex_sql::storage::erased::ErasedAsyncSqlTransaction;
@@ -75,8 +75,22 @@ pub struct TxnHandle {
 
 #[derive(Clone)]
 pub enum CatalogRollbackEffect {
-    DropTable { table_name: String },
-    CreateTable { table: Box<TableMetadata> },
+    DropTable {
+        table_name: String,
+        table_id: u32,
+    },
+    CreateTable {
+        table: Box<TableMetadata>,
+        indexes: Vec<IndexMetadata>,
+    },
+    DropIndex {
+        index_name: String,
+        index_id: u32,
+    },
+    CreateIndex {
+        index: Box<IndexMetadata>,
+        table_id: u32,
+    },
 }
 
 struct TxnHandleInner {

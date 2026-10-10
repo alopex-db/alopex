@@ -12,6 +12,7 @@ use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, MemoryCatalog};
 use alopex_sql::executor::bulk::CopySecurityConfig;
 use alopex_sql::executor::{AsyncExecutor, ExecutionResult};
+use alopex_sql::planner::TableReferenceAccess;
 use alopex_sql::storage::SqlValue;
 use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
 use arrow_array::{Int32Array, RecordBatch};
@@ -157,6 +158,130 @@ async fn read_parquet_honors_copy_allowed_dirs() {
             .contains("path not in allowed directories"),
         "{query_error}"
     );
+    for prefix in ["EXPLAIN", "EXPLAIN ANALYZE"] {
+        bridge
+            .async_plan_for_routing(&format!("{prefix} {allowed_sql}"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bridge
+                .async_execute(&format!("{prefix} {allowed_sql}"))
+                .await
+                .unwrap(),
+            ExecutionResult::Query(_)
+        ));
+        for error in [
+            bridge
+                .async_plan_for_routing(&format!("{prefix} {outside_sql}"))
+                .await
+                .unwrap_err(),
+            bridge
+                .async_execute(&format!("{prefix} {outside_sql}"))
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("path not in allowed directories"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn async_explain_preserves_execution_permissions_and_rollback() {
+    let store = AsyncKVStoreAdapter::from_arc(Arc::new(MemoryKV::new()), TxnMode::ReadWrite);
+    let catalog = build_catalog();
+    let mut setup = AsyncTxnBridge::with_catalog(
+        store.begin_async().await.unwrap(),
+        TxnMode::ReadWrite,
+        catalog.clone(),
+    );
+    setup
+        .async_execute("CREATE TABLE explained (id INT PRIMARY KEY, value INT)")
+        .await
+        .unwrap();
+    setup
+        .async_execute("INSERT INTO explained VALUES (1, 7)")
+        .await
+        .unwrap();
+    setup.async_commit().await.unwrap();
+
+    for mode in [TxnMode::ReadWrite, TxnMode::ReadOnly] {
+        let mut bridge =
+            AsyncTxnBridge::with_catalog(store.begin_async().await.unwrap(), mode, catalog.clone());
+        let update = "UPDATE explained SET value = 9 WHERE id = 1";
+        for sql in [
+            format!("EXPLAIN {update}"),
+            format!("EXPLAIN ANALYZE {update}"),
+        ] {
+            let plans = bridge.async_plan_for_routing(&sql).await.unwrap();
+            assert_eq!(plans.len(), 1);
+            assert_eq!(plans[0].table_references().len(), 1);
+            assert_eq!(
+                plans[0].table_references()[0].access,
+                TableReferenceAccess::Write
+            );
+        }
+        assert!(matches!(
+            bridge
+                .async_execute(&format!("EXPLAIN {update}"))
+                .await
+                .unwrap(),
+            ExecutionResult::Query(_)
+        ));
+        let ExecutionResult::Query(before) = bridge
+            .async_execute("SELECT value FROM explained")
+            .await
+            .unwrap()
+        else {
+            panic!("query expected")
+        };
+        assert_eq!(before.rows, vec![vec![SqlValue::Integer(7)]]);
+        let analyzed = bridge
+            .async_execute(&format!("EXPLAIN ANALYZE {update}"))
+            .await;
+        if mode == TxnMode::ReadOnly {
+            assert!(matches!(
+                analyzed,
+                Err(alopex_sql::executor::ExecutorError::ReadOnlyTransaction { .. })
+            ));
+        } else {
+            assert!(matches!(analyzed.unwrap(), ExecutionResult::Query(_)));
+        }
+        let ExecutionResult::Query(after) = bridge
+            .async_execute("SELECT value FROM explained")
+            .await
+            .unwrap()
+        else {
+            panic!("query expected")
+        };
+        assert_eq!(
+            after.rows,
+            vec![vec![SqlValue::Integer(if mode == TxnMode::ReadOnly {
+                7
+            } else {
+                9
+            })]]
+        );
+        bridge.async_rollback().await.unwrap();
+    }
+    let mut verify = AsyncTxnBridge::with_catalog(
+        store.begin_async().await.unwrap(),
+        TxnMode::ReadWrite,
+        catalog,
+    );
+    let ExecutionResult::Query(rows) = verify
+        .async_execute("SELECT value FROM explained")
+        .await
+        .unwrap()
+    else {
+        panic!("query expected")
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::Integer(7)]]);
+    verify.async_rollback().await.unwrap();
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

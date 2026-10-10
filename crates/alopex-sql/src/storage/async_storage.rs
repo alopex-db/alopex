@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use alopex_core::async_runtime::{BoxFuture, BoxStream, MaybeSend};
 use alopex_core::kv::async_kv::AsyncKVTransaction;
@@ -522,258 +523,334 @@ where
             }
         };
 
-        let op_name = plan.operation_name();
-        results.push(match plan {
-            LogicalPlan::CreateTable {
-                table,
-                if_not_exists,
-                with_options,
-            } => {
-                ensure_write(mode, op_name)?;
-                let mut guard = catalog.write().expect("catalog lock poisoned");
-                ddl::create_table::execute_create_table(
-                    txn,
-                    &mut *guard,
-                    table,
-                    with_options,
-                    if_not_exists,
-                )?
-            }
-            LogicalPlan::CreateTableAs {
-                table,
-                if_not_exists,
-                with_options,
-                source,
-            } => {
-                ensure_write(mode, op_name)?;
-                let mut guard = catalog.write().expect("catalog lock poisoned");
-                execute_create_table_as_blocking(
-                    txn,
-                    &mut *guard,
-                    table,
-                    with_options,
-                    if_not_exists,
-                    *source,
-                )?
-            }
-            LogicalPlan::DropTable { name, if_exists } => {
-                ensure_write(mode, op_name)?;
-                let mut guard = catalog.write().expect("catalog lock poisoned");
-                ddl::drop_table::execute_drop_table(txn, &mut *guard, &name, if_exists)?
-            }
-            LogicalPlan::CreateIndex {
-                index,
-                if_not_exists,
-            } => {
-                ensure_write(mode, op_name)?;
-                let mut guard = catalog.write().expect("catalog lock poisoned");
-                ddl::create_index::execute_create_index(txn, &mut *guard, index, if_not_exists)?
-            }
-            LogicalPlan::DropIndex { name, if_exists } => {
-                ensure_write(mode, op_name)?;
-                let mut guard = catalog.write().expect("catalog lock poisoned");
-                ddl::drop_index::execute_drop_index(txn, &mut *guard, &name, if_exists)?
-            }
-            LogicalPlan::Insert {
-                table,
-                columns,
-                values,
-                conflict,
-                returning,
-            } => {
-                ensure_write(mode, op_name)?;
+        results.push(execute_plan_blocking(
+            txn,
+            catalog,
+            plan,
+            mode,
+            copy_security,
+            read_security,
+        )?);
+    }
+
+    Ok(results)
+}
+
+fn execute_plan_blocking<T>(
+    txn: &mut BlockingSqlTransaction<T>,
+    catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
+    plan: LogicalPlan,
+    mode: TxnMode,
+    copy_security: &bulk::CopySecurityConfig,
+    read_security: Option<&bulk::CopySecurityConfig>,
+) -> ExecResult<ExecutionResult>
+where
+    T: for<'a> AsyncKVTransaction<'a>,
+{
+    let op_name = plan.operation_name();
+    Ok(match plan {
+        LogicalPlan::Explain {
+            analyze,
+            format,
+            input,
+        } => {
+            let _statement_timestamp = crate::executor::evaluator::begin_statement();
+            let (btree_indexes, hnsw_path) = {
                 let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_insert_with_plan(
-                    txn, &*guard, &table, columns, values, conflict, returning,
-                )?
+                (
+                    query::selected_btree_indexes(&input, &*guard),
+                    query::explain_knn_path(txn, &*guard, &input)?,
+                )
+            };
+            if !analyze {
+                return Ok(crate::executor::explain_result(
+                    &input,
+                    hnsw_path,
+                    &btree_indexes,
+                    format,
+                    None,
+                ));
             }
-            LogicalPlan::InsertSelect {
-                table,
-                columns,
-                source,
-                conflict,
-                returning,
-            } => {
-                ensure_write(mode, op_name)?;
+            let started = Instant::now();
+            let execution = if hnsw_path.is_some() {
                 let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) =
-                    query::execute_query_with_policy_and_copy_security(
+                query::execute_query_with_knn_stats(txn, &*guard, &input)?
+            } else {
+                None
+            };
+            let (result, stats) = match execution {
+                Some((result, stats)) => (result, Some(stats)),
+                None => (
+                    execute_plan_blocking(
                         txn,
-                        &*guard,
-                        *source,
-                        None,
+                        catalog,
+                        (*input).clone(),
+                        mode,
+                        copy_security,
                         read_security,
-                    )?
-                else {
-                    return Err(ExecutorError::InvalidOperation {
-                        operation: "INSERT ... SELECT".into(),
-                        reason: "SELECT source did not return query rows".into(),
-                    });
-                };
-                dml::execute_insert_rows_with_plan(
+                    )?,
+                    None,
+                ),
+            };
+            crate::executor::explain_result(
+                &input,
+                hnsw_path,
+                &btree_indexes,
+                format,
+                Some(crate::executor::ExplainAnalysis {
+                    knn_stats: stats.as_ref(),
+                    elapsed_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    rows: crate::executor::result_rows(&result),
+                }),
+            )
+        }
+        LogicalPlan::CreateTable {
+            table,
+            if_not_exists,
+            with_options,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *guard,
+                table,
+                with_options,
+                if_not_exists,
+            )?
+        }
+        LogicalPlan::CreateTableAs {
+            table,
+            if_not_exists,
+            with_options,
+            source,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            execute_create_table_as_blocking(
+                txn,
+                &mut *guard,
+                table,
+                with_options,
+                if_not_exists,
+                *source,
+            )?
+        }
+        LogicalPlan::DropTable { name, if_exists } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::drop_table::execute_drop_table(txn, &mut *guard, &name, if_exists)?
+        }
+        LogicalPlan::CreateIndex {
+            index,
+            if_not_exists,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::create_index::execute_create_index(txn, &mut *guard, index, if_not_exists)?
+        }
+        LogicalPlan::DropIndex { name, if_exists } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::drop_index::execute_drop_index(txn, &mut *guard, &name, if_exists)?
+        }
+        LogicalPlan::Insert {
+            table,
+            columns,
+            values,
+            conflict,
+            returning,
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            dml::execute_insert_with_plan(
+                txn, &*guard, &table, columns, values, conflict, returning,
+            )?
+        }
+        LogicalPlan::InsertSelect {
+            table,
+            columns,
+            source,
+            conflict,
+            returning,
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            let ExecutionResult::Query(result) =
+                query::execute_query_with_policy_and_copy_security(
                     txn,
                     &*guard,
-                    &table,
-                    columns,
-                    result.rows,
-                    conflict,
-                    returning,
+                    *source,
+                    None,
+                    read_security,
                 )?
-            }
-            LogicalPlan::Update {
-                table,
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "INSERT ... SELECT".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*guard,
+                &table,
+                columns,
+                result.rows,
+                conflict,
+                returning,
+            )?
+        }
+        LogicalPlan::Update {
+            table,
+            assignments,
+            filter,
+            join_source,
+            returning,
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            dml::execute_update_with_returning(
+                txn,
+                &*guard,
+                &table,
                 assignments,
                 filter,
                 join_source,
                 returning,
-            } => {
-                ensure_write(mode, op_name)?;
-                let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_update_with_returning(
-                    txn,
-                    &*guard,
-                    &table,
-                    assignments,
-                    filter,
-                    join_source,
-                    returning,
-                )?
-            }
-            LogicalPlan::Delete {
-                table,
+            )?
+        }
+        LogicalPlan::Delete {
+            table,
+            filter,
+            join_source,
+            returning,
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            dml::execute_delete_with_returning(
+                txn,
+                &*guard,
+                &table,
                 filter,
                 join_source,
                 returning,
-            } => {
-                ensure_write(mode, op_name)?;
-                let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_delete_with_returning(
-                    txn,
-                    &*guard,
-                    &table,
-                    filter,
-                    join_source,
-                    returning,
-                )?
-            }
-            LogicalPlan::Merge {
-                target,
-                source,
-                on,
-                clauses,
-            } => {
-                ensure_write(mode, op_name)?;
-                let guard = catalog.read().expect("catalog lock poisoned");
-                dml::execute_merge(txn, &*guard, &target, &source, on, clauses)?
-            }
-            LogicalPlan::Copy {
-                query: Some(_),
-                direction: crate::ast::CopyDirection::From,
-                ..
-            } => {
-                return Err(ExecutorError::InvalidOperation {
-                    operation: "COPY FROM".into(),
-                    reason: "COPY FROM requires a table source and file input".into(),
-                });
-            }
-            LogicalPlan::Copy {
-                query: Some(query),
-                path,
-                options,
-                direction: crate::ast::CopyDirection::To,
-                ..
-            } => {
-                let header = options.iter().any(|option| {
-                    option.name.eq_ignore_ascii_case("header")
-                        && option.value.eq_ignore_ascii_case("true")
-                });
-                let format = copy_format(&path, &options)?;
-                let guard = catalog.read().expect("catalog lock poisoned");
-                let ExecutionResult::Query(result) =
-                    query::execute_query_with_policy_and_copy_security(
-                        txn,
-                        &*guard,
-                        *query,
-                        None,
-                        read_security,
-                    )?
-                else {
-                    return Err(ExecutorError::InvalidOperation {
-                        operation: "COPY TO".into(),
-                        reason: "query source did not return rows".into(),
-                    });
-                };
-                bulk::execute_copy_query_to(
-                    &result,
-                    &path,
-                    format,
-                    bulk::CopyOptions { header },
-                    copy_security,
-                )?
-            }
-            LogicalPlan::Copy {
-                table,
-                path,
-                options,
-                direction: crate::ast::CopyDirection::To,
-                query: None,
-            } => {
-                let guard = catalog.read().expect("catalog lock poisoned");
-                let header = options.iter().any(|option| {
-                    option.name.eq_ignore_ascii_case("header")
-                        && option.value.eq_ignore_ascii_case("true")
-                });
-                let format = copy_format(&path, &options)?;
-                bulk::execute_copy_to(
-                    txn,
-                    &*guard,
-                    &table,
-                    &path,
-                    format,
-                    bulk::CopyOptions { header },
-                    copy_security,
-                )?
-            }
-            LogicalPlan::Copy {
-                table,
-                path,
-                options,
-                direction: crate::ast::CopyDirection::From,
-                query: None,
-                ..
-            } => {
-                ensure_write(mode, op_name)?;
-                let guard = catalog.read().expect("catalog lock poisoned");
-                let header = options.iter().any(|option| {
-                    option.name.eq_ignore_ascii_case("header")
-                        && option.value.eq_ignore_ascii_case("true")
-                });
-                let format = copy_format(&path, &options)?;
-                bulk::execute_copy(
-                    txn,
-                    &*guard,
-                    &table,
-                    &path,
-                    format,
-                    bulk::CopyOptions { header },
-                    copy_security,
-                )?
-            }
-            query_plan => {
-                let guard = catalog.read().expect("catalog lock poisoned");
-                let policy = txn.memory_policy().cloned();
+            )?
+        }
+        LogicalPlan::Merge {
+            target,
+            source,
+            on,
+            clauses,
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            dml::execute_merge(txn, &*guard, &target, &source, on, clauses)?
+        }
+        LogicalPlan::Copy {
+            query: Some(_),
+            direction: crate::ast::CopyDirection::From,
+            ..
+        } => {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "COPY FROM".into(),
+                reason: "COPY FROM requires a table source and file input".into(),
+            });
+        }
+        LogicalPlan::Copy {
+            query: Some(query),
+            path,
+            options,
+            direction: crate::ast::CopyDirection::To,
+            ..
+        } => {
+            let header = options.iter().any(|option| {
+                option.name.eq_ignore_ascii_case("header")
+                    && option.value.eq_ignore_ascii_case("true")
+            });
+            let format = copy_format(&path, &options)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            let ExecutionResult::Query(result) =
                 query::execute_query_with_policy_and_copy_security(
                     txn,
                     &*guard,
-                    query_plan,
-                    policy.as_ref(),
+                    *query,
+                    None,
                     read_security,
                 )?
-            }
-        });
-    }
-
-    Ok(results)
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "COPY TO".into(),
+                    reason: "query source did not return rows".into(),
+                });
+            };
+            bulk::execute_copy_query_to(
+                &result,
+                &path,
+                format,
+                bulk::CopyOptions { header },
+                copy_security,
+            )?
+        }
+        LogicalPlan::Copy {
+            table,
+            path,
+            options,
+            direction: crate::ast::CopyDirection::To,
+            query: None,
+        } => {
+            let guard = catalog.read().expect("catalog lock poisoned");
+            let header = options.iter().any(|option| {
+                option.name.eq_ignore_ascii_case("header")
+                    && option.value.eq_ignore_ascii_case("true")
+            });
+            let format = copy_format(&path, &options)?;
+            bulk::execute_copy_to(
+                txn,
+                &*guard,
+                &table,
+                &path,
+                format,
+                bulk::CopyOptions { header },
+                copy_security,
+            )?
+        }
+        LogicalPlan::Copy {
+            table,
+            path,
+            options,
+            direction: crate::ast::CopyDirection::From,
+            query: None,
+            ..
+        } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            let header = options.iter().any(|option| {
+                option.name.eq_ignore_ascii_case("header")
+                    && option.value.eq_ignore_ascii_case("true")
+            });
+            let format = copy_format(&path, &options)?;
+            bulk::execute_copy(
+                txn,
+                &*guard,
+                &table,
+                &path,
+                format,
+                bulk::CopyOptions { header },
+                copy_security,
+            )?
+        }
+        query_plan => {
+            let guard = catalog.read().expect("catalog lock poisoned");
+            let policy = txn.memory_policy().cloned();
+            query::execute_query_with_policy_and_copy_security(
+                txn,
+                &*guard,
+                query_plan,
+                policy.as_ref(),
+                read_security,
+            )?
+        }
+    })
 }
 
 fn execute_create_table_as_blocking<T>(

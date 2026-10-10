@@ -270,7 +270,9 @@ async fn grpc_sql_vector_transaction_flow() {
 
     client
         .execute_ddl(grpc::proto::DdlRequest {
-            sql: "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));".to_string(),
+            sql:
+                "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2), CHECK (id > 0));"
+                    .to_string(),
             session_id: String::new(),
         })
         .await
@@ -311,6 +313,53 @@ async fn grpc_sql_vector_transaction_flow() {
         })
         .await
         .expect("vector upsert batch");
+
+    let mut batch_snapshots = Vec::new();
+    for phase in 0..2 {
+        let mut stream = client
+            .execute_sql(grpc::proto::SqlRequest {
+                sql: "SELECT id, embedding FROM items ORDER BY id;".to_string(),
+                session_id: String::new(),
+            })
+            .await
+            .expect("batch snapshot")
+            .into_inner();
+        let mut rows = Vec::new();
+        while let Some(result_set) = stream.message().await.expect("snapshot result") {
+            rows.extend(result_set.rows.into_iter().map(|row| row.values));
+        }
+        assert_eq!(
+            rows.iter()
+                .map(|row| extract_int(&row[0]))
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        batch_snapshots.push(rows);
+
+        if phase == 0 {
+            // Updating an existing row stages a write before the later CHECK fails.
+            let error = client
+                .vector_upsert_batch(grpc::proto::VectorUpsertBatchRequest {
+                    table: "items".to_string(),
+                    vectors: vec![
+                        grpc::proto::VectorUpsertBatchItem {
+                            id: 2,
+                            vector: vec![9.0, 9.0],
+                        },
+                        grpc::proto::VectorUpsertBatchItem {
+                            id: 0,
+                            vector: vec![0.5, 0.5],
+                        },
+                    ],
+                    column: String::new(),
+                })
+                .await
+                .expect_err("later CHECK must reject the whole batch");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("CHECK constraint violated"));
+        }
+    }
+    assert_eq!(batch_snapshots[0], batch_snapshots[1]);
 
     let search = client
         .vector_search(grpc::proto::VectorSearchRequest {
