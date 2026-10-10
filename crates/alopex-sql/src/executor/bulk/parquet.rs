@@ -128,8 +128,8 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
     Ok((schema, rows))
 }
 
-/// Read against SQL's planned types, accounting for decoded value payloads.
-/// This does not bound Arrow decoding allocations or row/container overhead.
+/// Read against SQL's planned types, accounting for decoded payloads and retained
+/// row/value capacity. This does not bound Arrow decoding allocations.
 pub(crate) fn read_parquet_with_plan(
     path: &str,
     planned: &[ColumnMetadata],
@@ -162,24 +162,64 @@ pub(crate) fn read_parquet_with_plan(
         }
     }
 
-    let mut rows = Vec::new();
-    let mut payload_bytes = 0_u64;
+    let mut rows: Vec<Vec<SqlValue>> = Vec::new();
+    let mut retained_bytes = 0_u64;
+    let overflow = || ExecutorError::ResourceExhausted {
+        message: "READ_PARQUET retained size overflow".into(),
+    };
     while let Some(batch) = reader.next_batch(1024)? {
-        for row in batch {
-            if let Some(policy) = memory {
-                for value in &row {
-                    payload_bytes = payload_bytes
+        if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
+            for row in &batch {
+                retained_bytes = retained_bytes
+                    .checked_add(
+                        (row.capacity() as u64)
+                            .checked_mul(std::mem::size_of::<SqlValue>() as u64)
+                            .ok_or_else(overflow)?,
+                    )
+                    .ok_or_else(overflow)?;
+                for value in row {
+                    retained_bytes = retained_bytes
                         .checked_add(value.estimated_bytes())
-                        .ok_or_else(|| ExecutorError::ResourceExhausted {
-                            message: "READ_PARQUET payload size overflow".into(),
-                        })?;
+                        .ok_or_else(overflow)?;
                 }
+            }
+            // The reader already owns this decoded batch. Charge it together
+            // before retaining it, and reserve outer slots once per growth.
+            let required = rows.len().checked_add(batch.len()).ok_or_else(overflow)?;
+            let capacity = if required > rows.capacity() {
+                rows.capacity()
+                    .checked_mul(2)
+                    .ok_or_else(overflow)?
+                    .max(required)
+            } else {
+                rows.capacity()
+            };
+            let accounted = |capacity: usize| {
+                (capacity as u64)
+                    .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
+                    .and_then(|bytes| retained_bytes.checked_add(bytes))
+                    .ok_or_else(overflow)
+            };
+            policy
+                .enforce(accounted(capacity)?)
+                .map_err(map_core_memory_error)?;
+            if rows.is_empty() && batch.capacity() == capacity {
+                // Reuse the reader's already-accounted outer allocation.
+                rows = batch;
+                continue;
+            }
+            if capacity > rows.capacity() {
+                rows.try_reserve_exact(capacity - rows.len())
+                    .map_err(|error| ExecutorError::ResourceExhausted {
+                        message: format!("READ_PARQUET row allocation failed: {error}"),
+                    })?;
+                // An allocator may provide more capacity than requested.
                 policy
-                    .enforce(payload_bytes)
+                    .enforce(accounted(rows.capacity())?)
                     .map_err(map_core_memory_error)?;
             }
-            rows.push(row);
         }
+        rows.extend(batch);
     }
     Ok(rows)
 }

@@ -456,6 +456,55 @@ fn issue577_memory_policy_reaches_read_parquet() {
 }
 
 #[test]
+fn issue577_read_parquet_null_rows_consume_memory_budget() {
+    for row_count in [1024_usize, 1025] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![None::<i64>; row_count]))],
+        )
+        .unwrap();
+        write_parquet(&file, schema, batch);
+
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+        let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+        let plan = Planner::new(&catalog).plan(&statement).unwrap();
+        let mut txn = bridge.begin_write().unwrap();
+        let sufficient = MemoryPolicy::new(Some(1024 * 1024), SpillPolicy::FailFast);
+        let result =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&sufficient)).unwrap();
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected a query result with sufficient memory");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Null]; row_count]);
+        drop(result);
+
+        let retained_bytes = (row_count.next_power_of_two() * std::mem::size_of::<Vec<SqlValue>>()
+            + row_count * std::mem::size_of::<SqlValue>()) as u64;
+        let exact = MemoryPolicy::new(Some(retained_bytes), SpillPolicy::FailFast);
+        assert!(execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&exact)).is_ok());
+        let below = MemoryPolicy::new(Some(retained_bytes - 1), SpillPolicy::FailFast);
+        assert!(matches!(
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&below)),
+            Err(ExecutorError::ResourceExhausted { .. })
+        ));
+
+        // NULL payloads are empty, but retaining rows and value slots still costs memory.
+        // This checks retained-row accounting, not the Arrow decoder's allocation peak.
+        let insufficient = MemoryPolicy::new(Some(64), SpillPolicy::FailFast);
+        let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient))
+            .expect_err("READ_PARQUET must account for retained NULL rows");
+        assert!(
+            matches!(error, ExecutorError::ResourceExhausted { .. }),
+            "expected the retained-row memory-policy error, got {error:?}"
+        );
+    }
+}
+
+#[test]
 fn issue577_runtime_schema_change_rejected() {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
