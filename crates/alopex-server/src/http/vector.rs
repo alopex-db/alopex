@@ -1087,16 +1087,25 @@ mod tests {
             .try_write_owned()
             .is_err());
 
+        let gate = Arc::clone(&state.catalog_txn_gate);
+        let (write_acquired_tx, write_acquired_rx) = std::sync::mpsc::channel();
+        let writer = tokio::spawn(async move {
+            let guard = gate.write_owned().await;
+            write_acquired_tx
+                .send(())
+                .expect("write acquisition receiver");
+            guard
+        });
         release_tx.send(()).expect("release operation");
-        for _ in 0..20 {
-            if Arc::clone(&state.catalog_txn_gate)
-                .try_write_owned()
-                .is_ok()
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
+        let write_acquired = tokio::task::spawn_blocking(move || {
+            write_acquired_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .expect("write acquisition waiter");
+        if let Err(err) = write_acquired {
+            writer.abort();
+            panic!("catalog guard must be released after blocking operation completion: {err}");
         }
-        panic!("catalog guard must be released after blocking operation completion");
+        drop(writer.await.expect("catalog writer task"));
     }
 }
