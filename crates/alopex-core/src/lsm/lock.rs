@@ -54,6 +54,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, OnceLock};
 
 use crate::error::Result;
@@ -71,11 +73,49 @@ const LOCK_FILE_SUFFIX: &str = ".lock";
 type RegistryKey = (u32, PathBuf);
 
 #[cfg(not(target_arch = "wasm32"))]
-static HELD_LOCKS: OnceLock<Mutex<HashMap<RegistryKey, usize>>> = OnceLock::new();
+type HeldLocks = Mutex<HashMap<RegistryKey, usize>>;
 
+/// PID of the process that claimed the registry; 0 means unclaimed.
+///
+/// This lives outside the `OnceLock` so a forked child can tell the registry
+/// is inherited without touching a `OnceLock` (or mutex) that a parent thread
+/// may have been initializing or holding at fork.
 #[cfg(not(target_arch = "wasm32"))]
-fn held_locks() -> &'static Mutex<HashMap<RegistryKey, usize>> {
-    HELD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+static REGISTRY_OWNER: AtomicU32 = AtomicU32::new(0);
+
+/// Process-local registry of held locks.
+#[cfg(not(target_arch = "wasm32"))]
+static HELD_LOCKS: OnceLock<HeldLocks> = OnceLock::new();
+
+/// Claim `owner` for `pid`, then lazily initialize `registry`.
+///
+/// Returns `None`, without touching `registry`, when a different PID already
+/// owns it. A same-PID caller may block on normal `OnceLock` initialization.
+#[cfg(not(target_arch = "wasm32"))]
+fn held_locks_in<'a>(
+    owner: &AtomicU32,
+    registry: &'a OnceLock<HeldLocks>,
+    pid: u32,
+) -> Option<&'a HeldLocks> {
+    match owner.compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {}
+        Err(current) if current == pid => {}
+        Err(_) => return None,
+    }
+    Some(registry.get_or_init(|| Mutex::new(HashMap::new())))
+}
+
+/// The registry mutex, or `None` when this process is not the registry owner.
+///
+/// If no process claimed the registry before fork, the child claims it and
+/// initializes its own.
+///
+/// A fork child whose parent already claimed the registry intentionally keeps it
+/// disabled for its whole lifetime (no `pthread_atfork` re-initialization). It
+/// falls back to OS-lock correctness plus lock-file holder diagnostics.
+#[cfg(not(target_arch = "wasm32"))]
+fn held_locks() -> Option<&'static HeldLocks> {
+    held_locks_in(&REGISTRY_OWNER, &HELD_LOCKS, std::process::id())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -87,21 +127,21 @@ fn make_registry_key(pid: u32, lock_path: &Path) -> RegistryKey {
 #[cfg(not(target_arch = "wasm32"))]
 fn registry_contains(key: &RegistryKey) -> bool {
     held_locks()
-        .lock()
+        .and_then(|held| held.lock().ok())
         .map(|guard| guard.contains_key(key))
         .unwrap_or(false)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn registry_register(key: &RegistryKey) {
-    if let Ok(mut guard) = held_locks().lock() {
+    if let Some(Ok(mut guard)) = held_locks().map(|held| held.lock()) {
         *guard.entry(key.clone()).or_insert(0) += 1;
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn registry_unregister(key: &RegistryKey) {
-    if let Ok(mut guard) = held_locks().lock() {
+    if let Some(Ok(mut guard)) = held_locks().map(|held| held.lock()) {
         if let Some(count) = guard.get_mut(key) {
             if *count <= 1 {
                 guard.remove(key);
@@ -433,6 +473,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fresh_registry_claims_ownership_and_initializes() {
+        let owner = AtomicU32::new(0);
+        let registry = OnceLock::new();
+        let pid = std::process::id();
+
+        assert!(held_locks_in(&owner, &registry, pid).is_some());
+        assert_eq!(owner.load(Ordering::Acquire), pid);
+        assert!(registry.get().is_some());
+        // Same PID keeps access on later calls.
+        assert!(held_locks_in(&owner, &registry, pid).is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn foreign_owner_is_rejected_without_touching_the_once_lock() {
+        let pid = std::process::id();
+        let foreign = pid.wrapping_add(1).max(1);
+        let owner = AtomicU32::new(foreign);
+        let registry = OnceLock::new();
+
+        assert!(held_locks_in(&owner, &registry, pid).is_none());
+        assert!(registry.get().is_none(), "OnceLock must stay uninitialized");
+        assert_eq!(owner.load(Ordering::Acquire), foreign);
+    }
+
+    #[test]
     fn registry_refcounts_duplicate_registrations() {
         struct Cleanup<'a>(&'a RegistryKey);
 
@@ -661,6 +728,94 @@ mod tests {
                 .success(),
             "owner drop must permit acquire"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forked_child_acquire_does_not_wait_on_inherited_registry_mutex() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("db");
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let held = acquire(&data_dir, &lock_path).unwrap();
+        let registry_guard = held_locks()
+            .expect("test process owns the registry")
+            .lock()
+            .unwrap();
+        // SAFETY: the child only calls acquire and _exit; it never returns to
+        // the multithreaded test runtime. The parent bounds and reaps it.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            let error = std::io::Error::last_os_error();
+            // Release the global mutex first so the panic does not poison it.
+            drop(registry_guard);
+            panic!("fork failed: {error}");
+        }
+        if pid == 0 {
+            // The parent still holds the registry mutex. Without the owner-PID
+            // check this direct lookup blocks and the parent's timeout fires.
+            let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let child_key = make_registry_key(std::process::id(), &lock_path);
+                if registry_contains(&child_key) {
+                    2
+                } else {
+                    match acquire(&data_dir, &lock_path) {
+                        Err(Error::AlreadyOpen { .. }) => 0,
+                        _ => 1,
+                    }
+                }
+            }))
+            .unwrap_or(3);
+            // SAFETY: _exit is async-signal-safe and skips destructors and the
+            // test harness, which must not run in the forked child.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let outcome = loop {
+            // SAFETY: pid is our child and status is valid writable storage.
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == pid {
+                break Ok(());
+            }
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    break Err(error);
+                }
+            }
+            if Instant::now() >= deadline {
+                break Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if let Err(error) = outcome {
+            // ECHILD means the PID is no longer ours; do not signal a reused PID.
+            if error.raw_os_error() != Some(libc::ECHILD) {
+                // SAFETY: this unreaped child still belongs to this test.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                loop {
+                    // SAFETY: status is writable and pid names our child.
+                    let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+                    if reaped == pid
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+            }
+            // Release the global mutex first so the panic does not poison it.
+            drop(registry_guard);
+            panic!("forked acquire child did not complete: {error}");
+        }
+        drop(registry_guard);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "child acquire must report AlreadyOpen without deadlock"
+        );
+        drop(held);
     }
 
     #[cfg(unix)]
