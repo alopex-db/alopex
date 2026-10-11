@@ -8,5 +8,5 @@ hnswlib==0.8.0
 h5py==3.16.0
 datafusion==50.0.0
 duckdb==1.4.0
-pysqlite3-binary==0.5.4
+pysqlite3-binary==0.5.4; sys_platform == "linux"
 psycopg[binary]==3.2.10
