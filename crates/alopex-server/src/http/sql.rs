@@ -147,7 +147,7 @@ enum TableLifecycleCandidate {
     },
     CreateIndex {
         index_name: String,
-        index_existed_before: bool,
+        before: Option<(TableLifecycleState, IndexMetadata)>,
     },
     DropIndex {
         index_name: String,
@@ -765,7 +765,7 @@ fn table_lifecycle_candidates(
             LogicalPlan::CreateIndex { index, .. } => {
                 candidates.push(TableLifecycleCandidate::CreateIndex {
                     index_name: index.name.clone(),
-                    index_existed_before: index_exists(state, &index.name)?,
+                    before: index_table_lifecycle_state(state, &index.name)?,
                 });
             }
             LogicalPlan::DropIndex { name, .. } => {
@@ -796,14 +796,20 @@ fn statement_effects_after_execution(
                         None => true,
                     };
                     if changed {
-                        lifecycle_effects.push(TableLifecycleEffect::Created {
-                            table_ref: after.table_ref,
-                            table_id: after.table_id,
-                        });
-                        catalog_rollback_effects.push(CatalogRollbackEffect::DropTable {
-                            table_name: after.table.name,
-                            table_id: after.table_id,
-                        });
+                        push_lifecycle_effect(
+                            &mut lifecycle_effects,
+                            TableLifecycleEffect::Created {
+                                table_ref: after.table_ref,
+                                table_id: after.table_id,
+                            },
+                        );
+                        push_catalog_rollback_effect(
+                            &mut catalog_rollback_effects,
+                            CatalogRollbackEffect::DropTable {
+                                table_name: after.table.name,
+                                table_id: after.table_id,
+                            },
+                        );
                     }
                 }
             }
@@ -819,51 +825,137 @@ fn statement_effects_after_execution(
                         None => true,
                     };
                     if changed {
-                        lifecycle_effects.push(TableLifecycleEffect::Dropped {
-                            table_ref: before.table_ref.clone(),
-                            table_id: before.table_id,
-                        });
-                        catalog_rollback_effects.push(CatalogRollbackEffect::CreateTable {
-                            table: Box::new(before.table),
-                            indexes,
-                        });
+                        push_lifecycle_effect(
+                            &mut lifecycle_effects,
+                            TableLifecycleEffect::Dropped {
+                                table_ref: before.table_ref.clone(),
+                                table_id: before.table_id,
+                            },
+                        );
+                        push_catalog_rollback_effect(
+                            &mut catalog_rollback_effects,
+                            CatalogRollbackEffect::CreateTable {
+                                table: Box::new(before.table),
+                                indexes,
+                            },
+                        );
                     }
                 }
             }
-            TableLifecycleCandidate::CreateIndex {
-                index_name,
-                index_existed_before,
-            } => {
-                if !index_existed_before {
-                    if let Some((after, index)) = index_table_lifecycle_state(state, &index_name)? {
-                        lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
-                            table_ref: after.table_ref,
-                            table_id: after.table_id,
-                        });
-                        catalog_rollback_effects.push(CatalogRollbackEffect::DropIndex {
-                            index_name: index.name,
-                            index_id: index.index_id,
-                        });
+            TableLifecycleCandidate::CreateIndex { index_name, before } => {
+                if let Some((after, index)) = index_table_lifecycle_state(state, &index_name)? {
+                    let changed = before
+                        .as_ref()
+                        .is_none_or(|(_, before)| before.index_id != index.index_id);
+                    if changed {
+                        push_lifecycle_effect(
+                            &mut lifecycle_effects,
+                            TableLifecycleEffect::SchemaChanged {
+                                table_ref: after.table_ref,
+                                table_id: after.table_id,
+                            },
+                        );
+                        push_catalog_rollback_effect(
+                            &mut catalog_rollback_effects,
+                            CatalogRollbackEffect::DropIndex {
+                                index_name: index.name,
+                                index_id: index.index_id,
+                            },
+                        );
                     }
                 }
             }
             TableLifecycleCandidate::DropIndex { index_name, before } => {
                 if let Some((before, index)) = before {
-                    if !index_exists(state, &index_name)? {
-                        lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
-                            table_ref: before.table_ref,
-                            table_id: before.table_id,
-                        });
-                        catalog_rollback_effects.push(CatalogRollbackEffect::CreateIndex {
-                            index: Box::new(index),
-                            table_id: before.table_id,
-                        });
+                    let after = index_table_lifecycle_state(state, &index_name)?;
+                    let changed = after
+                        .as_ref()
+                        .is_none_or(|(_, after)| after.index_id != index.index_id);
+                    if changed {
+                        push_lifecycle_effect(
+                            &mut lifecycle_effects,
+                            TableLifecycleEffect::SchemaChanged {
+                                table_ref: before.table_ref,
+                                table_id: before.table_id,
+                            },
+                        );
+                        push_catalog_rollback_effect(
+                            &mut catalog_rollback_effects,
+                            CatalogRollbackEffect::CreateIndex {
+                                index: Box::new(index),
+                                table_id: before.table_id,
+                            },
+                        );
                     }
                 }
             }
         }
     }
     Ok((lifecycle_effects, catalog_rollback_effects))
+}
+
+fn push_lifecycle_effect(effects: &mut Vec<TableLifecycleEffect>, effect: TableLifecycleEffect) {
+    effects.retain(|existing| existing != &effect);
+    effects.push(effect);
+}
+
+fn push_catalog_rollback_effect(
+    effects: &mut Vec<CatalogRollbackEffect>,
+    effect: CatalogRollbackEffect,
+) {
+    effects.retain(|existing| !same_catalog_rollback_identity(existing, &effect));
+    effects.push(effect);
+}
+
+fn same_catalog_rollback_identity(
+    left: &CatalogRollbackEffect,
+    right: &CatalogRollbackEffect,
+) -> bool {
+    match (left, right) {
+        (
+            CatalogRollbackEffect::DropTable {
+                table_name: left_name,
+                table_id: left_id,
+            },
+            CatalogRollbackEffect::DropTable {
+                table_name: right_name,
+                table_id: right_id,
+            },
+        ) => left_name == right_name && left_id == right_id,
+        (
+            CatalogRollbackEffect::CreateTable {
+                table: left_table, ..
+            },
+            CatalogRollbackEffect::CreateTable {
+                table: right_table, ..
+            },
+        ) => left_table.name == right_table.name && left_table.table_id == right_table.table_id,
+        (
+            CatalogRollbackEffect::DropIndex {
+                index_name: left_name,
+                index_id: left_id,
+            },
+            CatalogRollbackEffect::DropIndex {
+                index_name: right_name,
+                index_id: right_id,
+            },
+        ) => left_name == right_name && left_id == right_id,
+        (
+            CatalogRollbackEffect::CreateIndex {
+                index: left_index,
+                table_id: left_table_id,
+            },
+            CatalogRollbackEffect::CreateIndex {
+                index: right_index,
+                table_id: right_table_id,
+            },
+        ) => {
+            left_index.name == right_index.name
+                && left_index.index_id == right_index.index_id
+                && left_table_id == right_table_id
+        }
+        _ => false,
+    }
 }
 
 fn table_lifecycle_state(
@@ -904,14 +996,6 @@ fn index_table_lifecycle_state(
             index.clone(),
         )
     }))
-}
-
-fn index_exists(state: &ServerState, index_name: &str) -> Result<bool> {
-    let guard = state
-        .catalog
-        .read()
-        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
-    Ok(guard.get_index(index_name).is_some())
 }
 
 fn default_table_ref(table_name: &str) -> String {
@@ -1327,6 +1411,102 @@ fn is_write_sql(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_index_metadata_eq(actual: &IndexMetadata, expected: &IndexMetadata) {
+        assert_eq!(actual.index_id, expected.index_id);
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.catalog_name, expected.catalog_name);
+        assert_eq!(actual.namespace_name, expected.namespace_name);
+        assert_eq!(actual.table, expected.table);
+        assert_eq!(actual.columns, expected.columns);
+        assert_eq!(actual.column_indices, expected.column_indices);
+        assert_eq!(actual.unique, expected.unique);
+        assert_eq!(actual.method, expected.method);
+        assert_eq!(actual.options, expected.options);
+    }
+
+    #[tokio::test]
+    async fn index_replacement_rollback_restores_original_metadata() {
+        use alopex_sql::ast::ddl::IndexMethod;
+        use alopex_sql::planner::plan_sql_for_routing;
+
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = &server.state;
+
+        let table = {
+            let catalog = state.catalog.read().expect("catalog");
+            let planned = plan_sql_for_routing(&*catalog, "CREATE TABLE items (id INTEGER)")
+                .expect("plan table creation");
+            let LogicalPlan::CreateTable { table, .. } = &planned[0].plan else {
+                panic!("expected CREATE TABLE plan");
+            };
+            table.clone()
+        };
+        state
+            .catalog
+            .write()
+            .expect("catalog")
+            .create_table(table)
+            .expect("register table");
+
+        let original = IndexMetadata::new(41, "idx_items_id", "items", vec!["id".into()])
+            .with_column_indices(vec![0])
+            .with_unique(true)
+            .with_method(IndexMethod::BTree)
+            .with_option("fillfactor", "70");
+        state
+            .catalog
+            .write()
+            .expect("catalog")
+            .create_index(original.clone())
+            .expect("register original index");
+
+        let planned = {
+            let catalog = state.catalog.read().expect("catalog");
+            plan_sql_for_routing(
+                &*catalog,
+                "DROP INDEX IF EXISTS idx_items_id; \
+                 CREATE INDEX IF NOT EXISTS idx_items_id ON items (id)",
+            )
+            .expect("plan index replacement")
+        };
+        let candidates =
+            table_lifecycle_candidates(state, &planned).expect("index lifecycle candidates");
+
+        let replacement = IndexMetadata::new(42, "idx_items_id", "items", vec!["id".into()])
+            .with_column_indices(vec![0])
+            .with_method(IndexMethod::BTree)
+            .with_option("fillfactor", "90");
+        {
+            let mut catalog = state.catalog.write().expect("catalog");
+            catalog
+                .drop_index("idx_items_id")
+                .expect("drop original index");
+            catalog
+                .create_index(replacement)
+                .expect("register replacement index");
+        }
+
+        let (_, rollback) =
+            statement_effects_after_execution(state, candidates).expect("replacement effects");
+        state
+            .apply_catalog_rollback_effects(rollback)
+            .expect("rollback replacement");
+
+        let catalog = state.catalog.read().expect("catalog");
+        let restored = catalog
+            .get_index("idx_items_id")
+            .expect("original index restored");
+        assert_index_metadata_eq(restored, &original);
+    }
 
     #[tokio::test]
     async fn ctas_lifecycle_tracks_creation_and_rolls_back_only_new_tables() {

@@ -773,6 +773,76 @@ async fn session_drop_index_rollback_restores_catalog() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn session_index_replacement_rollback_restores_original_metadata() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state.clone());
+    for sql in [
+        "CREATE TABLE replacement_rows (id INT PRIMARY KEY, value INT)",
+        "CREATE UNIQUE INDEX replacement_value_idx ON replacement_rows (value)",
+    ] {
+        let (status, body) = send_json(
+            &app,
+            "/sql",
+            serde_json::json!({ "sql": sql, "streaming": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let original = state
+        .catalog
+        .read()
+        .expect("catalog")
+        .get_index("replacement_value_idx")
+        .expect("original index")
+        .clone();
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let session: Value = serde_json::from_str(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session id");
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "CREATE INDEX IF NOT EXISTS replacement_value_idx ON replacement_rows (value); \
+                    DROP INDEX IF EXISTS replacement_value_idx; \
+                    CREATE INDEX IF NOT EXISTS replacement_value_idx ON replacement_rows (value)",
+            "session_id": session_id,
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let replacement_id = state
+        .catalog
+        .read()
+        .expect("catalog")
+        .get_index("replacement_value_idx")
+        .expect("replacement index")
+        .index_id;
+    assert_ne!(replacement_id, original.index_id);
+
+    let (status, body) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let catalog = state.catalog.read().expect("catalog");
+    let restored = catalog
+        .get_index("replacement_value_idx")
+        .expect("original index restored");
+    assert_eq!(restored.index_id, original.index_id);
+    assert_eq!(restored.name, original.name);
+    assert_eq!(restored.catalog_name, original.catalog_name);
+    assert_eq!(restored.namespace_name, original.namespace_name);
+    assert_eq!(restored.table, original.table);
+    assert_eq!(restored.columns, original.columns);
+    assert_eq!(restored.column_indices, original.column_indices);
+    assert_eq!(restored.unique, original.unique);
+    assert_eq!(restored.method, original.method);
+    assert_eq!(restored.options, original.options);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn session_index_undo_preserves_noops_order_and_identity() {
     use alopex_server::error::ServerError;
     use alopex_server::session::CatalogRollbackEffect;
