@@ -660,8 +660,14 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
             workflow,
         )
-        self.assertIn("faiss-cpu==1.15.0", workflow)
-        self.assertIn("hnswlib==0.8.0", workflow)
+        requirements_path = (
+            Path(__file__).resolve().parent / "requirements-v0811.txt"
+        )
+        requirements = requirements_path.read_text(encoding="utf-8")
+        self.assertIn("-r scripts/performance/requirements-v0811.txt", workflow)
+        self.assertIn("faiss-cpu==1.15.0", requirements)
+        self.assertIn("hnswlib==0.8.0", requirements)
+        self.assertIn("h5py==3.16.0", requirements)
         self.assertIn('--release-version "$RELEASE_VERSION"', workflow)
         self.assertIn('--glove-dataset "$GLOVE_DATASET"', workflow)
         self.assertIn("--max-scale-n 50000", workflow)
