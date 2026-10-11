@@ -4,7 +4,21 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 requirements="${ALOPEX_PERFORMANCE_REQUIREMENTS:-${repo_root}/scripts/performance/requirements-v0811.txt}"
 venv="${ALOPEX_PERFORMANCE_VENV:-${repo_root}/.venv-performance}"
-python="${PYTHON:-python3.11}"
+
+if [[ -n "${PYTHON:-}" ]]; then
+    python="${PYTHON}"
+elif command -v python3.11 >/dev/null 2>&1; then
+    python="python3.11"
+elif [[ -x "${HOME}/.local/bin/python3.11" ]]; then
+    python="${HOME}/.local/bin/python3.11"
+elif command -v uv >/dev/null 2>&1; then
+    python="$(uv python find 3.11)"
+elif [[ -x "${HOME}/.local/bin/uv" ]]; then
+    python="$("${HOME}/.local/bin/uv" python find 3.11)"
+else
+    echo "Python 3.11 is required; install it with uv or set PYTHON once" >&2
+    exit 2
+fi
 
 if [[ $# -eq 0 ]]; then
     echo "usage: scripts/run-performance-python.sh <command> [args...]" >&2
@@ -12,7 +26,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 if ! command -v "${python}" >/dev/null 2>&1; then
-    echo "Python 3.11 is required; set PYTHON to a Python 3.11 executable" >&2
+    echo "Python 3.11 is required; install it with uv or set PYTHON once" >&2
     exit 2
 fi
 

@@ -88,6 +88,38 @@ class PerformancePythonRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("Python 3.11", result.stderr)
 
+    def test_finds_user_local_python_without_python_or_path_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            home_bin = temporary / "home" / ".local" / "bin"
+            home_bin.mkdir(parents=True)
+            (home_bin / "python3.11").symlink_to(sys.executable)
+            requirements = temporary / "requirements.txt"
+            requirements.write_text("", encoding="utf-8")
+            virtualenv = temporary / "venv"
+            environment = os.environ.copy()
+            environment.pop("PYTHON", None)
+            environment.update(
+                {
+                    "ALOPEX_PERFORMANCE_REQUIREMENTS": str(requirements),
+                    "ALOPEX_PERFORMANCE_VENV": str(virtualenv),
+                    "HOME": str(temporary / "home"),
+                    "PATH": "/usr/bin:/bin",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(RUNNER), "python", "-c", "print('automatic')"],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip().splitlines()[-1], "automatic")
+
 
 if __name__ == "__main__":
     unittest.main()
