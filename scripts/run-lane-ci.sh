@@ -4,6 +4,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python="${PYTHON:-python3.11}"
+export PYTHON="${python}"
 venv_dir="${LANE_CI_VENV:-${project_root}/.venv-lane-ci}"
 venv_python="${venv_dir}/bin/python"
 parser_dir="${NIM_SQL_PARSER_LIB_DIR:-${project_root}/crates/alopex-sql/nim-sql-parser}"
