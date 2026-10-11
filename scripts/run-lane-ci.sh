@@ -33,10 +33,10 @@ if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
     export CARGO_TARGET_DIR="${first_worktree}/target"
 fi
 
-lib_test_mode=0
-if [[ "${1:-}" == "--lib-test" ]]; then
-    lib_test_mode=1
-fi
+python_mode=0
+case "${1:-}" in
+    --python-test | --python-test-no-numpy) python_mode=1 ;;
+esac
 
 case "$(uname -s)" in
     Darwin*) parser_shared="${parser_dir}/libalopex_sql_parser.dylib" ;;
@@ -45,7 +45,7 @@ esac
 parser_static="${parser_dir}/libalopex_sql_parser.a"
 
 python_libdir=""
-if [[ "${lib_test_mode}" -eq 0 ]]; then
+if [[ "${python_mode}" -eq 1 ]]; then
     if [[ ! -x "${venv_python}" ]]; then
         "${python}" -m venv "${venv_dir}"
     fi
