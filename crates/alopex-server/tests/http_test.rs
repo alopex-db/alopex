@@ -554,6 +554,59 @@ async fn http_sql_vector_session_flow() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn http_vector_index_update_replaces_existing_index() {
+    let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/sql",
+        json!({ "sql": "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));" }),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let request = json!({
+        "name": "items_embedding_idx",
+        "table": "items",
+        "column": "embedding",
+        "method": "hnsw",
+        "options": { "m": "8" }
+    });
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/vector/index/create",
+        request.clone(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let original_id = state
+        .catalog
+        .read()
+        .expect("catalog")
+        .get_index("items_embedding_idx")
+        .expect("original index")
+        .index_id;
+
+    let (status, _, body) =
+        send_json(router, Method::POST, "/vector/index/update", request, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let replacement_id = state
+        .catalog
+        .read()
+        .expect("catalog")
+        .get_index("items_embedding_idx")
+        .expect("replacement index")
+        .index_id;
+    assert_ne!(replacement_id, original_id);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn http_sql_copy_uses_configured_directory_and_is_atomic() {
     let (state, temp, copy_dir) = build_state_with_copy_dir().await;
     let router = http::router(state);

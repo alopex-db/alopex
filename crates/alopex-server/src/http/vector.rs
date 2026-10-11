@@ -514,7 +514,7 @@ pub(crate) async fn index_update_impl(
         &request.column,
         request.method.as_deref(),
         &request.options,
-        false,
+        true,
     ) {
         Ok(sql) => sql,
         Err(err) => {
