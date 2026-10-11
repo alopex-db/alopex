@@ -79,16 +79,17 @@ pub async fn list(
     Extension(ctx): Extension<RequestContext>,
     Query(query): Query<AdminResourcesQuery>,
 ) -> Response {
-    match list_impl(state.clone(), query) {
+    match list_impl(state.clone(), query).await {
         Ok(resp) => json_response(resp, state.config.max_response_size, &ctx),
         Err(err) => error_response(err, &ctx),
     }
 }
 
-fn list_impl(
+async fn list_impl(
     state: Arc<ServerState>,
     query: AdminResourcesQuery,
 ) -> Result<AdminResourcesResponse> {
+    let _catalog_txn_operation = Arc::clone(&state.catalog_txn_gate).read_owned().await;
     let limit = query.limit.unwrap_or(DEFAULT_RESOURCE_LIMIT);
     let columnar_column_limit = query
         .columnar_column_limit
@@ -326,5 +327,67 @@ fn map_columnar_error(err: alopex_core::columnar::ColumnarError) -> ServerError 
             ))
         }
         other => ServerError::Core(other.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_waits_for_catalog_writer_and_hides_rolled_back_table() {
+        let temp = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = server.state.clone();
+        let writer = Arc::clone(&state.catalog_txn_gate).write_owned().await;
+        let table = {
+            let catalog = state.catalog.read().expect("catalog");
+            let planned = alopex_sql::planner::plan_sql_for_routing(
+                &*catalog,
+                "CREATE TABLE pending_admin_table (id INTEGER)",
+            )
+            .expect("plan table");
+            let alopex_sql::planner::LogicalPlan::CreateTable { table, .. } = &planned[0].plan
+            else {
+                panic!("expected CREATE TABLE plan");
+            };
+            table.clone()
+        };
+        state
+            .catalog
+            .write()
+            .expect("catalog")
+            .create_table(table)
+            .expect("stage table");
+
+        let listing = list_impl(
+            state.clone(),
+            AdminResourcesQuery {
+                limit: None,
+                include_columnar_columns: None,
+                columnar_column_limit: None,
+                kv_prefix: None,
+            },
+        );
+        tokio::pin!(listing);
+        assert!(futures::poll!(listing.as_mut()).is_pending());
+
+        state
+            .catalog
+            .write()
+            .expect("catalog")
+            .drop_table("pending_admin_table")
+            .expect("rollback table");
+        drop(writer);
+
+        let response = listing.await.expect("admin resources");
+        assert!(response.sql_tables.is_empty());
     }
 }

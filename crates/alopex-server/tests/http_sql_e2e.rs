@@ -384,6 +384,150 @@ async fn http_multi_statement_returns_result_per_statement() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn failed_non_session_multi_statement_restores_catalog() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state.clone());
+    for sql in [
+        "CREATE TABLE conflict_rows (id INTEGER PRIMARY KEY)",
+        "INSERT INTO conflict_rows VALUES (1)",
+        "CREATE TABLE failed_batch_rows (id INTEGER PRIMARY KEY)",
+    ] {
+        let (status, body) = send_json(
+            &app,
+            "/sql",
+            serde_json::json!({ "sql": sql, "streaming": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO failed_batch_rows VALUES (7); \
+                    CREATE TABLE failed_batch_table (id INTEGER PRIMARY KEY); \
+                    INSERT INTO conflict_rows VALUES (1)",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(!state
+        .catalog
+        .read()
+        .expect("catalog")
+        .table_exists("failed_batch_table"));
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "CREATE TABLE failed_batch_table (id INTEGER PRIMARY KEY)",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM failed_batch_rows",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response = serde_json::from_str::<Value>(&body).expect("select response");
+    assert!(response["rows"].as_array().expect("rows").is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn failed_session_multi_statement_buffers_catalog_rollback() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state.clone());
+    for sql in [
+        "CREATE TABLE session_conflict_rows (id INTEGER PRIMARY KEY)",
+        "INSERT INTO session_conflict_rows VALUES (1)",
+        "CREATE TABLE failed_session_batch_rows (id INTEGER PRIMARY KEY)",
+    ] {
+        let (status, body) = send_json(
+            &app,
+            "/sql",
+            serde_json::json!({ "sql": sql, "streaming": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let session: Value = serde_json::from_str(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session id");
+
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO failed_session_batch_rows VALUES (7); \
+                    CREATE TABLE failed_session_batch_table (id INTEGER PRIMARY KEY); \
+                    INSERT INTO session_conflict_rows VALUES (1)",
+            "session_id": session_id,
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(state
+        .catalog
+        .read()
+        .expect("catalog")
+        .table_exists("failed_session_batch_table"));
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "SELECT id FROM failed_session_batch_rows",
+            "session_id": session_id,
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response = serde_json::from_str::<Value>(&body).expect("session select response");
+    assert_eq!(response["rows"].as_array().expect("rows").len(), 1);
+
+    let (status, body) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!state
+        .catalog
+        .read()
+        .expect("catalog")
+        .table_exists("failed_session_batch_table"));
+
+    for sql in [
+        "CREATE TABLE failed_session_batch_table (id INTEGER PRIMARY KEY)",
+        "SELECT id FROM failed_session_batch_rows",
+    ] {
+        let (status, body) = send_json(
+            &app,
+            "/sql",
+            serde_json::json!({ "sql": sql, "streaming": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if sql.starts_with("SELECT") {
+            let response = serde_json::from_str::<Value>(&body).expect("select response");
+            assert!(response["rows"].as_array().expect("rows").is_empty());
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn session_ddl_then_select_uses_same_transaction_catalog_view() {
     let (state, _temp_dir) = test_state();
     let app = http::router(state);

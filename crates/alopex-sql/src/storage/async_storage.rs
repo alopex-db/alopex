@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -50,6 +51,7 @@ where
     T: for<'a> AsyncKVTransaction<'a>,
 {
     state: Arc<tokio::sync::Mutex<AsyncTxnState<T>>>,
+    operation_gate: Arc<tokio::sync::Semaphore>,
     mode: TxnMode,
     catalog: Option<Arc<RwLock<dyn Catalog + Send + Sync>>>,
     memory_policy: Option<MemoryPolicy>,
@@ -65,6 +67,7 @@ where
     pub fn new(txn: T, mode: TxnMode) -> Self {
         Self {
             state: Arc::new(tokio::sync::Mutex::new(AsyncTxnState::new(txn))),
+            operation_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             mode,
             catalog: None,
             memory_policy: None,
@@ -145,7 +148,12 @@ where
         table: &'a TableMetadata,
         row_id: u64,
     ) -> BoxFuture<'a, StorageResult<Option<Row>>> {
+        let operation_gate = Arc::clone(&self.operation_gate);
         Box::pin(async move {
+            let _permit = operation_gate
+                .acquire_owned()
+                .await
+                .map_err(|_| StorageError::TransactionClosed)?;
             let guard = self.state.lock().await;
             let txn = guard.txn.as_ref().ok_or(StorageError::TransactionClosed)?;
             let key = KeyEncoder::row_key(table.table_id, row_id);
@@ -166,7 +174,12 @@ where
         table: &'a TableMetadata,
         row: Row,
     ) -> BoxFuture<'a, StorageResult<()>> {
+        let operation_gate = Arc::clone(&self.operation_gate);
         Box::pin(async move {
+            let _permit = operation_gate
+                .acquire_owned()
+                .await
+                .map_err(|_| StorageError::TransactionClosed)?;
             if self.mode != TxnMode::ReadWrite {
                 return Err(StorageError::TransactionReadOnly);
             }
@@ -189,9 +202,23 @@ where
     {
         let (sender, receiver) = tokio::sync::mpsc::channel(32);
         let state = Arc::clone(&self.state);
+        let operation_gate = Arc::clone(&self.operation_gate);
         let table_id = table.table_id;
 
         tokio::spawn(async move {
+            if sender.is_closed() {
+                return;
+            }
+            let _permit = match operation_gate.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let _ = sender.send(Err(StorageError::TransactionClosed)).await;
+                    return;
+                }
+            };
+            if sender.is_closed() {
+                return;
+            }
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
                 let txn = match guard.txn.take() {
@@ -254,23 +281,43 @@ where
         T: Send + 'static,
     {
         let state = self.state;
+        let operation_gate = self.operation_gate;
         let mode = self.mode;
         Box::pin(async move {
-            let (txn, hnsw_indices) = {
-                let mut guard = state.lock().await;
-                let txn = guard.txn.take().ok_or(StorageError::TransactionClosed)?;
-                let hnsw = std::mem::take(&mut guard.hnsw_indices);
-                (txn, hnsw)
-            };
-            let handle = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || {
-                let mut blocking_txn =
-                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
-                blocking_txn.commit_hnsw()?;
-                blocking_txn.inner.commit_self().map_err(StorageError::from)
-            })
-            .await
-            .map_err(|_| StorageError::TransactionClosed)?
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let permit = match operation_gate.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = result_tx.send(Err(StorageError::TransactionClosed));
+                        return;
+                    }
+                };
+                let (txn, hnsw_indices) = {
+                    let mut guard = state.lock().await;
+                    let Some(txn) = guard.txn.take() else {
+                        let _ = result_tx.send(Err(StorageError::TransactionClosed));
+                        return;
+                    };
+                    let hnsw = std::mem::take(&mut guard.hnsw_indices);
+                    (txn, hnsw)
+                };
+                let handle = tokio::runtime::Handle::current();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut blocking_txn =
+                        BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
+                    blocking_txn.commit_hnsw()?;
+                    blocking_txn.inner.commit_self().map_err(StorageError::from)
+                })
+                .await
+                .map_err(|_| StorageError::TransactionClosed)
+                .and_then(|result| result);
+                drop(permit);
+                let _ = result_tx.send(result);
+            });
+            result_rx
+                .await
+                .unwrap_or(Err(StorageError::TransactionClosed))
         })
     }
 
@@ -280,26 +327,46 @@ where
         T: Send + 'static,
     {
         let state = self.state;
+        let operation_gate = self.operation_gate;
         let mode = self.mode;
         Box::pin(async move {
-            let (txn, hnsw_indices) = {
-                let mut guard = state.lock().await;
-                let txn = guard.txn.take().ok_or(StorageError::TransactionClosed)?;
-                let hnsw = std::mem::take(&mut guard.hnsw_indices);
-                (txn, hnsw)
-            };
-            let handle = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || {
-                let mut blocking_txn =
-                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
-                blocking_txn.rollback_hnsw()?;
-                blocking_txn
-                    .inner
-                    .rollback_self()
-                    .map_err(StorageError::from)
-            })
-            .await
-            .map_err(|_| StorageError::TransactionClosed)?
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let permit = match operation_gate.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = result_tx.send(Err(StorageError::TransactionClosed));
+                        return;
+                    }
+                };
+                let (txn, hnsw_indices) = {
+                    let mut guard = state.lock().await;
+                    let Some(txn) = guard.txn.take() else {
+                        let _ = result_tx.send(Err(StorageError::TransactionClosed));
+                        return;
+                    };
+                    let hnsw = std::mem::take(&mut guard.hnsw_indices);
+                    (txn, hnsw)
+                };
+                let handle = tokio::runtime::Handle::current();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut blocking_txn =
+                        BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
+                    blocking_txn.rollback_hnsw()?;
+                    blocking_txn
+                        .inner
+                        .rollback_self()
+                        .map_err(StorageError::from)
+                })
+                .await
+                .map_err(|_| StorageError::TransactionClosed)
+                .and_then(|result| result);
+                drop(permit);
+                let _ = result_tx.send(result);
+            });
+            result_rx
+                .await
+                .unwrap_or(Err(StorageError::TransactionClosed))
         })
     }
 }
@@ -316,6 +383,7 @@ pub trait AsyncSqlTransaction<'txn>: MaybeSend {
         &'a self,
         sql: &'a str,
     ) -> BoxFuture<'a, ExecResult<Vec<PlannedStatement>>>;
+    fn async_wait_for_idle(&self) -> BoxFuture<'_, ExecResult<()>>;
     fn async_commit(self) -> BoxFuture<'txn, ExecResult<()>>;
     fn async_rollback(self) -> BoxFuture<'txn, ExecResult<()>>;
 }
@@ -354,11 +422,16 @@ where
         };
         let sql = sql.to_string();
         let state = Arc::clone(&self.state);
+        let operation_gate = Arc::clone(&self.operation_gate);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
         let read_security = self.copy_security.clone();
         let copy_security = read_security.clone().unwrap_or_default();
         Box::pin(async move {
+            let permit = operation_gate
+                .acquire_owned()
+                .await
+                .map_err(|_| ExecutorError::Storage(StorageError::TransactionClosed))?;
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
                 let txn = guard
@@ -369,33 +442,53 @@ where
                 (txn, hnsw)
             };
 
-            let handle = tokio::runtime::Handle::current();
-            let join = tokio::task::spawn_blocking(move || {
-                let mut blocking_txn =
-                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                let result = execute_sql_blocking_multi(
-                    &mut blocking_txn,
-                    &catalog,
-                    &sql,
-                    mode,
-                    &copy_security,
-                    read_security.as_ref(),
-                );
-                let (txn, hnsw) = blocking_txn.into_parts();
-                (result, txn, hnsw)
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let handle = tokio::runtime::Handle::current();
+                let join = tokio::task::spawn_blocking(move || {
+                    let mut blocking_txn =
+                        BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        execute_sql_blocking_multi(
+                            &mut blocking_txn,
+                            &catalog,
+                            &sql,
+                            mode,
+                            &copy_security,
+                            read_security.as_ref(),
+                        )
+                    }));
+                    let (txn, hnsw) = blocking_txn.into_parts();
+                    (result, txn, hnsw)
+                });
+
+                let result = match join.await {
+                    Ok((result, txn, hnsw_indices)) => {
+                        let mut guard = state.lock().await;
+                        guard.txn = Some(txn);
+                        guard.hnsw_indices = hnsw_indices;
+                        result.unwrap_or_else(|_| {
+                            Err(ExecutorError::InvalidOperation {
+                                operation: "async_execute_multi".into(),
+                                reason: "blocking task panicked".into(),
+                            })
+                        })
+                    }
+                    Err(_) => Err(ExecutorError::InvalidOperation {
+                        operation: "async_execute_multi".into(),
+                        reason: "blocking task cancelled".into(),
+                    }),
+                };
+                drop(permit);
+                let _ = result_tx.send(result);
             });
 
-            let (result, txn, hnsw_indices) =
-                join.await.map_err(|_| ExecutorError::InvalidOperation {
+            result_rx.await.unwrap_or_else(|_| {
+                Err(ExecutorError::InvalidOperation {
                     operation: "async_execute_multi".into(),
                     reason: "blocking task cancelled".into(),
-                })?;
-
-            let mut guard = state.lock().await;
-            guard.txn = Some(txn);
-            guard.hnsw_indices = hnsw_indices;
-
-            result
+                })
+            })
         })
     }
 
@@ -413,12 +506,28 @@ where
         };
         let sql = sql.to_string();
         let state = Arc::clone(&self.state);
+        let operation_gate = Arc::clone(&self.operation_gate);
         let mode = self.mode;
         let memory_policy = self.memory_policy.clone();
         let read_security = self.copy_security.clone();
         let sender_for_task = sender.clone();
 
         tokio::spawn(async move {
+            if sender_for_task.is_closed() {
+                return;
+            }
+            let _permit = match operation_gate.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let _ = sender_for_task
+                        .send(Err(ExecutorError::Storage(StorageError::TransactionClosed)))
+                        .await;
+                    return;
+                }
+            };
+            if sender_for_task.is_closed() {
+                return;
+            }
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
                 let txn = match guard.txn.take() {
@@ -439,21 +548,33 @@ where
             let join = tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
                     BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                stream_query_blocking(
-                    &mut blocking_txn,
-                    &catalog,
-                    &sql,
-                    sender_blocking,
-                    read_security.as_ref(),
-                );
-                blocking_txn.into_parts()
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    stream_query_blocking(
+                        &mut blocking_txn,
+                        &catalog,
+                        &sql,
+                        sender_blocking,
+                        read_security.as_ref(),
+                    );
+                }));
+                let (txn, hnsw_indices) = blocking_txn.into_parts();
+                (result, txn, hnsw_indices)
             });
 
             match join.await {
-                Ok((txn, hnsw_indices)) => {
+                Ok((result, txn, hnsw_indices)) => {
                     let mut guard = state.lock().await;
                     guard.txn = Some(txn);
                     guard.hnsw_indices = hnsw_indices;
+                    drop(guard);
+                    if result.is_err() {
+                        let _ = sender_for_task
+                            .send(Err(ExecutorError::InvalidOperation {
+                                operation: "async_query".into(),
+                                reason: "blocking task panicked".into(),
+                            }))
+                            .await;
+                    }
                 }
                 Err(_) => {
                     let _ = sender_for_task
@@ -474,6 +595,18 @@ where
         sql: &'a str,
     ) -> BoxFuture<'a, ExecResult<Vec<PlannedStatement>>> {
         AsyncTxnBridge::async_plan_for_routing(self, sql)
+    }
+
+    fn async_wait_for_idle(&self) -> BoxFuture<'_, ExecResult<()>> {
+        let operation_gate = Arc::clone(&self.operation_gate);
+        Box::pin(async move {
+            let permit = operation_gate
+                .acquire_owned()
+                .await
+                .map_err(|_| ExecutorError::Storage(StorageError::TransactionClosed))?;
+            drop(permit);
+            Ok(())
+        })
     }
 
     fn async_commit(self) -> BoxFuture<'txn, ExecResult<()>> {

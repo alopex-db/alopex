@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use alopex_cluster::{AuthenticatedSubject, TableLifecycleEffect};
@@ -93,17 +94,49 @@ pub enum CatalogRollbackEffect {
     },
 }
 
+pub(crate) struct CommitFinalization {
+    pub transaction: alopex_sql::executor::Result<()>,
+    pub lifecycle_effects: Vec<TableLifecycleEffect>,
+    pub catalog_rollback_effects: Vec<CatalogRollbackEffect>,
+}
+
+pub(crate) struct RollbackFinalization {
+    pub transaction: alopex_sql::executor::Result<()>,
+    pub catalog_rollback_effects: Vec<CatalogRollbackEffect>,
+}
+
 struct TxnHandleInner {
+    operation_gate: Arc<tokio::sync::Mutex<()>>,
+    catalog_txn_guard: tokio::sync::Mutex<Option<SessionCatalogTxnGuard>>,
     txn: tokio::sync::Mutex<Option<Box<dyn ErasedAsyncSqlTransaction>>>,
     pending_table_lifecycle_effects: tokio::sync::Mutex<Vec<TableLifecycleEffect>>,
     pending_catalog_rollback_effects: tokio::sync::Mutex<Vec<CatalogRollbackEffect>>,
     created_at: SystemTime,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionCatalogTxnGuardKind {
+    None,
+    Read,
+    Write,
+}
+
+pub(crate) enum SessionCatalogTxnGuard {
+    Read {
+        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Write {
+        _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+        _ordering: tokio::sync::OwnedMutexGuard<()>,
+    },
+}
+
 impl TxnHandle {
     pub fn new(txn: Box<dyn ErasedAsyncSqlTransaction>) -> Self {
         Self {
             inner: Arc::new(TxnHandleInner {
+                operation_gate: Arc::new(tokio::sync::Mutex::new(())),
+                catalog_txn_guard: tokio::sync::Mutex::new(None),
                 txn: tokio::sync::Mutex::new(Some(txn)),
                 pending_table_lifecycle_effects: tokio::sync::Mutex::new(Vec::new()),
                 pending_catalog_rollback_effects: tokio::sync::Mutex::new(Vec::new()),
@@ -121,6 +154,7 @@ impl TxnHandle {
         sql: &'a str,
     ) -> BoxFuture<'a, alopex_sql::executor::Result<ExecutionResult>> {
         Box::pin(async move {
+            let _operation = self.lock_operation().await;
             let mut guard = self.inner.txn.lock().await;
             let txn = guard
                 .as_mut()
@@ -135,6 +169,71 @@ impl TxnHandle {
     pub fn execute_multi<'a>(
         &'a self,
         sql: &'a str,
+    ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
+        Box::pin(async move {
+            let operation = self.lock_operation().await;
+            self.execute_multi_with_operation(sql, &operation).await
+        })
+    }
+
+    pub(crate) async fn lock_operation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.inner.operation_gate).lock_owned().await
+    }
+
+    pub(crate) async fn catalog_txn_guard_kind(
+        &self,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> SessionCatalogTxnGuardKind {
+        match self.inner.catalog_txn_guard.lock().await.as_ref() {
+            Some(SessionCatalogTxnGuard::Read { .. }) => SessionCatalogTxnGuardKind::Read,
+            Some(SessionCatalogTxnGuard::Write { .. }) => SessionCatalogTxnGuardKind::Write,
+            None => SessionCatalogTxnGuardKind::None,
+        }
+    }
+
+    pub(crate) async fn store_catalog_read_guard(
+        &self,
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        let previous = self
+            .inner
+            .catalog_txn_guard
+            .lock()
+            .await
+            .replace(SessionCatalogTxnGuard::Read { _guard: guard });
+        debug_assert!(previous.is_none(), "catalog transaction guard replaced");
+    }
+
+    pub(crate) async fn store_catalog_write_guard(
+        &self,
+        guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+        ordering: tokio::sync::OwnedMutexGuard<()>,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        let previous =
+            self.inner
+                .catalog_txn_guard
+                .lock()
+                .await
+                .replace(SessionCatalogTxnGuard::Write {
+                    _guard: guard,
+                    _ordering: ordering,
+                });
+        debug_assert!(previous.is_none(), "catalog transaction guard replaced");
+    }
+
+    pub(crate) async fn take_catalog_txn_guard(
+        &self,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> Option<SessionCatalogTxnGuard> {
+        self.inner.catalog_txn_guard.lock().await.take()
+    }
+
+    pub(crate) fn execute_multi_with_operation<'a>(
+        &'a self,
+        sql: &'a str,
+        _operation: &'a tokio::sync::OwnedMutexGuard<()>,
     ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
         Box::pin(async move {
             let mut guard = self.inner.txn.lock().await;
@@ -154,7 +253,14 @@ impl TxnHandle {
         let inner = Arc::clone(&self.inner);
 
         tokio::spawn(async move {
+            if sender.is_closed() {
+                return;
+            }
+            let _operation = Arc::clone(&inner.operation_gate).lock_owned().await;
             let guard = inner.txn.lock().await;
+            if sender.is_closed() {
+                return;
+            }
             let Some(txn) = guard.as_ref() else {
                 let _ = sender
                     .send(Err(ExecutorError::InvalidOperation {
@@ -173,6 +279,59 @@ impl TxnHandle {
         });
 
         Box::pin(ReceiverStream::new(receiver))
+    }
+
+    pub(crate) fn query_with_operation<'a>(
+        &'a self,
+        sql: &'a str,
+        _operation: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> BoxStream<'a, alopex_sql::executor::Result<Row>> {
+        let (sender, receiver) = mpsc::channel(32);
+        let sql = sql.to_string();
+        let inner = Arc::clone(&self.inner);
+
+        tokio::spawn(async move {
+            if sender.is_closed() {
+                return;
+            }
+            let guard = inner.txn.lock().await;
+            if sender.is_closed() {
+                return;
+            }
+            let Some(txn) = guard.as_ref() else {
+                let _ = sender
+                    .send(Err(ExecutorError::InvalidOperation {
+                        operation: "query".into(),
+                        reason: "transaction is closed".into(),
+                    }))
+                    .await;
+                return;
+            };
+            let mut stream = txn.query(&sql);
+            while let Some(item) = stream.next().await {
+                if sender.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Box::pin(ReceiverStream::new(receiver))
+    }
+
+    pub(crate) fn wait_for_idle_with_operation<'a>(
+        &'a self,
+        _operation: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> BoxFuture<'a, alopex_sql::executor::Result<()>> {
+        Box::pin(async move {
+            let guard = self.inner.txn.lock().await;
+            let txn = guard
+                .as_ref()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "wait_for_idle".into(),
+                    reason: "transaction is closed".into(),
+                })?;
+            txn.wait_for_idle().await
+        })
     }
 
     pub fn plan_for_routing<'a>(
@@ -214,35 +373,86 @@ impl TxnHandle {
     }
 
     pub async fn commit(self) -> alopex_sql::executor::Result<Vec<TableLifecycleEffect>> {
+        let finalization = self.finalize_commit().await;
+        finalization.transaction?;
+        Ok(finalization.lifecycle_effects)
+    }
+
+    pub(crate) async fn finalize_commit(self) -> CommitFinalization {
+        let operation = self.lock_operation().await;
+        self.finalize_commit_with_operation(&operation).await
+    }
+
+    pub(crate) async fn finalize_commit_with_operation(
+        self,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> CommitFinalization {
         let mut guard = self.inner.txn.lock().await;
-        let txn = guard
-            .take()
-            .ok_or_else(|| ExecutorError::InvalidOperation {
+        let transaction = match guard.take() {
+            Some(txn) => txn.commit_boxed().await,
+            None => Err(ExecutorError::InvalidOperation {
                 operation: "commit".into(),
                 reason: "transaction is closed".into(),
-            })?;
-        txn.commit_boxed().await?;
-        let mut effects = self.inner.pending_table_lifecycle_effects.lock().await;
-        Ok(std::mem::take(&mut *effects))
+            }),
+        };
+        drop(guard);
+        let lifecycle_effects = {
+            let mut effects = self.inner.pending_table_lifecycle_effects.lock().await;
+            std::mem::take(&mut *effects)
+        };
+        let catalog_rollback_effects = {
+            let mut effects = self.inner.pending_catalog_rollback_effects.lock().await;
+            std::mem::take(&mut *effects)
+        };
+        CommitFinalization {
+            transaction,
+            lifecycle_effects,
+            catalog_rollback_effects,
+        }
     }
 
     pub async fn rollback(self) -> alopex_sql::executor::Result<Vec<CatalogRollbackEffect>> {
+        let finalization = self.finalize_rollback().await;
+        finalization.transaction?;
+        Ok(finalization.catalog_rollback_effects)
+    }
+
+    pub(crate) async fn finalize_rollback(self) -> RollbackFinalization {
+        let operation = self.lock_operation().await;
+        self.finalize_rollback_with_operation(&operation).await
+    }
+
+    pub(crate) async fn finalize_rollback_with_operation(
+        self,
+        _operation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> RollbackFinalization {
         let mut guard = self.inner.txn.lock().await;
-        let txn = guard
-            .take()
-            .ok_or_else(|| ExecutorError::InvalidOperation {
+        let transaction = match guard.take() {
+            Some(txn) => txn.rollback_boxed().await,
+            None => Err(ExecutorError::InvalidOperation {
                 operation: "rollback".into(),
                 reason: "transaction is closed".into(),
-            })?;
-        let result = txn.rollback_boxed().await;
+            }),
+        };
+        drop(guard);
         self.inner
             .pending_table_lifecycle_effects
             .lock()
             .await
             .clear();
-        result?;
-        let mut effects = self.inner.pending_catalog_rollback_effects.lock().await;
-        Ok(std::mem::take(&mut *effects))
+        let catalog_rollback_effects = {
+            let mut effects = self.inner.pending_catalog_rollback_effects.lock().await;
+            std::mem::take(&mut *effects)
+        };
+        RollbackFinalization {
+            transaction,
+            catalog_rollback_effects,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn operation_is_locked(&self) -> bool {
+        self.inner.operation_gate.try_lock().is_err()
     }
 }
 
@@ -261,6 +471,7 @@ pub struct SessionManager {
     sessions: DashMap<SessionId, Session>,
     config: SessionConfig,
     txn_factory: TransactionFactory,
+    expired_handle_finalizer: OnceLock<Arc<dyn Fn(TxnHandle) + Send + Sync>>,
 }
 
 struct Session {
@@ -279,6 +490,27 @@ impl SessionManager {
             sessions: DashMap::new(),
             config,
             txn_factory,
+            expired_handle_finalizer: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn set_expired_handle_finalizer(
+        &self,
+        finalizer: Arc<dyn Fn(TxnHandle) + Send + Sync>,
+    ) {
+        self.expired_handle_finalizer
+            .set(finalizer)
+            .unwrap_or_else(|_| panic!("expired session finalizer must only be installed once"));
+    }
+
+    fn remove_expired(&self, id: &SessionId) {
+        let Some((_, mut session)) = self.sessions.remove(id) else {
+            return;
+        };
+        if let Some(handle) = session.txn_handle.take() {
+            if let Some(finalizer) = self.expired_handle_finalizer.get() {
+                finalizer(handle);
+            }
         }
     }
 
@@ -332,7 +564,7 @@ impl SessionManager {
             .ok_or_else(|| ServerError::NotFound("session not found".into()))?;
         if entry.expires_at <= SystemTime::now() {
             drop(entry);
-            self.sessions.remove(id);
+            self.remove_expired(id);
             return Err(ServerError::SessionExpired("session expired".into()));
         }
         Ok(SessionSnapshot {
@@ -353,7 +585,7 @@ impl SessionManager {
             .ok_or_else(|| ServerError::NotFound("session not found".into()))?;
         if entry.expires_at <= SystemTime::now() {
             drop(entry);
-            self.sessions.remove(id);
+            self.remove_expired(id);
             return Err(ServerError::SessionExpired("session expired".into()));
         }
         if entry.txn_handle.is_some() {
@@ -374,7 +606,7 @@ impl SessionManager {
             .ok_or_else(|| ServerError::NotFound("session not found".into()))?;
         if entry.expires_at <= SystemTime::now() {
             drop(entry);
-            self.sessions.remove(id);
+            self.remove_expired(id);
             return Err(ServerError::SessionExpired("session expired".into()));
         }
         let handle = entry
@@ -394,7 +626,7 @@ impl SessionManager {
                 .ok_or_else(|| ServerError::NotFound("session not found".into()))?;
             if entry.expires_at <= SystemTime::now() {
                 drop(entry);
-                self.sessions.remove(id);
+                self.remove_expired(id);
                 return Err(ServerError::SessionExpired("session expired".into()));
             }
             let handle = entry
@@ -429,6 +661,14 @@ impl SessionManager {
         Ok(effects)
     }
 
+    pub(crate) fn take_handle_for_finalization(
+        &self,
+        id: &SessionId,
+        state: SessionState,
+    ) -> Result<TxnHandle> {
+        self.take_handle(id, state)
+    }
+
     pub fn cleanup_expired(&self) {
         let now = SystemTime::now();
         let expired: Vec<SessionId> = self
@@ -438,13 +678,21 @@ impl SessionManager {
             .map(|entry| entry.id.clone())
             .collect();
         for id in expired {
-            self.sessions.remove(&id);
+            self.remove_expired(&id);
         }
     }
 
     #[cfg(test)]
     pub(crate) fn active_session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_now(&self, id: &SessionId) {
+        self.sessions
+            .get_mut(id)
+            .expect("session must exist")
+            .expires_at = SystemTime::UNIX_EPOCH;
     }
 
     fn take_handle(&self, id: &SessionId, state: SessionState) -> Result<TxnHandle> {
@@ -454,7 +702,7 @@ impl SessionManager {
             .ok_or_else(|| ServerError::NotFound("session not found".into()))?;
         if entry.expires_at <= SystemTime::now() {
             drop(entry);
-            self.sessions.remove(id);
+            self.remove_expired(id);
             return Err(ServerError::SessionExpired("session expired".into()));
         }
         let handle = entry
@@ -470,6 +718,77 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestTransaction {
+        fail_finalization: bool,
+        idle_gate: Option<Arc<tokio::sync::Semaphore>>,
+        query_started: Option<Arc<std::sync::atomic::AtomicBool>>,
+    }
+
+    impl ErasedAsyncSqlTransaction for TestTransaction {
+        fn execute<'a>(
+            &'a mut self,
+            _sql: &'a str,
+        ) -> BoxFuture<'a, alopex_sql::executor::Result<ExecutionResult>> {
+            Box::pin(async { Ok(ExecutionResult::Success) })
+        }
+
+        fn execute_multi<'a>(
+            &'a mut self,
+            _sql: &'a str,
+        ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
+            Box::pin(async { Ok(vec![ExecutionResult::Success]) })
+        }
+
+        fn query<'a>(&'a self, _sql: &'a str) -> BoxStream<'a, alopex_sql::executor::Result<Row>> {
+            if let Some(query_started) = &self.query_started {
+                query_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Box::pin(futures::stream::empty())
+        }
+
+        fn plan_for_routing<'a>(
+            &'a self,
+            _sql: &'a str,
+        ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<PlannedStatement>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn wait_for_idle(&self) -> BoxFuture<'_, alopex_sql::executor::Result<()>> {
+            Box::pin(async move {
+                if let Some(idle_gate) = &self.idle_gate {
+                    idle_gate.acquire().await.expect("idle gate").forget();
+                }
+                Ok(())
+            })
+        }
+
+        fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, alopex_sql::executor::Result<()>> {
+            Box::pin(async move {
+                if self.fail_finalization {
+                    Err(ExecutorError::InvalidOperation {
+                        operation: "commit".into(),
+                        reason: "controlled failure".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn rollback_boxed(self: Box<Self>) -> BoxFuture<'static, alopex_sql::executor::Result<()>> {
+            Box::pin(async move {
+                if self.fail_finalization {
+                    Err(ExecutorError::InvalidOperation {
+                        operation: "rollback".into(),
+                        reason: "controlled failure".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
 
     fn manager() -> SessionManager {
         SessionManager::new(
@@ -504,5 +823,131 @@ mod tests {
             manager.authenticated_subject(&bound).await.unwrap(),
             subject
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_response_does_not_allow_rollback_to_overtake_effect_buffering() {
+        let handle = TxnHandle::new(Box::new(TestTransaction {
+            fail_finalization: false,
+            idle_gate: None,
+            query_started: None,
+        }));
+        let allow_effect_buffering = Arc::new(tokio::sync::Notify::new());
+        let allow_effect_buffering_for_coordinator = Arc::clone(&allow_effect_buffering);
+        let handle_for_coordinator = handle.clone();
+        let (timeout_response_tx, timeout_response_rx) = tokio::sync::oneshot::channel();
+
+        let coordinator = tokio::spawn(async move {
+            let operation = handle_for_coordinator.lock_operation().await;
+            timeout_response_tx
+                .send(())
+                .expect("timeout response receiver");
+            allow_effect_buffering_for_coordinator.notified().await;
+            handle_for_coordinator
+                .buffer_catalog_rollback_effects(vec![CatalogRollbackEffect::DropTable {
+                    table_name: "timed_out_table".into(),
+                    table_id: 41,
+                }])
+                .await;
+            drop(operation);
+        });
+
+        timeout_response_rx.await.expect("timeout response");
+        let mut rollback = tokio::spawn(handle.rollback());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut rollback)
+                .await
+                .is_err(),
+            "rollback must wait until the coordinator buffers catalog effects"
+        );
+
+        allow_effect_buffering.notify_one();
+        coordinator.await.expect("coordinator");
+        let effects = rollback
+            .await
+            .expect("rollback task")
+            .expect("rollback result");
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            CatalogRollbackEffect::DropTable {
+                table_name,
+                table_id,
+            } => {
+                assert_eq!(table_name, "timed_out_table");
+                assert_eq!(*table_id, 41);
+            }
+            _ => panic!("rollback must receive the buffered catalog effect"),
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_barrier_keeps_session_operation_locked_until_worker_cleanup() {
+        let idle_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let handle = TxnHandle::new(Box::new(TestTransaction {
+            fail_finalization: false,
+            idle_gate: Some(Arc::clone(&idle_gate)),
+            query_started: None,
+        }));
+        let operation = handle.lock_operation().await;
+        let mut idle = Box::pin(handle.wait_for_idle_with_operation(&operation));
+
+        assert!(futures::poll!(idle.as_mut()).is_pending());
+        assert!(handle.operation_is_locked());
+        idle_gate.add_permits(1);
+        idle.await.expect("idle barrier");
+        assert!(handle.operation_is_locked());
+        drop(operation);
+        assert!(!handle.operation_is_locked());
+    }
+
+    #[tokio::test]
+    async fn dropped_session_stream_does_not_start_query_after_txn_wait() {
+        let query_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = TxnHandle::new(Box::new(TestTransaction {
+            fail_finalization: false,
+            idle_gate: None,
+            query_started: Some(Arc::clone(&query_started)),
+        }));
+        let operation = handle.lock_operation().await;
+        let txn_guard = handle.inner.txn.lock().await;
+        let stream = handle.query_with_operation("SELECT 1", &operation);
+        drop(stream);
+        drop(txn_guard);
+        tokio::task::yield_now().await;
+
+        assert!(!query_started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn failed_finalization_still_returns_catalog_rollback_effects() {
+        let commit_handle = TxnHandle::new(Box::new(TestTransaction {
+            fail_finalization: true,
+            idle_gate: None,
+            query_started: None,
+        }));
+        commit_handle
+            .buffer_catalog_rollback_effects(vec![CatalogRollbackEffect::DropTable {
+                table_name: "commit_failure".into(),
+                table_id: 51,
+            }])
+            .await;
+        let commit = commit_handle.finalize_commit().await;
+        assert!(commit.transaction.is_err());
+        assert_eq!(commit.catalog_rollback_effects.len(), 1);
+
+        let rollback_handle = TxnHandle::new(Box::new(TestTransaction {
+            fail_finalization: true,
+            idle_gate: None,
+            query_started: None,
+        }));
+        rollback_handle
+            .buffer_catalog_rollback_effects(vec![CatalogRollbackEffect::DropTable {
+                table_name: "rollback_failure".into(),
+                table_id: 52,
+            }])
+            .await;
+        let rollback = rollback_handle.finalize_rollback().await;
+        assert!(rollback.transaction.is_err());
+        assert_eq!(rollback.catalog_rollback_effects.len(), 1);
     }
 }

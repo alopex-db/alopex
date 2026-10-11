@@ -88,6 +88,38 @@ class PerformancePythonRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("Python 3.11", result.stderr)
 
+    def test_failed_dependency_install_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            requirements = temporary / "requirements.txt"
+            requirements.write_text(
+                str(temporary / "missing-package.whl") + "\n",
+                encoding="utf-8",
+            )
+            virtualenv = temporary / "venv"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "ALOPEX_PERFORMANCE_REQUIREMENTS": str(requirements),
+                    "ALOPEX_PERFORMANCE_VENV": str(virtualenv),
+                    "PYTHON": sys.executable,
+                }
+            )
+
+            for _ in range(2):
+                result = subprocess.run(
+                    ["bash", str(RUNNER), "true"],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(
+                    (virtualenv / ".alopex-performance-requirements.sha256").exists()
+                )
+
     def test_finds_user_local_python_without_python_or_path_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
