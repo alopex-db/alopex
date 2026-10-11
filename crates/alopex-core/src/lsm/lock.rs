@@ -50,7 +50,11 @@
 //! Plain directories (the server, `Database::open("./mydb")`) are never pruned
 //! by the core, so their lock lives inside at [`LOCK_FILE_NAME`].
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::Result;
 use crate::lsm::container::{self, ConvergePolicy};
@@ -62,6 +66,51 @@ pub const LOCK_FILE_NAME: &str = ".alopex.lock";
 ///
 /// `mydb.alopex` locks through `mydb.alopex.lock`.
 const LOCK_FILE_SUFFIX: &str = ".lock";
+
+#[cfg(not(target_arch = "wasm32"))]
+type RegistryKey = (u32, PathBuf);
+
+#[cfg(not(target_arch = "wasm32"))]
+static HELD_LOCKS: OnceLock<Mutex<HashMap<RegistryKey, usize>>> = OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn held_locks() -> &'static Mutex<HashMap<RegistryKey, usize>> {
+    HELD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn make_registry_key(pid: u32, lock_path: &Path) -> RegistryKey {
+    let canonical = std::fs::canonicalize(lock_path).unwrap_or_else(|_| lock_path.to_path_buf());
+    (pid, canonical)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn registry_contains(key: &RegistryKey) -> bool {
+    held_locks()
+        .lock()
+        .map(|guard| guard.contains_key(key))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn registry_register(key: &RegistryKey) {
+    if let Ok(mut guard) = held_locks().lock() {
+        *guard.entry(key.clone()).or_insert(0) += 1;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn registry_unregister(key: &RegistryKey) {
+    if let Ok(mut guard) = held_locks().lock() {
+        if let Some(count) = guard.get_mut(key) {
+            if *count <= 1 {
+                guard.remove(key);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
 
 /// A held data-directory lock.
 ///
@@ -87,6 +136,9 @@ pub(crate) struct DirectoryLock {
     /// Only the acquiring process may explicitly unlock the shared description.
     #[cfg(not(target_arch = "wasm32"))]
     owner_pid: u32,
+    /// Process-local identity used to diagnose same-process contention.
+    #[cfg(not(target_arch = "wasm32"))]
+    registry_key: Option<RegistryKey>,
     #[cfg(target_arch = "wasm32")]
     _wasm: (),
 }
@@ -103,6 +155,9 @@ impl Drop for DirectoryLock {
             // Best effort in Drop; closing the file remains the fallback.
             let _ = file.unlock();
         }
+        if let Some(key) = &self.registry_key {
+            registry_unregister(key);
+        }
     }
 }
 
@@ -118,6 +173,8 @@ impl DirectoryLock {
             _file: None,
             #[cfg(not(target_arch = "wasm32"))]
             owner_pid: std::process::id(),
+            #[cfg(not(target_arch = "wasm32"))]
+            registry_key: None,
             #[cfg(target_arch = "wasm32")]
             _wasm: (),
         }
@@ -211,13 +268,21 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
         .truncate(false)
         .open(lock_path)?;
 
+    let owner_pid = std::process::id();
+    let registry_key = make_registry_key(owner_pid, lock_path);
+
     match file.try_lock() {
-        Ok(()) => {}
+        Ok(()) => registry_register(&registry_key),
         Err(TryLockError::WouldBlock) => {
+            let holder = if registry_contains(&registry_key) {
+                format!("pid={owner_pid}")
+            } else {
+                read_holder(lock_path)
+            };
             return Err(Error::AlreadyOpen {
                 path: data_dir.to_path_buf(),
                 lock_path: lock_path.to_path_buf(),
-                holder: read_holder(lock_path),
+                holder,
             });
         }
         Err(TryLockError::Error(err)) => return Err(Error::Io(err)),
@@ -231,7 +296,8 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
         #[cfg(all(test, not(target_arch = "wasm32")))]
         path: Some(lock_path.to_path_buf()),
         _file: Some(file),
-        owner_pid: std::process::id(),
+        owner_pid,
+        registry_key: Some(registry_key),
     })
 }
 
@@ -367,6 +433,63 @@ mod tests {
     }
 
     #[test]
+    fn registry_refcounts_duplicate_registrations() {
+        struct Cleanup<'a>(&'a RegistryKey);
+
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                while registry_contains(self.0) {
+                    registry_unregister(self.0);
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.lock");
+        std::fs::File::create(&path).unwrap();
+
+        let key = make_registry_key(std::process::id(), &path);
+        let _cleanup = Cleanup(&key);
+
+        registry_register(&key);
+        registry_register(&key);
+        assert!(registry_contains(&key));
+
+        registry_unregister(&key);
+        assert!(registry_contains(&key));
+
+        registry_unregister(&key);
+        assert!(!registry_contains(&key));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn acquire_rejects_alias_lock_path_in_same_process() {
+        let temp = tempdir().unwrap();
+        let data_dir = temp.path().join("db");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let _guard = acquire(&data_dir, &lock_path).expect("first acquire should succeed");
+
+        let alias_lock_path = temp
+            .path()
+            .join("db")
+            .join("..")
+            .join("db")
+            .join(LOCK_FILE_NAME);
+
+        let err = acquire(&data_dir, &alias_lock_path)
+            .expect_err("alias lock path should be rejected as already open");
+
+        assert!(matches!(err, Error::AlreadyOpen { .. }));
+        assert!(
+            err.to_string().contains("already open in this process"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
     fn second_acquire_reports_already_open() {
         let dir = tempdir().unwrap();
         let data_dir = dir.path().join("db");
@@ -387,14 +510,15 @@ mod tests {
             }
             other => panic!("expected AlreadyOpen, got {other:?}"),
         }
-        #[cfg(unix)]
-        {
-            assert!(err.to_string().contains("already open in this process"));
-            assert!(err.to_string().contains("Database or Transaction handles"));
-        }
-        // Windows may reject reads of the held lock's diagnostic record.
-        #[cfg(not(unix))]
-        assert!(err.to_string().contains("already open"));
+        let message = err.to_string();
+        assert!(
+            message.contains("already open in this process"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("Database, Transaction or PreparedStatement handles"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
