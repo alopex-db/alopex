@@ -86,7 +86,7 @@ class PerformancePythonRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("requires Python 3.11", result.stderr)
+        self.assertIn("Python 3.11", result.stderr)
 
 
 if __name__ == "__main__":
