@@ -149,7 +149,7 @@ pub(crate) struct HnswNode {
     /// Vector payload.
     pub vector: Vec<f32>,
     /// Cached L2 norm for cosine scoring.
-    pub norm: f32,
+    pub norm: f64,
     /// Metadata blob associated with the vector.
     pub metadata: Vec<u8>,
     /// Adjacency lists per level (level -> node IDs).

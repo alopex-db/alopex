@@ -7,6 +7,7 @@ use alopex_cluster::{
     ClusterManager, ClusterMode, ClusterStatusSnapshot, MembershipSource, NodeRole, NodeState,
     TableLifecycleEffect,
 };
+use alopex_core::async_runtime::BoxFuture;
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 use alopex_core::kv::AsyncKVStore;
@@ -29,7 +30,10 @@ use crate::ops::memory::MemoryControlPolicy;
 use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo, UpgradeCoordinator};
 use crate::ops::restore::RestoreCoordinator;
 use crate::ops::state::{LifecycleStateManager, Mode};
-use crate::session::{CatalogRollbackEffect, SessionConfig, SessionManager, TransactionFactory};
+use crate::session::{
+    CatalogRollbackEffect, SessionCatalogTxnGuard, SessionConfig, SessionId, SessionManager,
+    SessionState, TransactionFactory,
+};
 use crate::tls;
 
 pub struct Server {
@@ -59,6 +63,24 @@ pub struct ServerState {
     pub upgrade_coordinator: UpgradeCoordinator,
     pub admission_permits: Arc<Semaphore>,
     pub admission_waiters: AtomicUsize,
+    pub(crate) catalog_ddl_order_gate: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) catalog_txn_gate: Arc<tokio::sync::RwLock<()>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SessionFinalizationAction {
+    Commit,
+    Rollback,
+}
+
+pub(crate) enum CatalogTxnOperation {
+    Read {
+        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Write {
+        _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+        _ordering: tokio::sync::OwnedMutexGuard<()>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,29 +154,38 @@ impl Server {
         let upgrade_coordinator = UpgradeCoordinator::new(&config.data_dir);
         let admission_permits = Arc::new(Semaphore::new(config.max_concurrency));
 
-        Ok(Self {
-            state: Arc::new(ServerState {
-                config,
-                cluster_manager,
-                store,
-                catalog,
-                async_store,
-                session_manager,
-                metrics,
-                audit,
-                auth,
-                remote_read_authorizer,
-                distributed_read_registry,
-                start_time: Instant::now(),
-                lifecycle_state,
-                recovery_info,
-                backup_coordinator,
-                restore_coordinator,
-                upgrade_coordinator,
-                admission_permits,
-                admission_waiters: AtomicUsize::new(0),
-            }),
-        })
+        let state = Arc::new(ServerState {
+            config,
+            cluster_manager,
+            store,
+            catalog,
+            async_store,
+            session_manager,
+            metrics,
+            audit,
+            auth,
+            remote_read_authorizer,
+            distributed_read_registry,
+            start_time: Instant::now(),
+            lifecycle_state,
+            recovery_info,
+            backup_coordinator,
+            restore_coordinator,
+            upgrade_coordinator,
+            admission_permits,
+            admission_waiters: AtomicUsize::new(0),
+            catalog_ddl_order_gate: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_txn_gate: Arc::new(tokio::sync::RwLock::new(())),
+        });
+        let weak_state = Arc::downgrade(&state);
+        state
+            .session_manager
+            .set_expired_handle_finalizer(Arc::new(move |handle| {
+                if let Some(state) = weak_state.upgrade() {
+                    drop(state.finalize_handle(handle, SessionFinalizationAction::Rollback));
+                }
+            }));
+        Ok(Self { state })
     }
 
     pub async fn run(self) -> Result<()> {
@@ -213,6 +244,92 @@ impl Server {
 }
 
 impl ServerState {
+    pub(crate) fn finalize_session(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        action: SessionFinalizationAction,
+    ) -> BoxFuture<'static, Result<()>> {
+        let session_state = match action {
+            SessionFinalizationAction::Commit => SessionState::Committing,
+            SessionFinalizationAction::Rollback => SessionState::RollingBack,
+        };
+        let handle = match self
+            .session_manager
+            .take_handle_for_finalization(session_id, session_state)
+        {
+            Ok(handle) => handle,
+            Err(err) => return Box::pin(async move { Err(err) }),
+        };
+        self.finalize_handle(handle, action)
+    }
+
+    fn finalize_handle(
+        self: &Arc<Self>,
+        handle: crate::session::TxnHandle,
+        action: SessionFinalizationAction,
+    ) -> BoxFuture<'static, Result<()>> {
+        let state = Arc::clone(self);
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let operation = handle.lock_operation().await;
+            let _catalog_txn_guard = match handle.take_catalog_txn_guard(&operation).await {
+                Some(guard) => guard,
+                None => SessionCatalogTxnGuard::Read {
+                    _guard: Arc::clone(&state.catalog_txn_gate).read_owned().await,
+                },
+            };
+            let result = match action {
+                SessionFinalizationAction::Commit => {
+                    let finalization = handle.finalize_commit_with_operation(&operation).await;
+                    match finalization.transaction {
+                        Ok(()) if finalization.lifecycle_effects.is_empty() => Ok(()),
+                        Ok(()) => state
+                            .apply_table_lifecycle_effects(finalization.lifecycle_effects)
+                            .and_then(|()| crate::http::sql::sync_catalog_to_store(&state)),
+                        Err(transaction_error) => {
+                            let catalog_rollback = state.apply_catalog_rollback_effects(
+                                finalization.catalog_rollback_effects,
+                            );
+                            match catalog_rollback {
+                                Ok(()) => Err(ServerError::Sql(transaction_error.into())),
+                                Err(catalog_error) => Err(ServerError::Internal(format!(
+                                    "session commit failed: {transaction_error}; catalog rollback: {catalog_error}"
+                                ))),
+                            }
+                        }
+                    }
+                }
+                SessionFinalizationAction::Rollback => {
+                    let finalization = handle.finalize_rollback_with_operation(&operation).await;
+                    let transaction = finalization
+                        .transaction
+                        .map_err(|err| ServerError::Sql(err.into()));
+                    let catalog =
+                        state.apply_catalog_rollback_effects(finalization.catalog_rollback_effects);
+                    match (transaction, catalog) {
+                        (Ok(()), Ok(())) => Ok(()),
+                        (transaction, catalog) => Err(ServerError::Internal(format!(
+                            "session rollback failed: transaction rollback: {}; catalog rollback: {}",
+                            finalization_result(&transaction),
+                            finalization_result(&catalog),
+                        ))),
+                    }
+                }
+            };
+            drop(operation);
+            if let Err(Err(err)) = response_tx.send(result) {
+                tracing::error!(error = %err, "detached session finalization failed");
+            }
+        });
+        Box::pin(async move {
+            response_rx.await.map_err(|_| {
+                ServerError::Internal(
+                    "session finalization coordinator stopped before responding".into(),
+                )
+            })?
+        })
+    }
+
     pub fn cluster_status_snapshot(&self) -> Result<ClusterStatusSnapshot> {
         let snapshot = self
             .cluster_manager
@@ -278,25 +395,143 @@ impl ServerState {
             .catalog
             .write()
             .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+        let mut protected_tables = std::collections::HashSet::new();
+        let mut protected_indexes = std::collections::HashSet::new();
+        let mut result = Ok(());
         for effect in effects.into_iter().rev() {
-            match effect {
-                CatalogRollbackEffect::DropTable { table_name } => {
-                    if catalog.table_exists(&table_name) {
-                        catalog
-                            .drop_table(&table_name)
-                            .map_err(|err| ServerError::Internal(err.to_string()))?;
-                    }
+            let (mut tables, indexes): (Vec<String>, Vec<String>) = match &effect {
+                CatalogRollbackEffect::DropTable { table_name, .. } => (
+                    vec![table_name.clone()],
+                    catalog
+                        .get_indexes_for_table(table_name)
+                        .into_iter()
+                        .map(|index| index.name.clone())
+                        .collect(),
+                ),
+                CatalogRollbackEffect::CreateTable { table, indexes } => (
+                    vec![table.name.clone()],
+                    indexes.iter().map(|index| index.name.clone()).collect(),
+                ),
+                CatalogRollbackEffect::DropIndex { index_name, .. } => {
+                    (Vec::new(), vec![index_name.clone()])
                 }
-                CatalogRollbackEffect::CreateTable { table } => {
-                    if !catalog.table_exists(&table.name) {
-                        catalog
-                            .create_table(*table)
-                            .map_err(|err| ServerError::Internal(err.to_string()))?;
-                    }
+                CatalogRollbackEffect::CreateIndex { index, .. } => {
+                    (vec![index.table.clone()], vec![index.name.clone()])
                 }
+            };
+            tables.extend(
+                indexes
+                    .iter()
+                    .filter_map(|name| catalog.get_index(name).map(|index| index.table.clone())),
+            );
+            // A failed undo must also protect its dependants from later cascades.
+            // Continue only independent undo, preserving the first error.
+            if tables.iter().any(|name| protected_tables.contains(name))
+                || indexes.iter().any(|name| protected_indexes.contains(name))
+            {
+                protected_tables.extend(tables);
+                protected_indexes.extend(indexes);
+                continue;
             }
+            let effect_result = (|| {
+                match effect {
+                    CatalogRollbackEffect::DropTable {
+                        table_name,
+                        table_id,
+                    } => {
+                        if let Some(current) = catalog.get_table(&table_name) {
+                            if current.table_id != table_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback table identity changed: {table_name}"
+                                )));
+                            }
+                            catalog
+                                .drop_table(&table_name)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                    CatalogRollbackEffect::CreateTable { table, indexes } => {
+                        if catalog
+                            .get_table(&table.name)
+                            .is_some_and(|current| current.table_id != table.table_id)
+                        {
+                            return Err(ServerError::Conflict(format!(
+                                "rollback table identity changed: {}",
+                                table.name
+                            )));
+                        }
+                        // Check all dependent identities before changing this table.
+                        for index in &indexes {
+                            if catalog
+                                .get_index(&index.name)
+                                .is_some_and(|current| current.index_id != index.index_id)
+                            {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {}",
+                                    index.name
+                                )));
+                            }
+                        }
+                        if !catalog.table_exists(&table.name) {
+                            catalog
+                                .create_table(*table)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                        for index in indexes {
+                            if !catalog.index_exists(&index.name) {
+                                catalog
+                                    .create_index(index)
+                                    .map_err(|err| ServerError::Internal(err.to_string()))?;
+                            }
+                        }
+                    }
+                    CatalogRollbackEffect::DropIndex {
+                        index_name,
+                        index_id,
+                    } => {
+                        if let Some(current) = catalog.get_index(&index_name) {
+                            if current.index_id != index_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {index_name}"
+                                )));
+                            }
+                            catalog
+                                .drop_index(&index_name)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                    CatalogRollbackEffect::CreateIndex { index, table_id } => {
+                        if catalog.get_table(&index.table).map(|table| table.table_id)
+                            != Some(table_id)
+                        {
+                            return Err(ServerError::Conflict(format!(
+                                "rollback index table identity changed: {}",
+                                index.table
+                            )));
+                        }
+                        if let Some(current) = catalog.get_index(&index.name) {
+                            if current.index_id != index.index_id {
+                                return Err(ServerError::Conflict(format!(
+                                    "rollback index identity changed: {}",
+                                    index.name
+                                )));
+                            }
+                        } else {
+                            catalog
+                                .create_index(*index)
+                                .map_err(|err| ServerError::Internal(err.to_string()))?;
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if effect_result.is_err() {
+                protected_tables.extend(tables);
+                protected_indexes.extend(indexes);
+            }
+            result = result.and(effect_result);
         }
-        Ok(())
+        result
     }
 
     pub async fn begin_sql_txn(
@@ -309,6 +544,13 @@ impl ServerState {
         bridge.set_memory_policy(policy);
         bridge.set_copy_security(self.config.copy_security_config()?);
         Ok(bridge)
+    }
+}
+
+fn finalization_result(result: &Result<()>) -> String {
+    match result {
+        Ok(()) => "ok".into(),
+        Err(err) => err.to_string(),
     }
 }
 
@@ -522,6 +764,274 @@ fn init_tracing() {
 mod tests {
     use super::*;
     use crate::config::ClusterServerConfig;
+    use alopex_cluster::{
+        ClusterId, ClusterIdentity, ClusterManagerConfig, Endpoint, MemberIdentity, MemberStatus,
+        MembershipView, NodeId, PlacementLifecycleState, PlacementMetadata, RoutingTarget,
+        TableRef,
+    };
+    use alopex_sql::storage::AsyncSqlTransaction;
+
+    #[tokio::test]
+    async fn dropped_finalization_response_still_applies_catalog_rollback() {
+        use alopex_sql::planner::plan_sql_for_routing;
+
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..ServerConfig::default()
+        })
+        .unwrap();
+        let state = server.state.clone();
+        let session_id = state.session_manager.create_session().await.unwrap();
+        let handle = state
+            .session_manager
+            .begin_transaction(&session_id)
+            .await
+            .unwrap();
+        let table = {
+            let catalog = state.catalog.read().unwrap();
+            let planned = plan_sql_for_routing(
+                &*catalog,
+                "CREATE TABLE cancelled_finalization (id INTEGER)",
+            )
+            .unwrap();
+            let alopex_sql::planner::LogicalPlan::CreateTable { table, .. } = &planned[0].plan
+            else {
+                panic!("expected CREATE TABLE plan");
+            };
+            table.clone()
+        };
+        let table_id = table.table_id;
+        state.catalog.write().unwrap().create_table(table).unwrap();
+        handle
+            .buffer_catalog_rollback_effects(vec![CatalogRollbackEffect::DropTable {
+                table_name: "cancelled_finalization".into(),
+                table_id,
+            }])
+            .await;
+
+        let response = state.finalize_session(&session_id, SessionFinalizationAction::Rollback);
+        drop(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !state
+                    .catalog
+                    .read()
+                    .unwrap()
+                    .table_exists("cancelled_finalization")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached finalization coordinator must apply catalog rollback");
+    }
+
+    #[tokio::test]
+    async fn dropped_commit_response_still_commits_publishes_and_persists_catalog() {
+        use alopex_sql::planner::plan_sql_for_routing;
+
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..ServerConfig::default()
+        })
+        .unwrap();
+        let state = server.state.clone();
+        let session_id = state.session_manager.create_session().await.unwrap();
+        let handle = state
+            .session_manager
+            .begin_transaction(&session_id)
+            .await
+            .unwrap();
+        let table = {
+            let catalog = state.catalog.read().unwrap();
+            let planned =
+                plan_sql_for_routing(&*catalog, "CREATE TABLE cancelled_commit (id INTEGER)")
+                    .unwrap();
+            let alopex_sql::planner::LogicalPlan::CreateTable { table, .. } = &planned[0].plan
+            else {
+                panic!("expected CREATE TABLE plan");
+            };
+            table.clone()
+        };
+        let table_id = table.table_id;
+        let table_ref = TableRef::new(format!(
+            "{}.{}.{}",
+            table.catalog_name, table.namespace_name, table.name
+        ));
+        state.catalog.write().unwrap().create_table(table).unwrap();
+
+        let stale_table_id = table_id.wrapping_add(1);
+        let mut placement = PlacementMetadata::new(table_ref.clone(), stale_table_id, 7);
+        placement.targets.push(RoutingTarget::table(
+            "node-a",
+            table_ref.clone(),
+            stale_table_id,
+        ));
+        let identity = ClusterIdentity {
+            cluster_id: Some(ClusterId::new("cluster-a")),
+            advertised_endpoint: Some(Endpoint::new("127.0.0.1:7001")),
+            ..ClusterIdentity::new("node-a", NodeRole::Worker, NodeState::Active)
+        };
+        let mut membership = MembershipView::new(MembershipSource::Persisted, 7);
+        membership.members.push(MemberStatus {
+            identity: MemberIdentity {
+                node_id: NodeId::new("node-a"),
+                cluster_id: Some(ClusterId::new("cluster-a")),
+                advertised_endpoint: Some(Endpoint::new("127.0.0.1:7001")),
+                role: NodeRole::Worker,
+            },
+            raw_reachability_state: None,
+            derived_state: NodeState::Active,
+            transition_reason: Some("test".to_string()),
+        });
+        let mut cluster_config = ClusterManagerConfig::cluster_aware(identity);
+        cluster_config.membership_source = MembershipSource::Persisted;
+        cluster_config.initial_membership = Some(membership);
+        cluster_config.initial_placements = vec![placement];
+        *state.cluster_manager.write().unwrap() = ClusterManager::new(cluster_config).unwrap();
+
+        handle
+            .execute("INSERT INTO cancelled_commit VALUES (42)")
+            .await
+            .unwrap();
+        handle
+            .buffer_table_lifecycle_effects(vec![TableLifecycleEffect::Created {
+                table_ref: table_ref.clone(),
+                table_id,
+            }])
+            .await;
+        let operation = handle.lock_operation().await;
+        let catalog_ordering = Arc::clone(&state.catalog_ddl_order_gate).lock_owned().await;
+        let catalog_guard = Arc::clone(&state.catalog_txn_gate).write_owned().await;
+        handle
+            .store_catalog_write_guard(catalog_guard, catalog_ordering, &operation)
+            .await;
+
+        let response = state.finalize_session(&session_id, SessionFinalizationAction::Commit);
+        drop(response);
+        drop(operation);
+
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.catalog_txn_gate.read(),
+        )
+        .await
+        .expect("detached commit must complete catalog finalization");
+        drop(completed);
+
+        let persisted = PersistentCatalog::load(state.store.clone()).unwrap();
+        assert_eq!(
+            persisted.get_table("cancelled_commit").unwrap().table_id,
+            table_id
+        );
+        let placement = state
+            .cluster_status_snapshot()
+            .unwrap()
+            .placement
+            .placements
+            .into_iter()
+            .find(|placement| {
+                placement.table_ref == table_ref && placement.table_id == stale_table_id
+            })
+            .expect("stale placement");
+        assert_eq!(placement.lifecycle_state, PlacementLifecycleState::Stale);
+
+        let mut txn = state.begin_sql_txn().await.unwrap();
+        let result = txn
+            .async_execute("SELECT id FROM cancelled_commit")
+            .await
+            .unwrap();
+        txn.async_rollback().await.unwrap();
+        let alopex_sql::executor::ExecutionResult::Query(query) = result else {
+            panic!("expected committed row query");
+        };
+        assert_eq!(
+            query.rows,
+            vec![vec![alopex_sql::storage::SqlValue::Integer(42)]]
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_session_cleanup_waits_for_in_flight_operation_before_catalog_rollback() {
+        use alopex_sql::planner::plan_sql_for_routing;
+
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..ServerConfig::default()
+        })
+        .unwrap();
+        let state = server.state.clone();
+        let session_id = state.session_manager.create_session().await.unwrap();
+        let handle = state
+            .session_manager
+            .begin_transaction(&session_id)
+            .await
+            .unwrap();
+        let table = {
+            let catalog = state.catalog.read().unwrap();
+            let planned =
+                plan_sql_for_routing(&*catalog, "CREATE TABLE expired_in_flight_ddl (id INTEGER)")
+                    .unwrap();
+            let alopex_sql::planner::LogicalPlan::CreateTable { table, .. } = &planned[0].plan
+            else {
+                panic!("expected CREATE TABLE plan");
+            };
+            table.clone()
+        };
+        let table_id = table.table_id;
+        state.catalog.write().unwrap().create_table(table).unwrap();
+        handle
+            .buffer_catalog_rollback_effects(vec![CatalogRollbackEffect::DropTable {
+                table_name: "expired_in_flight_ddl".into(),
+                table_id,
+            }])
+            .await;
+        let operation = handle.lock_operation().await;
+
+        state.session_manager.expire_now(&session_id);
+        state.session_manager.cleanup_expired();
+        assert_eq!(state.session_manager.active_session_count(), 0);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(state
+            .catalog
+            .read()
+            .unwrap()
+            .table_exists("expired_in_flight_ddl"));
+
+        drop(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !state
+                    .catalog
+                    .read()
+                    .unwrap()
+                    .table_exists("expired_in_flight_ddl")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expiry finalization must resume after the operation releases");
+    }
 
     #[test]
     fn server_state_exposes_default_single_node_cluster_manager() {

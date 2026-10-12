@@ -24,6 +24,13 @@
   ],
   "entries": [
     {
+      "api": "DATE_DIFF",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_are_numeric_and_interval_units_are_sql_standard;crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_preserve_sign_day_boundaries_and_nulls",
+      "issue": 584
+    },
+    {
       "api": "portable SELECT/null/order/coercion",
       "status": "known-performance-divergence",
       "reference": "sqlite/postgresql/duckdb/datafusion pinned commits",
@@ -975,6 +982,15 @@
       "issue": 307,
       "performance_contract": "sql-sqlite-v1",
       "performance_evidence": "sql-sqlite-curated"
+    },
+    {
+      "surface": "scalar",
+      "api": "scalar.date_diff",
+      "claim": "DATE_DIFF",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_are_numeric_and_interval_units_are_sql_standard;crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_preserve_sign_day_boundaries_and_nulls",
+      "issue": 584
     },
     {
       "surface": "scalar",

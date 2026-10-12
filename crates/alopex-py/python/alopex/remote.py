@@ -789,6 +789,19 @@ class RemoteTransaction:
     def search_similar(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.search_similar", _KV_REASON)
 
+    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.prepare",
+            "prepared-statement handles are local to an embedded database handle",
+        )
+
+    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.execute_many",
+            "batch execution is built on embedded prepared-statement handles, "
+            "which a remote server session does not expose",
+        )
+
     def get_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get_vector", _KV_REASON)
 

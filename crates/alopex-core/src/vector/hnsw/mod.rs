@@ -27,6 +27,14 @@ pub const MAX_HNSW_EF_SEARCH: usize = 1_000_000;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
+fn vector_norm(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt()
+}
+
 /// Validates the public HNSW search-breadth contract.
 pub fn validate_ef_search(ef_search: usize) -> Result<()> {
     if !(1..=MAX_HNSW_EF_SEARCH).contains(&ef_search) {
@@ -125,9 +133,11 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             if all_new {
-                graph.insert_unpruned(key, vector, metadata)?;
+                previous_insert =
+                    Some(graph.insert_unpruned(key, vector, metadata, previous_insert)?);
                 if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
                     graph.prune_overfull_neighbors();
                 }
@@ -289,10 +299,13 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             let existed = graph.find_node_id(key).is_some();
             let node_id = if all_new {
-                graph.insert_unpruned(key, vector, metadata)?
+                let node_id = graph.insert_unpruned(key, vector, metadata, previous_insert)?;
+                previous_insert = Some(node_id);
+                node_id
             } else {
                 graph.upsert(key, vector, metadata)?
             };
@@ -458,7 +471,7 @@ impl HnswIndex {
                     total_bytes += (level_neighbors.len() * 4) as u64;
                     total_bytes += 24;
                 }
-                total_bytes += 104;
+                total_bytes += std::mem::size_of::<types::HnswNode>() as u64;
             }
         }
 

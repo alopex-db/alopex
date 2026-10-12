@@ -1,6 +1,6 @@
 import pytest
 
-from alopex import Database, HnswConfig, TxnMode
+from alopex import Database, HnswConfig, Metric, TxnMode
 
 
 @pytest.mark.requires_numpy
@@ -28,6 +28,29 @@ def test_hnsw_create_search_delete():
 
 
 @pytest.mark.requires_numpy
+def test_hnsw_query_ef_changes_observed_search_work():
+    import numpy as np
+
+    db = Database.new()
+    try:
+        db.create_hnsw_index("breadth", HnswConfig(2, m=2, ef_construction=16, metric=Metric.L2))
+        vectors = np.array([[float(i), 1.0] for i in range(128)], dtype=np.float32)
+        with db.begin(TxnMode.READ_WRITE) as txn:
+            assert txn.upsert_to_hnsw_batch(
+                "breadth", [str(i).encode() for i in range(128)], vectors
+            ) == 128
+            txn.commit()
+        query = vectors[64]
+        narrow, narrow_stats = db.search_hnsw("breadth", query, 1, ef_search=1)
+        wide, wide_stats = db.search_hnsw("breadth", query, 1, ef_search=128)
+        assert len(narrow) == len(wide) == 1
+        assert wide[0].key == b"64"
+        assert wide_stats.nodes_visited > narrow_stats.nodes_visited > 0
+    finally:
+        db.close()
+
+
+@pytest.mark.requires_numpy
 def test_hnsw_batch_upsert_rejects_duplicate_keys_atomically():
     import numpy as np
 
@@ -38,6 +61,8 @@ def test_hnsw_batch_upsert_rejects_duplicate_keys_atomically():
         assert txn.upsert_to_hnsw_batch("idx", [b"a", b"b"], vectors) == 2
         with pytest.raises(Exception, match="duplicate key"):
             txn.upsert_to_hnsw_batch("idx", [b"dup", b"dup"], vectors)
+        with pytest.raises(Exception, match="empty"):
+            txn.upsert_to_hnsw_batch("idx", [], np.empty((0, 2), dtype=np.float32))
         txn.commit()
 
     results, _ = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 10)
