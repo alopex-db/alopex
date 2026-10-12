@@ -19,6 +19,7 @@ use crate::storage::SqlValue;
 
 use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_file};
 
+mod pages;
 mod preflight;
 use preflight::{check_footer, check_pages};
 
@@ -113,10 +114,12 @@ impl ParquetReader {
             check_pages(&mut file, builder.metadata(), footer_start, limit)?;
         }
 
-        let reader = builder
-            .with_batch_size(1024)
-            .build()
-            .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
+        let reader = if limit.is_some() {
+            pages::reader(file, builder.metadata().clone(), builder.schema(), 1024)
+        } else {
+            builder.with_batch_size(1024).build()
+        }
+        .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
         // TODO: バッチサイズを open 引数で受け取れるようにし、呼び出し側で柔軟に制御できるようにする。
 
         let target_types: Vec<ResolvedType> = table_meta

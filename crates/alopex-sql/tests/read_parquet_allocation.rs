@@ -166,9 +166,20 @@ fn execute_observed_after_planning(
     file: &tempfile::NamedTempFile,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
+    execute_observed_with_alias(file, "", change)
+}
+
+fn execute_observed_with_alias(
+    file: &tempfile::NamedTempFile,
+    alias: &str,
+    change: impl FnOnce(),
+) -> (Result<ExecutionResult, ExecutorError>, usize) {
     let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
     let catalog = MemoryCatalog::new();
-    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let sql = format!(
+        "SELECT * FROM read_parquet('{}') {alias}",
+        file.path().display()
+    );
     let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     change();
@@ -508,4 +519,140 @@ fn issue577_invalid_metadata_wire_types_rejected_before_decode() {
         assert!(maximum <= LIMIT);
         assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
     }
+}
+
+#[test]
+fn issue577_page_reader_adapter_preserves_normal_pages() {
+    use arrow_array::{Int64Array, LargeStringArray, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::column::page::Page;
+    use parquet::file::properties::WriterVersion;
+
+    for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
+        for dictionary in [false, true] {
+            for compression in [Compression::UNCOMPRESSED, Compression::SNAPPY] {
+                let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, true),
+                    Field::new("label", DataType::LargeUtf8, true),
+                ]));
+                let batch = RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int64Array::from(vec![
+                            Some(1),
+                            None,
+                            Some(3),
+                            Some(4),
+                            None,
+                        ])),
+                        Arc::new(LargeStringArray::from(vec![
+                            Some("alpha"),
+                            Some("repeat"),
+                            None,
+                            Some("repeat"),
+                            Some("omega"),
+                        ])),
+                    ],
+                )
+                .unwrap();
+                let properties = WriterProperties::builder()
+                    .set_writer_version(version)
+                    .set_dictionary_enabled(dictionary)
+                    .set_compression(compression)
+                    .set_max_row_group_size(3)
+                    .set_data_page_row_count_limit(1)
+                    .set_write_batch_size(1)
+                    .build();
+                let mut writer = ArrowWriter::try_new(
+                    File::create(file.path()).unwrap(),
+                    schema,
+                    Some(properties),
+                )
+                .unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+                let reference =
+                    SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+                assert_eq!(reference.num_row_groups(), 2);
+                let mut pages = reference
+                    .get_row_group(0)
+                    .unwrap()
+                    .get_column_page_reader(0)
+                    .unwrap();
+                let mut data_pages = 0;
+                let mut dictionaries = 0;
+                while let Some(page) = pages.get_next_page().unwrap() {
+                    match page {
+                        Page::DataPage { .. } => {
+                            assert_eq!(version, WriterVersion::PARQUET_1_0);
+                            data_pages += 1;
+                        }
+                        Page::DataPageV2 { .. } => {
+                            assert_eq!(version, WriterVersion::PARQUET_2_0);
+                            data_pages += 1;
+                        }
+                        Page::DictionaryPage { .. } => dictionaries += 1,
+                    }
+                }
+                assert!(data_pages > 1);
+                assert_eq!(dictionaries, usize::from(dictionary));
+
+                let (result, maximum) =
+                    execute_observed_with_alias(&file, "AS p(renamed_id, renamed_label)", || {});
+                let ExecutionResult::Query(result) = result.unwrap() else {
+                    panic!("expected a normal query result");
+                };
+                assert_eq!(
+                    result
+                        .columns
+                        .iter()
+                        .map(|column| column.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["renamed_id", "renamed_label"]
+                );
+                assert_eq!(
+                    result.rows,
+                    vec![
+                        vec![SqlValue::BigInt(1), SqlValue::Text("alpha".into())],
+                        vec![SqlValue::Null, SqlValue::Text("repeat".into())],
+                        vec![SqlValue::BigInt(3), SqlValue::Null],
+                        vec![SqlValue::BigInt(4), SqlValue::Text("repeat".into())],
+                        vec![SqlValue::Null, SqlValue::Text("omega".into())],
+                    ]
+                );
+                println!(
+                    "normal seam version={version:?} dictionary={dictionary} compression={compression:?} row_groups=2 data_pages={data_pages} maximum_request={maximum}"
+                );
+                assert!(maximum <= LIMIT);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue577_page_reader_adapter_preserves_empty_file() {
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(Vec::<i64>::new()))],
+    )
+    .unwrap();
+    let mut writer =
+        ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let (result, maximum) = execute_observed(&file);
+    let ExecutionResult::Query(result) = result.unwrap() else {
+        panic!("expected an empty query result");
+    };
+    assert!(result.rows.is_empty());
+    assert_eq!(result.columns[0].name, "id");
+    assert!(maximum <= LIMIT);
 }
