@@ -1,0 +1,511 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::fs::File;
+use std::sync::Arc;
+
+use alopex_core::kv::memory::MemoryKV;
+use alopex_sql::catalog::MemoryCatalog;
+use alopex_sql::dialect::AlopexDialect;
+use alopex_sql::executor::query::execute_query_with_policy;
+use alopex_sql::executor::{ExecutionResult, ExecutorError, MemoryPolicy, SpillPolicy};
+use alopex_sql::parser::Parser;
+use alopex_sql::planner::Planner;
+use alopex_sql::storage::{SqlValue, TxnBridge};
+use parquet::basic::Compression;
+use parquet::data_type::Int64Type;
+use parquet::file::properties::WriterProperties;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::file::writer::SerializedFileWriter;
+use parquet::schema::parser::parse_message_type;
+use parquet::thrift::{TCompactOutputProtocol, TSerializable};
+
+const LIMIT: usize = 64 * 1024;
+const DECLARED_PAGE_BYTES: i32 = 1024 * 1024;
+
+// The separate test executable keeps this observer out of other integration tests.
+struct ObservedAllocator;
+thread_local! {
+    static MAX_REQUEST: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn observe(size: usize) {
+    let _ = MAX_REQUEST.try_with(|maximum| {
+        if let Some(previous) = maximum.get() {
+            maximum.set(Some(previous.max(size)));
+        }
+    });
+}
+
+unsafe impl GlobalAlloc for ObservedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        observe(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        observe(layout.size());
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        observe(size);
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: ObservedAllocator = ObservedAllocator;
+
+fn fixture(oversized: bool) -> tempfile::NamedTempFile {
+    fixture_with_sizes(oversized.then_some((DECLARED_PAGE_BYTES, 10)))
+}
+
+fn fixture_with_sizes(sizes: Option<(i32, i32)>) -> tempfile::NamedTempFile {
+    fixture_with_dictionary(sizes, false)
+}
+
+fn fixture_with_dictionary(sizes: Option<(i32, i32)>, dictionary: bool) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(parse_message_type("message fixture { REQUIRED INT64 id; }").unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_dictionary_enabled(dictionary)
+            .build(),
+    );
+    let mut writer =
+        SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties).unwrap();
+    let mut group = writer.next_row_group().unwrap();
+    let mut column = group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int64Type>()
+        .write_batch(&[7], None, None)
+        .unwrap();
+    column.close().unwrap();
+    group.close().unwrap();
+    let mut footer = writer.close().unwrap();
+
+    if let Some((uncompressed, compressed)) = sizes {
+        let mut bytes = std::fs::read(file.path()).unwrap();
+        let footer_size =
+            u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
+                as usize;
+        bytes.truncate(bytes.len() - 8 - footer_size);
+        let chunk = &mut footer.row_groups[0].columns[0];
+        let metadata = chunk.meta_data.as_mut().unwrap();
+        let offset = metadata.data_page_offset as usize;
+        // Compact Thrift: field 1 DATA_PAGE, then field 2 i32 with the eight-byte payload size.
+        assert_eq!(
+            &bytes[offset..offset + 6],
+            &[0x15, 0x00, 0x15, 0x10, 0x15, 0x14]
+        );
+        let mut encoded = Vec::new();
+        for (tag, size) in [(0x15, uncompressed), (0x15, compressed)] {
+            encoded.push(tag);
+            let mut value = ((size as u32) << 1) ^ ((size >> 31) as u32);
+            while value >= 128 {
+                encoded.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            encoded.push(value as u8);
+        }
+        let growth = encoded.len() as i64 - 4;
+        bytes.splice(offset + 2..offset + 6, encoded);
+        // Keep the chunk bounds accurate, but retain the small footer payload declaration.
+        metadata.total_compressed_size += growth;
+        metadata.total_uncompressed_size += growth;
+        footer.row_groups[0].total_byte_size += growth;
+        if let Some(size) = &mut footer.row_groups[0].total_compressed_size {
+            *size += growth;
+        }
+        let chunk = &mut footer.row_groups[0].columns[0];
+        chunk.offset_index_offset = None;
+        chunk.offset_index_length = None;
+        chunk.column_index_offset = None;
+        chunk.column_index_length = None;
+        let mut encoded_footer = Vec::new();
+        footer
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_footer))
+            .unwrap();
+        bytes.extend_from_slice(&encoded_footer);
+        bytes.extend_from_slice(&(encoded_footer.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"PAR1");
+        std::fs::write(file.path(), bytes).unwrap();
+    }
+
+    let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 1);
+    assert!(reader.metadata().row_group(0).total_byte_size() < LIMIT as i64);
+    assert!(reader.metadata().row_group(0).column(0).uncompressed_size() < LIMIT as i64);
+    assert!(file.as_file().metadata().unwrap().len() < 4096);
+    file
+}
+
+fn execute_observed(
+    file: &tempfile::NamedTempFile,
+) -> (Result<ExecutionResult, ExecutorError>, usize) {
+    execute_observed_after_planning(file, || {})
+}
+
+fn replace_footer(file: &tempfile::NamedTempFile, footer: &[u8]) {
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    let size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    bytes.truncate(bytes.len() - 8 - size);
+    bytes.extend_from_slice(footer);
+    bytes.extend_from_slice(&(footer.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"PAR1");
+    std::fs::write(file.path(), bytes).unwrap();
+}
+
+fn execute_observed_after_planning(
+    file: &tempfile::NamedTempFile,
+    change: impl FnOnce(),
+) -> (Result<ExecutionResult, ExecutorError>, usize) {
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+    change();
+    let mut transaction = bridge.begin_write().unwrap();
+    let policy = MemoryPolicy::new(Some(LIMIT as u64), SpillPolicy::FailFast);
+    MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
+    let result = execute_query_with_policy(&mut transaction, &catalog, plan, Some(&policy));
+    let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+    (result, maximum)
+}
+
+#[test]
+fn issue577_small_compressed_page_preserves_rows() {
+    let file = fixture(false);
+    let (result, maximum) = execute_observed(&file);
+    let ExecutionResult::Query(result) = result.unwrap() else {
+        panic!("expected the normal compressed page to produce a query result");
+    };
+    assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+    println!(
+        "normal fixture bytes={} maximum_request={maximum} limit={LIMIT}",
+        file.as_file().metadata().unwrap().len()
+    );
+    assert!(maximum <= LIMIT);
+}
+
+#[test]
+fn issue577_oversized_page_rejected_before_allocation() {
+    let file = fixture(true);
+    let (result, maximum) = execute_observed(&file);
+    println!(
+        "oversized fixture bytes={} maximum_request={maximum} limit={LIMIT} declared_page_bytes={DECLARED_PAGE_BYTES} result={result:?}",
+        file.as_file().metadata().unwrap().len()
+    );
+    assert!(
+        maximum <= LIMIT,
+        "READ_PARQUET requested {maximum} bytes before rejecting a page under its {LIMIT}-byte budget"
+    );
+    assert!(
+        matches!(result, Err(ExecutorError::ResourceExhausted { .. })),
+        "expected a memory-policy rejection before page decompression, got {result:?}"
+    );
+}
+
+#[test]
+fn issue577_invalid_page_declarations_rejected_before_allocation() {
+    for sizes in [(-1, 10), (8, -1), (8, 1024), (i32::MAX, 10), (8, i32::MAX)] {
+        let file = fixture_with_sizes(Some(sizes));
+        let (result, maximum) = execute_observed(&file);
+        println!("sizes={sizes:?} maximum_request={maximum} result={result:?}");
+        assert!(maximum <= LIMIT);
+        if sizes.0 > LIMIT as i32 || sizes.1 > LIMIT as i32 {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+        }
+    }
+}
+
+#[test]
+fn issue577_malformed_headers_and_footer_rejected_before_allocation() {
+    for case in [
+        "varint overflow",
+        "binary length",
+        "missing stop",
+        "footer length",
+        "explicit field id overflow",
+        "delta field id overflow",
+    ] {
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+            let column = reader.metadata().row_group(0).column(0);
+            let start = column.data_page_offset() as usize;
+            let end = start + column.compressed_size() as usize;
+            let mut bytes = std::fs::read(file.path()).unwrap();
+            match case {
+                "varint overflow" => {
+                    bytes[start..end].fill(0xff);
+                    bytes[start..start + 3].copy_from_slice(&[0x15, 0, 0x15]);
+                }
+                "binary length" => {
+                    // An unknown binary field must be skipped without allocating its declaration.
+                    bytes[start..start + 5].copy_from_slice(&[0x18, 0x80, 0x80, 0x80, 0x01]);
+                }
+                "missing stop" => bytes[start..end].fill(0x11),
+                "footer length" => {
+                    let trailer = bytes.len() - 8;
+                    bytes[trailer..trailer + 4]
+                        .copy_from_slice(&(DECLARED_PAGE_BYTES as u32).to_le_bytes());
+                }
+                "explicit field id overflow" => {
+                    // Explicit compact IDs are i16, not arbitrary zigzag integers.
+                    bytes[start..start + 5].copy_from_slice(&[0x05, 0x84, 0x80, 0x08, 0x00]);
+                }
+                "delta field id overflow" => {
+                    bytes[start..start + 6].copy_from_slice(&[0x01, 0xfe, 0xff, 0x03, 0xf1, 0x00]);
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(file.path(), bytes).unwrap();
+        });
+        println!("case={case} maximum_request={maximum} result={result:?}");
+        assert!(maximum <= LIMIT);
+        if case == "footer length" {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+        }
+    }
+}
+
+#[test]
+fn issue577_dictionary_count_rejected_before_allocation() {
+    let file = fixture_with_dictionary(None, true);
+    let (result, maximum) = execute_observed(&file);
+    let ExecutionResult::Query(result) = result.unwrap() else {
+        panic!("expected a normal dictionary to produce a query result");
+    };
+    assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+    assert!(maximum <= LIMIT);
+    for count in [-1, (LIMIT / std::mem::size_of::<i64>() + 1) as i32] {
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+            let start = reader.metadata().row_group(0).column(0).data_page_offset() as usize;
+            let mut bytes = std::fs::read(file.path()).unwrap();
+            // DICTIONARY_PAGE, small byte sizes, then DictionaryPageHeader.num_values.
+            let mut header = vec![0x15, 0x04, 0x15, 0x10, 0x15, 0x14, 0x4c, 0x15];
+            let mut value = ((count as u32) << 1) ^ ((count >> 31) as u32);
+            while value >= 128 {
+                header.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            header.extend_from_slice(&[value as u8, 0x15, 0x00, 0x00, 0x00]);
+            bytes[start..start + header.len()].copy_from_slice(&header);
+            std::fs::write(file.path(), bytes).unwrap();
+        });
+        println!("dictionary count={count} maximum_request={maximum} result={result:?}");
+        assert!(maximum <= LIMIT);
+        if count < 0 {
+            assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+        } else {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        }
+    }
+}
+
+#[test]
+fn issue577_schema_change_precedes_page_and_row_budget_checks() {
+    use arrow_array::RecordBatch;
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    for columns in [1, 2] {
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            let fields = (0..columns)
+                .map(|index| Field::new(format!("id{index}"), DataType::Int32, false))
+                .collect::<Vec<_>>();
+            let schema = Arc::new(Schema::new(fields));
+            let arrays = (0..columns)
+                .map(|_| Arc::new(arrow_array::Int32Array::from(vec![7; 1024])) as _)
+                .collect();
+            let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+            let column = reader.metadata().row_group(0).column(0);
+            let start = column
+                .dictionary_page_offset()
+                .unwrap_or(column.data_page_offset()) as usize;
+            let mut bytes = std::fs::read(file.path()).unwrap();
+            bytes[start] = 0;
+            std::fs::write(file.path(), bytes).unwrap();
+        });
+        println!("schema columns={columns} maximum_request={maximum} result={result:?}");
+        assert!(maximum <= LIMIT);
+        assert!(matches!(result, Err(ExecutorError::SchemaMismatch { .. })));
+    }
+}
+
+#[test]
+fn issue577_footer_metadata_allocations_rejected_before_decode() {
+    use parquet::format;
+    use std::mem::size_of;
+
+    // Each path uses explicit compact field IDs; intermediate lists have one struct.
+    type MetadataCase = (&'static str, &'static [(u8, u8)], usize, u8);
+    let cases: &[MetadataCase] = &[
+        ("schema", &[(2, 9)], size_of::<format::SchemaElement>(), 12),
+        ("row groups", &[(4, 9)], size_of::<format::RowGroup>(), 12),
+        (
+            "file key/value",
+            &[(5, 9)],
+            size_of::<format::KeyValue>(),
+            12,
+        ),
+        (
+            "column orders",
+            &[(7, 9)],
+            size_of::<format::ColumnOrder>(),
+            12,
+        ),
+        (
+            "columns",
+            &[(4, 9), (1, 9)],
+            size_of::<format::ColumnChunk>(),
+            12,
+        ),
+        (
+            "sorting",
+            &[(4, 9), (4, 9)],
+            size_of::<format::SortingColumn>(),
+            12,
+        ),
+        (
+            "encodings",
+            &[(4, 9), (1, 9), (3, 12), (2, 9)],
+            size_of::<format::Encoding>(),
+            5,
+        ),
+        (
+            "schema path",
+            &[(4, 9), (1, 9), (3, 12), (3, 9)],
+            size_of::<String>(),
+            8,
+        ),
+        (
+            "column key/value",
+            &[(4, 9), (1, 9), (3, 12), (8, 9)],
+            size_of::<format::KeyValue>(),
+            12,
+        ),
+        (
+            "encoding stats",
+            &[(4, 9), (1, 9), (3, 12), (13, 9)],
+            size_of::<format::PageEncodingStats>(),
+            12,
+        ),
+        (
+            "repetition histogram",
+            &[(4, 9), (1, 9), (3, 12), (16, 12), (2, 9)],
+            size_of::<i64>(),
+            6,
+        ),
+        (
+            "definition histogram",
+            &[(4, 9), (1, 9), (3, 12), (16, 12), (3, 9)],
+            size_of::<i64>(),
+            6,
+        ),
+        (
+            "encryption path",
+            &[(4, 9), (1, 9), (8, 12), (2, 12), (1, 9)],
+            size_of::<String>(),
+            8,
+        ),
+        ("schema name", &[(2, 9), (4, 8)], 1, 8),
+        ("created by", &[(6, 8)], 1, 8),
+        ("unknown binary", &[(10, 8)], 1, 8),
+    ];
+    let mut failures = Vec::new();
+    for &(name, path, width, element) in cases {
+        let count = LIMIT.checked_div(width).map_or(17, |count| count + 1);
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            let mut footer = vec![0x15, 0x02];
+            for (index, &(id, kind)) in path.iter().enumerate() {
+                footer.extend_from_slice(&[kind, id * 2]);
+                if kind == 9 {
+                    footer.push(if index + 1 == path.len() {
+                        0xf0 | element
+                    } else {
+                        0x1c
+                    });
+                }
+            }
+            let mut value = count as u64;
+            while value >= 128 {
+                footer.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            footer.extend_from_slice(&[value as u8, 0, 0]);
+            replace_footer(&file, &footer);
+        });
+        println!(
+            "metadata={name} slots={count} width={width} declared={} maximum_request={maximum} result={result:?}",
+            count * width
+        );
+        let expected = if width == 0 {
+            matches!(result, Err(ExecutorError::BulkLoad(_)))
+        } else {
+            matches!(result, Err(ExecutorError::ResourceExhausted { .. }))
+        };
+        if maximum > LIMIT || !expected {
+            failures.push(name);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "metadata preflight failures: {failures:?}"
+    );
+}
+
+#[test]
+fn issue577_invalid_metadata_wire_types_rejected_before_decode() {
+    let cases: &[(&str, &[u8])] = &[
+        ("scalar field type", &[0x18, 0]),
+        ("list field type", &[0x15, 2, 0x18, 0]),
+        ("list element type", &[0x15, 2, 0x19, 0x18, 0]),
+        (
+            "nested list element type",
+            &[0x15, 2, 0x09, 8, 0x1c, 0x09, 2, 0x18, 0],
+        ),
+        ("truncated list", &[0x15, 2, 0x19, 0x2c, 0]),
+        ("truncated unknown binary", &[0x15, 2, 0x98, 4, 0]),
+        ("truncated unknown list", &[0x15, 2, 0x99, 0xfc, 16, 0]),
+    ];
+    for &(name, footer) in cases {
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            replace_footer(&file, footer);
+        });
+        println!("invalid metadata={name} maximum_request={maximum} result={result:?}");
+        assert!(maximum <= LIMIT);
+        assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+    }
+}

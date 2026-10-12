@@ -19,11 +19,13 @@ use crate::storage::SqlValue;
 
 use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_file};
 
+mod preflight;
+use preflight::{check_footer, check_pages};
+
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
     schema: CopySchema,
     target_types: Vec<ResolvedType>,
-    declared_rows: i64,
     reader: ParquetRecordBatchReader,
     buffer: Option<Vec<Vec<SqlValue>>>,
     row_offset: usize,
@@ -38,21 +40,79 @@ impl ParquetReader {
     }
 
     fn from_file(file: File, table_meta: &TableMetadata) -> Result<Self> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+        Self::from_file_with_memory(file, table_meta, None, false)
+    }
+
+    fn from_file_with_memory(
+        mut file: File,
+        table_meta: &TableMetadata,
+        memory: Option<&MemoryPolicy>,
+        validate_planned_schema: bool,
+    ) -> Result<Self> {
+        let limit = memory.and_then(MemoryPolicy::limit_bytes);
+        let footer_start = limit
+            // Metadata uses bounded scratch space independently of retained rows.
+            .map(|limit| check_footer(&mut file, limit.max(4096)))
+            .transpose()?;
+        let input = file.try_clone().map_err(parquet_io_error)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(|e| {
             ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
         })?;
-
-        let arrow_schema = builder.schema();
-        let mut fields = Vec::with_capacity(arrow_schema.fields().len());
-        for f in arrow_schema.fields() {
-            let ty = map_arrow_type(f.data_type())?;
-            fields.push(CopyField {
-                name: Some(f.name().clone()),
-                data_type: Some(ty),
+        let fields = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                Ok(CopyField {
+                    name: Some(field.name().clone()),
+                    data_type: Some(map_arrow_type(field.data_type())?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if validate_planned_schema && fields.len() != table_meta.columns.len() {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: table_meta.columns.len(),
+                actual: fields.len(),
+                reason: "READ_PARQUET column count changed after planning".into(),
             });
         }
-
+        for (position, (field, column)) in fields.iter().zip(&table_meta.columns).enumerate() {
+            // SQL aliases change planned names, not the source's positional types.
+            if validate_planned_schema && field.data_type.as_ref() != Some(&column.data_type) {
+                return Err(ExecutorError::SchemaMismatch {
+                    expected: table_meta.columns.len(),
+                    actual: fields.len(),
+                    reason: format!("READ_PARQUET column {position} type changed after planning"),
+                });
+            }
+        }
         let declared_rows = builder.metadata().file_metadata().num_rows();
+        let overflow = || ExecutorError::ResourceExhausted {
+            message: "READ_PARQUET retained size overflow".into(),
+        };
+        if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
+            // Reject a declared result that cannot fit even its row/value slots
+            // before inspecting or decoding pages.
+            let count = u64::try_from(declared_rows)
+                .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
+            let minimum = (table_meta.columns.len() as u64)
+                .checked_mul(std::mem::size_of::<SqlValue>() as u64)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
+                .and_then(|bytes| bytes.checked_mul(count))
+                .ok_or_else(overflow)?;
+            if policy.over_limit(minimum) {
+                return Err(ExecutorError::ResourceExhausted {
+                    message: format!(
+                        "READ_PARQUET requires at least {minimum} bytes for declared rows (limit {}); spilling this operator is not supported",
+                        policy.limit_bytes().unwrap_or(u64::MAX)
+                    ),
+                });
+            }
+        }
+        if let (Some(limit), Some(footer_start)) = (limit, footer_start) {
+            check_pages(&mut file, builder.metadata(), footer_start, limit)?;
+        }
+
         let reader = builder
             .with_batch_size(1024)
             .build()
@@ -68,7 +128,6 @@ impl ParquetReader {
         Ok(Self {
             schema: CopySchema { fields },
             target_types,
-            declared_rows,
             reader,
             buffer: None,
             row_offset: 0,
@@ -132,7 +191,7 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
 }
 
 /// Read against SQL's planned types, accounting for decoded payloads and retained
-/// row/value capacity. This does not bound Arrow decoding allocations.
+/// row/value capacity, with footer and page declarations checked before decoding.
 pub(crate) fn read_parquet_with_plan(
     path: &str,
     planned: &[ColumnMetadata],
@@ -145,50 +204,12 @@ pub(crate) fn read_parquet_with_plan(
             .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
     };
     let table = TableMetadata::new("read_parquet", planned.to_vec());
-    let mut reader = ParquetReader::from_file(file, &table)?;
-    let actual = reader.schema();
-    if actual.fields.len() != planned.len() {
-        return Err(ExecutorError::SchemaMismatch {
-            expected: planned.len(),
-            actual: actual.fields.len(),
-            reason: "READ_PARQUET column count changed after planning".into(),
-        });
-    }
-    for (position, (field, column)) in actual.fields.iter().zip(planned).enumerate() {
-        // SQL aliases change planned names, not the source's positional types.
-        if field.data_type.as_ref() != Some(&column.data_type) {
-            return Err(ExecutorError::SchemaMismatch {
-                expected: planned.len(),
-                actual: actual.fields.len(),
-                reason: format!("READ_PARQUET column {position} type changed after planning"),
-            });
-        }
-    }
-
+    let mut reader = ParquetReader::from_file_with_memory(file, &table, memory, true)?;
     let mut rows: Vec<Vec<SqlValue>> = Vec::new();
     let mut retained_bytes = 0_u64;
     let overflow = || ExecutorError::ResourceExhausted {
         message: "READ_PARQUET retained size overflow".into(),
     };
-    if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
-        // Reject a declared result that cannot fit even its row/value slots
-        // before reading pages. Payloads and decoder allocations are not bounded here.
-        let count = u64::try_from(reader.declared_rows)
-            .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
-        let minimum = (planned.len() as u64)
-            .checked_mul(std::mem::size_of::<SqlValue>() as u64)
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
-            .and_then(|bytes| bytes.checked_mul(count))
-            .ok_or_else(overflow)?;
-        if policy.over_limit(minimum) {
-            return Err(ExecutorError::ResourceExhausted {
-                message: format!(
-                    "READ_PARQUET requires at least {minimum} bytes for declared rows (limit {}); spilling this operator is not supported",
-                    policy.limit_bytes().unwrap_or(u64::MAX)
-                ),
-            });
-        }
-    }
     while let Some(batch) = reader.next_batch(1024)? {
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             for row in &batch {
@@ -250,6 +271,10 @@ pub(crate) fn read_parquet_with_plan(
         rows.extend(batch);
     }
     Ok(rows)
+}
+
+fn parquet_io_error(error: std::io::Error) -> ExecutorError {
+    ExecutorError::BulkLoad(format!("failed to inspect parquet: {error}"))
 }
 
 impl BulkReader for ParquetReader {
