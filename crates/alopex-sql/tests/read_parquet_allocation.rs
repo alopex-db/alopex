@@ -166,12 +166,13 @@ fn execute_observed_after_planning(
     file: &tempfile::NamedTempFile,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
-    execute_observed_with_alias(file, "", change)
+    execute_observed_with_alias(file, "", LIMIT, change)
 }
 
 fn execute_observed_with_alias(
     file: &tempfile::NamedTempFile,
     alias: &str,
+    limit: usize,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
     let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
@@ -184,7 +185,7 @@ fn execute_observed_with_alias(
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     change();
     let mut transaction = bridge.begin_write().unwrap();
-    let policy = MemoryPolicy::new(Some(LIMIT as u64), SpillPolicy::FailFast);
+    let policy = MemoryPolicy::new(Some(limit as u64), SpillPolicy::FailFast);
     MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
     let result = execute_query_with_policy(&mut transaction, &catalog, plan, Some(&policy));
     let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
@@ -219,6 +220,85 @@ fn issue577_snappy_output_checked_before_capacity_growth() {
 #[test]
 fn issue577_codec_brotli_output_checked_before_capacity_growth() {
     codec_output_checked_before_capacity_growth(Compression::BROTLI(Default::default()));
+}
+
+fn replace_with_brotli_huffman_fixture(file: &tempfile::NamedTempFile) {
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    let bytes = std::fs::read(file.path()).unwrap();
+    let footer_size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+        &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - footer_size..])),
+    )
+    .unwrap();
+    let chunk = &mut footer.row_groups[0].columns[0];
+    let metadata = chunk.meta_data.as_mut().unwrap();
+    let offset = metadata.data_page_offset as usize;
+    let mut header = parquet::format::PageHeader::read_from_in_protocol(
+        &mut TCompactInputProtocol::new(Cursor::new(&bytes[offset..])),
+    )
+    .unwrap();
+    // Window 10, eight output bytes, 256 literal trees; the tree data is incomplete.
+    let input = [0xa1, 0x38, 0, 0, 0xc0, 0xff, 5, 0];
+    header.uncompressed_page_size = 8;
+    header.compressed_page_size = input.len() as i32;
+    let mut encoded_header = Vec::new();
+    header
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_header))
+        .unwrap();
+    metadata.codec = parquet::format::CompressionCodec::BROTLI;
+    metadata.total_compressed_size = (encoded_header.len() + input.len()) as i64;
+    metadata.total_uncompressed_size = metadata.total_compressed_size;
+    let total_size = metadata.total_compressed_size;
+    chunk.offset_index_offset = None;
+    chunk.offset_index_length = None;
+    chunk.column_index_offset = None;
+    chunk.column_index_length = None;
+    footer.row_groups[0].total_byte_size = total_size;
+    footer.row_groups[0].total_compressed_size = Some(total_size);
+    let mut changed = bytes[..offset].to_vec();
+    changed.extend_from_slice(&encoded_header);
+    changed.extend_from_slice(&input);
+    let mut encoded_footer = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_footer))
+        .unwrap();
+    changed.extend_from_slice(&encoded_footer);
+    changed.extend_from_slice(&(encoded_footer.len() as u32).to_le_bytes());
+    changed.extend_from_slice(b"PAR1");
+    assert!(changed.len() < 4096);
+    std::fs::write(file.path(), changed).unwrap();
+}
+
+#[test]
+fn issue577_brotli_huffman_checked_before_allocation() {
+    let file = fixture(false);
+    let (result, maximum) =
+        execute_observed_after_planning(&file, || replace_with_brotli_huffman_fixture(&file));
+    assert!(matches!(
+        result,
+        Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+    ));
+    println!("Brotli Huffman maximum_request={maximum} limit={LIMIT}");
+    assert!(
+        maximum <= LIMIT,
+        "Huffman request exceeded the decoding budget"
+    );
+}
+
+#[test]
+fn issue577_brotli_minimum_workspace_checked_before_allocation() {
+    let file = fixture(false);
+    let limit = 8192;
+    let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+        replace_with_brotli_huffman_fixture(&file);
+    });
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("Brotli requires 12960 bytes"));
+    println!("Brotli minimum workspace maximum_request={maximum} limit={limit}");
+    assert!(maximum <= limit);
 }
 
 #[test]
@@ -714,8 +794,12 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 assert!(data_pages > 1);
                 assert_eq!(dictionaries, usize::from(dictionary));
 
-                let (result, maximum) =
-                    execute_observed_with_alias(&file, "AS p(renamed_id, renamed_label)", || {});
+                let (result, maximum) = execute_observed_with_alias(
+                    &file,
+                    "AS p(renamed_id, renamed_label)",
+                    LIMIT,
+                    || {},
+                );
                 let ExecutionResult::Query(result) = result.unwrap() else {
                     panic!("expected a normal query result");
                 };

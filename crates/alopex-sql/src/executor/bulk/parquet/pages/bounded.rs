@@ -4,7 +4,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use brotli_decompressor::{
-    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc,
+    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, HuffmanCode, StandardAlloc,
 };
 use bytes::Bytes;
 use parquet::basic::{Compression, Encoding, Type};
@@ -26,39 +26,54 @@ fn nonnegative(value: i32) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid())
 }
 
-struct BrotliBytes {
+struct BrotliAllocation {
     inner: StandardAlloc,
     limit: u64,
     rejected: Option<usize>,
 }
 
-impl Allocator<u8> for BrotliBytes {
-    type AllocatedMemory = <StandardAlloc as Allocator<u8>>::AllocatedMemory;
+impl<T> Allocator<T> for BrotliAllocation
+where
+    StandardAlloc: Allocator<T>,
+{
+    type AllocatedMemory = <StandardAlloc as Allocator<T>>::AllocatedMemory;
 
     fn alloc_cell(&mut self, count: usize) -> Self::AllocatedMemory {
-        // The pinned decoder checks empty u8 allocations before accessing them.
-        if count as u64 > self.limit {
-            self.rejected = Some(count);
-            return self.inner.alloc_cell(0);
+        let bytes = count.checked_mul(std::mem::size_of::<T>());
+        if matches!(bytes, Some(bytes) if bytes as u64 <= self.limit) {
+            <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, count)
+        } else {
+            // Fixed tables fit the prechecked minimum; variable groups check empty results.
+            self.rejected = Some(bytes.unwrap_or(usize::MAX));
+            <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, 0)
         }
-        self.inner.alloc_cell(count)
     }
 
     fn free_cell(&mut self, memory: Self::AllocatedMemory) {
-        self.inner.free_cell(memory);
+        <StandardAlloc as Allocator<T>>::free_cell(&mut self.inner, memory);
     }
 }
 
-fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
-    let mut state = BrotliState::new(
-        BrotliBytes {
-            inner: StandardAlloc::default(),
-            limit,
-            rejected: None,
+fn brotli_budget_error(bytes: usize, limit: u64) -> ParquetError {
+    ParquetError::External(Box::new(
+        crate::executor::ExecutorError::ResourceExhausted {
+            message: format!("READ_PARQUET Brotli requires {bytes} bytes (limit {limit})"),
         },
-        StandardAlloc::default(),
-        StandardAlloc::default(),
-    );
+    ))
+}
+
+fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
+    // Brotli 4.0.3's largest fixed Huffman request is 3 * 1080 slots.
+    let minimum = 3 * 1080 * std::mem::size_of::<HuffmanCode>();
+    if minimum as u64 > limit {
+        return Err(brotli_budget_error(minimum, limit));
+    }
+    let allocator = || BrotliAllocation {
+        inner: StandardAlloc::default(),
+        limit,
+        rejected: None,
+    };
+    let mut state = BrotliState::new(allocator(), allocator(), allocator());
     let mut available_in = input.len();
     let mut available_out = output.len();
     let mut input_offset = 0;
@@ -75,12 +90,13 @@ fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
         &mut total_out,
         &mut state,
     );
-    if let Some(bytes) = state.alloc_u8.rejected {
-        return Err(ParquetError::External(Box::new(
-            crate::executor::ExecutorError::ResourceExhausted {
-                message: format!("READ_PARQUET Brotli requires {bytes} bytes (limit {limit})"),
-            },
-        )));
+    if let Some(bytes) = state
+        .alloc_u8
+        .rejected
+        .or(state.alloc_u32.rejected)
+        .or(state.alloc_hc.rejected)
+    {
+        return Err(brotli_budget_error(bytes, limit));
     }
     if !matches!(result, BrotliResult::ResultSuccess) || output_offset != output.len() {
         return Err(invalid());
