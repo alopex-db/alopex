@@ -108,6 +108,36 @@ fn cosine_search_prepares_query_norm_once() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn cosine_search_preserves_remainder_dimensions_and_self_distance() {
+    for dimension in [1, 3, 5, 7, 9, 129] {
+        let mut graph = HnswGraph::new(
+            base_config()
+                .with_dimension(dimension)
+                .with_metric(Metric::Cosine),
+        )
+        .unwrap();
+        let mut query = vec![0.0; dimension];
+        query[dimension - 1] = 1.0;
+        let other: Vec<f32> = (1..=dimension).map(|value| value as f32).collect();
+        graph.insert(b"self", &query, b"").unwrap();
+        graph.insert(b"other", &other, b"").unwrap();
+        let (hits, _) = graph.search(&query, 2, 8).unwrap();
+        assert_eq!(hits.len(), 2);
+        let self_hit = hits.iter().find(|hit| hit.key == b"self").unwrap();
+        assert_eq!(self_hit.distance, 0.0, "dimension={dimension}");
+        let other_hit = hits.iter().find(|hit| hit.key == b"other").unwrap();
+        let squared_norm: f64 = other.iter().map(|&v| f64::from(v).powi(2)).sum();
+        let expected = (1.0 - f64::from(other[dimension - 1]) / squared_norm.sqrt()) as f32;
+        assert!(
+            (other_hit.distance - expected).abs() < f32::EPSILON,
+            "dimension={dimension}: {} vs {expected}",
+            other_hit.distance
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn neighbor_selection_reuses_cached_node_norms() {
     for (metric, left_vector, right_vector, expected_score) in [
         (Metric::Cosine, [1.0, 0.0], [0.0, 1.0], 0.0),
