@@ -23,6 +23,8 @@ mod pages;
 mod preflight;
 use preflight::{check_footer, check_pages};
 
+const MAX_READ_PARQUET_ROWS: u64 = 100_000;
+
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
     schema: CopySchema,
@@ -91,11 +93,32 @@ impl ParquetReader {
         let overflow = || ExecutorError::ResourceExhausted {
             message: "READ_PARQUET retained size overflow".into(),
         };
+        let count = u64::try_from(declared_rows)
+            .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
+        if validate_planned_schema {
+            let group_rows =
+                builder
+                    .metadata()
+                    .row_groups()
+                    .iter()
+                    .try_fold(0_u64, |total, group| {
+                        let rows = u64::try_from(group.num_rows()).map_err(|_| {
+                            ExecutorError::BulkLoad("negative parquet row group count".into())
+                        })?;
+                        total.checked_add(rows).ok_or_else(overflow)
+                    })?;
+            let declared = count.max(group_rows);
+            if declared > MAX_READ_PARQUET_ROWS {
+                return Err(ExecutorError::ResourceExhausted {
+                    message: format!(
+                        "READ_PARQUET exceeds row limit {MAX_READ_PARQUET_ROWS} (declared {declared})"
+                    ),
+                });
+            }
+        }
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             // Reject a declared result that cannot fit even its row/value slots
             // before inspecting or decoding pages.
-            let count = u64::try_from(declared_rows)
-                .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
             let minimum = (table_meta.columns.len() as u64)
                 .checked_mul(std::mem::size_of::<SqlValue>() as u64)
                 .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
@@ -190,12 +213,7 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let table = TableMetadata::new("read_parquet", columns);
-    let mut reader = ParquetReader::open(path, &table, false)?;
-    let mut rows = Vec::new();
-    while let Some(batch) = reader.next_batch(1024)? {
-        rows.extend(batch);
-    }
+    let rows = read_parquet_with_plan(path, &columns, None, None)?;
     Ok((schema, rows))
 }
 

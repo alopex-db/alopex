@@ -166,13 +166,13 @@ fn execute_observed_after_planning(
     file: &tempfile::NamedTempFile,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
-    execute_observed_with_alias(file, "", LIMIT, change)
+    execute_observed_with_alias(file, "", Some(LIMIT), change)
 }
 
 fn execute_observed_with_alias(
     file: &tempfile::NamedTempFile,
     alias: &str,
-    limit: usize,
+    limit: Option<usize>,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
     let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
@@ -185,9 +185,9 @@ fn execute_observed_with_alias(
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     change();
     let mut transaction = bridge.begin_write().unwrap();
-    let policy = MemoryPolicy::new(Some(limit as u64), SpillPolicy::FailFast);
+    let policy = limit.map(|limit| MemoryPolicy::new(Some(limit as u64), SpillPolicy::FailFast));
     MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
-    let result = execute_query_with_policy(&mut transaction, &catalog, plan, Some(&policy));
+    let result = execute_query_with_policy(&mut transaction, &catalog, plan, policy.as_ref());
     let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
     (result, maximum)
 }
@@ -205,6 +205,118 @@ fn issue577_small_compressed_page_preserves_rows() {
         file.as_file().metadata().unwrap().len()
     );
     assert!(maximum <= LIMIT);
+}
+
+#[test]
+fn issue577_row_count_checked_before_decode() {
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    for (file_rows, group_rows) in [(1, 100_001), (100_001, 1)] {
+        let file = fixture(false);
+        let (result, maximum) = execute_observed_with_alias(&file, "", None, || {
+            let bytes = std::fs::read(file.path()).unwrap();
+            let footer_size =
+                u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
+                    as usize;
+            let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+                &mut TCompactInputProtocol::new(Cursor::new(
+                    &bytes[bytes.len() - 8 - footer_size..],
+                )),
+            )
+            .unwrap();
+            footer.num_rows = file_rows;
+            footer.row_groups[0].num_rows = group_rows;
+            let mut encoded = Vec::new();
+            footer
+                .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+                .unwrap();
+            replace_footer(&file, &encoded);
+        });
+        assert!(
+            matches!(&result, Err(ExecutorError::ResourceExhausted { message })
+                if message.contains("row limit")),
+            "expected a row-limit error, got {result:?}"
+        );
+        println!(
+            "row declaration file_rows={file_rows} group_rows={group_rows} maximum_request={maximum}"
+        );
+        assert!(maximum <= LIMIT);
+    }
+}
+
+fn row_count_fixture(rows: usize) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(parse_message_type("message fixture { REQUIRED INT64 id; }").unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_dictionary_enabled(false)
+            .build(),
+    );
+    let mut writer =
+        SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties).unwrap();
+    let mut group = writer.next_row_group().unwrap();
+    let mut column = group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int64Type>()
+        .write_batch(&vec![7; rows], None, None)
+        .unwrap();
+    column.close().unwrap();
+    group.close().unwrap();
+    writer.close().unwrap();
+    file
+}
+
+#[test]
+fn issue577_row_limit_boundary_preserves_rows() {
+    let file = row_count_fixture(100_000);
+    let limit = 32 * 1024 * 1024;
+    let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {});
+    let ExecutionResult::Query(result) = result.unwrap() else {
+        panic!("expected rows at the inclusive row limit");
+    };
+    assert_eq!(result.rows.len(), 100_000);
+    assert!(result.rows.iter().all(|row| row == &[SqlValue::BigInt(7)]));
+    println!(
+        "row limit boundary rows={} maximum_request={maximum}",
+        result.rows.len()
+    );
+    assert!(maximum <= limit);
+}
+
+#[test]
+fn issue577_public_read_parquet_row_limit() {
+    let file = row_count_fixture(100_001);
+    MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
+    let result = alopex_sql::executor::bulk::read_parquet(file.path().to_str().unwrap());
+    let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+    assert!(matches!(
+        result,
+        Err(ExecutorError::ResourceExhausted { .. })
+    ));
+    println!("public reader row limit maximum_request={maximum}");
+    assert!(maximum <= LIMIT);
+}
+
+#[test]
+fn issue577_streaming_reader_exceeds_materialized_row_limit() {
+    use alopex_sql::catalog::{ColumnMetadata, TableMetadata};
+    use alopex_sql::executor::bulk::{BulkReader, ParquetReader};
+    use alopex_sql::planner::types::ResolvedType;
+
+    let file = row_count_fixture(100_001);
+    let table = TableMetadata::new(
+        "copy_stream",
+        vec![ColumnMetadata::new("id", ResolvedType::BigInt)],
+    );
+    let mut reader = ParquetReader::open(file.path().to_str().unwrap(), &table, false).unwrap();
+    let mut rows = 0;
+    while let Some(batch) = reader.next_batch(1024).unwrap() {
+        assert!(batch.iter().all(|row| row == &[SqlValue::BigInt(7)]));
+        rows += batch.len();
+    }
+    assert_eq!(rows, 100_001);
 }
 
 #[test]
@@ -292,7 +404,7 @@ fn issue577_brotli_huffman_checked_before_allocation() {
 fn issue577_brotli_minimum_workspace_checked_before_allocation() {
     let file = fixture(false);
     let limit = 8192;
-    let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+    let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {
         replace_with_brotli_huffman_fixture(&file);
     });
     let error = result.unwrap_err();
@@ -797,7 +909,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 let (result, maximum) = execute_observed_with_alias(
                     &file,
                     "AS p(renamed_id, renamed_label)",
-                    LIMIT,
+                    Some(LIMIT),
                     || {},
                 );
                 let ExecutionResult::Query(result) = result.unwrap() else {
