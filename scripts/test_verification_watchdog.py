@@ -1,0 +1,134 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+from verification_watchdog import ResourcePolicy, run_guarded
+
+
+SAFE = {'host_total_bytes': 64 << 30, 'host_available_bytes': 32 << 30,
+        'host_commit_available_bytes': 32 << 30, 'host_cpu_busy': 0.1,
+        'wsl_available_bytes': 32 << 30}
+
+
+class Observations:
+    def __init__(self, second=None):
+        self.second = second
+        self.calls = 0
+        self.closed = False
+
+    def read(self):
+        self.calls += 1
+        if self.calls > 1:
+            time.sleep(0.3)
+            if isinstance(self.second, BaseException):
+                raise self.second
+            if self.second is not None:
+                return dict(SAFE, **self.second)
+        return dict(SAFE)
+
+    def close(self):
+        self.closed = True
+
+
+class WatchdogTests(unittest.TestCase):
+    def run_case(self, monitor, code, runtime='10', policy=None, descendant=False, watchdog=False):
+        with tempfile.TemporaryDirectory(prefix='codex-watchdog-') as directory:
+            base = Path(directory)
+            unit = f'codex-issue597-test-{os.getpid()}-{time.time_ns()}'
+            launch = ['systemd-run', '--user', '--wait', '--pipe', '--unit=' + unit,
+                      '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
+                      '--property=CPUQuota=100%', '--property=TasksMax=128',
+                      '--property=RuntimeMaxSec=' + runtime,
+                      '--property=KillMode=control-group', '--property=TimeoutStopSec=2',
+                      sys.executable, '-B', '-c', code, str(base / 'child.pid')]
+            if watchdog:
+                launch[6:6] = ['--property=Type=notify', '--property=NotifyAccess=all',
+                              '--property=WatchdogSec=1', '--property=WatchdogSignal=SIGTERM']
+            result = run_guarded(launch, unit, base / 'run', monitor,
+                                 policy or ResourcePolicy())
+            self.assertTrue(monitor.closed)
+            saved = json.loads((base / 'run-watch.json').read_text())
+            self.assertEqual(saved['status'], result['status'])
+            self.assertTrue(result['cleanup_complete'])
+            events = [json.loads(line) for line in (base / 'run-events.jsonl').read_text().splitlines()]
+            self.assertEqual(events[0]['event'], 'start')
+            self.assertEqual(events[-1]['event'], 'end')
+            if descendant:
+                self.assertTrue((base / 'child.pid').is_file(), 'descendant did not start')
+            if (base / 'child.pid').exists():
+                self.assertFalse(Path('/proc', (base / 'child.pid').read_text()).exists())
+            return result, events
+
+    def test_success_and_failure(self):
+        for code, status in [('pass', 'success'), ('raise SystemExit(7)', 'failed')]:
+            result, events = self.run_case(Observations(), code)
+            self.assertEqual(result['status'], status)
+            self.assertTrue(any(event['event'] == 'sample' for event in events))
+
+    def test_rejects_before_launch(self):
+        for unsafe in ({'host_available_bytes': 0}, {'host_commit_available_bytes': 0},
+                       {'wsl_available_bytes': 0}, {'host_cpu_busy': 0.99}):
+            monitor = Observations()
+            monitor.calls = 1
+            monitor.second = unsafe
+            result, _ = self.run_case(monitor, 'raise RuntimeError("must not run")')
+            self.assertEqual(result['status'], 'rejected')
+            self.assertFalse(result['launched'])
+
+    def test_pressure_stops_descendants(self):
+        code = ('import subprocess,sys,time; from pathlib import Path; '
+                'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                'Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(60)')
+        for unsafe in ({'host_available_bytes': 0}, {'host_commit_available_bytes': 0},
+                       {'wsl_available_bytes': 0}):
+            result, _ = self.run_case(Observations(unsafe), code, descendant=True)
+            self.assertEqual(result['status'], 'pressure_stopped')
+
+    def test_cpu_pressure_stops(self):
+        result, _ = self.run_case(Observations({'host_cpu_busy': 0.99}),
+                                  'import time; time.sleep(60)',
+                                  policy=ResourcePolicy(cpu_grace_seconds=0))
+        self.assertEqual(result['status'], 'pressure_stopped')
+
+    def test_transient_cpu_load_resets_grace_period(self):
+        policy = ResourcePolicy()
+        high = dict(SAFE, host_cpu_busy=0.99)
+        with patch('verification_watchdog.time.monotonic', side_effect=[100, 105, 112, 123]):
+            self.assertIsNone(policy.reason(high))
+            self.assertIsNone(policy.reason(high))
+            self.assertIsNone(policy.reason(SAFE))
+            self.assertIsNone(policy.reason(high))
+            self.assertEqual(policy.reason(high), 'host CPU pressure')
+
+    def test_monitor_loss_and_interruption_stop_descendants(self):
+        code = ('import subprocess,sys,time; from pathlib import Path; '
+                'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                'Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(60)')
+        for error, expected in [(OSError('observation unavailable'), 'monitor_stopped'),
+                                (KeyboardInterrupt(), 'interrupted')]:
+            result, _ = self.run_case(Observations(error), code, descendant=True)
+            self.assertEqual(result['status'], expected)
+
+    def test_timeout_and_launch_failure(self):
+        result, _ = self.run_case(Observations(), 'import time; time.sleep(60)', runtime='1')
+        self.assertEqual(result['status'], 'timeout')
+        result, _ = self.run_case(Observations(), 'pass', runtime='invalid-runtime')
+        self.assertEqual(result['status'], 'launch_failed')
+
+    def test_os_watchdog_stops_when_heartbeat_ceases(self):
+        code = ('import subprocess,sys,time; from pathlib import Path; '
+                'subprocess.run(["systemd-notify","--ready"],check=True); '
+                'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                'Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(60)')
+        result, _ = self.run_case(Observations(), code, descendant=True, watchdog=True)
+        self.assertEqual(result['status'], 'monitor_stopped')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 
 worktree = Path(__file__).resolve().parents[1]
 root = next(parent for parent in worktree.parents if (parent / "alopex/Cargo.toml").is_file())
@@ -17,27 +18,24 @@ label, selector = sys.argv[1:]
 assert label.replace("-", "").isalnum(), "invalid verification label"
 if os.environ.get("CODEX_RESOURCE_CHILD") != "1":
     unit = "codex-issue597-" + label + "-" + str(os.getpid())
-    resource_log = evidence / (label + "-resource-unit.log")
     launch = ["systemd-run", "--user", "--wait", "--pipe", "--unit=" + unit,
               "--property=MemoryMax=4G", "--property=MemoryHigh=3G",
               "--property=MemorySwapMax=0", "--property=CPUQuota=100%",
               "--property=TasksMax=128", "--property=RuntimeMaxSec=600",
               "--property=KillMode=control-group", "--property=TimeoutStopSec=5",
+              "--property=Type=notify", "--property=NotifyAccess=all",
+              "--property=WatchdogSec=4", "--property=WatchdogSignal=SIGTERM",
+              "--property=TimeoutAbortSec=2",
               "--working-directory=" + str(root), "/usr/bin/env",
               "CODEX_RESOURCE_CHILD=1", "PATH=" + os.environ["PATH"],
               sys.executable, "-B", str(Path(__file__).resolve()), label, selector]
-    try:
-        with resource_log.open("w") as output:
-            result = subprocess.run(launch, stdout=output, stderr=subprocess.STDOUT)
-        state = subprocess.run(["systemctl", "--user", "show", unit,
-                                "--property=Result", "--property=ExecMainStatus"],
-                               capture_output=True, text=True)
-        with resource_log.open("a") as output:
-            output.write(state.stdout)
-    finally:
-        subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True)
-        subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True)
-    sys.exit(result.returncode)
+    from host_resources import HostMonitor
+    from verification_watchdog import ResourcePolicy, run_guarded
+    result = run_guarded(launch, unit, evidence / label, HostMonitor(), ResourcePolicy())
+    if not result["cleanup_complete"]:
+        sys.exit(125)
+    sys.exit(result["exit"] if result["exit"] is not None else 125)
+
 group = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[1]
 assert group and "/codex-issue597-" in group, "verification requires its own resource unit"
 cgroup = Path("/sys/fs/cgroup") / group.lstrip("/")
@@ -46,6 +44,27 @@ resource_limits = {name: (cgroup / name).read_text().strip() for name in
 assert resource_limits == {"memory.max": "4294967296", "memory.high": "3221225472",
                           "memory.swap.max": "0", "cpu.max": "100000 100000",
                           "pids.max": "128"}, "resource limits were not enforced"
+
+
+def keep_watchdog_alive():
+    heartbeat = evidence / (label + "-events.jsonl")
+    last_mtime = heartbeat.stat().st_mtime_ns
+    last_change = time.monotonic()
+    while True:
+        try:
+            current_mtime = heartbeat.stat().st_mtime_ns
+            if current_mtime != last_mtime:
+                last_mtime, last_change = current_mtime, time.monotonic()
+            if time.monotonic() - last_change > 3:
+                return
+            subprocess.run(["systemd-notify", "WATCHDOG=1"], check=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return
+        time.sleep(1)
+
+
+subprocess.run(["systemd-notify", "--ready"], check=True, timeout=2)
+threading.Thread(target=keep_watchdog_alive, daemon=True).start()
 env = os.environ.copy()
 env.update(CARGO_TARGET_DIR=str(root / "alopex/target"), CARGO_INCREMENTAL="0",
            CARGO_BUILD_JOBS="1", ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1",
