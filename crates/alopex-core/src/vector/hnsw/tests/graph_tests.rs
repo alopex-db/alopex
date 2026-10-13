@@ -118,7 +118,9 @@ fn neighbor_selection_reuses_cached_node_norms() {
         let left = graph.insert(b"left", &left_vector, b"").unwrap();
         let right = graph.insert(b"right", &right_vector, b"").unwrap();
 
-        assert!((graph.node_similarity(left, right) - expected_score).abs() < f32::EPSILON);
+        assert!(
+            (graph.node_similarity(left, right) - expected_score).abs() < f64::from(f32::EPSILON)
+        );
     }
 }
 
@@ -316,4 +318,104 @@ fn delete_marks_node_and_compact_removes_it() {
     let stats = graph.stats();
     assert_eq!(stats.node_count, 2);
     assert_eq!(stats.deleted_count, 0);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn public_insert_keeps_candidates_below_neighbor_limit() {
+    let mut graph = make_graph();
+    let a = graph.insert(b"a", &[0.0, 0.0], b"").unwrap();
+    let b = graph.insert(b"b", &[1.0, 0.0], b"").unwrap();
+    let c = graph.insert(b"c", &[2.0, 0.0], b"").unwrap();
+    let mut neighbors = graph.nodes[c as usize].as_ref().unwrap().neighbors[0].clone();
+    neighbors.sort_unstable();
+    assert_eq!(
+        neighbors,
+        vec![a, b],
+        "fewer candidates than M must retain both candidates without diversity pruning"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn reverse_link_pruning_preserves_direction_among_duplicate_vectors() {
+    for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+        let mut graph = HnswGraph::new(base_config().with_metric(metric)).unwrap();
+        let center = graph.insert(b"center", &[1.0, 0.0], b"").unwrap();
+        let a = graph.insert(b"a", &[1.0, 0.0], b"").unwrap();
+        let b = graph.insert(b"b", &[1.0, 0.0], b"").unwrap();
+        let c = graph.insert(b"c", &[1.0, 0.0], b"").unwrap();
+        let bridge = graph.insert(b"bridge", &[0.0, 1.0], b"").unwrap();
+        graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = vec![a, b, bridge];
+        graph.prune_neighbors(center, 0, 2);
+        assert_eq!(
+            graph.nodes[center as usize].as_ref().unwrap().neighbors[0],
+            vec![a, bridge],
+            "identical vectors must not consume the last edge to another direction"
+        );
+
+        graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = vec![a, b, c];
+        graph.prune_neighbors(center, 0, 2);
+        assert_eq!(
+            graph.nodes[center as usize].as_ref().unwrap().neighbors[0],
+            vec![a, b],
+            "distinct keys with duplicate vectors still fill unused neighbor capacity"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn reverse_link_pruning_preserves_near_parallel_diverse_direction() {
+    let vector = |base: usize| (0..128).map(|d| (base + d) as f32).collect::<Vec<_>>();
+    let center_vector = vector(500);
+    let a_vector = vector(501);
+    let b_vector = vector(502);
+    let c_vector = vector(499);
+    let cosine64 = |left: &[f32], right: &[f32]| {
+        let dot = left
+            .iter()
+            .zip(right)
+            .map(|(&l, &r)| f64::from(l) * f64::from(r))
+            .sum::<f64>();
+        let left_squared = left
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>();
+        let right_squared = right
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>();
+        dot / (left_squared.sqrt() * right_squared.sqrt())
+    };
+    let ca = cosine64(&center_vector, &a_vector);
+    let cb = cosine64(&center_vector, &b_vector);
+    let cc = cosine64(&center_vector, &c_vector);
+    let ba = cosine64(&b_vector, &a_vector);
+    let ac = cosine64(&a_vector, &c_vector);
+    assert!(
+        ca > cc && cc > cb,
+        "independent oracle: a closest, then c, then b"
+    );
+    assert!(ba > cb, "independent oracle: a excludes redundant b");
+    assert!(ac < cc, "independent oracle: a retains opposite-side c");
+
+    let mut graph = HnswGraph::new(
+        base_config()
+            .with_dimension(128)
+            .with_metric(Metric::Cosine),
+    )
+    .unwrap();
+    let center = graph.insert(b"center", &center_vector, b"").unwrap();
+    let a = graph.insert(b"a", &a_vector, b"").unwrap();
+    let b = graph.insert(b"b", &b_vector, b"").unwrap();
+    let c = graph.insert(b"c", &c_vector, b"").unwrap();
+    // Three candidates exceed max=2: the under-capacity shortcut cannot apply.
+    graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = vec![a, b, c];
+    graph.prune_neighbors(center, 0, 2);
+    assert_eq!(
+        graph.nodes[center as usize].as_ref().unwrap().neighbors[0],
+        vec![a, c],
+        "near-parallel cosine pruning must retain a and opposite-side c"
+    );
 }

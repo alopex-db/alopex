@@ -98,7 +98,7 @@ impl HnswGraph {
         let node = HnswNode {
             key: key.to_vec(),
             vector: vector.to_vec(),
-            norm: vector.iter().map(|value| value * value).sum::<f32>().sqrt(),
+            norm: super::vector_norm(vector),
             metadata: metadata.to_vec(),
             neighbors,
             deleted: false,
@@ -216,7 +216,7 @@ impl HnswGraph {
             };
             node.vector.clear();
             node.vector.extend_from_slice(vector);
-            node.norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+            node.norm = super::vector_norm(vector);
             node.metadata.clear();
             node.metadata.extend_from_slice(metadata);
             if node.deleted {
@@ -337,7 +337,7 @@ impl HnswGraph {
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
 
-        let mut scored_results: Vec<(f32, HnswSearchResult)> = candidates
+        let mut scored_results: Vec<(f64, HnswSearchResult)> = candidates
             .into_iter()
             .filter_map(|c| self.node(c.node_id).map(|n| (c, n)))
             .filter(|(_, n)| !n.deleted)
@@ -534,7 +534,7 @@ impl HnswGraph {
         }
 
         while let Some(candidate) = candidates.pop() {
-            let worst_best = best.peek().map(|r| r.0.score).unwrap_or(f32::NEG_INFINITY);
+            let worst_best = best.peek().map(|r| r.0.score).unwrap_or(f64::NEG_INFINITY);
             if best.len() >= ef && candidate.score < worst_best {
                 break;
             }
@@ -582,6 +582,12 @@ impl HnswGraph {
     }
 
     fn select_neighbors_heuristic(&self, candidates: &[ScoredEntry], max: usize) -> Vec<u32> {
+        if candidates.len() < max {
+            return candidates
+                .iter()
+                .map(|candidate| candidate.node_id)
+                .collect();
+        }
         let mut sorted = candidates.to_vec();
         sorted.sort_by(|a, b| {
             b.score
@@ -589,18 +595,31 @@ impl HnswGraph {
                 .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
         });
         let mut selected = Vec::with_capacity(max);
+        let mut duplicates = Vec::new();
         for candidate in sorted {
             if selected.len() >= max {
                 break;
             }
+            // Preserve other directions before filling spare edges with duplicate vectors.
+            if selected.iter().any(|&chosen| {
+                self.node(candidate.node_id)
+                    .zip(self.node(chosen))
+                    .is_some_and(|(candidate, chosen)| candidate.vector == chosen.vector)
+            }) {
+                if duplicates.len() < max {
+                    duplicates.push(candidate.node_id);
+                }
+                continue;
+            }
             let diverse = selected.iter().all(|&chosen| {
                 let similarity = self.node_similarity(candidate.node_id, chosen);
-                similarity < candidate.score
+                similarity <= candidate.score
             });
             if diverse || selected.is_empty() {
                 selected.push(candidate.node_id);
             }
         }
+        selected.extend(duplicates.into_iter().take(max - selected.len()));
         selected
     }
 
@@ -765,67 +784,67 @@ impl HnswGraph {
 
     /// Scores two existing nodes with the same metric used by HNSW wiring.
     /// Cosine similarity reuses the norms stored at insertion time.
-    pub(crate) fn node_similarity(&self, left_id: u32, right_id: u32) -> f32 {
+    pub(crate) fn node_similarity(&self, left_id: u32, right_id: u32) -> f64 {
         let (Some(left), Some(right)) = (self.node(left_id), self.node(right_id)) else {
-            return f32::NEG_INFINITY;
+            return f64::NEG_INFINITY;
         };
         match self.config.metric {
-            Metric::Cosine => {
-                if left.norm == 0.0 || right.norm == 0.0 {
-                    0.0
-                } else {
-                    self.kernel.inner_product(&left.vector, &right.vector)
-                        / (left.norm * right.norm)
-                }
+            Metric::Cosine => cosine_similarity(&left.vector, &right.vector, left.norm, right.norm),
+            Metric::L2 => f64::from(self.kernel.l2(&left.vector, &right.vector)),
+            Metric::InnerProduct => {
+                f64::from(self.kernel.inner_product(&left.vector, &right.vector))
             }
-            Metric::L2 => self.kernel.l2(&left.vector, &right.vector),
-            Metric::InnerProduct => self.kernel.inner_product(&left.vector, &right.vector),
         }
     }
 
-    fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f32 {
+    fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f64 {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
         if let Some(node) = self.node(node_id) {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
-            if self.config.metric == Metric::Cosine {
-                if query.norm == 0.0 || node.norm == 0.0 {
-                    return 0.0;
+            return match self.config.metric {
+                Metric::Cosine => {
+                    cosine_similarity(query.values, &node.vector, query.norm, node.norm)
                 }
-                let dot = self.kernel.inner_product(query.values, &node.vector);
-                return dot / (query.norm * node.norm);
-            }
-            return self.distance_raw(query.values, &node.vector);
+                Metric::L2 => f64::from(self.kernel.l2(query.values, &node.vector)),
+                Metric::InnerProduct => {
+                    f64::from(self.kernel.inner_product(query.values, &node.vector))
+                }
+            };
         }
-        f32::NEG_INFINITY
-    }
-
-    fn distance_raw(&self, a: &[f32], b: &[f32]) -> f32 {
-        match self.config.metric {
-            Metric::Cosine => self.kernel.cosine(a, b),
-            Metric::L2 => self.kernel.l2(a, b),
-            Metric::InnerProduct => self.kernel.inner_product(a, b),
-        }
+        f64::NEG_INFINITY
     }
 
     /// Convert the internal higher-is-better score into the public distance contract.
-    fn public_distance(&self, score: f32) -> f32 {
+    fn public_distance(&self, score: f64) -> f32 {
         match self.config.metric {
-            Metric::Cosine => 1.0 - score,
-            Metric::L2 | Metric::InnerProduct => -score,
+            Metric::Cosine => (1.0 - score) as f32,
+            Metric::L2 | Metric::InnerProduct => -score as f32,
         }
     }
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32], left_norm: f64, right_norm: f64) -> f64 {
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    let dot = left
+        .iter()
+        .zip(right)
+        .map(|(&a, &b)| f64::from(a) * f64::from(b))
+        .sum::<f64>();
+    (dot / (left_norm * right_norm)).clamp(-1.0, 1.0)
 }
 
 #[derive(Clone, Copy)]
 struct PreparedQuery<'a> {
     values: &'a [f32],
-    norm: f32,
+    norm: f64,
 }
 
 impl<'a> PreparedQuery<'a> {
     fn new(metric: Metric, values: &'a [f32]) -> Self {
         let norm = if metric == Metric::Cosine {
-            values.iter().map(|value| value * value).sum::<f32>().sqrt()
+            super::vector_norm(values)
         } else {
             0.0
         };
@@ -853,7 +872,7 @@ fn validate_hnsw_vector(metric: Metric, vector: &[f32]) -> Result<()> {
 #[derive(Clone, Debug)]
 struct ScoredEntry {
     node_id: u32,
-    score: f32,
+    score: f64,
 }
 
 impl PartialEq for ScoredEntry {

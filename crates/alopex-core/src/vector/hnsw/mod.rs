@@ -27,6 +27,14 @@ pub const MAX_HNSW_EF_SEARCH: usize = 1_000_000;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
+fn vector_norm(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt()
+}
+
 /// Validates the public HNSW search-breadth contract.
 pub fn validate_ef_search(ef_search: usize) -> Result<()> {
     if !(1..=MAX_HNSW_EF_SEARCH).contains(&ef_search) {
@@ -458,7 +466,7 @@ impl HnswIndex {
                     total_bytes += (level_neighbors.len() * 4) as u64;
                     total_bytes += 24;
                 }
-                total_bytes += 104;
+                total_bytes += std::mem::size_of::<types::HnswNode>() as u64;
             }
         }
 

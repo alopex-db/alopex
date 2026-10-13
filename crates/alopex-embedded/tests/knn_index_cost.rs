@@ -366,6 +366,10 @@ fn sql_knn_hnsw_cost_process_worker() {
             elapsed_ms,
         );
     }
+    // Check the same immutable query after recording samples so warmup stays unchanged.
+    if arm == "hnsw" {
+        assert_complete_hnsw_path(&db, &table, &query);
+    }
 }
 
 fn selected_usize(name: &str, upper_bound: usize) -> usize {
@@ -476,8 +480,13 @@ fn elapsed_millis(db: &Database, query: &str) -> Vec<f64> {
     let mut elapsed = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let start = Instant::now();
-        db.execute_sql(query).expect("execute query");
-        elapsed.push(start.elapsed().as_secs_f64() * 1_000.0);
+        let result_rows = match db.execute_sql(query).expect("execute query") {
+            ExecutionResult::Query(result) => result.rows.len(),
+            _ => panic!("SELECT must return a query result"),
+        };
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        assert_eq!(result_rows, K, "each measured SELECT must return k rows");
+        elapsed.push(elapsed_ms);
     }
     elapsed
 }
@@ -486,4 +495,49 @@ fn median_millis(samples: &[f64]) -> f64 {
     let mut elapsed = samples.to_vec();
     elapsed.sort_by(f64::total_cmp);
     elapsed[RUNS / 2]
+}
+
+// The cost fixture previously reached only three candidates at this size.
+#[test]
+#[ignore = "16k execution-path regression; run with the issue #461 focused acceptance targets"]
+fn sql_knn_complete_candidates_keep_index_execution_path() {
+    let db = Database::open_in_memory().expect("open database");
+    seed(&db, "items_hnsw", 16_000, true);
+    assert_complete_hnsw_path(&db, "items_hnsw", &query("items_hnsw"));
+}
+
+fn assert_complete_hnsw_path(db: &Database, table: &str, sql: &str) {
+    let mut vector = vec![0.0_f32; DIMENSION];
+    vector[0] = 1.0;
+    let (raw, stats) = db
+        .search_hnsw(&format!("idx_{table}_embedding"), &vector, K, Some(64))
+        .unwrap();
+    let ExecutionResult::Query(analyze) =
+        db.execute_sql(&format!("EXPLAIN ANALYZE {sql}")).unwrap()
+    else {
+        panic!("query plan expected")
+    };
+    let plan = format!("{:?}", analyze.rows);
+    let ExecutionResult::Query(result) = db.execute_sql(sql).unwrap() else {
+        panic!("rows expected")
+    };
+    println!(
+        "raw_hits={} nodes_visited={} SQL_rows={} plan={}",
+        raw.len(),
+        stats.nodes_visited,
+        result.rows.len(),
+        plan
+    );
+    assert_eq!(result.rows.len(), K, "SQL LIMIT must preserve row count");
+    assert_eq!(
+        raw.len(),
+        K,
+        "healthy indexed non-NULL data must provide k candidates"
+    );
+    assert!(plan.contains("HnswSearch"), "{plan}");
+    assert!(plan.contains("fallback=none"), "{plan}");
+    assert!(
+        !plan.contains("fallback=ExactKnnScan"),
+        "complete raw candidate search must retain the index execution path"
+    );
 }
