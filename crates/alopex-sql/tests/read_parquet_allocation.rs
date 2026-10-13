@@ -645,6 +645,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 Compression::SNAPPY,
                 Compression::GZIP(Default::default()),
                 Compression::ZSTD(Default::default()),
+                Compression::BROTLI(Default::default()),
             ] {
                 let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
                 let schema = Arc::new(Schema::new(vec![

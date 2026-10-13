@@ -51,6 +51,7 @@ parquet = { version = "53", features = ["arrow"] }
 bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
 flate2 = { version = "=1.1.8", default-features = false, features = ["rust_backend"] }
 zstd = { version = "=0.13.3", default-features = false }
+brotli-decompressor = "=4.0.3"
 thrift = { version = "=0.17.0", default-features = false }
 crc32fast = "=1.5.0"
 arrow-array = "53"

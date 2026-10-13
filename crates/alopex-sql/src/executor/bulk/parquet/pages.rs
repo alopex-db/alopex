@@ -117,7 +117,9 @@ impl Iterator for ColumnChunks {
             };
             if matches!(
                 column.compression(),
-                parquet::basic::Compression::GZIP(_) | parquet::basic::Compression::ZSTD(_)
+                parquet::basic::Compression::GZIP(_)
+                    | parquet::basic::Compression::ZSTD(_)
+                    | parquet::basic::Compression::BROTLI(_)
             ) {
                 return Ok(Box::new(bounded::BoundedPages::new(
                     Arc::clone(&self.file),
@@ -186,6 +188,7 @@ mod tests {
         for compression in [
             parquet::basic::Compression::GZIP(Default::default()),
             parquet::basic::Compression::ZSTD(Default::default()),
+            parquet::basic::Compression::BROTLI(Default::default()),
         ] {
             assert_indexed_pages(compression);
         }

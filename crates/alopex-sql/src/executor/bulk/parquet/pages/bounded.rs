@@ -3,6 +3,9 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
+use brotli_decompressor::{
+    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc,
+};
 use bytes::Bytes;
 use parquet::basic::{Compression, Encoding, Type};
 use parquet::column::page::{Page, PageMetadata, PageReader};
@@ -21,6 +24,68 @@ fn invalid() -> ParquetError {
 
 fn nonnegative(value: i32) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid())
+}
+
+struct BrotliBytes {
+    inner: StandardAlloc,
+    limit: u64,
+    rejected: Option<usize>,
+}
+
+impl Allocator<u8> for BrotliBytes {
+    type AllocatedMemory = <StandardAlloc as Allocator<u8>>::AllocatedMemory;
+
+    fn alloc_cell(&mut self, count: usize) -> Self::AllocatedMemory {
+        // The pinned decoder checks empty u8 allocations before accessing them.
+        if count as u64 > self.limit {
+            self.rejected = Some(count);
+            return self.inner.alloc_cell(0);
+        }
+        self.inner.alloc_cell(count)
+    }
+
+    fn free_cell(&mut self, memory: Self::AllocatedMemory) {
+        self.inner.free_cell(memory);
+    }
+}
+
+fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
+    let mut state = BrotliState::new(
+        BrotliBytes {
+            inner: StandardAlloc::default(),
+            limit,
+            rejected: None,
+        },
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+    );
+    let mut available_in = input.len();
+    let mut available_out = output.len();
+    let mut input_offset = 0;
+    let mut output_offset = 0;
+    let mut total_out = 0;
+    // Full input lets the decoder shrink the ringbuffer for small final blocks.
+    let result = BrotliDecompressStream(
+        &mut available_in,
+        &mut input_offset,
+        input,
+        &mut available_out,
+        &mut output_offset,
+        output,
+        &mut total_out,
+        &mut state,
+    );
+    if let Some(bytes) = state.alloc_u8.rejected {
+        return Err(ParquetError::External(Box::new(
+            crate::executor::ExecutorError::ResourceExhausted {
+                message: format!("READ_PARQUET Brotli requires {bytes} bytes (limit {limit})"),
+            },
+        )));
+    }
+    if !matches!(result, BrotliResult::ResultSuccess) || output_offset != output.len() {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 enum Position {
@@ -277,6 +342,10 @@ impl BoundedPages {
                 }
             }
             Compression::ZSTD(_) => {}
+            Compression::BROTLI(_) if compressed_size != offset || output_size != offset => {
+                decode_brotli(&compressed[offset..], &mut output[offset..], self.limit)?;
+            }
+            Compression::BROTLI(_) => {}
             _ => return Err(invalid()),
         }
         Ok(Bytes::from(output))

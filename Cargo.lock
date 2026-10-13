@@ -394,6 +394,7 @@ dependencies = [
  "arrow-schema",
  "base64 0.22.1",
  "bincode",
+ "brotli-decompressor",
  "bytes",
  "cap-fs-ext",
  "cap-primitives",
