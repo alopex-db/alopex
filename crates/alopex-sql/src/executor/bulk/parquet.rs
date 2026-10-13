@@ -114,8 +114,14 @@ impl ParquetReader {
             check_pages(&mut file, builder.metadata(), footer_start, limit)?;
         }
 
-        let reader = if limit.is_some() {
-            pages::reader(file, builder.metadata().clone(), builder.schema(), 1024)
+        let reader = if let Some(limit) = limit {
+            pages::reader(
+                file,
+                builder.metadata().clone(),
+                builder.schema(),
+                1024,
+                limit,
+            )
         } else {
             builder.with_batch_size(1024).build()
         }

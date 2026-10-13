@@ -9,11 +9,14 @@ use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::serialized_reader::SerializedPageReader;
 
+mod bounded;
+
 pub(super) fn reader(
     file: File,
     metadata: Arc<ParquetMetaData>,
     schema: &Schema,
     batch_size: usize,
+    limit: u64,
 ) -> Result<ParquetRecordBatchReader> {
     let declared_rows = usize::try_from(metadata.file_metadata().num_rows())
         .map_err(|_| ParquetError::General("invalid parquet row count".into()))?;
@@ -35,6 +38,7 @@ pub(super) fn reader(
         file: Arc::new(file),
         metadata,
         num_rows,
+        limit,
     };
     ParquetRecordBatchReader::try_new_with_row_groups(
         &levels,
@@ -48,6 +52,7 @@ struct FileRowGroups {
     file: Arc<File>,
     metadata: Arc<ParquetMetaData>,
     num_rows: usize,
+    limit: u64,
 }
 
 impl RowGroups for FileRowGroups {
@@ -65,6 +70,7 @@ impl RowGroups for FileRowGroups {
             metadata: Arc::clone(&self.metadata),
             column,
             next_group: 0,
+            limit: self.limit,
         }))
     }
 }
@@ -74,6 +80,7 @@ struct ColumnChunks {
     metadata: Arc<ParquetMetaData>,
     column: usize,
     next_group: usize,
+    limit: u64,
 }
 
 impl Iterator for ColumnChunks {
@@ -108,6 +115,18 @@ impl Iterator for ColumnChunks {
             } else {
                 None
             };
+            if matches!(
+                column.compression(),
+                parquet::basic::Compression::GZIP(_) | parquet::basic::Compression::ZSTD(_)
+            ) {
+                return Ok(Box::new(bounded::BoundedPages::new(
+                    Arc::clone(&self.file),
+                    column,
+                    group.num_rows() as usize,
+                    locations,
+                    self.limit,
+                )?) as Box<dyn PageReader>);
+            }
             let inner = SerializedPageReader::new(
                 Arc::clone(&self.file),
                 column,
@@ -135,7 +154,7 @@ impl Iterator for ColumnPages {
 
 impl PageReader for ColumnPages {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
-        // shortcut: stock decoding has no capacity enforcement; replace before decoder acceptance.
+        // shortcut: Brotli and legacy LZ4 working allocations still need budget enforcement.
         self.inner.get_next_page()
     }
 
@@ -164,6 +183,15 @@ mod tests {
 
     #[test]
     fn page_index_peek_skip_and_record_boundaries_preserve_rows() {
+        for compression in [
+            parquet::basic::Compression::GZIP(Default::default()),
+            parquet::basic::Compression::ZSTD(Default::default()),
+        ] {
+            assert_indexed_pages(compression);
+        }
+    }
+
+    fn assert_indexed_pages(compression: parquet::basic::Compression) {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut lists = ListBuilder::new(Int32Builder::new());
         lists.values().append_value(1);
@@ -195,6 +223,7 @@ mod tests {
         )
         .unwrap();
         let props = WriterProperties::builder()
+            .set_compression(compression)
             .set_max_row_group_size(2)
             .set_data_page_row_count_limit(1)
             .set_write_batch_size(1)
@@ -216,6 +245,7 @@ mod tests {
             file: Arc::new(input.try_clone().unwrap()),
             metadata: Arc::clone(&metadata),
             num_rows: 4,
+            limit: 65536,
         };
         let mut chunks = groups.column_chunks(0).unwrap();
         assert!(groups.column_chunks(3).is_err());
@@ -233,7 +263,7 @@ mod tests {
         assert!(chunks.next().unwrap().is_ok());
         assert!(chunks.next().is_none());
 
-        let actual = reader(input, metadata, builder.schema(), 1024)
+        let actual = reader(input, metadata, builder.schema(), 1024, 65536)
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();

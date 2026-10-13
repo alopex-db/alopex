@@ -207,6 +207,115 @@ fn issue577_small_compressed_page_preserves_rows() {
 }
 
 #[test]
+fn issue577_gzip_output_checked_before_capacity_growth() {
+    codec_output_checked_before_capacity_growth(Compression::GZIP(Default::default()));
+}
+
+#[test]
+fn issue577_snappy_output_checked_before_capacity_growth() {
+    codec_output_checked_before_capacity_growth(Compression::SNAPPY);
+}
+
+#[test]
+fn issue577_codec_brotli_output_checked_before_capacity_growth() {
+    codec_output_checked_before_capacity_growth(Compression::BROTLI(Default::default()));
+}
+
+#[test]
+fn issue577_codec_zstd_output_checked_before_capacity_growth() {
+    codec_output_checked_before_capacity_growth(Compression::ZSTD(Default::default()));
+}
+
+#[test]
+fn issue577_codec_lz4_raw_output_checked_before_capacity_growth() {
+    codec_output_checked_before_capacity_growth(Compression::LZ4_RAW);
+}
+
+fn codec_output_checked_before_capacity_growth(compression: Compression) {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+    use parquet::file::properties::EnabledStatistics;
+
+    for large in [false, true] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(compression)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(EnabledStatistics::None)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        let payload = vec![0; if large { LIMIT + 1 } else { 8 }];
+        column
+            .typed::<ByteArrayType>()
+            .write_batch(&[ByteArray::from(payload)], None, None)
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        let mut footer = writer.close().unwrap();
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            if !large {
+                return;
+            }
+            let mut bytes = std::fs::read(file.path()).unwrap();
+            let footer_size =
+                u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
+                    as usize;
+            bytes.truncate(bytes.len() - 8 - footer_size);
+            let metadata = footer.row_groups[0].columns[0].meta_data.as_mut().unwrap();
+            let offset = metadata.data_page_offset as usize;
+            assert_eq!(&bytes[offset..offset + 3], &[0x15, 0, 0x15]);
+            let mut end = offset + 3;
+            while bytes[end] & 128 != 0 {
+                end += 1;
+            }
+            // Preserve the encoded width and every physical offset while declaring eight bytes.
+            let width = end - (offset + 3) + 1;
+            assert!(width > 1);
+            bytes[offset + 3] = 16 | 128;
+            bytes[offset + 4..end].fill(128);
+            bytes[end] = 0;
+            metadata.total_uncompressed_size = 1024;
+            footer.row_groups[0].total_byte_size = 1024;
+            let mut encoded = Vec::new();
+            footer
+                .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+                .unwrap();
+            assert!(encoded.len() < 4096);
+            bytes.extend_from_slice(&encoded);
+            bytes.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(b"PAR1");
+            assert!(bytes.len() < 4096);
+            std::fs::write(file.path(), bytes).unwrap();
+        });
+        println!(
+            "{compression:?} control large={large} maximum_request={maximum} result={result:?}"
+        );
+        if large {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected a normal compressed query result");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Blob(vec![0; 8])]]);
+        }
+        assert!(
+            maximum <= LIMIT,
+            "{compression:?} output grew beyond the decoding budget"
+        );
+    }
+}
+
+#[test]
 fn issue577_oversized_page_rejected_before_allocation() {
     let file = fixture(true);
     let (result, maximum) = execute_observed(&file);
@@ -531,7 +640,12 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
 
     for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
         for dictionary in [false, true] {
-            for compression in [Compression::UNCOMPRESSED, Compression::SNAPPY] {
+            for compression in [
+                Compression::UNCOMPRESSED,
+                Compression::SNAPPY,
+                Compression::GZIP(Default::default()),
+                Compression::ZSTD(Default::default()),
+            ] {
                 let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
                 let schema = Arc::new(Schema::new(vec![
                     Field::new("id", DataType::Int64, true),

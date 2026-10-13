@@ -111,13 +111,74 @@ pub(super) fn check_pages(
     Ok(())
 }
 
+pub(super) fn read_page_header_bytes(
+    file: &mut File,
+    start: u64,
+    end: u64,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    let maximum = end.checked_sub(start).ok_or_else(invalid_page)?.min(limit);
+    file.seek(SeekFrom::Start(start))
+        .map_err(parquet_io_error)?;
+    let mut header = CompactHeader {
+        input: BufReader::with_capacity(maximum.min(4096) as usize, (&mut *file).take(maximum)),
+        maximum,
+    };
+    let (uncompressed, compressed, _) = header.page()?;
+    check_declared_bytes(uncompressed, limit)?;
+    check_declared_bytes(compressed, limit)?;
+    let consumed = maximum - header.remaining();
+    start
+        .checked_add(consumed)
+        .and_then(|p| p.checked_add(compressed))
+        .filter(|p| *p <= end)
+        .ok_or_else(invalid_page)?;
+    drop(header);
+    let mut bytes = vec![0; usize::try_from(consumed).map_err(|_| invalid_page())?];
+    file.seek(SeekFrom::Start(start))
+        .map_err(parquet_io_error)?;
+    file.read_exact(&mut bytes).map_err(parquet_io_error)?;
+    let mut copied = CompactHeader {
+        input: BufReader::with_capacity(
+            bytes.len().min(4096),
+            std::io::Cursor::new(&bytes).take(consumed),
+        ),
+        maximum: consumed,
+    };
+    let (uncompressed, compressed, _) = copied.page()?;
+    check_declared_bytes(uncompressed, limit)?;
+    check_declared_bytes(compressed, limit)?;
+    if copied.remaining() != 0 {
+        return Err(invalid_page());
+    }
+    start
+        .checked_add(consumed)
+        .and_then(|p| p.checked_add(compressed))
+        .filter(|p| *p <= end)
+        .ok_or_else(invalid_page)?;
+    drop(copied);
+    let mut typed = CompactHeader {
+        input: BufReader::with_capacity(
+            bytes.len().min(4096),
+            std::io::Cursor::new(&bytes).take(consumed),
+        ),
+        maximum: consumed,
+    };
+    typed.metadata_fields(0, "PageHeader")?;
+    if typed.remaining() != 0 {
+        return Err(invalid_page());
+    }
+    drop(typed);
+    Ok(bytes)
+}
+
 // Skip compact Thrift values without allocating statistics or unknown-field payloads.
-struct CompactHeader<'a> {
-    input: BufReader<std::io::Take<&'a mut File>>,
+struct CompactHeader<R: Read> {
+    input: BufReader<std::io::Take<R>>,
     maximum: u64,
 }
 
-impl CompactHeader<'_> {
+impl<R: Read> CompactHeader<R> {
     fn remaining(&self) -> u64 {
         self.input.get_ref().limit() + self.input.buffer().len() as u64
     }
@@ -388,6 +449,18 @@ impl CompactHeader<'_> {
 // Field and slot types follow the pinned Parquet format decoder to keep both readers aligned.
 fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8)> {
     Some(match (context, id) {
+        ("PageHeader", 1..=4) => (5, "", 0, 0),
+        ("PageHeader", 5) => (12, "DataPageHeader", 0, 0),
+        ("PageHeader", 6) => (12, "IndexPageHeader", 0, 0),
+        ("PageHeader", 7) => (12, "DictionaryPageHeader", 0, 0),
+        ("PageHeader", 8) => (12, "DataPageHeaderV2", 0, 0),
+        ("DataPageHeader", 1..=4) => (5, "", 0, 0),
+        ("DataPageHeader", 5) => (12, "Statistics", 0, 0),
+        ("DataPageHeaderV2", 1..=6) => (5, "", 0, 0),
+        ("DataPageHeaderV2", 7) => (1, "", 0, 0),
+        ("DataPageHeaderV2", 8) => (12, "Statistics", 0, 0),
+        ("DictionaryPageHeader", 1..=2) => (5, "", 0, 0),
+        ("DictionaryPageHeader", 3) => (1, "", 0, 0),
         ("AesGcmCtrV1", 1) | ("AesGcmCtrV1", 2) => (8, "", 0, 0),
         ("AesGcmCtrV1", 3) => (1, "", 0, 0),
         ("AesGcmV1", 1) | ("AesGcmV1", 2) => (8, "", 0, 0),
