@@ -29,6 +29,9 @@ use crate::storage::{KeyEncoder, RowCodec};
 
 use futures::{Stream, stream::StreamExt};
 
+mod worker;
+use worker::{WorkerStore, WorkerTransaction};
+
 struct AsyncTxnState<T> {
     txn: Option<T>,
     hnsw_indices: HashMap<String, HnswTxnEntry>,
@@ -261,6 +264,9 @@ where
                 let hnsw = std::mem::take(&mut guard.hnsw_indices);
                 (txn, hnsw)
             };
+            if hnsw_indices.is_empty() {
+                return txn.async_commit().await.map_err(StorageError::from);
+            }
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
@@ -287,6 +293,9 @@ where
                 let hnsw = std::mem::take(&mut guard.hnsw_indices);
                 (txn, hnsw)
             };
+            if hnsw_indices.is_empty() {
+                return txn.async_rollback().await.map_err(StorageError::from);
+            }
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
@@ -367,6 +376,44 @@ where
                 let hnsw = std::mem::take(&mut guard.hnsw_indices);
                 (txn, hnsw)
             };
+
+            if txn.supports_worker_tasks() {
+                let mut txn = txn;
+                let response = txn
+                    .async_worker_task(Box::new(move |raw| {
+                        let mut worker = WorkerSqlTransaction::<WorkerStore<'_>>::from_inner(
+                            WorkerTransaction { raw },
+                            mode,
+                            hnsw_indices,
+                            memory_policy,
+                        );
+                        let result = execute_sql_blocking_multi(
+                            &mut worker,
+                            &catalog,
+                            &sql,
+                            mode,
+                            &copy_security,
+                            read_security.as_ref(),
+                        );
+                        Box::new((result, worker.hnsw_indices))
+                    }))
+                    .await
+                    .map_err(StorageError::from)?;
+                let response = response
+                    .downcast::<(
+                        ExecResult<Vec<ExecutionResult>>,
+                        HashMap<String, HnswTxnEntry>,
+                    )>()
+                    .map_err(|_| ExecutorError::InvalidOperation {
+                        operation: "async_execute_multi".into(),
+                        reason: "invalid transaction worker response".into(),
+                    })?;
+                let (result, hnsw_indices) = *response;
+                let mut guard = state.lock().await;
+                guard.txn = Some(txn);
+                guard.hnsw_indices = hnsw_indices;
+                return result;
+            }
 
             let handle = tokio::runtime::Handle::current();
             let join = tokio::task::spawn_blocking(move || {
@@ -492,17 +539,14 @@ where
     }
 }
 
-fn execute_sql_blocking_multi<T>(
-    txn: &mut BlockingSqlTransaction<T>,
+fn execute_sql_blocking_multi<'ctx, S: KVStore + 'ctx>(
+    txn: &mut WorkerSqlTransaction<'ctx, S>,
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     mode: TxnMode,
     copy_security: &bulk::CopySecurityConfig,
     read_security: Option<&bulk::CopySecurityConfig>,
-) -> ExecResult<Vec<ExecutionResult>>
-where
-    T: for<'a> AsyncKVTransaction<'a>,
-{
+) -> ExecResult<Vec<ExecutionResult>> {
     txn.read_security = read_security.cloned();
     let statements = parse_sql(sql)?;
     if statements.is_empty() {
@@ -776,17 +820,14 @@ where
     Ok(results)
 }
 
-fn execute_create_table_as_blocking<T>(
-    txn: &mut BlockingSqlTransaction<T>,
+fn execute_create_table_as_blocking<'ctx, S: KVStore + 'ctx>(
+    txn: &mut WorkerSqlTransaction<'ctx, S>,
     catalog: &mut (dyn Catalog + Send + Sync),
     table: TableMetadata,
     with_options: Vec<(String, String)>,
     if_not_exists: bool,
     source: LogicalPlan,
-) -> ExecResult<ExecutionResult>
-where
-    T: for<'a> AsyncKVTransaction<'a>,
-{
+) -> ExecResult<ExecutionResult> {
     let table_name = table.name.clone();
     if catalog.table_exists(&table_name) {
         return if if_not_exists {
@@ -819,15 +860,13 @@ where
     )
 }
 
-fn stream_query_blocking<T>(
-    txn: &mut BlockingSqlTransaction<T>,
+fn stream_query_blocking<'ctx, S: KVStore + 'ctx>(
+    txn: &mut WorkerSqlTransaction<'ctx, S>,
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     sender: tokio::sync::mpsc::Sender<ExecResult<Row>>,
     read_security: Option<&bulk::CopySecurityConfig>,
-) where
-    T: for<'a> AsyncKVTransaction<'a>,
-{
+) {
     let statements = match parse_sql(sql) {
         Ok(stmts) => stmts,
         Err(err) => {
@@ -953,17 +992,19 @@ impl<T> Stream for ReceiverStream<T> {
     }
 }
 
-struct BlockingSqlTransaction<T> {
-    inner: BlockingKVTransaction<T>,
+type BlockingSqlTransaction<T> = WorkerSqlTransaction<'static, BlockingKVStore<T>>;
+
+struct WorkerSqlTransaction<'ctx, S: KVStore + 'ctx> {
+    inner: S::Transaction<'ctx>,
     mode: TxnMode,
     hnsw_indices: HashMap<String, HnswTxnEntry>,
     memory_policy: Option<MemoryPolicy>,
     read_security: Option<bulk::CopySecurityConfig>,
 }
 
-impl<T> BlockingSqlTransaction<T>
+impl<T> WorkerSqlTransaction<'static, BlockingKVStore<T>>
 where
-    T: for<'a> AsyncKVTransaction<'a>,
+    T: for<'a> AsyncKVTransaction<'a> + 'static,
 {
     fn new(
         txn: T,
@@ -983,6 +1024,23 @@ where
 
     fn into_parts(self) -> (T, HashMap<String, HnswTxnEntry>) {
         (self.inner.into_inner(), self.hnsw_indices)
+    }
+}
+
+impl<'ctx, S: KVStore + 'ctx> WorkerSqlTransaction<'ctx, S> {
+    fn from_inner(
+        inner: S::Transaction<'ctx>,
+        mode: TxnMode,
+        hnsw_indices: HashMap<String, HnswTxnEntry>,
+        memory_policy: Option<MemoryPolicy>,
+    ) -> Self {
+        Self {
+            inner,
+            mode,
+            hnsw_indices,
+            memory_policy,
+            read_security: None,
+        }
     }
 
     fn memory_policy(&self) -> Option<&MemoryPolicy> {
@@ -1012,9 +1070,8 @@ where
     }
 }
 
-impl<'txn, T> crate::storage::bridge::SqlTxn<'txn, BlockingKVStore<T>> for BlockingSqlTransaction<T>
-where
-    T: for<'a> AsyncKVTransaction<'a> + 'txn,
+impl<'ctx, S: KVStore + 'ctx> crate::storage::bridge::SqlTxn<'ctx, S>
+    for WorkerSqlTransaction<'ctx, S>
 {
     fn memory_policy(&self) -> Option<&MemoryPolicy> {
         self.memory_policy.as_ref()
@@ -1035,7 +1092,7 @@ where
         Ok(())
     }
 
-    fn inner_mut(&mut self) -> &mut BlockingKVTransaction<T> {
+    fn inner_mut(&mut self) -> &mut S::Transaction<'ctx> {
         &mut self.inner
     }
 
