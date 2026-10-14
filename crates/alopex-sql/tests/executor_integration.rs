@@ -14,6 +14,9 @@ use std::time::Instant;
 #[path = "support/integer_primary_key_boundaries.rs"]
 mod integer_primary_key_boundaries;
 
+#[path = "support/btree_read_counts.rs"]
+mod btree_read_counts;
+
 fn create_executor() -> (
     Executor<MemoryKV, MemoryCatalog>,
     Arc<RwLock<MemoryCatalog>>,

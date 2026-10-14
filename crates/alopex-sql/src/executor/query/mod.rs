@@ -51,6 +51,11 @@ enum IndexPredicate {
     },
 }
 
+// An index path materializes both row IDs and rows. Above this cost, a table
+// scan streams rows and avoids random row lookups for a broad predicate.
+const MAX_BTREE_INDEX_CANDIDATES: usize = 1024;
+const MAX_BTREE_INDEX_BYTES: u64 = 8 * 1024 * 1024;
+
 fn index_predicate(
     predicate: &crate::planner::typed_expr::TypedExpr,
 ) -> Option<(usize, IndexPredicate)> {
@@ -137,45 +142,59 @@ fn execute_index_scan<'txn, S: KVStore + 'txn>(
     table_meta: &crate::catalog::TableMetadata,
     index: &crate::catalog::IndexMetadata,
     predicate: IndexPredicate,
-) -> Result<Vec<Row>> {
-    let row_ids = match predicate {
-        IndexPredicate::Equality(value) => {
-            if value.is_null() {
-                return Ok(Vec::new());
-            }
-            txn.with_index(
-                index.index_id,
-                index.unique,
-                index.column_indices.clone(),
-                |storage| storage.lookup(&value),
-            )?
-        }
-        IndexPredicate::Range {
-            start,
-            end,
-            start_inclusive,
-            end_inclusive,
-        } => txn.with_index(
-            index.index_id,
-            index.unique,
-            index.column_indices.clone(),
-            |storage| {
-                storage
-                    .range_scan(start.as_ref(), end.as_ref(), start_inclusive, end_inclusive)?
-                    .collect()
-            },
-        )?,
-    };
+    memory: Option<&MemoryPolicy>,
+) -> Result<Option<Vec<Row>>> {
+    let byte_limit = memory
+        .and_then(MemoryPolicy::limit_bytes)
+        .unwrap_or(MAX_BTREE_INDEX_BYTES)
+        .min(MAX_BTREE_INDEX_BYTES);
+    let max_candidates = MAX_BTREE_INDEX_CANDIDATES
+        .min(usize::try_from(byte_limit / std::mem::size_of::<u64>() as u64).unwrap_or(usize::MAX));
+    let row_ids = txn.with_index(
+        index.index_id,
+        index.unique,
+        index.column_indices.clone(),
+        |storage| {
+            let scan = match &predicate {
+                IndexPredicate::Equality(value) if value.is_null() => return Ok(Vec::new()),
+                IndexPredicate::Equality(value) => {
+                    storage.range_scan(Some(value), Some(value), true, true)?
+                }
+                IndexPredicate::Range {
+                    start,
+                    end,
+                    start_inclusive,
+                    end_inclusive,
+                } => storage.range_scan(
+                    start.as_ref(),
+                    end.as_ref(),
+                    *start_inclusive,
+                    *end_inclusive,
+                )?,
+            };
+            scan.take(max_candidates + 1).collect()
+        },
+    )?;
+    if row_ids.len() > max_candidates {
+        return Ok(None);
+    }
     let mut row_ids = row_ids;
     row_ids.sort_unstable();
+    let mut retained_bytes = (row_ids.len() * std::mem::size_of::<u64>()) as u64;
     Ok(txn.with_table(table_meta, |storage| {
         let mut rows = Vec::with_capacity(row_ids.len());
         for row_id in row_ids {
             if let Some(values) = storage.get(row_id)? {
+                retained_bytes = retained_bytes
+                    .saturating_add(std::mem::size_of::<Row>() as u64)
+                    .saturating_add(values.iter().map(ByteSized::estimated_bytes).sum::<u64>());
+                if retained_bytes > byte_limit {
+                    return Ok(None);
+                }
                 rows.push(Row::new(row_id, values));
             }
         }
-        Ok(rows)
+        Ok(Some(rows))
     })?)
 }
 
@@ -960,10 +979,13 @@ fn build_iterator_pipeline_with_outer<
                 && let Some(index) = matching_btree_index(catalog, table, column)
             {
                 let schema = table_meta.columns.clone();
-                let rows = execute_index_scan(txn, table_meta, &index, index_predicate)?;
-                let input_iter = iterator::VecIterator::new(rows, schema.clone());
-                let filter_iter = FilterIterator::new(input_iter, predicate);
-                return Ok((Box::new(filter_iter), projection.clone(), schema));
+                if let Some(rows) =
+                    execute_index_scan(txn, table_meta, &index, index_predicate, memory)?
+                {
+                    let input_iter = iterator::VecIterator::new(rows, schema.clone());
+                    let filter_iter = FilterIterator::new(input_iter, predicate);
+                    return Ok((Box::new(filter_iter), projection.clone(), schema));
+                }
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
