@@ -649,14 +649,16 @@ impl Database {
                     .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
             );
             #[cfg(test)]
-            if let Some(barrier) = self
-                .hnsw_cache_after_executor_barrier
-                .lock()
-                .expect("hnsw cache after executor barrier lock poisoned")
-                .clone()
-            {
-                barrier.wait();
-                barrier.wait();
+            if mode == TxnMode::ReadOnly {
+                if let Some(barrier) = self
+                    .hnsw_cache_after_executor_barrier
+                    .lock()
+                    .expect("hnsw cache after executor barrier lock poisoned")
+                    .clone()
+                {
+                    barrier.wait();
+                    barrier.wait();
+                }
             }
         }
 
@@ -1002,6 +1004,11 @@ impl<'a> Transaction<'a> {
         let sql_catalog = self.db.sql_catalog.clone();
 
         let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+        // Make direct graph writes visible to SQL before it loads the graph.
+        for (index, state) in self.hnsw_indices.values_mut() {
+            index.commit_staged(txn, state).map_err(Error::Core)?;
+        }
+        self.hnsw_indices.clear();
         let mode = txn.mode();
 
         let mut borrowed =

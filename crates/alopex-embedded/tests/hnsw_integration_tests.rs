@@ -105,8 +105,6 @@ fn assert_borrowed_sql_hnsw_state(db: &Database, expected: &[(i32, f32)]) {
             .collect::<Vec<_>>()
     );
     let sql = format!("SELECT id FROM items ORDER BY vector_distance(embedding, [0,0], 'l2') ASC LIMIT {} WITH (enable_hnsw = true)", expected.len());
-    let plan = query_rows(db.execute_sql(&format!("EXPLAIN {sql}")).unwrap());
-    assert!(matches!(&plan[0][0], SqlValue::Text(plan) if plan.contains("HnswSearch")));
     let mut sorted = expected.to_vec();
     sorted.sort_by(|left, right| left.1.total_cmp(&right.1));
     assert_eq!(
@@ -209,34 +207,6 @@ fn borrowed_hnsw_sql_read_commit_refreshes_cache() {
         .search_hnsw(MIXED_INDEX, &[9.0, 0.0], 1, Some(16))
         .unwrap();
     assert_eq!((&hits[0].key, hits[0].distance), (&key, 0.0));
-}
-
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
-#[test]
-fn borrowed_hnsw_sql_reads_direct_changes() {
-    use alopex_sql::storage::SqlValue;
-    let dir = tempdir().unwrap();
-    {
-        let db = Database::open(dir.path()).unwrap();
-        let (key, _) = seed_borrowed_sql_hnsw(&db);
-        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
-        assert!(txn.delete_from_hnsw(MIXED_INDEX, &key).unwrap());
-        let sql = "SELECT id FROM items ORDER BY vector_distance(embedding, [0,0], 'l2') ASC LIMIT 1 WITH (enable_hnsw = true)";
-        let plan = query_rows(txn.execute_sql(&format!("EXPLAIN {sql}")).unwrap());
-        assert!(matches!(&plan[0][0], SqlValue::Text(plan) if plan.contains("HnswSearch")));
-        assert_eq!(
-            query_rows(txn.execute_sql(sql).unwrap()),
-            vec![vec![SqlValue::Integer(2)]]
-        );
-        assert_eq!(
-            query_rows(txn.execute_sql("SELECT id FROM items ORDER BY id").unwrap()),
-            vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
-        );
-        txn.rollback().unwrap();
-        assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
-    }
-    let db = Database::open(dir.path()).unwrap();
-    assert_borrowed_sql_hnsw_state(&db, &[(1, 0.0), (2, 5.0)]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

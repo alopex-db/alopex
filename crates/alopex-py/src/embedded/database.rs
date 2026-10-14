@@ -451,6 +451,8 @@ impl PyDatabase {
                 Err(observed) => count = observed,
             }
         }
+    }
+
     #[cfg(test)]
     fn take_hnsw_detach_hook(&self) -> Option<(Sender<()>, Receiver<()>)> {
         self.hnsw_detach_hook.lock().unwrap().take()
