@@ -211,6 +211,9 @@ pub(crate) fn execute_sql_owned(
     transaction: &mut OwnedEmbeddedTransaction,
     sql: &str,
 ) -> Result<SqlResult> {
+    if transaction.failed {
+        return Err(Error::TxnFailed);
+    }
     let statements = match parse_sql(sql) {
         Ok(statements) => statements,
         Err(error) => {

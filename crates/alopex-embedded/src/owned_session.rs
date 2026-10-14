@@ -451,6 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn sql_after_direct_hnsw_change_commits_the_staged_graph() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.execute_sql("SELECT 1").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+    }
+
+    #[test]
     fn failed_hnsw_restore_blocks_commit_until_earlier_savepoint_recovers() {
         let database = Arc::new(Database::new());
         database
