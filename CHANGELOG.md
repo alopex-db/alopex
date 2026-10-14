@@ -18,6 +18,12 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
+- Opening a database created by v0.8.15 or earlier now rebuilds missing UNIQUE
+  constraint indexes. If existing rows violate a UNIQUE constraint, opening
+  fails without changing the database. Keep a backup, remove the conflicting
+  rows with the prior version or a repair tool, then reopen with v0.8.16.
+  Table-level PRIMARY KEY declarations are recognized regardless of their
+  order among constraints; multiple declarations are rejected (#585).
 - Catalog loading now rejects invalid DEFAULT or constraint metadata instead
   of silently discarding it. Internal encoding properties no longer appear in
   public table properties. Rust callers converting `PersistedTableMeta` and
