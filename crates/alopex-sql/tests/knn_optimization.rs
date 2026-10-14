@@ -629,8 +629,8 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
-        let end = (start + BATCH_SIZE - 1).min(ROWS);
+    for start in (1..ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS - 1);
         let values = (start..=end)
             .map(|id| format!("({id}, {vector})"))
             .collect::<Vec<_>>()
@@ -649,6 +649,13 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
 
     let query = format!(
         "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
+    let at_threshold = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(at_threshold.starts_with("ExactKnnScan"), "{at_threshold}");
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!("INSERT INTO items (id, embedding) VALUES ({ROWS}, {vector})"),
     );
     let indexed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
     assert!(
