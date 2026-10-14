@@ -494,6 +494,11 @@ impl PyTransaction {
     ) -> PyResult<Py<PyAny>> {
         let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
         self.ensure_active()?;
+        if crate::embedded::database::is_transaction_control_statement(&bound_sql) {
+            return Err(error::to_py_err(
+                "Transaction.execute_sql does not accept SQL transaction control; use db.begin() and Transaction.savepoint(), rollback_to(), release(), commit(), or rollback()",
+            ));
+        }
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
         // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
@@ -870,6 +875,37 @@ mod tests {
         });
 
         assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 1);
+    }
+
+    #[test]
+    fn execute_sql_guides_control_statements_before_running_a_prefix() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            for sql in [
+                "BEGIN",
+                "COMMIT",
+                "-- comment\nSAVEPOINT retry",
+                "ROLLBACK TO retry",
+                "INSERT INTO t (id) VALUES (99); COMMIT",
+            ] {
+                let error = txn
+                    .execute_sql(py, sql, None)
+                    .expect_err("SQL transaction control must use Python methods");
+                assert!(
+                    error.to_string().contains("Transaction.savepoint()"),
+                    "{sql} did not explain the Python transaction API: {error}"
+                );
+            }
+            txn.execute_sql(py, "SELECT id FROM t", None)
+                .expect("ordinary SQL remains available");
+            txn.commit(py).expect("guard did not fail transaction");
+        });
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
     }
 
     #[test]

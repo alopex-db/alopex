@@ -43,7 +43,7 @@ pub struct PyPreparedStatement {
     finalized: bool,
 }
 
-fn is_transaction_control_statement(sql: &str) -> bool {
+pub(crate) fn is_transaction_control_statement(sql: &str) -> bool {
     let keyword = leading_sql_keyword(sql);
     let starts_with_transaction_control = [
         "BEGIN",

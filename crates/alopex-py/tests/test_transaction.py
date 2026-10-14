@@ -86,3 +86,31 @@ def test_failed_transaction_rejects_new_savepoints_but_can_roll_back_to_existing
         assert db.execute_sql("SELECT id FROM items") == [{"id": 1}]
     finally:
         db.close()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT retry",
+        "ROLLBACK TO retry",
+        "RELEASE retry",
+        "-- leading comment\nSAVEPOINT retry",
+        "/* leading comment */ COMMIT",
+        "INSERT INTO items (id) VALUES (99); COMMIT",
+    ],
+)
+def test_transaction_execute_sql_rejects_control_before_any_statement_runs(sql):
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        with pytest.raises(AlopexError, match=r"Transaction\.savepoint\(\)"):
+            txn.execute_sql(sql)
+        assert txn.execute_sql("SELECT id FROM items") == []
+        txn.commit()
+        assert db.execute_sql("SELECT id FROM items") == []
+    finally:
+        db.close()
