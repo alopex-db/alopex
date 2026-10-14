@@ -202,18 +202,20 @@ fn knn_query_options_reject_non_knn_query() {
 fn knn_query_options_reject_unsafe_ef_search_before_execution() {
     let (_executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
-    let stmt = Parser::parse_sql(
-        &AlopexDialect,
-        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (ef_search = 10000000000000)",
-    )
-    .expect("parse SQL")
-    .pop()
-    .expect("one statement");
+    for ef_search in ["0", "10000000000000"] {
+        let stmt = Parser::parse_sql(
+            &AlopexDialect,
+            &format!("SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (ef_search = {ef_search})"),
+        )
+        .expect("parse SQL")
+        .pop()
+        .expect("one statement");
 
-    let error = Planner::new(&*catalog.read().expect("catalog lock"))
-        .plan(&stmt)
-        .expect_err("unsafe ef_search must be rejected before HNSW execution");
-    assert!(error.to_string().contains("ef_search"), "{error}");
+        let error = Planner::new(&*catalog.read().expect("catalog lock"))
+            .plan(&stmt)
+            .expect_err("unsafe ef_search must be rejected before HNSW execution");
+        assert!(error.to_string().contains("ef_search"), "{error}");
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -248,6 +250,10 @@ fn enable_hnsw_true_forces_hnsw_plan_below_cost_threshold() {
     assert!(analyzed.contains("HnswSearch"), "{analyzed}");
     assert!(analyzed.contains("nodes_visited="), "{analyzed}");
     assert!(!analyzed.contains("nodes_visited=0"), "{analyzed}");
+    assert!(
+        analyzed.contains("ef_search=50 fallback=none"),
+        "missing query and index ef_search must use the default: {analyzed}"
+    );
 
     let filtered_plan = explain_text(
         &mut executor,
@@ -358,29 +364,31 @@ fn hnsw_index_accepts_search_ef_default() {
 fn hnsw_index_rejects_unsafe_ef_search_without_leaving_catalog_state() {
     let (mut executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
-    let stmt = Parser::parse_sql(
-        &AlopexDialect,
-        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=10000000000000)",
-    )
-    .expect("parse DDL")
-    .pop()
-    .expect("one statement");
-    let plan = Planner::new(&*catalog.read().expect("catalog lock"))
-        .plan(&stmt)
-        .expect("plan DDL");
+    for ef_search in ["0", "10000000000000"] {
+        let stmt = Parser::parse_sql(
+            &AlopexDialect,
+            &format!("CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search={ef_search})"),
+        )
+        .expect("parse DDL")
+        .pop()
+        .expect("one statement");
+        let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+            .plan(&stmt)
+            .expect("plan DDL");
 
-    let error = executor
-        .execute(plan)
-        .expect_err("unsafe HNSW index ef_search must be rejected");
-    assert!(error.to_string().contains("ef_search"), "{error}");
-    assert!(
-        catalog
-            .read()
-            .expect("catalog lock")
-            .get_index("idx_items_embedding")
-            .is_none(),
-        "failed CREATE INDEX must not leave an index in the catalog"
-    );
+        let error = executor
+            .execute(plan)
+            .expect_err("unsafe HNSW index ef_search must be rejected");
+        assert!(error.to_string().contains("ef_search"), "{error}");
+        assert!(
+            catalog
+                .read()
+                .expect("catalog lock")
+                .get_index("idx_items_embedding")
+                .is_none(),
+            "failed CREATE INDEX must not leave an index in the catalog"
+        );
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

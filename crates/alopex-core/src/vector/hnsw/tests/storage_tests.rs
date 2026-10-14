@@ -88,16 +88,17 @@ fn staged_batch_publishes_stats_only_after_commit() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn public_search_rejects_ef_search_above_the_safety_limit() {
+fn public_search_rejects_ef_search_outside_the_safety_limits() {
     let index = HnswIndex::create("test_index", base_config()).unwrap();
-
-    let error = index
-        .search(&[0.0, 0.0], 1, Some(MAX_HNSW_EF_SEARCH + 1))
-        .expect_err("public HNSW search must reject an unsafe ef_search");
-    assert!(matches!(
-        error,
-        Error::InvalidParameter { ref param, .. } if param == "ef_search"
-    ));
+    for ef_search in [0, MAX_HNSW_EF_SEARCH + 1] {
+        let error = index
+            .search(&[0.0, 0.0], 1, Some(ef_search))
+            .expect_err("public HNSW search must reject an unsafe ef_search");
+        assert!(matches!(
+            error,
+            Error::InvalidParameter { ref param, .. } if param == "ef_search"
+        ));
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
