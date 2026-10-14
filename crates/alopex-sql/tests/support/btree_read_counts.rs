@@ -158,7 +158,7 @@ fn btree_access_path_reads_only_matching_table_rows() {
     // setup writes, timing, and claims about storage-engine complexity.
     let store = Arc::new(CountingKV::default());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
-    let mut executor = Executor::new(Arc::clone(&store), catalog);
+    let mut executor = Executor::new(Arc::clone(&store), Arc::clone(&catalog));
     executor
         .execute(LogicalPlan::CreateTable {
             table: TableMetadata::new(
@@ -246,4 +246,93 @@ fn btree_access_path_reads_only_matching_table_rows() {
     let (rows, counts) = run(&mut executor, fallback);
     assert_eq!(rows, baseline_equal);
     assert_eq!(counts, (0, 256), "cross-type fallback (get, scan)");
+
+    let bridge = alopex_sql::storage::TxnBridge::new(Arc::clone(&store));
+    let mut read = bridge.begin_read().unwrap();
+    for (budget, indexed) in [
+        (64, false),
+        (
+            (std::mem::size_of::<alopex_sql::executor::Row>() + std::mem::size_of::<u64>() + 4)
+                as u64,
+            true,
+        ),
+        (
+            (std::mem::size_of::<alopex_sql::executor::Row>() + std::mem::size_of::<u64>() + 4)
+                as u64
+                - 4,
+            false,
+        ),
+    ] {
+        let predicate = if budget == 64 {
+            query(BinaryOp::GtEq, number("247", ResolvedType::Integer))
+        } else {
+            query(BinaryOp::Eq, number("253", ResolvedType::Integer))
+        };
+        let policy = alopex_sql::executor::MemoryPolicy::new(
+            Some(budget),
+            alopex_sql::executor::SpillPolicy::FailFast,
+        );
+        store.reads.reset();
+        let mut rows = alopex_sql::executor::query::execute_query_streaming_with_policy(
+            &mut read,
+            &*catalog.read().unwrap(),
+            predicate,
+            Some(&policy),
+        )
+        .unwrap();
+        assert!(rows.next_row().unwrap().is_some());
+        let (gets, scans) = store.reads.snapshot();
+        if indexed {
+            assert_eq!((gets, scans), (1, 0), "budget {budget}");
+        } else {
+            assert!(scans > 0, "budget {budget} must stream table rows");
+            assert_eq!(gets, usize::from(budget != 64), "budget {budget}");
+        }
+    }
+    drop(read);
+
+    // A broad range and a heavily duplicated equality must stop collecting
+    // index candidates and use the streaming table scan instead.
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["score".into()],
+            values: (0..1023)
+                .map(|_| vec![number("253", ResolvedType::Integer)])
+                .collect(),
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    let (rows, counts) = run(
+        &mut executor,
+        query(BinaryOp::Eq, number("253", ResolvedType::Integer)),
+    );
+    assert_eq!(rows.len(), 1024);
+    assert_eq!(counts, (1024, 0), "candidate cap remains indexable");
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "items".into(),
+            columns: vec!["score".into()],
+            values: (0..2)
+                .map(|_| vec![number("253", ResolvedType::Integer)])
+                .collect(),
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    for (plan, expected_rows) in [
+        (
+            query(BinaryOp::GtEq, number("0", ResolvedType::Integer)),
+            1281,
+        ),
+        (
+            query(BinaryOp::Eq, number("253", ResolvedType::Integer)),
+            1026,
+        ),
+    ] {
+        let (rows, counts) = run(&mut executor, plan);
+        assert_eq!(rows.len(), expected_rows);
+        assert_eq!(counts, (0, 1281), "broad predicate must scan table");
+    }
 }
