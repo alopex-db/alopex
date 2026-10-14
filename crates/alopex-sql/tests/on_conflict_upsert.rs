@@ -332,9 +332,9 @@ fn unique_index_enforces_conflicts_and_allows_multiple_nulls() {
         &catalog,
         "
         CREATE TABLE users (id INT PRIMARY KEY, code TEXT);
-        INSERT INTO users (id, code) VALUES (1, 'a'), (2, NULL);
+        INSERT INTO users (id, code) VALUES (1, 'a'), (2, NULL), (3, NULL);
         CREATE UNIQUE INDEX users_code_key ON users (code);
-        INSERT INTO users (id, code) VALUES (3, NULL);
+        INSERT INTO users (id, code) VALUES (4, NULL);
         ",
     )
     .expect("create unique index");
@@ -343,7 +343,7 @@ fn unique_index_enforces_conflicts_and_allows_multiple_nulls() {
         execute_sql_on(
             &mut executor,
             &catalog,
-            "INSERT INTO users (id, code) VALUES (4, 'a');",
+            "INSERT INTO users (id, code) VALUES (5, 'a');",
         )
         .is_err()
     );
@@ -360,7 +360,7 @@ fn unique_index_enforces_conflicts_and_allows_multiple_nulls() {
         &mut executor,
         &catalog,
         "
-        INSERT INTO users (id, code) VALUES (5, 'a') ON CONFLICT (code) DO NOTHING;
+        INSERT INTO users (id, code) VALUES (6, 'a') ON CONFLICT (code) DO NOTHING;
         SELECT id, code FROM users ORDER BY id;
         ",
     )
@@ -375,6 +375,116 @@ fn unique_index_enforces_conflicts_and_allows_multiple_nulls() {
             vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
             vec![SqlValue::Integer(2), SqlValue::Null],
             vec![SqlValue::Integer(3), SqlValue::Null],
+            vec![SqlValue::Integer(4), SqlValue::Null],
+        ]
+    );
+}
+
+#[test]
+fn unique_index_build_rejects_existing_duplicates_without_publishing_index() {
+    use alopex_sql::Catalog;
+    use alopex_sql::executor::{ConstraintViolation, ExecutorError};
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE users (id INT PRIMARY KEY, code TEXT); \
+         INSERT INTO users VALUES (1, 'a'), (2, 'a');",
+    )
+    .unwrap();
+
+    let error = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE UNIQUE INDEX users_code_key ON users (code);",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+    ));
+    assert!(
+        catalog
+            .read()
+            .unwrap()
+            .get_index("users_code_key")
+            .is_none()
+    );
+
+    let result = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "SELECT id, code FROM users ORDER BY id;",
+    )
+    .unwrap();
+    let ExecutionResult::Query(query) = &result[0] else {
+        panic!("expected unchanged rows");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("a".into())],
+        ]
+    );
+
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX users_code_key ON users (code);",
+    )
+    .expect("failed UNIQUE build must leave the index name available");
+    assert!(
+        !catalog
+            .read()
+            .unwrap()
+            .get_index("users_code_key")
+            .unwrap()
+            .unique
+    );
+}
+
+#[test]
+fn composite_unique_rejects_insert_and_update_but_allows_multiple_nulls() {
+    use alopex_sql::executor::{ConstraintViolation, ExecutorError};
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE users (id INT PRIMARY KEY, code TEXT, region INT, UNIQUE(code, region)); \
+         INSERT INTO users VALUES (1, 'a', 1), (2, 'a', 2), (3, NULL, 1), (4, NULL, 1);",
+    )
+    .unwrap();
+    for sql in [
+        "INSERT INTO users VALUES (5, 'a', 1);",
+        "UPDATE users SET region = 1 WHERE id = 2;",
+    ] {
+        let error = execute_sql_on(&mut executor, &catalog, sql).unwrap_err();
+        assert!(matches!(
+            error,
+            ExecutorError::ConstraintViolation(ConstraintViolation::Unique { .. })
+        ));
+    }
+    let result = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "SELECT id, code, region FROM users ORDER BY id;",
+    )
+    .unwrap();
+    let ExecutionResult::Query(query) = &result[0] else {
+        panic!("expected unchanged rows");
+    };
+    assert_eq!(query.rows.len(), 4);
+    assert_eq!(
+        query.rows[1],
+        vec![
+            SqlValue::Integer(2),
+            SqlValue::Text("a".into()),
+            SqlValue::Integer(2),
         ]
     );
 }

@@ -374,7 +374,9 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
             columns, rows,
         )))
     } else {
-        Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+        Ok(ExecutionResult::RowsAffected(
+            (staged.len() + updated_rows.len()) as u64,
+        ))
     }
 }
 
