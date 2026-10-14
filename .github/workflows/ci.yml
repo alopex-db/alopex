@@ -37,6 +37,7 @@ jobs:
             base_sha="${PR_BASE_SHA}"
           fi
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
+          python3 scripts/ci/check_parser_wire_contract.py "${base_sha}" "${GITHUB_SHA}"
           production=false
           changed=0
           while IFS= read -r -d '' path; do
