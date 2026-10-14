@@ -650,6 +650,28 @@ def test_execute_sql_vector_param_roundtrip(db):
     assert rows == [{"embedding": [0.25, -1.5, 2.0]}]
 
 
+def test_execute_sql_null_vector_is_sql_null_and_skipped_by_hnsw(db):
+    db.execute_sql(
+        "CREATE TABLE vector_items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    db.execute_sql(
+        "INSERT INTO vector_items VALUES (1, [0.0, 0.0]), (2, NULL)"
+    )
+    assert db.execute_sql(
+        "SELECT vector_distance(embedding, [0.0, 0.0], 'l2') AS distance, "
+        "vector_similarity(embedding, [0.0, 0.0], 'l2') AS similarity "
+        "FROM vector_items WHERE id = 2"
+    ) == [{"distance": None, "similarity": None}]
+
+    nearest = (
+        "SELECT id FROM vector_items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}]
+    db.execute_sql("CREATE INDEX vector_items_hnsw ON vector_items (embedding) USING HNSW")
+    assert db.execute_sql(nearest) == [{"id": 1}]
+
+
 def test_execute_sql_numpy_vector_param(db):
     np = pytest.importorskip("numpy")
     db.execute_sql("CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))")
