@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -5,7 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use brotli_decompressor::{
-    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, HuffmanCode, StandardAlloc,
+    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, HuffmanCode, SliceWrapper,
+    StandardAlloc,
 };
 use bytes::Bytes;
 use parquet::basic::{Compression, Encoding, Type};
@@ -29,12 +31,30 @@ fn nonnegative(value: i32) -> Result<usize> {
 
 struct ScratchReservation<'a> {
     reserved: &'a AtomicU64,
-    bytes: u64,
+    bytes: Cell<u64>,
+}
+
+impl<'a> ScratchReservation<'a> {
+    fn new(reserved: &'a AtomicU64, bytes: u64, limit: u64, codec: &str) -> Result<Self> {
+        reserved
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|&used| used <= limit)
+            })
+            .map_err(|_| {
+                ParquetError::External(Box::new(crate::executor::ExecutorError::ResourceExhausted {
+                    message: format!("READ_PARQUET {codec} workspace requires {bytes} additional bytes (limit {limit})"),
+                }))
+            })?;
+        Ok(Self {
+            reserved,
+            bytes: Cell::new(bytes),
+        })
+    }
 }
 
 impl Drop for ScratchReservation<'_> {
     fn drop(&mut self) {
-        self.reserved.fetch_sub(self.bytes, Ordering::Relaxed);
+        self.reserved.fetch_sub(self.bytes.get(), Ordering::Relaxed);
     }
 }
 
@@ -54,19 +74,7 @@ fn decode_zstd(input: &[u8], output: &mut [u8], limit: u64, reserved: &AtomicU64
         .checked_mul(8)
         .filter(|&bytes| bytes != 0)
         .ok_or_else(invalid)?;
-    reserved
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-            used.checked_add(bytes as u64).filter(|&used| used <= limit)
-        })
-        .map_err(|_| {
-            ParquetError::External(Box::new(crate::executor::ExecutorError::ResourceExhausted {
-                message: format!("READ_PARQUET ZSTD workspace requires {bytes} additional bytes (limit {limit})"),
-            }))
-        })?;
-    let _reservation = ScratchReservation {
-        reserved,
-        bytes: bytes as u64,
-    };
+    let _reservation = ScratchReservation::new(reserved, bytes as u64, limit, "ZSTD")?;
     let mut workspace = vec![Word { _bytes: [0; 8] }; words];
     // SAFETY: The 8-byte-aligned workspace stays live and fixed through both C calls.
     // The static context never mallocs or resizes, and is not passed to freeDCtx.
@@ -89,31 +97,52 @@ fn decode_zstd(input: &[u8], output: &mut [u8], limit: u64, reserved: &AtomicU64
     Ok(())
 }
 
-struct BrotliAllocation {
+struct BrotliAllocation<'a> {
     inner: StandardAlloc,
     limit: u64,
-    rejected: Option<usize>,
+    reserved: &'a AtomicU64,
+    pre_reserved: &'a Cell<u64>,
+    rejected: &'a Cell<Option<usize>>,
 }
 
-impl<T> Allocator<T> for BrotliAllocation
+impl<T> Allocator<T> for BrotliAllocation<'_>
 where
     StandardAlloc: Allocator<T>,
 {
     type AllocatedMemory = <StandardAlloc as Allocator<T>>::AllocatedMemory;
 
     fn alloc_cell(&mut self, count: usize) -> Self::AllocatedMemory {
-        let bytes = count.checked_mul(std::mem::size_of::<T>());
-        if matches!(bytes, Some(bytes) if bytes as u64 <= self.limit) {
-            <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, count)
-        } else {
-            // Fixed tables fit the prechecked minimum; variable groups check empty results.
-            self.rejected = Some(bytes.unwrap_or(usize::MAX));
-            <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, 0)
+        if self.rejected.get().is_none() {
+            let bytes = count.checked_mul(std::mem::size_of::<T>());
+            if let Some(bytes) = bytes.filter(|&bytes| bytes as u64 <= self.limit) {
+                let prepaid = self.pre_reserved.get().min(bytes as u64);
+                let additional = bytes as u64 - prepaid;
+                match self
+                    .reserved
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                        used.checked_add(additional)
+                            .filter(|&used| used <= self.limit)
+                    }) {
+                    Ok(_) => {
+                        self.pre_reserved.set(self.pre_reserved.get() - prepaid);
+                        return <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, count);
+                    }
+                    Err(used) => self.rejected.set(Some(
+                        usize::try_from(used.saturating_add(additional)).unwrap_or(usize::MAX),
+                    )),
+                }
+            } else {
+                self.rejected.set(Some(bytes.unwrap_or(usize::MAX)));
+            }
         }
+        // All three allocators stay rejected so dependent tables cannot outlive a failed request.
+        <StandardAlloc as Allocator<T>>::alloc_cell(&mut self.inner, 0)
     }
 
     fn free_cell(&mut self, memory: Self::AllocatedMemory) {
+        let bytes = std::mem::size_of_val(memory.slice());
         <StandardAlloc as Allocator<T>>::free_cell(&mut self.inner, memory);
+        self.reserved.fetch_sub(bytes as u64, Ordering::Relaxed);
     }
 }
 
@@ -125,18 +154,31 @@ fn brotli_budget_error(bytes: usize, limit: u64) -> ParquetError {
     ))
 }
 
-fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
+fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64, reserved: &AtomicU64) -> Result<()> {
     // Brotli 4.0.3's largest fixed Huffman request is 3 * 1080 slots.
     let minimum = 3 * 1080 * std::mem::size_of::<HuffmanCode>();
     if minimum as u64 > limit {
         return Err(brotli_budget_error(minimum, limit));
     }
+    // Fixed tables include an unchecked allocation; reserve all three before entering the decoder.
+    let fixed = ScratchReservation::new(
+        reserved,
+        ((1080 + 3240 + 3240) * std::mem::size_of::<HuffmanCode>()) as u64,
+        limit,
+        "Brotli",
+    )?;
+    let zero = Cell::new(0);
+    let rejected = Cell::new(None);
     let allocator = || BrotliAllocation {
         inner: StandardAlloc::default(),
         limit,
-        rejected: None,
+        reserved,
+        pre_reserved: &zero,
+        rejected: &rejected,
     };
-    let mut state = BrotliState::new(allocator(), allocator(), allocator());
+    let mut huffman = allocator();
+    huffman.pre_reserved = &fixed.bytes;
+    let mut state = BrotliState::new(allocator(), allocator(), huffman);
     let mut available_in = input.len();
     let mut available_out = output.len();
     let mut input_offset = 0;
@@ -153,12 +195,7 @@ fn decode_brotli(input: &[u8], output: &mut [u8], limit: u64) -> Result<()> {
         &mut total_out,
         &mut state,
     );
-    if let Some(bytes) = state
-        .alloc_u8
-        .rejected
-        .or(state.alloc_u32.rejected)
-        .or(state.alloc_hc.rejected)
-    {
+    if let Some(bytes) = rejected.get() {
         return Err(brotli_budget_error(bytes, limit));
     }
     if !matches!(result, BrotliResult::ResultSuccess) || output_offset != output.len() {
@@ -426,7 +463,12 @@ impl BoundedPages {
             }
             Compression::ZSTD(_) => {}
             Compression::BROTLI(_) if compressed_size != offset || output_size != offset => {
-                decode_brotli(&compressed[offset..], &mut output[offset..], self.limit)?;
+                decode_brotli(
+                    &compressed[offset..],
+                    &mut output[offset..],
+                    self.limit,
+                    &self.reserved_bytes,
+                )?;
             }
             Compression::BROTLI(_) => {}
             _ => return Err(invalid()),
@@ -543,7 +585,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zstd_scratch_is_released_after_success_and_failure() {
+    fn codec_scratch_is_released_after_success_and_failure() {
         let input = zstd::bulk::compress(&[7; 8], 1).unwrap();
         let mut concatenated = zstd::bulk::compress(&[7; 4], 1).unwrap();
         concatenated.extend(zstd::bulk::compress(&[7; 4], 1).unwrap());
@@ -574,5 +616,54 @@ mod tests {
         }
         assert!(decode_zstd(&input, &mut [0; 8], context + 127, &reserved).is_err());
         assert_eq!(reserved.load(Ordering::Relaxed), 128);
+
+        let mut codec = parquet::compression::create_codec(
+            Compression::BROTLI(Default::default()),
+            &parquet::compression::CodecOptions::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut input = Vec::new();
+        codec.compress(&[7; 8], &mut input).unwrap();
+        for (data, length, valid) in [
+            (input.as_slice(), 8, true),
+            (&input[..0], 8, false),
+            (&input[..1], 8, false),
+            (&input[..input.len() - 1], 8, false),
+            (input.as_slice(), 7, false),
+            (input.as_slice(), 9, false),
+        ] {
+            let mut output = vec![0; length];
+            assert_eq!(
+                decode_brotli(data, &mut output, 6 * 1024 * 1024, &reserved).is_ok(),
+                valid
+            );
+            assert_eq!(reserved.load(Ordering::Relaxed), 128);
+            if valid {
+                assert_eq!(output, [7; 8]);
+            }
+        }
+        assert!(decode_brotli(&input, &mut [0; 8], 30_240 + 127, &reserved).is_err());
+        assert_eq!(reserved.load(Ordering::Relaxed), 128);
+
+        let reserved = AtomicU64::new(8);
+        let rejected = Cell::new(None);
+        let zero = Cell::new(0);
+        let mut allocator = BrotliAllocation {
+            inner: StandardAlloc::default(),
+            limit: 8,
+            reserved: &reserved,
+            pre_reserved: &zero,
+            rejected: &rejected,
+        };
+        let failed = <BrotliAllocation as Allocator<u32>>::alloc_cell(&mut allocator, 1);
+        assert!(failed.slice().is_empty());
+        reserved.store(0, Ordering::Relaxed);
+        let later = <BrotliAllocation as Allocator<HuffmanCode>>::alloc_cell(&mut allocator, 1);
+        assert!(later.slice().is_empty());
+        <BrotliAllocation as Allocator<u32>>::free_cell(&mut allocator, failed);
+        <BrotliAllocation as Allocator<HuffmanCode>>::free_cell(&mut allocator, later);
+        assert_eq!(reserved.load(Ordering::Relaxed), 0);
+        assert_eq!(rejected.get(), Some(12));
     }
 }

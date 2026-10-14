@@ -846,6 +846,72 @@ fn issue577_codec_brotli_output_checked_before_capacity_growth() {
     codec_output_checked_before_capacity_growth(Compression::BROTLI(Default::default()));
 }
 
+#[test]
+fn issue577_brotli_workspace_sum_checked_before_allocation() {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+
+    // The default 4 MiB window fits; wide output plus its workspace exceeds 6 MiB.
+    let limit = 6 * 1024 * 1024;
+    for (limit, width, reject) in [
+        (limit, 8, false),
+        (limit, LIMIT, true),
+        (limit * 2, 8, false),
+        (limit * 2, LIMIT, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::BROTLI(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        column
+            .typed::<ByteArrayType>()
+            .write_batch(&vec![ByteArray::from(vec![0x42; width]); 32], None, None)
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        writer.close().unwrap();
+        assert!(file.as_file().metadata().unwrap().len() < 4096);
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "Brotli workspace limit={limit} width={width} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        assert!(maximum <= limit);
+        assert!(
+            observed.peak <= limit,
+            "Brotli combined workspace exceeded its budget"
+        );
+        if reject {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal Brotli rows");
+            };
+            assert_eq!(
+                result.rows,
+                vec![vec![SqlValue::Blob(vec![0x42; width])]; 32]
+            );
+        }
+    }
+}
+
 fn replace_with_brotli_huffman_fixture(file: &tempfile::NamedTempFile) {
     use std::io::Cursor;
     use thrift::protocol::TCompactInputProtocol;

@@ -8,7 +8,7 @@ Resource boundaries are separate:
 
 | Boundary and owner | Purpose and use | What the number means |
 | --- | --- | --- |
-| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes row/value slots, compressed and uncompressed page bytes, dictionary slots, and DELTA expansion capacity across columns, pages, and row groups. This conservative reservation is not measured process RAM or proof that all metadata and native scratch allocations are bounded. |
+| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes row/value slots, compressed and uncompressed page bytes, dictionary slots, DELTA expansion capacity across columns, pages, and row groups, and ZSTD/Brotli decoding workspace. This conservative reservation is not measured process RAM or proof that all metadata and codec allocations are bounded. |
 | Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested heap allocation; `rust_live_peak_bytes` is the peak sum of tracked live heap allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, stack storage, allocator overhead, and C internals are outside the ledger. |
 | Verification watchdog and runner | Protect the machine while building and executing tests; stop the owned process tree if host reserves or unit limits are lost. | The unit's 4 GiB allowance and measured peak include setup/build/test. An exhausted allowance makes that run invalid; it cannot establish a product allocation failure. Cargo compilation and executed product assertions have separate result fields. |
 
@@ -39,6 +39,15 @@ defined by RFC 8878. Static contexts reject older legacy frames; the unlimited
 reader retains its existing decoding path. Experimental static-context bindings
 are validated against the locked bundled library; substituted system libraries
 are outside this verification.
+
+The finite-policy Brotli reader reserves all three fixed Huffman tables before
+entering the pinned 4.0.3 decoder. Its custom allocators charge live byte, integer,
+and Huffman buffers to the same reader budget and return charges after freeing
+storage. A shared rejection flag prevents later dependent allocations from
+resuming after any refused request. The aggregate-workspace fixture uses explicit
+6 MiB and 12 MiB policies: the default 4 MiB window fits individually, but its sum
+with a 2 MiB page exceeds the smaller policy. These are test conditions, not a
+product default or deployment sizing recommendation.
 
 Use a fresh run ID. The watchdog refuses to overwrite its previous event stream.
 The watchdog writes its start record before observing the host or starting the unit.
