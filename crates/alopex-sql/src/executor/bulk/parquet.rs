@@ -53,9 +53,8 @@ impl ParquetReader {
         validate_planned_schema: bool,
     ) -> Result<Self> {
         let limit = memory.and_then(MemoryPolicy::limit_bytes);
-        let footer_start = limit
-            // Metadata uses bounded scratch space independently of retained rows.
-            .map(|limit| check_footer(&mut file, limit.max(4096)))
+        let footer = limit
+            .map(|limit| check_footer(&mut file, limit))
             .transpose()?;
         let input = file.try_clone().map_err(parquet_io_error)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(|e| {
@@ -117,7 +116,7 @@ impl ParquetReader {
             }
             count = declared;
         }
-        let mut reserved_bytes = 0;
+        let mut reserved_bytes = footer.as_ref().map_or(0, |footer| footer.key_value_bytes);
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             // Reject a declared result that cannot fit even its row/value slots
             // before inspecting or decoding pages.
@@ -125,22 +124,23 @@ impl ParquetReader {
                 .checked_mul(std::mem::size_of::<SqlValue>() as u64)
                 .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
                 .and_then(|bytes| bytes.checked_mul(count))
+                .and_then(|bytes| bytes.checked_add(reserved_bytes))
                 .ok_or_else(overflow)?;
             if policy.over_limit(minimum) {
                 return Err(ExecutorError::ResourceExhausted {
                     message: format!(
-                        "READ_PARQUET requires at least {minimum} bytes for declared rows (limit {}); spilling this operator is not supported",
+                        "READ_PARQUET requires at least {minimum} bytes for declared rows and metadata (limit {}); spilling this operator is not supported",
                         policy.limit_bytes().unwrap_or(u64::MAX)
                     ),
                 });
             }
             reserved_bytes = minimum;
         }
-        if let (Some(limit), Some(footer_start)) = (limit, footer_start) {
+        if let (Some(limit), Some(footer)) = (limit, footer) {
             reserved_bytes = check_pages(
                 &mut file,
                 builder.metadata(),
-                footer_start,
+                footer.start,
                 limit,
                 reserved_bytes,
             )?;

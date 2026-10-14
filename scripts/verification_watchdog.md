@@ -8,7 +8,7 @@ Resource boundaries are separate:
 
 | Boundary and owner | Purpose and use | What the number means |
 | --- | --- | --- |
-| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes row/value slots, compressed and uncompressed page bytes, dictionary slots, DELTA expansion capacity across columns, pages, and row groups, and ZSTD/Brotli decoding workspace. This conservative reservation is not measured process RAM or proof that all metadata and codec allocations are bounded. |
+| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes File KV declared slots/payload for Parquet and Arrow copies, row/value slots, compressed and uncompressed page bytes, dictionary slots, DELTA expansion capacity across columns, pages, and row groups, and ZSTD/Brotli decoding workspace. This conservative reservation is not measured process RAM or proof that all metadata and codec allocations are bounded. |
 | Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested heap allocation; `rust_live_peak_bytes` is the peak sum of tracked live heap allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, stack storage, allocator overhead, and C internals are outside the ledger. |
 | Verification watchdog and runner | Protect the machine while building and executing tests; stop the owned process tree if host reserves or unit limits are lost. | The unit's 4 GiB allowance and measured peak include setup/build/test. An exhausted allowance makes that run invalid; it cannot establish a product allocation failure. Cargo compilation and executed product assertions have separate result fields. |
 
@@ -48,6 +48,17 @@ resuming after any refused request. The aggregate-workspace fixture uses explici
 6 MiB and 12 MiB policies: the default 4 MiB window fits individually, but its sum
 with a 2 MiB page exceeds the smaller policy. These are test conditions, not a
 product default or deployment sizing recommendation.
+
+Footer preflight checks raw footer bytes plus cumulative Thrift list slots and
+string/binary payloads before the normal metadata decoder runs. It returns the
+footer offset and the File KV declaration reservation separately: only retained
+File KV slots/payload, including the Arrow copy, join the rows/pages/codec budget.
+Column KV declarations do not receive an Arrow copy charge. The metadata fixture
+uses 64 KiB and 256 KiB caller policies and one/256-row controls to distinguish
+temporary decoding from the overlap of retained File KV and result rows.
+This increment does not establish bounds for other retained metadata, schema
+conversion, `ARROW:schema` expansion, or HashMap bucket/control storage. These
+remaining allocations still prevent a whole-reader memory-bound claim.
 
 Use a fresh run ID. The watchdog refuses to overwrite its previous event stream.
 The watchdog writes its start record before observing the host or starting the unit.

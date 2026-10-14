@@ -20,7 +20,12 @@ fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<u64> {
+pub(super) struct FooterReservation {
+    pub(super) start: u64,
+    pub(super) key_value_bytes: u64,
+}
+
+pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservation> {
     let length = file.metadata().map_err(parquet_io_error)?.len();
     let trailer_start = length.checked_sub(8).ok_or_else(invalid_page)?;
     file.seek(SeekFrom::Start(trailer_start))
@@ -41,10 +46,17 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<u64> {
     let mut footer = CompactHeader {
         input: BufReader::with_capacity(size.min(4096) as usize, (&mut *file).take(size)),
         maximum: limit,
+        decoded_bytes: size,
+        retained_key_values: 0,
     };
     footer.metadata_fields(0, "FileMetaData")?;
+    let key_value_bytes = footer.retained_key_values;
+    drop(footer);
     file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
-    Ok(start)
+    Ok(FooterReservation {
+        start,
+        key_value_bytes,
+    })
 }
 
 pub(super) fn check_pages(
@@ -79,6 +91,8 @@ pub(super) fn check_pages(
                         (&mut *file).take(maximum),
                     ),
                     maximum,
+                    decoded_bytes: 0,
+                    retained_key_values: 0,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
                 let consumed = maximum - header.remaining();
@@ -131,6 +145,8 @@ pub(super) fn read_page_header_bytes(
     let mut header = CompactHeader {
         input: BufReader::with_capacity(maximum.min(4096) as usize, (&mut *file).take(maximum)),
         maximum,
+        decoded_bytes: 0,
+        retained_key_values: 0,
     };
     let (uncompressed, compressed, _) = header.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -152,6 +168,8 @@ pub(super) fn read_page_header_bytes(
             std::io::Cursor::new(&bytes).take(consumed),
         ),
         maximum: consumed,
+        decoded_bytes: 0,
+        retained_key_values: 0,
     };
     let (uncompressed, compressed, _) = copied.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -171,6 +189,8 @@ pub(super) fn read_page_header_bytes(
             std::io::Cursor::new(&bytes).take(consumed),
         ),
         maximum: consumed,
+        decoded_bytes: 0,
+        retained_key_values: 0,
     };
     typed.metadata_fields(0, "PageHeader")?;
     if typed.remaining() != 0 {
@@ -184,9 +204,28 @@ pub(super) fn read_page_header_bytes(
 struct CompactHeader<R: Read> {
     input: BufReader<std::io::Take<R>>,
     maximum: u64,
+    decoded_bytes: u64,
+    retained_key_values: u64,
 }
 
 impl<R: Read> CompactHeader<R> {
+    fn charge_metadata(&mut self, bytes: u64, context: &str) -> Result<()> {
+        self.decoded_bytes = self
+            .decoded_bytes
+            .checked_add(bytes)
+            .ok_or_else(invalid_page)?;
+        check_declared_bytes(self.decoded_bytes, self.maximum)?;
+        if context == "FileKeyValue" {
+            // File KV payloads are retained by both Parquet and Arrow Schema.
+            self.retained_key_values = bytes
+                .checked_mul(2)
+                .and_then(|bytes| self.retained_key_values.checked_add(bytes))
+                .ok_or_else(invalid_page)?;
+            check_declared_bytes(self.retained_key_values, self.maximum)?;
+        }
+        Ok(())
+    }
+
     fn remaining(&self) -> u64 {
         self.input.get_ref().limit() + self.input.buffer().len() as u64
     }
@@ -238,13 +277,18 @@ impl<R: Read> CompactHeader<R> {
             }
             id = self.field_id(field, id)?;
             let kind = field & 15;
-            let (expected, child, width, element) =
-                metadata_field(context, id).unwrap_or((kind, "", 0, 0));
+            let known = metadata_field(context, id);
+            let (expected, child, width, element) = known.unwrap_or((kind, "", 0, 0));
             if kind != expected && !(expected == 1 && kind == 2) {
                 return Err(invalid_page());
             }
             // Compact field booleans carry their value in the field tag.
             if kind != 1 && kind != 2 {
+                let child = if known.is_some() && context == "FileKeyValue" {
+                    context
+                } else {
+                    child
+                };
                 self.metadata_value(kind, depth, child, width, element)?;
             }
         }
@@ -279,6 +323,7 @@ impl<R: Read> CompactHeader<R> {
                 if length > self.remaining() {
                     return Err(invalid_page());
                 }
+                self.charge_metadata(length, context)?;
                 for _ in 0..length {
                     self.byte()?;
                 }
@@ -300,6 +345,7 @@ impl<R: Read> CompactHeader<R> {
                 if count > self.remaining() {
                     return Err(invalid_page());
                 }
+                self.charge_metadata(bytes, context)?;
                 for _ in 0..count {
                     self.metadata_value(kind, depth + 1, context, 0, 0)?;
                 }
@@ -526,7 +572,7 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ),
         ("FileMetaData", 5) => (
             9,
-            "KeyValue",
+            "FileKeyValue",
             std::mem::size_of::<parquet::format::KeyValue>(),
             12,
         ),
@@ -540,7 +586,9 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ("FileMetaData", 8) => (12, "EncryptionAlgorithm", 0, 0),
         ("IntType", 1) => (3, "", 0, 0),
         ("IntType", 2) => (1, "", 0, 0),
-        ("KeyValue", 1) | ("KeyValue", 2) => (8, "", 0, 0),
+        ("KeyValue", 1) | ("KeyValue", 2) | ("FileKeyValue", 1) | ("FileKeyValue", 2) => {
+            (8, "", 0, 0)
+        }
         ("LogicalType", 1) => (12, "StringType", 0, 0),
         ("LogicalType", 2) => (12, "MapType", 0, 0),
         ("LogicalType", 3) => (12, "ListType", 0, 0),

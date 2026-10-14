@@ -267,6 +267,85 @@ fn execute_observed_with_alias(
 }
 
 #[test]
+fn issue577_metadata_workspace_sum_checked_before_allocation() {
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    for (limit, width, rows, column_metadata, reject) in [
+        (None, 24 * 1024, 1, false, false),
+        (Some(LIMIT), 8, 1, false, false),
+        (Some(LIMIT), 24 * 1024, 1, false, true),
+        (Some(LIMIT * 4), 8, 1, false, false),
+        (Some(LIMIT * 4), 24 * 1024, 1, false, false),
+        (Some(LIMIT), 8, 256, false, false),
+        (Some(LIMIT), 12 * 1024, 1, false, false),
+        (Some(LIMIT), 12 * 1024, 256, false, true),
+        (Some(LIMIT), 12 * 1024, 256, true, false),
+        (Some(LIMIT * 4), 12 * 1024, 256, false, false),
+        (None, 12 * 1024, 256, false, false),
+    ] {
+        let file = row_count_fixture(rows);
+        let bytes = std::fs::read(file.path()).unwrap();
+        let size = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
+            as usize;
+        let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+            &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - size..])),
+        )
+        .unwrap();
+        footer.key_value_metadata = Some(
+            ["budget_a", "budget_b"]
+                .into_iter()
+                .map(|key| parquet::format::KeyValue {
+                    key: key.into(),
+                    value: Some("x".repeat(width)),
+                })
+                .collect(),
+        );
+        if column_metadata {
+            footer.row_groups[0].columns[0]
+                .meta_data
+                .as_mut()
+                .unwrap()
+                .key_value_metadata = footer.key_value_metadata.take();
+        }
+        let mut encoded = Vec::new();
+        footer
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+            .unwrap();
+        assert!(encoded.len() < LIMIT);
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "metadata workspace limit={limit:?} width={width} rows={rows} column_metadata={column_metadata} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "metadata combined workspace exceeded its budget"
+            );
+        }
+        if reject {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal metadata rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+        }
+    }
+}
+
+#[test]
 fn issue577_aggregate_observer_calibration() {
     LIVE_ALLOCATIONS.with(|observed| {
         let mut allocations = LiveAllocations::new();
