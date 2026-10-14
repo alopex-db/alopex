@@ -6,6 +6,7 @@ use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
+use alopex_sql::planner::PlannerError;
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::SqlValue;
 
@@ -166,4 +167,43 @@ fn create_table_as_select_derives_names_and_types_without_source_constraints() {
             vec![SqlValue::Integer(1), SqlValue::Null, SqlValue::Integer(3)],
         ]
     );
+}
+
+#[test]
+fn ctas_rejects_duplicate_output_names_before_creation() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE TABLE copied AS SELECT 1 AS id, 2 AS id",
+    )
+    .expect("parse CTAS")
+    .pop()
+    .expect("one statement");
+    let error = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&statement)
+        .expect_err("duplicate output names must be rejected");
+    assert!(matches!(error, PlannerError::InvalidExpression { .. }));
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert!(!catalog.read().expect("catalog lock").table_exists("copied"));
+}
+
+#[test]
+fn ctas_resolves_untyped_null_output_to_text() {
+    let results = execute_sql(
+        "CREATE TABLE bare AS SELECT NULL AS x;
+         CREATE TABLE typed AS SELECT CAST(NULL AS INTEGER) AS x;
+         SELECT x FROM bare;
+         SELECT x FROM typed;",
+    )
+    .expect("CTAS with NULL output executes");
+    let ExecutionResult::Query(bare) = &results[2] else {
+        panic!("expected bare NULL query result");
+    };
+    let ExecutionResult::Query(typed) = &results[3] else {
+        panic!("expected typed NULL query result");
+    };
+    assert_eq!(bare.columns[0].data_type, ResolvedType::Text);
+    assert_eq!(typed.columns[0].data_type, ResolvedType::Integer);
+    assert_eq!(bare.rows, vec![vec![SqlValue::Null]]);
+    assert_eq!(typed.rows, vec![vec![SqlValue::Null]]);
 }
