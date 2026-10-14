@@ -269,6 +269,30 @@ impl<R: Read> CompactHeader<R> {
         Ok(())
     }
 
+    fn reserve_converted_metadata(&mut self, count: u64, width: usize) -> Result<()> {
+        if count == 0 || width == 0 {
+            return Ok(());
+        }
+        // Parquet 53 pushes into empty Vecs; account for their retained growth capacity.
+        let initial = if width <= 1024 { 4 } else { 1 };
+        let capacity = count
+            .checked_next_power_of_two()
+            .ok_or_else(invalid_page)?
+            .max(initial);
+        let bytes = capacity
+            .checked_mul(width as u64)
+            .ok_or_else(invalid_page)?;
+        self.charge_metadata(bytes, "RetainedMetadata")?;
+        if count > initial {
+            // A relocating growth may keep the old converted backing alive temporarily.
+            let previous = (capacity / 2)
+                .checked_mul(width as u64)
+                .ok_or_else(invalid_page)?;
+            self.charge_metadata(previous, "")?;
+        }
+        Ok(())
+    }
+
     fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<u64> {
         let length = self.varint()?;
         check_declared_bytes(length, self.maximum)?;
@@ -447,7 +471,22 @@ impl<R: Read> CompactHeader<R> {
                 if count > self.remaining() {
                     return Err(invalid_page());
                 }
-                self.charge_metadata(bytes, context)?;
+                self.charge_metadata(
+                    bytes,
+                    if context == "SortingColumn" {
+                        "RetainedMetadata"
+                    } else {
+                        context
+                    },
+                )?;
+                let converted_width = match context {
+                    "RowGroup" => std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>(),
+                    "ColumnChunk" => {
+                        std::mem::size_of::<parquet::file::metadata::ColumnChunkMetaData>()
+                    }
+                    _ => 0,
+                };
+                self.reserve_converted_metadata(count, converted_width)?;
                 for _ in 0..count {
                     self.metadata_value(kind, depth + 1, context, 0, 0)?;
                 }

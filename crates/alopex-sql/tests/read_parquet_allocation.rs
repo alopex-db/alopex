@@ -915,6 +915,85 @@ fn row_count_fixture(rows: usize) -> tempfile::NamedTempFile {
 }
 
 #[test]
+fn issue577_row_group_metadata_shared_budget_before_allocation() {
+    row_group_metadata_shared_budget_before_allocation(false);
+}
+
+#[test]
+fn issue577_row_group_metadata_sorting_shared_budget_before_allocation() {
+    row_group_metadata_shared_budget_before_allocation(true);
+}
+
+fn row_group_metadata_shared_budget_before_allocation(sorted: bool) {
+    for (limit, groups, rows, may_reject) in [
+        (None, 32, 512, false),
+        (Some(LIMIT), 1, 1, false),
+        (Some(LIMIT), 1, 512, false),
+        (Some(LIMIT), 4, 64, false),
+        (Some(LIMIT), 5, 80, false),
+        (Some(LIMIT), 32, 512, true),
+        (Some(LIMIT * 4), 32, 512, false),
+        (Some(LIMIT), 33, 528, true),
+        (Some(LIMIT * 4), 33, 528, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED INT64 id; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::SNAPPY)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .set_sorting_columns(
+                    sorted.then(|| vec![parquet::format::SortingColumn::new(0, false, false)]),
+                )
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        for values in vec![7; rows].chunks(rows / groups) {
+            let mut group = writer.next_row_group().unwrap();
+            let mut column = group.next_column().unwrap().unwrap();
+            column
+                .typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .unwrap();
+            column.close().unwrap();
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "row group metadata sorted={sorted} limit={limit:?} groups={groups} rows={rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "row group metadata exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected row group metadata rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+        }
+    }
+}
+
+#[test]
 fn issue577_row_limit_boundary_preserves_rows() {
     let file = row_count_fixture(100_000);
     let limit = 32 * 1024 * 1024;
