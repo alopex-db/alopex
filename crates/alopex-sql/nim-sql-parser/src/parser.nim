@@ -555,6 +555,13 @@ proc parsePrimary(p: var Parser): SqlNode =
       let unitTok = p.advance()
       value.add(" " & unitTok.value)
       lastTok = unitTok
+      if unitTok.value.toLowerAscii() in ["year", "years"] and p.check(tkTo):
+        discard p.advance()
+        let endUnit = p.expectIdent("interval end unit")
+        if endUnit.value.toLowerAscii() notin ["month", "months"]:
+          p.error("YEAR TO interval qualifier requires MONTH")
+        value.add(" TO " & endUnit.value)
+        lastTok = endUnit
     result = newIntervalLit(value,
       Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(lastTok).`end`))
   of tkDecimal:
@@ -2105,6 +2112,10 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
     result.children.add(newIdent("IF NOT EXISTS"))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
+  if p.check(tkWith):
+    result.children.add(p.parseWithOptions())
+    if not p.check(tkAs):
+      p.error("expected AS after CREATE TABLE WITH options")
   if p.check(tkAs):
     discard p.advance()
     if not p.check(tkSelect):

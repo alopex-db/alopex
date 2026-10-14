@@ -170,6 +170,95 @@ fn create_table_as_select_derives_names_and_types_without_source_constraints() {
 }
 
 #[test]
+fn columnar_ctas_plan_rejects_before_catalog_mutation_and_preserves_noop() {
+    use alopex_sql::catalog::Catalog;
+    use alopex_sql::planner::LogicalPlan;
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let statement = Parser::parse_sql(&AlopexDialect, "CREATE TABLE copied AS SELECT 1 AS id")
+        .unwrap()
+        .remove(0);
+    let row_plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    let mut columnar_plan = row_plan.clone();
+    let LogicalPlan::CreateTableAs {
+        with_options,
+        if_not_exists,
+        ..
+    } = &mut columnar_plan
+    else {
+        panic!("expected CTAS plan");
+    };
+    with_options.push(("storage".into(), "columnar".into()));
+    *if_not_exists = true;
+    assert!(matches!(executor.execute(columnar_plan.clone()),
+        Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
+    assert!(!catalog.read().unwrap().table_exists("copied"));
+    executor.execute(row_plan).unwrap();
+    assert_eq!(
+        executor.execute(columnar_plan).unwrap(),
+        ExecutionResult::Success
+    );
+    let statement = Parser::parse_sql(&AlopexDialect, "SELECT id FROM copied")
+        .unwrap()
+        .remove(0);
+    let plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    let ExecutionResult::Query(query) = executor.execute(plan).unwrap() else {
+        panic!("expected preserved rows");
+    };
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn ctas_with_options_reaches_existing_storage_guard() {
+    use alopex_sql::planner::LogicalPlan;
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE TABLE copied WITH (storage='columnar') AS SELECT 1 AS id",
+    )
+    .expect("parse CTAS WITH")
+    .remove(0);
+    let plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .expect("plan CTAS WITH");
+    let LogicalPlan::CreateTableAs { with_options, .. } = &plan else {
+        panic!("expected CTAS plan");
+    };
+    assert_eq!(with_options, &vec![("storage".into(), "columnar".into())]);
+    assert!(matches!(executor.execute(plan),
+        Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
+    assert!(!catalog.read().unwrap().table_exists("copied"));
+}
+
+#[test]
+fn create_table_as_select_keeps_output_schema_without_source_constraints() {
+    let results = execute_sql(
+        "CREATE TABLE source (id INT PRIMARY KEY, cat TEXT NOT NULL);
+         INSERT INTO source VALUES (1, 'a');
+         CREATE TABLE copied AS SELECT id AS copied_id, cat FROM source;
+         INSERT INTO copied VALUES (1, NULL);
+         CREATE TABLE IF NOT EXISTS copied AS SELECT id, cat FROM source;
+         SELECT copied_id, cat FROM copied ORDER BY cat NULLS LAST;",
+    )
+    .expect("CTAS copies output names and types without source constraints");
+    let ExecutionResult::Query(query) = results.last().unwrap() else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(1), SqlValue::Null],
+        ]
+    );
+}
+
+#[test]
 fn ctas_rejects_duplicate_output_names_before_creation() {
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let statement = Parser::parse_sql(
