@@ -148,6 +148,29 @@ fn analysis_date_differences_are_numeric_and_interval_units_are_sql_standard() {
 }
 
 #[test]
+fn date_diff_rejects_unsupported_units() {
+    let mut harness = Harness::new();
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT DATE_DIFF('hour', TIMESTAMP '2017-01-01', TIMESTAMP '2017-01-09')",
+    )
+    .expect("parse DATE_DIFF")
+    .pop()
+    .expect("one statement");
+    let plan = Planner::new(&*harness.catalog.read().expect("catalog lock"))
+        .plan(&statement)
+        .expect("plan DATE_DIFF");
+    let error = harness
+        .executor
+        .execute(plan)
+        .expect_err("unsupported DATE_DIFF units must fail");
+    assert!(
+        error.to_string().contains("unsupported date part 'hour'"),
+        "{error}"
+    );
+}
+
+#[test]
 fn temporal_storage_comparison_and_month_end_arithmetic_round_trip() {
     assert!(ResolvedType::Text.can_cast_to(&ResolvedType::Date));
     let mut harness = Harness::new();

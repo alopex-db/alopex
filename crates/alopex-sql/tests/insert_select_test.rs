@@ -1,11 +1,12 @@
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::memory::MemoryKV;
-use alopex_sql::catalog::MemoryCatalog;
+use alopex_sql::catalog::{Catalog, MemoryCatalog};
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
+use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::SqlValue;
 
 fn execute_sql(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
@@ -94,6 +95,75 @@ fn create_table_as_select_materializes_source_rows() {
         vec![
             vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
             vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+        ]
+    );
+}
+
+#[test]
+fn create_table_as_select_derives_names_and_types_without_source_constraints() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE TABLE p (id INT PRIMARY KEY, cat TEXT NOT NULL DEFAULT 'a'); \
+         INSERT INTO p VALUES (1, 'x'); \
+         CREATE TABLE p2 AS SELECT id AS copied_id, cat AS copied_cat, id + 1 AS next_id FROM p; \
+         INSERT INTO p2 (copied_id, copied_cat, next_id) VALUES (1, NULL, 3); \
+         SELECT copied_id, copied_cat, next_id FROM p2 ORDER BY next_id;",
+    )
+    .expect("parse CTAS");
+    let mut results = Vec::new();
+    for statement in statements {
+        let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+            .plan(&statement)
+            .expect("plan CTAS");
+        results.push(
+            executor
+                .execute(plan)
+                .expect("execute CTAS and unconstrained insert"),
+        );
+    }
+
+    let table = catalog
+        .read()
+        .expect("catalog lock")
+        .get_table("p2")
+        .expect("created CTAS table")
+        .clone();
+    assert_eq!(
+        table.column_names(),
+        vec!["copied_id", "copied_cat", "next_id"]
+    );
+    assert_eq!(
+        table
+            .columns
+            .iter()
+            .map(|column| &column.data_type)
+            .collect::<Vec<_>>(),
+        vec![
+            &ResolvedType::Integer,
+            &ResolvedType::Text,
+            &ResolvedType::Integer
+        ]
+    );
+    assert!(table.primary_key.is_none());
+    assert!(table.constraints.is_empty());
+    assert!(table.columns.iter().all(|column| {
+        !column.not_null && !column.primary_key && !column.unique && column.default.is_none()
+    }));
+
+    let ExecutionResult::Query(query) = results.last().expect("select result") else {
+        panic!("expected CTAS rows");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Integer(1),
+                SqlValue::Text("x".into()),
+                SqlValue::Integer(2),
+            ],
+            vec![SqlValue::Integer(1), SqlValue::Null, SqlValue::Integer(3)],
         ]
     );
 }

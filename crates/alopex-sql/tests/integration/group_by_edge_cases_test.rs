@@ -144,6 +144,40 @@ fn group_by_supports_case_and_date_trunc() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn group_by_month_expression_alias_and_position_match() {
+    let mut harness = TestHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE orders (ts TIMESTAMP); \
+         INSERT INTO orders VALUES \
+         (TIMESTAMP '2025-01-15 10:00:00'), \
+         (TIMESTAMP '2025-01-20 11:00:00'), \
+         (TIMESTAMP '2025-02-01 00:00:00');",
+    );
+
+    for group_by in ["DATE_TRUNC('month', ts)", "m", "1"] {
+        let result = harness.query_sql(&format!(
+            "SELECT DATE_TRUNC('month', ts) AS m, COUNT(*) \
+             FROM orders GROUP BY {group_by} ORDER BY m"
+        ));
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    SqlValue::Timestamp(1_735_689_600_000_000),
+                    SqlValue::BigInt(2)
+                ],
+                vec![
+                    SqlValue::Timestamp(1_738_368_000_000_000),
+                    SqlValue::BigInt(1)
+                ],
+            ],
+            "GROUP BY {group_by}"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn invalid_having_non_grouped_column() {
     let mut harness = TestHarness::new();
     harness.execute_sql(
