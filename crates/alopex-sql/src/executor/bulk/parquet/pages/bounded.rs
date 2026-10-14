@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use brotli_decompressor::{
     Allocator, BrotliDecompressStream, BrotliResult, BrotliState, HuffmanCode, StandardAlloc,
@@ -24,6 +25,68 @@ fn invalid() -> ParquetError {
 
 fn nonnegative(value: i32) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid())
+}
+
+struct ScratchReservation<'a> {
+    reserved: &'a AtomicU64,
+    bytes: u64,
+}
+
+impl Drop for ScratchReservation<'_> {
+    fn drop(&mut self) {
+        self.reserved.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+fn decode_zstd(input: &[u8], output: &mut [u8], limit: u64, reserved: &AtomicU64) -> Result<()> {
+    use zstd::zstd_safe::zstd_sys;
+
+    #[repr(C, align(8))]
+    #[derive(Clone)]
+    struct Word {
+        _bytes: [u8; 8],
+    }
+
+    // SAFETY: This query has no arguments and allocates no context.
+    let bytes = unsafe { zstd_sys::ZSTD_estimateDCtxSize() };
+    let words = bytes.checked_add(7).ok_or_else(invalid)? / 8;
+    let bytes = words
+        .checked_mul(8)
+        .filter(|&bytes| bytes != 0)
+        .ok_or_else(invalid)?;
+    reserved
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            used.checked_add(bytes as u64).filter(|&used| used <= limit)
+        })
+        .map_err(|_| {
+            ParquetError::External(Box::new(crate::executor::ExecutorError::ResourceExhausted {
+                message: format!("READ_PARQUET ZSTD workspace requires {bytes} additional bytes (limit {limit})"),
+            }))
+        })?;
+    let _reservation = ScratchReservation {
+        reserved,
+        bytes: bytes as u64,
+    };
+    let mut workspace = vec![Word { _bytes: [0; 8] }; words];
+    // SAFETY: The 8-byte-aligned workspace stays live and fixed through both C calls.
+    // The static context never mallocs or resizes, and is not passed to freeDCtx.
+    let valid = unsafe {
+        let context = zstd_sys::ZSTD_initStaticDCtx(workspace.as_mut_ptr().cast(), bytes);
+        !context.is_null() && {
+            let decoded = zstd_sys::ZSTD_decompressDCtx(
+                context,
+                output.as_mut_ptr().cast(),
+                output.len(),
+                input.as_ptr().cast(),
+                input.len(),
+            );
+            zstd_sys::ZSTD_isError(decoded) == 0 && decoded == output.len()
+        }
+    };
+    if !valid {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 struct BrotliAllocation {
@@ -131,6 +194,7 @@ pub(super) struct BoundedPages {
     chunk_start: u64,
     chunk_end: u64,
     compression: Compression,
+    reserved_bytes: Arc<AtomicU64>,
 }
 
 impl BoundedPages {
@@ -140,6 +204,7 @@ impl BoundedPages {
         total_rows: usize,
         locations: Option<Vec<PageLocation>>,
         limit: u64,
+        reserved_bytes: Arc<AtomicU64>,
     ) -> Result<Self> {
         let chunk_start = u64::try_from(
             column
@@ -179,6 +244,7 @@ impl BoundedPages {
             chunk_start,
             chunk_end,
             compression: column.compression(),
+            reserved_bytes,
         })
     }
 
@@ -351,11 +417,12 @@ impl BoundedPages {
                 }
             }
             Compression::ZSTD(_) if compressed_size != offset || output_size != offset => {
-                let decoded = zstd::bulk::Decompressor::new()?
-                    .decompress_to_buffer(&compressed[offset..], &mut output[offset..])?;
-                if decoded != output_size - offset {
-                    return Err(invalid());
-                }
+                decode_zstd(
+                    &compressed[offset..],
+                    &mut output[offset..],
+                    self.limit,
+                    &self.reserved_bytes,
+                )?;
             }
             Compression::ZSTD(_) => {}
             Compression::BROTLI(_) if compressed_size != offset || output_size != offset => {
@@ -468,5 +535,44 @@ impl PageReader for BoundedPages {
             Position::Indexed { .. } => Ok(true),
             Position::Sequential { .. } => Ok(self.peek_next_page()?.is_none()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zstd_scratch_is_released_after_success_and_failure() {
+        let input = zstd::bulk::compress(&[7; 8], 1).unwrap();
+        let mut concatenated = zstd::bulk::compress(&[7; 4], 1).unwrap();
+        concatenated.extend(zstd::bulk::compress(&[7; 4], 1).unwrap());
+        let mut skippable = vec![0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, 1, 2, 3];
+        skippable.extend_from_slice(&input);
+        let mut corrupt = input.clone();
+        corrupt[0] ^= 0xff;
+        let reserved = AtomicU64::new(128);
+        let context = zstd::zstd_safe::DCtx::create().sizeof() as u64;
+        for (data, length, valid) in [
+            (input.as_slice(), 8, true),
+            (concatenated.as_slice(), 8, true),
+            (skippable.as_slice(), 8, true),
+            (corrupt.as_slice(), 8, false),
+            (&input[..input.len() - 1], 8, false),
+            (input.as_slice(), 7, false),
+            (input.as_slice(), 9, false),
+        ] {
+            let mut output = vec![0; length];
+            assert_eq!(
+                decode_zstd(data, &mut output, context + 128, &reserved).is_ok(),
+                valid
+            );
+            assert_eq!(reserved.load(Ordering::Relaxed), 128);
+            if valid {
+                assert_eq!(output, [7; 8]);
+            }
+        }
+        assert!(decode_zstd(&input, &mut [0; 8], context + 127, &reserved).is_err());
+        assert_eq!(reserved.load(Ordering::Relaxed), 128);
     }
 }

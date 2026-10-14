@@ -9,7 +9,7 @@ Resource boundaries are separate:
 | Boundary and owner | Purpose and use | What the number means |
 | --- | --- | --- |
 | Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes row/value slots, compressed and uncompressed page bytes, dictionary slots, and DELTA expansion capacity across columns, pages, and row groups. This conservative reservation is not measured process RAM or proof that all metadata and native scratch allocations are bounded. |
-| Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested allocation; `rust_live_peak_bytes` is the peak sum of tracked live allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, allocator overhead, and C internals are outside the ledger. |
+| Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested heap allocation; `rust_live_peak_bytes` is the peak sum of tracked live heap allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, stack storage, allocator overhead, and C internals are outside the ledger. |
 | Verification watchdog and runner | Protect the machine while building and executing tests; stop the owned process tree if host reserves or unit limits are lost. | The unit's 4 GiB allowance and measured peak include setup/build/test. An exhausted allowance makes that run invalid; it cannot establish a product allocation failure. Cargo compilation and executed product assertions have separate result fields. |
 
 The product reservation decides whether the reader may proceed; the test ledger
@@ -18,11 +18,27 @@ can safely run the verification. None of these owners may substitute its result
 for another owner's result. Remaining coverage gaps belong to issue #577.
 Ledger exhaustion invalidates the allocation measurement. Missing or zero-test
 results are incomplete; a build failure leaves product tests unexecuted.
+An OS unit exit of zero is insufficient without the child completion receipt;
+the runner returns 125 when an interrupted unit leaves that receipt absent.
 The receipt names environment RAM `verification_unit_memory_peak_bytes`.
 The fixture budgets keep normal controls within the limit while wider values
 exceed the combined budget even though every individual page fits. Repeating
 the same layouts at 64 KiB and 128 KiB checks the caller-supplied limit rather
 than a hard-coded threshold; these values prescribe no deployment sizing.
+
+The finite-policy ZSTD reader also reserves its native context before allocating
+an 8-byte-aligned, Rust-owned static workspace. The reservation includes alignment
+rounding and is returned after decoding, including error paths. The fixed bundled
+ZSTD 1.5.6 API guarantees that this static context cannot malloc or resize itself.
+Normal ZSTD fixtures therefore allow the measured context size in addition to
+their page/result allowance; the context-minus-one case must reject before allocation.
+The workspace is now visible to the Rust allocation ledger. Older Rust-only
+peaks excluded this native cost and are not total-memory comparison baselines.
+This reader targets the [Parquet ZSTD format](https://github.com/apache/parquet-format/blob/master/Compression.md#zstd)
+defined by RFC 8878. Static contexts reject older legacy frames; the unlimited
+reader retains its existing decoding path. Experimental static-context bindings
+are validated against the locked bundled library; substituted system libraries
+are outside this verification.
 
 Use a fresh run ID. The watchdog refuses to overwrite its previous event stream.
 The watchdog writes its start record before observing the host or starting the unit.

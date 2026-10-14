@@ -926,6 +926,70 @@ fn issue577_brotli_minimum_workspace_checked_before_allocation() {
 }
 
 #[test]
+fn issue577_zstd_scratch_checked_before_allocation() {
+    let context_bytes = zstd::zstd_safe::DCtx::create().sizeof();
+    for (rows, page_rows, group_rows) in [(1, 1, 1), (64, 16, 64), (64, 64, 16)] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED INT64 id; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_data_page_row_count_limit(page_rows)
+                .set_write_batch_size(1)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        for values in vec![7; rows].chunks(group_rows) {
+            let mut group = writer.next_row_group().unwrap();
+            let mut column = group.next_column().unwrap().unwrap();
+            column
+                .typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .unwrap();
+            column.close().unwrap();
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let row_slots = rows * (size_of::<Vec<SqlValue>>() + size_of::<SqlValue>());
+        for (limit, reject) in [
+            (None, false),
+            (Some(context_bytes + LIMIT), false),
+            (Some(context_bytes - 1), true),
+            (Some(context_bytes + row_slots - 1), true),
+        ] {
+            LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+            let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+            let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+            assert!(!observed.exhausted);
+            println!(
+                "ZSTD scratch context_bytes={context_bytes} limit={limit:?} rows={rows} page_rows={page_rows} group_rows={group_rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+                observed.peak,
+                result.is_err()
+            );
+            if let Some(limit) = limit {
+                assert!(maximum <= limit);
+                assert!(observed.peak <= limit);
+            }
+            if reject {
+                assert!(matches!(
+                    result,
+                    Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+                ));
+            } else {
+                let ExecutionResult::Query(result) = result.unwrap() else {
+                    panic!("expected normal ZSTD rows");
+                };
+                assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+            }
+        }
+    }
+}
+
+#[test]
 fn issue577_codec_zstd_output_checked_before_capacity_growth() {
     codec_output_checked_before_capacity_growth(Compression::ZSTD(Default::default()));
 }
@@ -935,10 +999,20 @@ fn issue577_codec_lz4_raw_output_checked_before_capacity_growth() {
     codec_output_checked_before_capacity_growth(Compression::LZ4_RAW);
 }
 
+fn codec_test_limit(compression: Compression) -> usize {
+    // ZSTD's native context must fit alongside the existing page/result allowance.
+    if matches!(compression, Compression::ZSTD(_)) {
+        zstd::zstd_safe::DCtx::create().sizeof() + LIMIT
+    } else {
+        LIMIT
+    }
+}
+
 fn codec_output_checked_before_capacity_growth(compression: Compression) {
     use parquet::data_type::{ByteArray, ByteArrayType};
     use parquet::file::properties::EnabledStatistics;
 
+    let limit = codec_test_limit(compression);
     for large in [false, true] {
         let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
         let schema =
@@ -955,7 +1029,7 @@ fn codec_output_checked_before_capacity_growth(compression: Compression) {
                 .unwrap();
         let mut group = writer.next_row_group().unwrap();
         let mut column = group.next_column().unwrap().unwrap();
-        let payload = vec![0; if large { LIMIT + 1 } else { 8 }];
+        let payload = vec![0; if large { limit + 1 } else { 8 }];
         column
             .typed::<ByteArrayType>()
             .write_batch(&[ByteArray::from(payload)], None, None)
@@ -963,7 +1037,7 @@ fn codec_output_checked_before_capacity_growth(compression: Compression) {
         column.close().unwrap();
         group.close().unwrap();
         let mut footer = writer.close().unwrap();
-        let (result, maximum) = execute_observed_after_planning(&file, || {
+        let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {
             if !large {
                 return;
             }
@@ -999,7 +1073,7 @@ fn codec_output_checked_before_capacity_growth(compression: Compression) {
             std::fs::write(file.path(), bytes).unwrap();
         });
         println!(
-            "{compression:?} control large={large} maximum_request={maximum} result={result:?}"
+            "{compression:?} control large={large} limit={limit} maximum_request={maximum} result={result:?}"
         );
         if large {
             assert!(matches!(
@@ -1013,7 +1087,7 @@ fn codec_output_checked_before_capacity_growth(compression: Compression) {
             assert_eq!(result.rows, vec![vec![SqlValue::Blob(vec![0; 8])]]);
         }
         assert!(
-            maximum <= LIMIT,
+            maximum <= limit,
             "{compression:?} output grew beyond the decoding budget"
         );
     }
@@ -1351,6 +1425,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 Compression::ZSTD(Default::default()),
                 Compression::BROTLI(Default::default()),
             ] {
+                let limit = codec_test_limit(compression);
                 let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
                 let schema = Arc::new(Schema::new(vec![
                     Field::new("id", DataType::Int64, true),
@@ -1421,7 +1496,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 let (result, maximum) = execute_observed_with_alias(
                     &file,
                     "AS p(renamed_id, renamed_label)",
-                    Some(LIMIT),
+                    Some(limit),
                     || {},
                 );
                 let ExecutionResult::Query(result) = result.unwrap() else {
@@ -1448,7 +1523,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                 println!(
                     "normal seam version={version:?} dictionary={dictionary} compression={compression:?} row_groups=2 data_pages={data_pages} maximum_request={maximum}"
                 );
-                assert!(maximum <= LIMIT);
+                assert!(maximum <= limit);
             }
         }
     }

@@ -137,6 +137,7 @@ impl Iterator for ColumnChunks {
                     group.num_rows() as usize,
                     locations,
                     self.limit,
+                    Arc::clone(&self.reserved_bytes),
                 )?)
             } else {
                 Box::new(SerializedPageReader::new(
@@ -417,6 +418,11 @@ mod tests {
     }
 
     fn assert_indexed_pages(compression: parquet::basic::Compression) {
+        let limit = if matches!(compression, parquet::basic::Compression::ZSTD(_)) {
+            zstd::zstd_safe::DCtx::create().sizeof() as u64 + 65536
+        } else {
+            65536
+        };
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut lists = ListBuilder::new(Int32Builder::new());
         lists.values().append_value(1);
@@ -470,7 +476,7 @@ mod tests {
             file: Arc::new(input.try_clone().unwrap()),
             metadata: Arc::clone(&metadata),
             num_rows: 4,
-            limit: 65536,
+            limit,
             reserved_bytes: Arc::new(AtomicU64::new(0)),
         };
         let mut chunks = groups.column_chunks(0).unwrap();
@@ -489,7 +495,7 @@ mod tests {
         assert!(chunks.next().unwrap().is_ok());
         assert!(chunks.next().is_none());
 
-        let actual = reader(input, metadata, builder.schema(), 1024, 65536, 0)
+        let actual = reader(input, metadata, builder.schema(), 1024, limit, 0)
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
