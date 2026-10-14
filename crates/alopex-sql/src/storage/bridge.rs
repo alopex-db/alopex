@@ -439,6 +439,27 @@ pub struct HnswTxnEntry {
     pub index: HnswIndex,
     pub state: HnswTransactionState,
     pub dirty: bool,
+    pub(crate) cached_read: bool,
+}
+
+impl HnswTxnEntry {
+    pub(crate) fn loaded(index: HnswIndex) -> Self {
+        Self {
+            index,
+            state: HnswTransactionState::default(),
+            dirty: false,
+            cached_read: false,
+        }
+    }
+
+    pub(crate) fn cached_read(index: HnswIndex) -> Self {
+        Self {
+            index,
+            state: HnswTransactionState::default(),
+            dirty: false,
+            cached_read: true,
+        }
+    }
 }
 
 impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
@@ -484,14 +505,8 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     pub(crate) fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
@@ -500,14 +515,8 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     pub(crate) fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
     }
@@ -678,6 +687,21 @@ impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
             self.overlay,
         )
     }
+
+    pub fn seed_hnsw_read_cache(&mut self, entries: Vec<(String, HnswIndex)>) {
+        for (name, index) in entries {
+            self.hnsw_indices
+                .entry(name)
+                .or_insert_with(|| HnswTxnEntry::cached_read(index));
+        }
+    }
+
+    pub fn cloned_hnsw_entries(&self) -> Vec<(String, HnswIndex)> {
+        self.hnsw_indices
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.index.clone_for_read()))
+            .collect()
+    }
 }
 
 impl<'a, 'b, 'c, S: KVStore + 'b> Drop for BorrowedSqlTransaction<'a, 'b, 'c, S> {
@@ -717,29 +741,24 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
     fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
 
     fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
+        if self
+            .hnsw_indices
+            .get(name)
+            .is_some_and(|entry| entry.cached_read)
+        {
+            self.hnsw_indices.remove(name);
+        }
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
     }
