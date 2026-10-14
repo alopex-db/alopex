@@ -36,6 +36,40 @@ def test_execute_sql_ddl_returns_none(db):
     assert result is None
 
 
+def test_parameterized_multiple_statements_fail_before_execution(db):
+    db.execute_sql("CREATE TABLE multi_params (id INTEGER PRIMARY KEY)")
+    sql = "INSERT INTO multi_params VALUES (?); INSERT INTO multi_params VALUES (?)"
+    with pytest.raises(ValueError, match="複数 SQL 文") as error:
+        db.execute_sql(sql, [1, 2])
+    assert error.value.code == "ALOPEX-PY019"
+    assert db.execute_sql("SELECT id FROM multi_params") == []
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    with pytest.raises(ValueError, match="複数 SQL 文"):
+        txn.execute_sql(sql, [1, 2])
+    with pytest.raises(ValueError, match="複数 SQL 文"):
+        txn.execute_sql_stream(
+            "SELECT ? AS amount; SELECT ? AS amount",
+            [Decimal("12345678901234567.89")] * 2,
+        )
+    assert txn.execute_sql("SELECT id FROM multi_params") == []
+    txn.rollback()
+
+
+def test_transaction_stream_rendered_decimal_is_exact(db):
+    value = Decimal("12345678901234567.89")
+    txn = db.begin(TxnMode.READ_WRITE)
+    try:
+        assert list(txn.execute_sql_stream("SELECT ? AS amount", [value])) == [
+            {"amount": value}
+        ]
+        assert list(txn.execute_sql_stream("SELECT -? AS amount", [value])) == [
+            {"amount": -value}
+        ]
+    finally:
+        txn.rollback()
+
+
 def test_parameter_binding_keeps_native_and_mixed_paths(db):
     db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
     assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1

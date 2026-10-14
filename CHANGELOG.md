@@ -18,6 +18,9 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
+- Python SQL calls now reject parameterized batches containing multiple
+  statements. Run each statement separately; the old SQL-text expansion could
+  lose Decimal precision in later results (#582).
 - Catalog loading now rejects invalid DEFAULT or constraint metadata instead
   of silently discarding it. Internal encoding properties no longer appear in
   public table properties. Rust callers converting `PersistedTableMeta` and
