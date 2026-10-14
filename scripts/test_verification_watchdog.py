@@ -39,6 +39,57 @@ class Observations:
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_host_fresh_responses_do_not_accumulate_cross_clock_drift(self):
+        monitor = HostMonitor()
+        monitor.process = Mock()
+        monitor.selector = Mock()
+        monitor.selector.select.side_effect = [[True], [True]]
+        monitor.process.stdout.read.side_effect = [
+            json.dumps(dict(SAFE, request_id=1, observed_elapsed_ms=0)).encode() + b'\n',
+            json.dumps(dict(SAFE, request_id=2, observed_elapsed_ms=254_000)).encode() + b'\n',
+        ]
+        with patch('host_resources.time.monotonic', side_effect=[0, 0, 0, 260, 260, 260]):
+            monitor.read()
+            sample = monitor.read()
+        self.assertLessEqual(sample['observation_age_seconds'], 5)
+        self.assertEqual(monitor.process.stdin.write.call_args_list[-1].args, (b'2\n',))
+
+    def test_host_ignores_queued_response_from_previous_request(self):
+        monitor = HostMonitor()
+        monitor.process = Mock()
+        monitor.selector = Mock()
+        monitor.selector.select.return_value = [True]
+        monitor.process.stdout.read.return_value = b'\n'.join(
+            json.dumps(dict(SAFE, request_id=value)).encode() for value in [0, 1]
+        ) + b'\n'
+        with patch('host_resources.time.monotonic', side_effect=[0, 0, 1]):
+            sample = monitor.read()
+        self.assertEqual(sample['request_id'], 1)
+        self.assertEqual(sample['observation_age_seconds'], 1)
+
+    def test_host_old_or_late_response_does_not_extend_deadline(self):
+        for request_id in [0, 1]:
+            monitor = HostMonitor()
+            monitor.process = Mock()
+            monitor.selector = Mock()
+            monitor.selector.select.return_value = [True]
+            monitor.process.stdout.read.return_value = (
+                json.dumps(dict(SAFE, request_id=request_id)).encode() + b'\n'
+            )
+            with patch('host_resources.time.monotonic', side_effect=[0, 0, 6]):
+                with self.assertRaisesRegex(OSError, 'within 5 seconds'):
+                    monitor.read()
+
+    def test_host_stdout_eof_does_not_wait_for_live_stderr(self):
+        monitor = HostMonitor()
+        monitor.process = Mock()
+        monitor.selector = Mock()
+        monitor.selector.select.return_value = [True]
+        monitor.process.stdout.read.return_value = b''
+        monitor.process.stderr.read.side_effect = AssertionError('stderr may remain open')
+        with self.assertRaisesRegex(OSError, 'observer stopped'):
+            monitor.read()
+
     def test_heartbeat_tolerates_observation_gap_but_stops_when_parent_is_lost(self):
         heartbeat = Mock()
         heartbeat.stat.return_value.st_mtime_ns = 1
@@ -67,11 +118,11 @@ class WatchdogTests(unittest.TestCase):
     def test_host_initialization_grace_preserves_runtime_deadline(self):
         monitor = HostMonitor()
         process = Mock()
-        process.stdout.read.return_value = (
-            json.dumps(dict(SAFE, observed_elapsed_ms=0)).encode() + b'\n'
-        )
+        process.stdout.read.side_effect = [
+            json.dumps(dict(SAFE, request_id=value)).encode() + b'\n' for value in [1, 2]
+        ]
         monitor.selector = Mock()
-        monitor.selector.select.side_effect = [[True], [], [True], [], []]
+        monitor.selector.select.side_effect = [[True], [True], []]
         with patch.object(monitor, '_start', side_effect=lambda: setattr(monitor, 'process', process)), \
              patch('host_resources.time.monotonic', side_effect=[10, 10, 10, 11, 11, 11, 12, 12]):
             monitor.read()
@@ -79,7 +130,7 @@ class WatchdogTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, 'within 5 seconds'):
                 monitor.read()
         waits = [call.args[0] for call in monitor.selector.select.call_args_list]
-        self.assertEqual(waits, [30, 0, 5, 0, 5])
+        self.assertEqual(waits, [30, 5, 5])
 
     def run_case(self, monitor, code, runtime='10', policy=None, descendant=False, watchdog=False):
         with tempfile.TemporaryDirectory(prefix='codex-watchdog-') as directory:

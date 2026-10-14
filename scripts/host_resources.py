@@ -13,7 +13,7 @@ class HostMonitor:
         self.process = None
         self.selector = None
         self.pending = b''
-        self.clock_anchor = None
+        self.request_id = 0
 
     def _start(self):
         shell = shutil.which('powershell.exe')
@@ -36,43 +36,36 @@ class HostMonitor:
         starting = self.process is None
         if self.process is None:
             self._start()
-        self.process.stdin.write(b'\n')
+        self.request_id += 1
+        self.process.stdin.write(f'{self.request_id}\n'.encode('ascii'))
         self.process.stdin.flush()
         # No test starts until initialization yields an observation; runtime stays strict.
         timeout = 30 if starting else 5
-        deadline = time.monotonic() + timeout
-        while b'\n' not in self.pending:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self.selector.select(remaining):
+        started = time.monotonic()
+        deadline = started + timeout
+        while True:
+            while b'\n' not in self.pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self.selector.select(remaining):
+                    raise OSError(f'No host observation received within {timeout} seconds')
+                data = self.process.stdout.read(4096)
+                if not data:
+                    raise OSError('Windows host observer stopped')
+                self.pending += data
+                if len(self.pending) > 8192:
+                    raise ValueError('invalid host observer output')
+            line, self.pending = self.pending.split(b'\n', 1)
+            sample = json.loads(line)
+            if sample['request_id'] > self.request_id:
+                raise ValueError('invalid host observation request')
+            if sample['request_id'] != self.request_id:
+                continue
+            age = time.monotonic() - started
+            if age > timeout:
                 raise OSError(f'No host observation received within {timeout} seconds')
-            data = self.process.stdout.read(4096)
-            if not data:
-                error = self.process.stderr.read(4096).decode('utf-8', errors='replace')
-                raise OSError('Windows host observer stopped: ' + error)
-            self.pending += data
-            if len(self.pending) > 8192:
-                raise ValueError('invalid host observer output')
-        # Read the newest complete observation; queued older samples are not current load.
-        while self.selector.select(0):
-            data = self.process.stdout.read(4096)
-            if not data:
-                raise OSError('Windows host observer stopped')
-            self.pending += data
-            if len(self.pending) > 8192:
-                raise ValueError('invalid host observer output')
-        complete, self.pending = self.pending.rsplit(b'\n', 1)
-        line = complete.split(b'\n')[-1]
-        sample = json.loads(line)
-        now = time.monotonic()
-        if self.clock_anchor is None:
-            self.clock_anchor = (now, sample['observed_elapsed_ms'])
-        age = now - self.clock_anchor[0] - (sample['observed_elapsed_ms'] - self.clock_anchor[1]) / 1000
-        if age > 5:
-            raise OSError('Host observation is older than five seconds')
-        if age < 0:
-            # A guest pause must not classify a newly received host sample as stale.
-            self.clock_anchor = (now, sample['observed_elapsed_ms'])
-        sample['observation_age_seconds'] = max(0, age)
+            break
+        # A correlated response was sampled after this request, without comparing clocks.
+        sample['observation_age_seconds'] = age
         memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
         sample['wsl_available_bytes'] = int(memory['MemAvailable'].split()[0]) * 1024
         return sample

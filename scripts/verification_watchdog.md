@@ -75,7 +75,11 @@ the watchdog stops the unit if any reserve is lost, if host CPU usage stays at
 than 5 seconds. The watchdog refuses to start on an already busy host.
 The observer may take up to 30 seconds to initialize before the unit starts.
 The watchdog starts no test without an observation; subsequent reads retain
-the 5-second deadline.
+the 5-second deadline. Each request has an increasing identifier that the host
+echoes only after receiving it and sampling resources. The observer ignores
+responses to previous requests and measures the round trip with the guest's
+monotonic clock. Windows Stopwatch and WSL clock drift cannot accumulate into
+an observation-age error; missing or late correlated responses still stop the run.
 The verification unit separately enforces 4 GiB RAM, no swap, one CPU equivalent,
 128 tasks and a 600-second deadline. The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.

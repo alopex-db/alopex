@@ -20,12 +20,14 @@ public static class HostResources {
 }
 '@
 $previous = $null
+$requestId = 0
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $heartbeat = [HostResources]::Heartbeat()
 $lastHeartbeat = $clock.Elapsed.TotalSeconds
 while (($null -ne $heartbeat) -and (($clock.Elapsed.TotalSeconds - $lastHeartbeat) -lt 10)) {
     if ($heartbeat.IsCompleted) {
         if ($null -eq $heartbeat.Result) { break }
+        $requestId = [long]::Parse($heartbeat.Result)
         $lastHeartbeat = $clock.Elapsed.TotalSeconds
         $heartbeat = [HostResources]::Heartbeat()
     }
@@ -38,6 +40,7 @@ while (($null -ne $heartbeat) -and (($clock.Elapsed.TotalSeconds - $lastHeartbea
     if (($null -ne $previous) -and ($total -gt $previous.Total)) {
         $busy = 1.0 - (($idle - $previous.Idle) / ($total - $previous.Total))
         [ordered]@{
+            request_id = $requestId
             observed_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             observed_elapsed_ms = $clock.Elapsed.TotalMilliseconds
             host_total_bytes = $memory.Total
