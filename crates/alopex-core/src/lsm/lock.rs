@@ -50,7 +50,11 @@
 //! Plain directories (the server, `Database::open("./mydb")`) are never pruned
 //! by the core, so their lock lives inside at [`LOCK_FILE_NAME`].
 
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::Result;
 use crate::lsm::container::{self, ConvergePolicy};
@@ -87,6 +91,10 @@ pub(crate) struct DirectoryLock {
     /// Only the acquiring process may explicitly unlock the shared description.
     #[cfg(not(target_arch = "wasm32"))]
     owner_pid: u32,
+    /// Windows locks prevent reading the holder file; retain local ownership
+    /// separately so a second handle can report the current process.
+    #[cfg(windows)]
+    registry_path: Option<PathBuf>,
     #[cfg(target_arch = "wasm32")]
     _wasm: (),
 }
@@ -99,9 +107,17 @@ impl Drop for DirectoryLock {
         if self.owner_pid != std::process::id() {
             return;
         }
+        #[cfg(windows)]
+        let mut local_locks = held_windows_locks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(file) = &self._file {
             // Best effort in Drop; closing the file remains the fallback.
             let _ = file.unlock();
+        }
+        #[cfg(windows)]
+        if let Some(path) = self.registry_path.take() {
+            local_locks.remove(&path);
         }
     }
 }
@@ -118,6 +134,8 @@ impl DirectoryLock {
             _file: None,
             #[cfg(not(target_arch = "wasm32"))]
             owner_pid: std::process::id(),
+            #[cfg(windows)]
+            registry_path: None,
             #[cfg(target_arch = "wasm32")]
             _wasm: (),
         }
@@ -183,6 +201,12 @@ fn append_lock_suffix(container: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[cfg(windows)]
+fn held_windows_locks() -> &'static Mutex<HashSet<PathBuf>> {
+    static HELD: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 /// Acquire the data-directory lock, or report who holds it.
 ///
 /// Returns [`crate::error::Error::AlreadyOpen`] when another handle — in this
@@ -199,6 +223,19 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
+    }
+
+    #[cfg(windows)]
+    let mut local_locks = held_windows_locks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(windows)]
+    if local_locks.contains(lock_path) {
+        return Err(Error::AlreadyOpen {
+            path: data_dir.to_path_buf(),
+            lock_path: lock_path.to_path_buf(),
+            holder: holder_line(),
+        });
     }
 
     // No `truncate(true)`: the loser opens this file too, and on Unix a
@@ -226,12 +263,16 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
     // Diagnostics are best-effort: a database that opened fine must not fail
     // because we could not describe ourselves in a text file.
     let _ = write_holder(&file);
+    #[cfg(windows)]
+    local_locks.insert(lock_path.to_path_buf());
 
     Ok(DirectoryLock {
         #[cfg(all(test, not(target_arch = "wasm32")))]
         path: Some(lock_path.to_path_buf()),
         _file: Some(file),
         owner_pid: std::process::id(),
+        #[cfg(windows)]
+        registry_path: Some(lock_path.to_path_buf()),
     })
 }
 
@@ -277,10 +318,10 @@ fn holder_line() -> String {
 
 /// Best-effort read of the holder description.
 ///
-/// On Windows this usually fails: `std`'s `LockFileEx` locks the whole byte
-/// range mandatorily, so the loser's `ReadFile` returns `ERROR_LOCK_VIOLATION`
-/// (裁定 D10). Degrading to `unknown` keeps the actionable half of the message
-/// — the path and the single-process rule — on every platform.
+/// On Windows a different process's lock usually prevents reading this file:
+/// `ReadFile` returns `ERROR_LOCK_VIOLATION` (裁定 D10). Same-process holders
+/// are identified through `held_windows_locks` before reaching this fallback.
+/// For an unreadable external holder, the path and single-process rule remain.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_holder(lock_path: &Path) -> String {
     match std::fs::read_to_string(lock_path) {
@@ -387,16 +428,10 @@ mod tests {
             }
             other => panic!("expected AlreadyOpen, got {other:?}"),
         }
-        #[cfg(unix)]
-        {
-            assert!(err.to_string().contains("already open in this process"));
-            assert!(err
-                .to_string()
-                .contains("Database, Transaction or PreparedStatement handles"));
-        }
-        // Windows may reject reads of the held lock's diagnostic record.
-        #[cfg(not(unix))]
-        assert!(err.to_string().contains("already open"));
+        assert!(err.to_string().contains("already open in this process"));
+        assert!(err
+            .to_string()
+            .contains("Database, Transaction or PreparedStatement handles"));
     }
 
     #[test]
