@@ -12,7 +12,7 @@ mod update;
 use alopex_core::kv::KVStore;
 
 use crate::ast::expr::BinaryOp;
-use crate::catalog::{Catalog, TableMetadata};
+use crate::catalog::{Catalog, StorageType, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
