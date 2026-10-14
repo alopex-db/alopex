@@ -27,6 +27,57 @@ pub(crate) struct PyTransactionInner {
     state: Mutex<TxnState>,
 }
 
+/// Borrow the existing transaction for one scan without holding the Python GIL.
+fn with_prepared_transaction<T: Send>(
+    py: Python<'_>,
+    inner: &Arc<PyTransactionInner>,
+    executing: bool,
+    operation: impl FnOnce(&mut alopex_embedded::OwnedEmbeddedTransaction) -> alopex_embedded::Result<T>
+        + Send,
+) -> PyResult<T> {
+    enum CallError {
+        StateLock,
+        TransactionLock,
+        Closed,
+        StreamActive,
+        MustAbort,
+        Native(alopex_embedded::Error),
+    }
+    let result = py.detach(|| {
+        let state = inner.state.lock().map_err(|_| CallError::StateLock)?;
+        if *state != TxnState::Active {
+            return Err(CallError::Closed);
+        }
+        let mut guard = inner.txn.lock().map_err(|_| CallError::TransactionLock)?;
+        let txn = guard.as_mut().ok_or(CallError::Closed)?;
+        if executing {
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CallError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CallError::MustAbort);
+                }
+                _ => {}
+            }
+        }
+        operation(txn).map_err(CallError::Native)
+    });
+    result.map_err(|err| match err {
+        CallError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CallError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CallError::Closed => error::to_py_err("transaction is closed"),
+        CallError::StreamActive => {
+            error::stream_error("stream_active", "transaction stream is active")
+        }
+        CallError::MustAbort => error::stream_error(
+            "stream_abort_required",
+            "transaction stream requires rollback",
+        ),
+        CallError::Native(err) => error::embedded_err(err),
+    })
+}
+
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
     #[allow(dead_code)]
