@@ -217,23 +217,27 @@ fn btree_access_path_measurement() {
         executor
     }
 
-    fn samples(executor: &mut Executor<MemoryKV, MemoryCatalog>) -> Vec<u128> {
+    fn samples(
+        executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    ) -> (Vec<u128>, Vec<Vec<alopex_sql::storage::SqlValue>>) {
         let result = executor.execute(query_plan()).expect("warmup query");
         let ExecutionResult::Query(result) = result else {
             panic!("warmup query result expected");
         };
         assert_eq!(result.rows.len(), 4);
-        (0..SAMPLES)
+        let expected_rows = result.rows;
+        let samples = (0..SAMPLES)
             .map(|_| {
                 let started = Instant::now();
                 let result = executor.execute(query_plan()).expect("query");
                 let ExecutionResult::Query(result) = result else {
                     panic!("query result expected");
                 };
-                assert_eq!(result.rows.len(), 4);
+                assert_eq!(result.rows, expected_rows);
                 started.elapsed().as_nanos()
             })
-            .collect()
+            .collect();
+        (samples, expected_rows)
     }
 
     fn median(samples: &[u128]) -> u128 {
@@ -243,9 +247,10 @@ fn btree_access_path_measurement() {
     }
 
     let mut scan = executor_with_data(false);
-    let scan_samples = samples(&mut scan);
+    let (scan_samples, scan_rows) = samples(&mut scan);
     let mut indexed = executor_with_data(true);
-    let indexed_samples = samples(&mut indexed);
+    let (indexed_samples, indexed_rows) = samples(&mut indexed);
+    assert_eq!(indexed_rows, scan_rows);
     let output = PathBuf::from(std::env::var("ALOPEX_BTREE_MEASUREMENT_OUTPUT").expect("output"));
     fs::create_dir_all(output.parent().expect("output directory")).expect("output directory");
     let raw = serde_json::json!({
