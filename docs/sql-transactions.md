@@ -51,3 +51,20 @@ falling back silently.
 Queries remain allowed, and the rejection does not fail the transaction.
 `READ WRITE` is the default. These local snapshot semantics do not establish
 the replica freshness or version evidence tracked by issue #226.
+
+## Concurrent writes to an HNSW index
+
+Two transactions can insert different table rows yet still conflict when both
+update the same HNSW index. The index stores shared graph metadata and rewrites
+graph keys during commit. Alopex uses optimistic commit validation, so one
+transaction can return `TxnConflict` even though the row primary keys differ.
+The failed transaction does not publish its row or index change.
+
+Treat `TxnConflict` as a request to retry the **whole transaction**. Start a
+new read-write transaction, replay its SQL and HNSW operations against the new
+snapshot, then commit. Use a finite retry limit and backoff with jitter when
+many writers share an index. Retrying only `commit` is insufficient: commit
+consumes the transaction, and its original graph snapshot is stale. Keep each
+write transaction short to reduce contention. The executable contract is
+`concurrent_hnsw_writers_retry_the_whole_transaction` in
+`crates/alopex-embedded/tests/hnsw_integration_tests.rs`.
