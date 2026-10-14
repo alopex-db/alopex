@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from host_resources import HostMonitor
 
-from verification_watchdog import ResourcePolicy, run_guarded
+from verification_watchdog import ResourcePolicy, keep_watchdog_alive, run_guarded
 
 
 SAFE = {'host_total_bytes': 64 << 30, 'host_available_bytes': 32 << 30,
@@ -39,6 +39,31 @@ class Observations:
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_heartbeat_tolerates_observation_gap_but_stops_when_parent_is_lost(self):
+        heartbeat = Mock()
+        heartbeat.stat.return_value.st_mtime_ns = 1
+        with patch('verification_watchdog.time.monotonic', side_effect=[0, 0, 6, 21]), \
+             patch('verification_watchdog.time.sleep'), \
+             patch('verification_watchdog.subprocess.run') as notify:
+            keep_watchdog_alive(heartbeat)
+        self.assertEqual(notify.call_count, 2)
+        self.assertTrue(all('--no-block' in call.args[0] for call in notify.call_args_list))
+
+    def test_heartbeat_progress_resets_deadline(self):
+        heartbeat = Mock()
+        heartbeat.stat.side_effect = [Mock(st_mtime_ns=value) for value in [1, 1, 2, 2, 2]]
+        with patch('verification_watchdog.time.monotonic', side_effect=[0, 0, 18, 18, 35, 39]), \
+             patch('verification_watchdog.time.sleep'), \
+             patch('verification_watchdog.subprocess.run') as notify:
+            keep_watchdog_alive(heartbeat)
+        self.assertEqual(notify.call_count, 3)
+
+    def test_notification_failure_stops_heartbeats(self):
+        heartbeat = Mock()
+        with patch('verification_watchdog.subprocess.run', side_effect=OSError('unavailable')) as notify:
+            keep_watchdog_alive(heartbeat)
+        self.assertEqual(notify.call_count, 1)
+
     def test_host_initialization_grace_preserves_runtime_deadline(self):
         monitor = HostMonitor()
         process = Mock()

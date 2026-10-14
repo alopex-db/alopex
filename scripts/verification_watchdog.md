@@ -24,8 +24,12 @@ The verification unit separately enforces 4 GiB RAM, no swap, one CPU equivalent
 128 tasks and a 600-second deadline. The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.
 The unit's OS watchdog receives heartbeats only while the parent event stream
-continues to advance. If the parent stops recording for 3 seconds, heartbeats
-cease and the OS watchdog terminates the unit after its 4-second deadline.
+continues to advance. The parent heartbeat allows 20 seconds for the 5-second
+observer read, the 8-second unit query, and recording IO. The host observation
+deadline and resource thresholds remain unchanged. Heartbeat notifications do
+not wait for a systemd acknowledgement. If the parent stops recording for
+20 seconds, heartbeats cease and the OS watchdog terminates the unit after its 4-second deadline.
+The unit log records whether the parent heartbeat expired or notification failed.
 The unit uses SIGTERM and a short abort timeout, rather than creating a core dump.
 
 The watchdog fsyncs start, host/unit samples, stop decisions and final events to

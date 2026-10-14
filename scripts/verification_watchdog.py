@@ -7,7 +7,29 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import time
+
+
+def keep_watchdog_alive(heartbeat):
+    last_mtime = heartbeat.stat().st_mtime_ns
+    last_change = time.monotonic()
+    while True:
+        try:
+            current_mtime = heartbeat.stat().st_mtime_ns
+            if current_mtime != last_mtime:
+                last_mtime, last_change = current_mtime, time.monotonic()
+            # Allow the 5-second observer read plus the 8-second unit query and IO.
+            if time.monotonic() - last_change > 20:
+                print('OS watchdog: parent heartbeat expired', file=sys.stderr, flush=True)
+                return
+            subprocess.run(['systemd-notify', '--no-block', 'WATCHDOG=1'],
+                           check=True, timeout=2)
+        except (OSError, subprocess.SubprocessError) as error:
+            print('OS watchdog: notification failed: ' + type(error).__name__,
+                  file=sys.stderr, flush=True)
+            return
+        time.sleep(1)
 
 
 @dataclass

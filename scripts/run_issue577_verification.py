@@ -46,25 +46,10 @@ assert resource_limits == {"memory.max": "4294967296", "memory.high": "322122547
                           "pids.max": "128"}, "resource limits were not enforced"
 
 
-def keep_watchdog_alive():
-    heartbeat = evidence / (label + "-events.jsonl")
-    last_mtime = heartbeat.stat().st_mtime_ns
-    last_change = time.monotonic()
-    while True:
-        try:
-            current_mtime = heartbeat.stat().st_mtime_ns
-            if current_mtime != last_mtime:
-                last_mtime, last_change = current_mtime, time.monotonic()
-            if time.monotonic() - last_change > 3:
-                return
-            subprocess.run(["systemd-notify", "WATCHDOG=1"], check=True, timeout=2)
-        except (OSError, subprocess.SubprocessError):
-            return
-        time.sleep(1)
-
-
+from verification_watchdog import keep_watchdog_alive
 subprocess.run(["systemd-notify", "--ready"], check=True, timeout=2)
-threading.Thread(target=keep_watchdog_alive, daemon=True).start()
+threading.Thread(target=keep_watchdog_alive,
+                 args=(evidence / (label + "-events.jsonl"),), daemon=True).start()
 env = os.environ.copy()
 env.update(CARGO_TARGET_DIR=str(root / "alopex/target"), CARGO_INCREMENTAL="0",
            CARGO_BUILD_JOBS="1", ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1",
