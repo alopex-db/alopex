@@ -160,6 +160,13 @@
       "issue": 306
     },
     {
+      "api": "Embedded HNSW cache limit",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget",
+      "issue": 581
+    },
+    {
       "api": "Embedded transaction upsert/delete/commit/rollback/reopen",
       "status": "known-performance-divergence",
       "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
@@ -832,6 +839,15 @@
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "embedded",
+      "api": "embedded.Database.set_hnsw_cache_limit",
+      "claim": "Embedded HNSW cache limit",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget",
+      "issue": 581
     },
     {
       "surface": "embedded",
