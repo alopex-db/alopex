@@ -4,14 +4,16 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::memory::MemoryKV;
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::types::TxnMode;
 use alopex_sql::Catalog;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
-use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
+use alopex_sql::executor::{ConstraintViolation, ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
-use alopex_sql::storage::TxnBridge;
+use alopex_sql::storage::{SqlTxn, SqlValue, TxnBridge};
 
 fn create_table(
     executor: &mut Executor<MemoryKV, MemoryCatalog>,
@@ -134,6 +136,71 @@ fn copy_schema_mismatch_rolls_back() {
     let count = verify.table_storage(&stored).scan().unwrap().count();
     verify.commit().unwrap();
     assert_eq!(count, 0);
+}
+
+fn constraint_execute(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> Result<ExecutionResult, ExecutorError> {
+    let statement = Parser::parse_sql(&AlopexDialect, sql)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    executor.execute(plan)
+}
+
+fn constraint_fixture(
+    columns: &str,
+) -> (
+    Arc<MemoryKV>,
+    Arc<RwLock<MemoryCatalog>>,
+    Executor<MemoryKV, MemoryCatalog>,
+) {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    constraint_execute(
+        &mut executor,
+        &catalog,
+        &format!("CREATE TABLE users ({columns}) WITH (storage='columnar')"),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog
+            .read()
+            .unwrap()
+            .get_table("users")
+            .unwrap()
+            .storage_options
+            .storage_type,
+        alopex_sql::catalog::StorageType::Columnar
+    );
+    (store, catalog, executor)
+}
+
+fn constraint_csv(contents: &str) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(contents.as_bytes()).unwrap();
+    file.flush().unwrap();
+    file
+}
+
+fn constraint_copy_sql(file: &tempfile::NamedTempFile) -> String {
+    format!(
+        "COPY users FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
+        file.path().to_str().unwrap().replace('\'', "''")
+    )
+}
+
+fn constraint_snapshot(store: &MemoryKV) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let entries = txn.scan_prefix(&[]).unwrap().collect();
+    txn.rollback_self().unwrap();
+    entries
 }
 
 fn assert_postload_columnar_unique_rejects_duplicates(public_sql: bool) {
