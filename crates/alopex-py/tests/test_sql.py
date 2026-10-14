@@ -8,6 +8,8 @@
 - ``Transaction.execute_sql`` も同一形状
 """
 
+import gc
+import io
 import json
 
 import pytest
@@ -84,6 +86,42 @@ def test_execute_sql_insert_returns_rows_affected(users_db):
         "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')"
     )
     assert result == 1
+
+
+def test_columnar_dml_rejects_writes_and_preserves_copied_rows(tmp_path):
+    path = tmp_path / "columnar.alopex"
+    db = Database.open(str(path))
+    db.execute_sql(
+        "CREATE TABLE c (id INTEGER PRIMARY KEY, t0 TEXT, price DOUBLE) "
+        "WITH (storage='columnar')"
+    )
+    assert db.copy_from_csv("c", io.BytesIO(b"1,a,1.0\n2,b,2.0\n"), False) == 2
+    db.execute_sql("CREATE TABLE source (id INTEGER PRIMARY KEY, price DOUBLE)")
+    db.execute_sql("INSERT INTO source VALUES (1, 9.0)")
+
+    select = "SELECT id, t0, price FROM c ORDER BY id"
+    copied = [
+        {"id": 1, "t0": "a", "price": 1.0},
+        {"id": 2, "t0": "b", "price": 2.0},
+    ]
+    assert db.execute_sql(select) == copied
+
+    for sql in (
+        "INSERT INTO c VALUES (3, 'c', 3.0)",
+        "UPDATE c SET price = 9.0 WHERE id = 1",
+        "UPDATE c SET price = 9.0 WHERE id = 999",
+        "DELETE FROM c WHERE id = 2",
+        "DELETE FROM c WHERE id = 999",
+        "MERGE INTO c USING source ON c.id = source.id "
+        "WHEN MATCHED THEN UPDATE SET price = source.price",
+    ):
+        with pytest.raises(AlopexError, match="not supported for columnar tables"):
+            db.execute_sql(sql)
+        assert db.execute_sql(select) == copied, sql
+
+    del db
+    gc.collect()
+    assert Database.open(str(path)).execute_sql(select) == copied
 
 
 def test_execute_sql_merge_updates_matches_and_inserts_non_matches(db):
