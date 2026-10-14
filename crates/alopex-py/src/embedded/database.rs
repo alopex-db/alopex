@@ -467,13 +467,13 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         sql::validate_sql_input(sql)?;
         let bindings = sql::prepared_bindings(params.as_ref())?;
-        let validated_sql =
-            crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         if sql::is_transaction_control_statement(sql) {
             return Err(error::to_py_err(
                 "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
             ));
         }
+        let validated_sql =
+            crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
         let result = if !bindings.is_empty()
             && bindings
                 .iter()

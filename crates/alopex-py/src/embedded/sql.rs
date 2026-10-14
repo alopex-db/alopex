@@ -236,6 +236,15 @@ pub(crate) fn bind_rendered_params(sql: &str, rendered: &[String]) -> PyResult<S
         }
         .into());
     }
+    if !rendered.is_empty()
+        && sql.contains(';')
+        && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() > 1)
+    {
+        return Err(AlopexError::SqlStatementInvalid(
+            "パラメータ付きの複数 SQL 文は実行できません。文ごとに実行してください".into(),
+        )
+        .into());
+    }
     if rendered.is_empty() {
         return Ok(sql.to_string());
     }
@@ -841,6 +850,24 @@ mod tests {
             assert_eq!(
                 sql,
                 "SELECT * FROM users WHERE id = 1 AND name = 'O''Brien'"
+            );
+        });
+    }
+
+    #[test]
+    fn bind_params_rejects_only_parameterized_multiple_statements() {
+        with_py(|py| {
+            let params = params_list(py, vec![1i64.into_bound_py_any(py).unwrap()]);
+            let error = bind_params("SELECT ?; SELECT 2", Some(&params)).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert!(error.to_string().contains("複数 SQL 文"));
+            assert_eq!(
+                bind_params("SELECT 1; SELECT 2", None).unwrap(),
+                "SELECT 1; SELECT 2"
+            );
+            assert_eq!(
+                bind_params("SELECT ';' AS mark, ? AS value", Some(&params)).unwrap(),
+                "SELECT ';' AS mark, 1 AS value"
             );
         });
     }
