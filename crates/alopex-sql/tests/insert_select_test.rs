@@ -209,24 +209,26 @@ fn columnar_ctas_plan_rejects_before_catalog_mutation_and_preserves_noop() {
 #[test]
 fn ctas_with_options_reaches_existing_storage_guard() {
     use alopex_sql::planner::LogicalPlan;
-    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
-    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
-    let statement = Parser::parse_sql(
-        &AlopexDialect,
+    for sql in [
         "CREATE TABLE copied WITH (storage='columnar') AS SELECT 1 AS id",
-    )
-    .expect("parse CTAS WITH")
-    .remove(0);
-    let plan = Planner::new(&*catalog.read().unwrap())
-        .plan(&statement)
-        .expect("plan CTAS WITH");
-    let LogicalPlan::CreateTableAs { with_options, .. } = &plan else {
-        panic!("expected CTAS plan");
-    };
-    assert_eq!(with_options, &vec![("storage".into(), "columnar".into())]);
-    assert!(matches!(executor.execute(plan),
-        Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
-    assert!(!catalog.read().unwrap().table_exists("copied"));
+        "CREATE TABLE copied AS SELECT 1 AS id WITH (storage='columnar')",
+    ] {
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse CTAS WITH")
+            .remove(0);
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .expect("plan CTAS WITH");
+        let LogicalPlan::CreateTableAs { with_options, .. } = &plan else {
+            panic!("expected CTAS plan");
+        };
+        assert_eq!(with_options, &vec![("storage".into(), "columnar".into())]);
+        assert!(matches!(executor.execute(plan),
+            Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
+        assert!(!catalog.read().unwrap().table_exists("copied"));
+    }
 }
 
 #[test]
@@ -271,22 +273,30 @@ fn ctas_rejects_duplicate_output_names_before_creation() {
 }
 
 #[test]
-fn ctas_resolves_untyped_null_output_to_text() {
+fn ctas_rejects_untyped_null_and_accepts_explicit_cast() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let statement = Parser::parse_sql(&AlopexDialect, "CREATE TABLE bare AS SELECT NULL AS x")
+        .expect("parse CTAS")
+        .pop()
+        .expect("one statement");
+    let error = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&statement)
+        .expect_err("untyped NULL must be rejected");
+    assert!(matches!(error, PlannerError::InvalidExpression { .. }));
+    assert!(
+        error.to_string().contains("cast NULL explicitly"),
+        "{error}"
+    );
+    assert!(!catalog.read().expect("catalog lock").table_exists("bare"));
+
     let results = execute_sql(
-        "CREATE TABLE bare AS SELECT NULL AS x;
-         CREATE TABLE typed AS SELECT CAST(NULL AS INTEGER) AS x;
-         SELECT x FROM bare;
+        "CREATE TABLE typed AS SELECT CAST(NULL AS INTEGER) AS x;
          SELECT x FROM typed;",
     )
-    .expect("CTAS with NULL output executes");
-    let ExecutionResult::Query(bare) = &results[2] else {
-        panic!("expected bare NULL query result");
-    };
-    let ExecutionResult::Query(typed) = &results[3] else {
+    .expect("explicitly typed NULL output executes");
+    let ExecutionResult::Query(typed) = &results[1] else {
         panic!("expected typed NULL query result");
     };
-    assert_eq!(bare.columns[0].data_type, ResolvedType::Text);
     assert_eq!(typed.columns[0].data_type, ResolvedType::Integer);
-    assert_eq!(bare.rows, vec![vec![SqlValue::Null]]);
     assert_eq!(typed.rows, vec![vec![SqlValue::Null]]);
 }
