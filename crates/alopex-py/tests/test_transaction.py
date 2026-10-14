@@ -80,7 +80,7 @@ def test_issue582_transaction_prepared_batch_failure_requires_rollback(db, attem
 
 def test_issue582_transaction_prepared_preflight_preserves_transaction(db):
     from collections import UserDict
-    from decimal import Decimal
+    from datetime import datetime
 
     db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
     txn = db.begin(TxnMode.READ_WRITE)
@@ -89,7 +89,7 @@ def test_issue582_transaction_prepared_preflight_preserves_transaction(db):
     with pytest.raises(ValueError) as error:
         statement.execute_many([[2], []])
     assert error.value.code == "ALOPEX-PY015"
-    for value in (UserDict({2: "value"}), {2}, Decimal("2.0")):
+    for value in (UserDict({2: "value"}), {2}, datetime(2024, 1, 1)):
         with pytest.raises(TypeError):
             statement.execute_many([[2], [value]])
     assert txn.execute_sql("SELECT id FROM items") == [{"id": 1}]
