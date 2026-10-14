@@ -222,6 +222,8 @@ pub(crate) fn execute_sql_owned(
         return Ok(alopex_sql::ExecutionResult::Success);
     }
 
+    transaction.stage_hnsw_before_sql()?;
+
     if statements.iter().any(stmt_requires_write) {
         let mut cache = transaction
             .db
