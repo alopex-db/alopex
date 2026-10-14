@@ -971,6 +971,92 @@ fn update_and_delete_subqueries_execute() {
 }
 
 #[test]
+fn dml_subquery_coalesce_argument_executes_lazily() {
+    let query = last_query(
+        "CREATE TABLE t (id INT PRIMARY KEY, v INT);
+         CREATE TABLE lookup (id INT PRIMARY KEY, v INT);
+         INSERT INTO t VALUES (1, 0), (2, 0), (3, 0);
+         INSERT INTO lookup VALUES (1, 7), (2, 8);
+         UPDATE t SET v = COALESCE((SELECT lookup.v FROM lookup WHERE lookup.id = t.id), 0);
+         UPDATE t SET v = COALESCE(5, (SELECT v FROM lookup)) WHERE id = 3;
+         SELECT id, v FROM t ORDER BY id;",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(7)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(8)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(5)],
+        ]
+    );
+}
+
+#[test]
+fn dml_subquery_unary_and_ifnull_controls() {
+    let query = last_query(
+        "CREATE TABLE t (id INT PRIMARY KEY, v INT);
+         CREATE TABLE lookup (v INT);
+         INSERT INTO t VALUES (1, 0), (2, 0);
+         INSERT INTO lookup VALUES (7), (8);
+         UPDATE t SET v = IFNULL((SELECT MAX(v) FROM lookup), 0) WHERE id = 1;
+         UPDATE t SET v = -(SELECT MIN(v) FROM lookup) WHERE id = 2;
+         SELECT id, v FROM t ORDER BY id;",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(8)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(-7)],
+        ]
+    );
+}
+
+#[test]
+fn dml_subquery_not_in_predicate_preserves_null_logic() {
+    let query = last_query(
+        "CREATE TABLE t (id INT PRIMARY KEY);
+         CREATE TABLE lookup (id INT);
+         INSERT INTO t VALUES (1), (2), (3);
+         INSERT INTO lookup VALUES (1), (NULL);
+         DELETE FROM t WHERE NOT (id IN (SELECT id FROM lookup));
+         SELECT id FROM t ORDER BY id;",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+        ]
+    );
+
+    let query = last_query(
+        "CREATE TABLE t (id INT PRIMARY KEY);
+         CREATE TABLE lookup (id INT);
+         INSERT INTO t VALUES (1), (2), (3);
+         INSERT INTO lookup VALUES (1);
+         DELETE FROM t WHERE NOT (id IN (SELECT id FROM lookup));
+         SELECT id FROM t ORDER BY id;",
+    );
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn dml_subquery_is_null_predicate_executes() {
+    let query = last_query(
+        "CREATE TABLE t (id INT PRIMARY KEY);
+         CREATE TABLE lookup (v INT);
+         INSERT INTO t VALUES (1), (2);
+         DELETE FROM t WHERE (SELECT MAX(v) FROM lookup) IS NULL;
+         INSERT INTO t VALUES (3);
+         INSERT INTO lookup VALUES (7);
+         DELETE FROM t WHERE (SELECT MAX(v) FROM lookup) IS NULL;
+         SELECT id FROM t ORDER BY id;",
+    );
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(3)]]);
+}
+
+#[test]
 fn scalar_subquery_rejects_multiple_rows() {
     let err = execute_sql(&setup_sql(
         "SELECT (SELECT orders.total FROM orders) AS total FROM users",
