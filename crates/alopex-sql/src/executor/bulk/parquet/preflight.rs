@@ -52,7 +52,8 @@ pub(super) fn check_pages(
     metadata: &parquet::file::metadata::ParquetMetaData,
     footer_start: u64,
     limit: u64,
-) -> Result<()> {
+    mut reserved_bytes: u64,
+) -> Result<u64> {
     for group in metadata.row_groups() {
         for column in group.columns() {
             let offset = column
@@ -83,6 +84,10 @@ pub(super) fn check_pages(
                 let consumed = maximum - header.remaining();
                 check_declared_bytes(uncompressed, limit)?;
                 check_declared_bytes(compressed, limit)?;
+                reserved_bytes = reserved_bytes
+                    .checked_add(uncompressed)
+                    .and_then(|bytes| bytes.checked_add(compressed))
+                    .ok_or_else(invalid_page)?;
                 if let Some(count) = dictionary_values {
                     use parquet::basic::Type;
                     use parquet::data_type::{ByteArray, FixedLenByteArray, Int96};
@@ -99,7 +104,10 @@ pub(super) fn check_pages(
                     // DictDecoder reserves every declared entry before validating its payload.
                     let bytes = count.checked_mul(width as u64).ok_or_else(invalid_page)?;
                     check_declared_bytes(bytes, limit)?;
+                    reserved_bytes = reserved_bytes.checked_add(bytes).ok_or_else(invalid_page)?;
                 }
+                // Reserve page storage together with retained rows before any page decoding.
+                check_declared_bytes(reserved_bytes, limit)?;
                 position = position
                     .checked_add(consumed)
                     .and_then(|p| p.checked_add(compressed))
@@ -108,7 +116,7 @@ pub(super) fn check_pages(
             }
         }
     }
-    Ok(())
+    Ok(reserved_bytes)
 }
 
 pub(super) fn read_page_header_bytes(

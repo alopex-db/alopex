@@ -93,7 +93,7 @@ impl ParquetReader {
         let overflow = || ExecutorError::ResourceExhausted {
             message: "READ_PARQUET retained size overflow".into(),
         };
-        let count = u64::try_from(declared_rows)
+        let mut count = u64::try_from(declared_rows)
             .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
         if validate_planned_schema {
             let group_rows =
@@ -115,7 +115,9 @@ impl ParquetReader {
                     ),
                 });
             }
+            count = declared;
         }
+        let mut reserved_bytes = 0;
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             // Reject a declared result that cannot fit even its row/value slots
             // before inspecting or decoding pages.
@@ -132,9 +134,16 @@ impl ParquetReader {
                     ),
                 });
             }
+            reserved_bytes = minimum;
         }
         if let (Some(limit), Some(footer_start)) = (limit, footer_start) {
-            check_pages(&mut file, builder.metadata(), footer_start, limit)?;
+            reserved_bytes = check_pages(
+                &mut file,
+                builder.metadata(),
+                footer_start,
+                limit,
+                reserved_bytes,
+            )?;
         }
 
         let reader = if let Some(limit) = limit {
@@ -144,6 +153,7 @@ impl ParquetReader {
                 builder.schema(),
                 1024,
                 limit,
+                reserved_bytes,
             )
         } else {
             builder.with_batch_size(1024).build()

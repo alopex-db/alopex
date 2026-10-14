@@ -8,6 +8,8 @@ import sys
 import time
 import threading
 
+from verification_results import cargo_result
+
 worktree = Path(__file__).resolve().parents[1]
 root = next(parent for parent in worktree.parents if (parent / "alopex/Cargo.toml").is_file())
 evidence = worktree / "target/verification/issue577-focused"
@@ -77,8 +79,10 @@ head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=
 source_files = ["Cargo.toml", "Cargo.lock", "crates/alopex-sql/Cargo.toml",
                 "crates/alopex-sql/src/executor/bulk/parquet.rs",
                 "crates/alopex-sql/src/executor/bulk/parquet/pages.rs",
+                "crates/alopex-sql/src/executor/bulk/parquet/preflight.rs",
                 "crates/alopex-sql/src/executor/bulk/parquet/pages/bounded.rs",
                 "crates/alopex-sql/tests/read_parquet_allocation.rs"]
+source_files.append("scripts/verification_results.py")
 source_digests = {name: hashlib.sha256((worktree / name).read_bytes()).hexdigest()
                   for name in source_files}
 with log.open("w") as output:
@@ -125,11 +129,14 @@ for path in check_outputs:
 receipt = {"owner": "parent Codex", "head": head, "command": command,
            "exit": process.returncode, "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
            "before_bytes": before, "after_bytes": capacity(), "removed_owned_bytes": removed}
+receipt["result"] = cargo_result(text, process.returncode,
+                               "lint" if label.endswith("lint") else "test")
 assert source_digests == {name: hashlib.sha256((worktree / name).read_bytes()).hexdigest()
                          for name in source_files}
 receipt["source_sha256"] = source_digests
 receipt["resource_limits"] = resource_limits
-receipt["memory_peak_bytes"] = int((cgroup / "memory.peak").read_text())
+receipt["verification_unit_memory_peak_bytes"] = int((cgroup / "memory.peak").read_text())
+receipt["resource_scope"] = "verification unit, including setup, compilation and execution; not product allocation usage"
 receipt["cpu_stat"] = (cgroup / "cpu.stat").read_text()
 receipt["memory_events"] = (cgroup / "memory.events").read_text()
 receipt["runtime_limit_seconds"] = 600
@@ -139,4 +146,6 @@ for line in text.splitlines():
     if "maximum_request=" in line or "test result:" in line:
         print(line[:500])
 print(json.dumps(receipt))
+if receipt["result"]["outcome"] == "invalid":
+    sys.exit(125)
 sys.exit(process.returncode if process.returncode >= 0 else 128 - process.returncode)

@@ -22,6 +22,7 @@ pub(super) fn reader(
     schema: &Schema,
     batch_size: usize,
     limit: u64,
+    reserved_bytes: u64,
 ) -> Result<ParquetRecordBatchReader> {
     let declared_rows = usize::try_from(metadata.file_metadata().num_rows())
         .map_err(|_| ParquetError::General("invalid parquet row count".into()))?;
@@ -44,7 +45,7 @@ pub(super) fn reader(
         metadata,
         num_rows,
         limit,
-        expanded_bytes: Arc::new(AtomicU64::new(0)),
+        reserved_bytes: Arc::new(AtomicU64::new(reserved_bytes)),
     };
     ParquetRecordBatchReader::try_new_with_row_groups(
         &levels,
@@ -59,7 +60,7 @@ struct FileRowGroups {
     metadata: Arc<ParquetMetaData>,
     num_rows: usize,
     limit: u64,
-    expanded_bytes: Arc<AtomicU64>,
+    reserved_bytes: Arc<AtomicU64>,
 }
 
 impl RowGroups for FileRowGroups {
@@ -78,7 +79,7 @@ impl RowGroups for FileRowGroups {
             column,
             next_group: 0,
             limit: self.limit,
-            expanded_bytes: Arc::clone(&self.expanded_bytes),
+            reserved_bytes: Arc::clone(&self.reserved_bytes),
         }))
     }
 }
@@ -89,7 +90,7 @@ struct ColumnChunks {
     column: usize,
     next_group: usize,
     limit: u64,
-    expanded_bytes: Arc<AtomicU64>,
+    reserved_bytes: Arc<AtomicU64>,
 }
 
 impl Iterator for ColumnChunks {
@@ -150,7 +151,7 @@ impl Iterator for ColumnChunks {
                 max_rep_level: column.column_descr().max_rep_level(),
                 max_def_level: column.column_descr().max_def_level(),
                 limit: self.limit,
-                expanded_bytes: Arc::clone(&self.expanded_bytes),
+                reserved_bytes: Arc::clone(&self.reserved_bytes),
             }) as Box<dyn PageReader>)
         })())
     }
@@ -163,7 +164,7 @@ struct ColumnPages {
     max_rep_level: i16,
     max_def_level: i16,
     limit: u64,
-    expanded_bytes: Arc<AtomicU64>,
+    reserved_bytes: Arc<AtomicU64>,
 }
 
 fn invalid_delta() -> ParquetError {
@@ -275,16 +276,15 @@ impl ColumnPages {
             }
             remaining -= count;
         }
-        self.expanded_bytes
+        let capacity = if expanded == 0 {
+            0
+        } else {
+            expanded.checked_mul(2).ok_or_else(invalid_delta)?.max(8)
+        };
+        self.reserved_bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                let used = used.checked_add(expanded)?;
-                // Bound payload buffer growth using the expansion summed across this reader.
-                let capacity = if used == 0 {
-                    0
-                } else {
-                    used.checked_mul(2)?.max(8)
-                };
-                (capacity <= self.limit).then_some(used)
+                let used = used.checked_add(capacity)?;
+                (used <= self.limit).then_some(used)
             })
             .map_err(|_| invalid_delta())?;
         Ok(())
@@ -471,7 +471,7 @@ mod tests {
             metadata: Arc::clone(&metadata),
             num_rows: 4,
             limit: 65536,
-            expanded_bytes: Arc::new(AtomicU64::new(0)),
+            reserved_bytes: Arc::new(AtomicU64::new(0)),
         };
         let mut chunks = groups.column_chunks(0).unwrap();
         assert!(groups.column_chunks(3).is_err());
@@ -489,7 +489,7 @@ mod tests {
         assert!(chunks.next().unwrap().is_ok());
         assert!(chunks.next().is_none());
 
-        let actual = reader(input, metadata, builder.schema(), 1024, 65536)
+        let actual = reader(input, metadata, builder.schema(), 1024, 65536, 0)
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();

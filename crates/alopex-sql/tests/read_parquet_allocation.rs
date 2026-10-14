@@ -1,5 +1,5 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::sync::Arc;
 
@@ -26,6 +26,60 @@ const DECLARED_PAGE_BYTES: i32 = 1024 * 1024;
 struct ObservedAllocator;
 thread_local! {
     static MAX_REQUEST: Cell<Option<usize>> = const { Cell::new(None) };
+    static LIVE_ALLOCATIONS: RefCell<Option<LiveAllocations>> = const { RefCell::new(None) };
+}
+
+struct LiveAllocations {
+    entries: [(usize, usize); 4096],
+    active: bool,
+    live: usize,
+    peak: usize,
+    exhausted: bool,
+}
+
+impl LiveAllocations {
+    fn new() -> Self {
+        Self {
+            entries: [(0, 0); 4096],
+            active: false,
+            live: 0,
+            peak: 0,
+            exhausted: false,
+        }
+    }
+
+    fn allocated(&mut self, pointer: usize, size: usize) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.0 == 0) {
+            *entry = (pointer, size);
+            self.live += size;
+            self.peak = self.peak.max(self.live);
+        } else {
+            self.exhausted = true;
+        }
+    }
+
+    fn deallocated(&mut self, pointer: usize) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.0 == pointer) {
+            self.live -= entry.1;
+            *entry = (0, 0);
+        }
+    }
+}
+
+fn observe_live(pointer: *mut u8, size: Option<usize>) {
+    if pointer.is_null() {
+        return;
+    }
+    let _ = LIVE_ALLOCATIONS.try_with(|observed| {
+        if let Ok(mut observed) = observed.try_borrow_mut()
+            && let Some(observed) = observed.as_mut().filter(|observed| observed.active)
+        {
+            match size {
+                Some(size) => observed.allocated(pointer as usize, size),
+                None => observed.deallocated(pointer as usize),
+            }
+        }
+    });
 }
 
 fn observe(size: usize) {
@@ -39,20 +93,30 @@ fn observe(size: usize) {
 unsafe impl GlobalAlloc for ObservedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         observe(layout.size());
-        unsafe { System.alloc(layout) }
+        let pointer = unsafe { System.alloc(layout) };
+        observe_live(pointer, Some(layout.size()));
+        pointer
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         observe(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        observe_live(pointer, Some(layout.size()));
+        pointer
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         observe(size);
-        unsafe { System.realloc(pointer, layout, size) }
+        let resized = unsafe { System.realloc(pointer, layout, size) };
+        if !resized.is_null() {
+            observe_live(pointer, None);
+            observe_live(resized, Some(size));
+        }
+        resized
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        observe_live(pointer, None);
         unsafe { System.dealloc(pointer, layout) }
     }
 }
@@ -186,10 +250,151 @@ fn execute_observed_with_alias(
     change();
     let mut transaction = bridge.begin_write().unwrap();
     let policy = limit.map(|limit| MemoryPolicy::new(Some(limit as u64), SpillPolicy::FailFast));
+    LIVE_ALLOCATIONS.with(|observed| {
+        if let Some(observed) = observed.borrow_mut().as_mut() {
+            observed.active = true;
+        }
+    });
     MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
     let result = execute_query_with_policy(&mut transaction, &catalog, plan, policy.as_ref());
     let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+    LIVE_ALLOCATIONS.with(|observed| {
+        if let Some(observed) = observed.borrow_mut().as_mut() {
+            observed.active = false;
+        }
+    });
     (result, maximum)
+}
+
+#[test]
+fn issue577_aggregate_observer_calibration() {
+    LIVE_ALLOCATIONS.with(|observed| {
+        let mut allocations = LiveAllocations::new();
+        allocations.active = true;
+        *observed.borrow_mut() = Some(allocations);
+    });
+    let first = std::hint::black_box(vec![0_u8; 1000]);
+    let mut second = std::hint::black_box(vec![0_u8; 2000]);
+    drop(first);
+    second.reserve_exact(1000);
+    LIVE_ALLOCATIONS.with(|observed| {
+        let observed = observed.borrow();
+        let observed = observed.as_ref().unwrap();
+        assert_eq!(observed.live, second.capacity());
+        assert_eq!(observed.peak, 3000);
+    });
+    drop(second);
+    let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+    assert_eq!(observed.live, 0);
+    assert!(!observed.exhausted);
+}
+
+#[test]
+fn issue577_aggregate_columns_checked_before_allocation() {
+    aggregate_checked_before_allocation(4, 64, 64, 64);
+}
+
+#[test]
+fn issue577_aggregate_pages_checked_before_allocation() {
+    aggregate_checked_before_allocation(1, 128, 32, 128);
+}
+
+#[test]
+fn issue577_aggregate_groups_checked_before_allocation() {
+    aggregate_checked_before_allocation(1, 128, 128, 32);
+}
+
+fn aggregate_checked_before_allocation(
+    columns: usize,
+    count: usize,
+    page_rows: usize,
+    group_rows: usize,
+) {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+
+    for (limit, width, oversized) in [
+        (LIMIT, 8, false),
+        (LIMIT, 256, true),
+        (LIMIT * 2, 8, false),
+        (LIMIT * 2, 512, true),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let fields = (0..columns)
+            .map(|index| format!("REQUIRED BYTE_ARRAY body{index};"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let schema =
+            Arc::new(parse_message_type(&format!("message fixture {{ {fields} }}")).unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .set_encoding(parquet::basic::Encoding::PLAIN)
+                .set_data_page_row_count_limit(page_rows)
+                .set_write_batch_size(1)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let values = vec![ByteArray::from(vec![0x42; width]); count];
+        for values in values.chunks(group_rows) {
+            let mut group = writer.next_row_group().unwrap();
+            while let Some(mut column) = group.next_column().unwrap() {
+                column
+                    .typed::<ByteArrayType>()
+                    .write_batch(values, None, None)
+                    .unwrap();
+                column.close().unwrap();
+            }
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+        assert_eq!(reader.num_row_groups(), count.div_ceil(group_rows));
+        for (index, values) in values.chunks(group_rows).enumerate() {
+            let group = reader.get_row_group(index).unwrap();
+            for column in 0..columns {
+                let mut pages = group.get_column_page_reader(column).unwrap();
+                let mut page_count = 0;
+                while let Some(page) = pages.get_next_page().unwrap() {
+                    assert!(page.buffer().len() <= limit);
+                    page_count += 1;
+                }
+                assert_eq!(page_count, values.len().div_ceil(page_rows));
+            }
+        }
+        drop(reader);
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted, "allocation observer capacity exceeded");
+        println!(
+            "aggregate limit={limit} columns={columns} rows={count} width={width} page_rows={page_rows} group_rows={group_rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        assert!(maximum <= limit);
+        assert!(
+            observed.peak <= limit,
+            "aggregate allocation exceeded its budget"
+        );
+        if oversized {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal aggregate rows");
+            };
+            assert_eq!(
+                result.rows,
+                vec![vec![SqlValue::Blob(vec![0x42; width]); columns]; count]
+            );
+        }
+    }
 }
 
 #[test]

@@ -4,6 +4,26 @@ The READ_PARQUET verification entrypoint uses the host-monitoring watchdog:
 rtk proxy python3 -B scripts/run_issue577_verification.py UNIQUE_RUN_ID issue577_
 ```
 
+Resource boundaries are separate:
+
+| Boundary and owner | Purpose and use | What the number means |
+| --- | --- | --- |
+| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes row/value slots, compressed and uncompressed page bytes, dictionary slots, and DELTA expansion capacity across columns, pages, and row groups. This conservative reservation is not measured process RAM or proof that all metadata and native scratch allocations are bounded. |
+| Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested allocation; `rust_live_peak_bytes` is the peak sum of tracked live allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, allocator overhead, and C internals are outside the ledger. |
+| Verification watchdog and runner | Protect the machine while building and executing tests; stop the owned process tree if host reserves or unit limits are lost. | The unit's 4 GiB allowance and measured peak include setup/build/test. An exhausted allowance makes that run invalid; it cannot establish a product allocation failure. Cargo compilation and executed product assertions have separate result fields. |
+
+The product reservation decides whether the reader may proceed; the test ledger
+checks the selected execution scenarios; the watchdog decides whether the host
+can safely run the verification. None of these owners may substitute its result
+for another owner's result. Remaining coverage gaps belong to issue #577.
+Ledger exhaustion invalidates the allocation measurement. Missing or zero-test
+results are incomplete; a build failure leaves product tests unexecuted.
+The receipt names environment RAM `verification_unit_memory_peak_bytes`.
+The fixture budgets keep normal controls within the limit while wider values
+exceed the combined budget even though every individual page fits. Repeating
+the same layouts at 64 KiB and 128 KiB checks the caller-supplied limit rather
+than a hard-coded threshold; these values prescribe no deployment sizing.
+
 Use a fresh run ID. The watchdog refuses to overwrite its previous event stream.
 The watchdog writes its start record before observing the host or starting the unit.
 The watchdog monitors Windows physical memory, conservative commit headroom and
