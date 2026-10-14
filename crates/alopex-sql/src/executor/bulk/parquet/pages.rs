@@ -1,11 +1,15 @@
 use std::fs::File;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_schema::Schema;
+use bytes::Bytes;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups};
 use parquet::arrow::{ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::basic::Encoding;
 use parquet::column::page::{Page, PageIterator, PageMetadata, PageReader};
+use parquet::data_type::Int32Type;
+use parquet::decoding::{Decoder, DeltaBitPackDecoder};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::serialized_reader::SerializedPageReader;
@@ -40,6 +44,7 @@ pub(super) fn reader(
         metadata,
         num_rows,
         limit,
+        expanded_bytes: Arc::new(AtomicU64::new(0)),
     };
     ParquetRecordBatchReader::try_new_with_row_groups(
         &levels,
@@ -54,6 +59,7 @@ struct FileRowGroups {
     metadata: Arc<ParquetMetaData>,
     num_rows: usize,
     limit: u64,
+    expanded_bytes: Arc<AtomicU64>,
 }
 
 impl RowGroups for FileRowGroups {
@@ -72,6 +78,7 @@ impl RowGroups for FileRowGroups {
             column,
             next_group: 0,
             limit: self.limit,
+            expanded_bytes: Arc::clone(&self.expanded_bytes),
         }))
     }
 }
@@ -82,6 +89,7 @@ struct ColumnChunks {
     column: usize,
     next_group: usize,
     limit: u64,
+    expanded_bytes: Arc<AtomicU64>,
 }
 
 impl Iterator for ColumnChunks {
@@ -142,6 +150,7 @@ impl Iterator for ColumnChunks {
                 max_rep_level: column.column_descr().max_rep_level(),
                 max_def_level: column.column_descr().max_def_level(),
                 limit: self.limit,
+                expanded_bytes: Arc::clone(&self.expanded_bytes),
             }) as Box<dyn PageReader>)
         })())
     }
@@ -154,6 +163,7 @@ struct ColumnPages {
     max_rep_level: i16,
     max_def_level: i16,
     limit: u64,
+    expanded_bytes: Arc<AtomicU64>,
 }
 
 fn invalid_delta() -> ParquetError {
@@ -194,7 +204,7 @@ fn delta_header(input: &mut &[u8], max_values: u64, limit: u64) -> Result<(u64, 
     Ok((block, mini_blocks, count))
 }
 
-fn skip_delta_prefix(input: &mut &[u8], block: u64, mini_blocks: u64, count: u64) -> Result<()> {
+fn skip_delta_values(input: &mut &[u8], block: u64, mini_blocks: u64, count: u64) -> Result<()> {
     delta_varint(input)?;
     let per_mini = block / mini_blocks;
     let mini_blocks = usize::try_from(mini_blocks).map_err(|_| invalid_delta())?;
@@ -225,6 +235,61 @@ fn skip_delta_prefix(input: &mut &[u8], block: u64, mini_blocks: u64, count: u64
 }
 
 impl ColumnPages {
+    fn check_delta_expansion(
+        &self,
+        prefix: Bytes,
+        suffix: Bytes,
+        count: u64,
+        payload_bytes: usize,
+    ) -> Result<()> {
+        let count = usize::try_from(count).map_err(|_| invalid_delta())?;
+        let mut prefixes = DeltaBitPackDecoder::<Int32Type>::new();
+        prefixes.set_data(prefix, count)?;
+        let mut suffixes = DeltaBitPackDecoder::<Int32Type>::new();
+        suffixes.set_data(suffix, count)?;
+        let mut prefix_values = [0; 32];
+        let mut suffix_values = [0; 32];
+        let mut remaining = count;
+        let mut previous = 0_u64;
+        let mut expanded = 0_u64;
+        let mut payload = 0_u64;
+        while remaining != 0 {
+            let count = remaining.min(prefix_values.len());
+            if prefixes.get(&mut prefix_values[..count])? != count
+                || suffixes.get(&mut suffix_values[..count])? != count
+            {
+                return Err(invalid_delta());
+            }
+            for (&prefix, &suffix) in prefix_values[..count].iter().zip(&suffix_values[..count]) {
+                let prefix = u64::try_from(prefix).map_err(|_| invalid_delta())?;
+                let suffix = u64::try_from(suffix).map_err(|_| invalid_delta())?;
+                if prefix > previous {
+                    return Err(invalid_delta());
+                }
+                previous = prefix.checked_add(suffix).ok_or_else(invalid_delta)?;
+                expanded = expanded.checked_add(previous).ok_or_else(invalid_delta)?;
+                payload = payload.checked_add(suffix).ok_or_else(invalid_delta)?;
+                if expanded > self.limit || payload > payload_bytes as u64 {
+                    return Err(invalid_delta());
+                }
+            }
+            remaining -= count;
+        }
+        self.expanded_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                let used = used.checked_add(expanded)?;
+                // Bound payload buffer growth using the expansion summed across this reader.
+                let capacity = if used == 0 {
+                    0
+                } else {
+                    used.checked_mul(2)?.max(8)
+                };
+                (capacity <= self.limit).then_some(used)
+            })
+            .map_err(|_| invalid_delta())?;
+        Ok(())
+    }
+
     fn check_delta_lengths(&self, page: &Page) -> Result<()> {
         if !matches!(
             page.encoding(),
@@ -276,16 +341,25 @@ impl ColumnPages {
             }
             Page::DictionaryPage { .. } => return Err(invalid_delta()),
         }
+        let prefix_start = page.buffer().len() - input.len();
         // parquet 53.4.1 resizes its i32 vectors from the encoded counts.
         let (block, mini_blocks, count) =
             delta_header(&mut input, u64::from(page.num_values()), self.limit)?;
         if page.encoding() == Encoding::DELTA_BYTE_ARRAY {
-            skip_delta_prefix(&mut input, block, mini_blocks, count)?;
-            let (_, _, suffix_count) =
+            skip_delta_values(&mut input, block, mini_blocks, count)?;
+            let suffix_start = page.buffer().len() - input.len();
+            let (suffix_block, suffix_mini_blocks, suffix_count) =
                 delta_header(&mut input, u64::from(page.num_values()), self.limit)?;
             if suffix_count != count {
                 return Err(invalid_delta());
             }
+            skip_delta_values(&mut input, suffix_block, suffix_mini_blocks, suffix_count)?;
+            self.check_delta_expansion(
+                page.buffer().slice(prefix_start..),
+                page.buffer().slice(suffix_start..),
+                count,
+                input.len(),
+            )?;
         }
         Ok(())
     }
@@ -397,6 +471,7 @@ mod tests {
             metadata: Arc::clone(&metadata),
             num_rows: 4,
             limit: 65536,
+            expanded_bytes: Arc::new(AtomicU64::new(0)),
         };
         let mut chunks = groups.column_chunks(0).unwrap();
         assert!(groups.column_chunks(3).is_err());

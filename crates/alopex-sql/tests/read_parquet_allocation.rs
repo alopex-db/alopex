@@ -447,6 +447,102 @@ fn issue577_delta_length_nullable_pages_preserve_rows() {
 }
 
 #[test]
+fn issue577_delta_byte_array_expansion_checked_before_allocation() {
+    delta_expansion_checked_before_allocation(64, 8192, 64, 64);
+}
+
+#[test]
+fn issue577_delta_byte_array_expansion_across_pages_checked_before_allocation() {
+    delta_expansion_checked_before_allocation(96, 1024, 32, 96);
+}
+
+#[test]
+fn issue577_delta_byte_array_expansion_across_groups_checked_before_allocation() {
+    delta_expansion_checked_before_allocation(96, 1024, 96, 32);
+}
+
+fn delta_expansion_checked_before_allocation(
+    large_count: usize,
+    large_width: usize,
+    page_rows: usize,
+    group_rows: usize,
+) {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+
+    for (count, width, oversized) in [
+        (4, 128, false),
+        (large_count, 128, false),
+        (large_count, large_width, true),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .set_encoding(parquet::basic::Encoding::DELTA_BYTE_ARRAY)
+                .set_data_page_row_count_limit(page_rows)
+                .set_write_batch_size(1)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let value = ByteArray::from(vec![0x42; width]);
+        let values = vec![value; count];
+        for values in values.chunks(group_rows) {
+            let mut group = writer.next_row_group().unwrap();
+            let mut column = group.next_column().unwrap().unwrap();
+            column
+                .typed::<ByteArrayType>()
+                .write_batch(values, None, None)
+                .unwrap();
+            column.close().unwrap();
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let fixture_bytes = file.as_file().metadata().unwrap().len();
+        assert!(fixture_bytes < 16 * 1024);
+        let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+        assert_eq!(reader.num_row_groups(), count.div_ceil(group_rows));
+        for (index, values) in values.chunks(group_rows).enumerate() {
+            let group = reader.get_row_group(index).unwrap();
+            let mut pages = group.get_column_page_reader(0).unwrap();
+            let mut page_count = 0;
+            while pages.get_next_page().unwrap().is_some() {
+                page_count += 1;
+            }
+            assert_eq!(page_count, values.len().div_ceil(page_rows));
+        }
+        drop(reader);
+        let (result, maximum) = execute_observed(&file);
+        println!(
+            "DELTA expansion count={count} width={width} page_rows={page_rows} group_rows={group_rows} fixture_bytes={fixture_bytes} maximum_request={maximum}"
+        );
+        assert!(
+            maximum <= LIMIT,
+            "DELTA expansion exceeded its allocation budget"
+        );
+        if oversized {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal expanded DELTA rows");
+            };
+            assert_eq!(
+                result.rows,
+                vec![vec![SqlValue::Blob(vec![0x42; width])]; count]
+            );
+        }
+    }
+}
+
+#[test]
 fn issue577_delta_byte_array_nullable_pages_preserve_rows() {
     for count in [3, 300] {
         delta_nullable_pages_preserve_rows(parquet::basic::Encoding::DELTA_BYTE_ARRAY, count);

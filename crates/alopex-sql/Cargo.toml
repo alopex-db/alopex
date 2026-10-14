@@ -47,7 +47,7 @@ sha2 = "0.10"
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
-parquet = { version = "53", features = ["arrow"] }
+parquet = { version = "53", features = ["arrow", "experimental"] }
 bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
 flate2 = { version = "=1.1.8", default-features = false, features = ["rust_backend"] }
 zstd = { version = "=0.13.3", default-features = false }
