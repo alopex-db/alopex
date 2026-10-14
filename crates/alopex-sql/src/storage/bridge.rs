@@ -237,6 +237,10 @@ fn replay_id(payload: &[RangeChangePayload]) -> CoreResult<String> {
 }
 
 pub trait SqlTxn<'txn, S: KVStore + 'txn> {
+    fn memory_policy(&self) -> Option<&crate::executor::MemoryPolicy> {
+        None
+    }
+
     fn mode(&self) -> TxnMode;
 
     fn ensure_write_txn(&self) -> CoreResult<()>;

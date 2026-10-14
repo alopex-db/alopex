@@ -520,6 +520,30 @@ impl From<PersistedColumnMeta> for ColumnMetadata {
     }
 }
 
+// v0.8.4 columns ended after `unique`; bincode cannot default fields added later.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedColumnMetaV2 {
+    name: String,
+    data_type: PersistedType,
+    not_null: bool,
+    primary_key: bool,
+    unique: bool,
+}
+
+impl From<PersistedColumnMetaV2> for PersistedColumnMeta {
+    fn from(value: PersistedColumnMetaV2) -> Self {
+        Self {
+            name: value.name,
+            data_type: value.data_type,
+            not_null: value.not_null,
+            primary_key: value.primary_key,
+            unique: value.unique,
+            generated_sequence: None,
+            generated_sequence_options: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedTableMeta {
     pub table_id: u32,
