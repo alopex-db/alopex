@@ -50,9 +50,18 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         decoded_bytes: size,
         retained_key_values: 0,
         retained_other_metadata: 0,
+        schema_path: Vec::new(),
+        schema_root_seen: false,
         has_arrow_schema: false,
     };
     footer.metadata_fields(0, "FileMetaData")?;
+    if footer
+        .schema_path
+        .iter()
+        .any(|(remaining, _)| *remaining != 0)
+    {
+        return Err(invalid_page());
+    }
     let has_arrow_schema = footer.has_arrow_schema;
     let retained_metadata_bytes = footer
         .retained_key_values
@@ -104,6 +113,8 @@ pub(super) fn check_pages(
                     decoded_bytes: 0,
                     retained_key_values: 0,
                     retained_other_metadata: 0,
+                    schema_path: Vec::new(),
+                    schema_root_seen: false,
                     has_arrow_schema: false,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
@@ -160,6 +171,8 @@ pub(super) fn read_page_header_bytes(
         decoded_bytes: 0,
         retained_key_values: 0,
         retained_other_metadata: 0,
+        schema_path: Vec::new(),
+        schema_root_seen: false,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = header.page()?;
@@ -185,6 +198,8 @@ pub(super) fn read_page_header_bytes(
         decoded_bytes: 0,
         retained_key_values: 0,
         retained_other_metadata: 0,
+        schema_path: Vec::new(),
+        schema_root_seen: false,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = copied.page()?;
@@ -208,6 +223,8 @@ pub(super) fn read_page_header_bytes(
         decoded_bytes: 0,
         retained_key_values: 0,
         retained_other_metadata: 0,
+        schema_path: Vec::new(),
+        schema_root_seen: false,
         has_arrow_schema: false,
     };
     typed.metadata_fields(0, "PageHeader")?;
@@ -225,6 +242,8 @@ struct CompactHeader<R: Read> {
     decoded_bytes: u64,
     retained_key_values: u64,
     retained_other_metadata: u64,
+    schema_path: Vec<(u64, u64)>,
+    schema_root_seen: bool,
     has_arrow_schema: bool,
 }
 
@@ -250,7 +269,7 @@ impl<R: Read> CompactHeader<R> {
         Ok(())
     }
 
-    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<()> {
+    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<u64> {
         let length = self.varint()?;
         check_declared_bytes(length, self.maximum)?;
         if length > self.remaining() {
@@ -266,7 +285,42 @@ impl<R: Read> CompactHeader<R> {
             }
         }
         self.has_arrow_schema |= arrow_key;
-        Ok(())
+        Ok(length)
+    }
+
+    fn schema_name(&mut self, length: u64, children: Option<u64>) -> Result<()> {
+        let root = !self.schema_root_seen;
+        let (prefix, mut retained) = if root {
+            self.schema_root_seen = true;
+            if children.is_none() {
+                return Err(invalid_page());
+            }
+            (0, length)
+        } else {
+            while self.schema_path.last().is_some_and(|(left, _)| *left == 0) {
+                self.schema_path.pop();
+            }
+            let (left, prefix) = self.schema_path.last_mut().ok_or_else(invalid_page)?;
+            *left -= 1;
+            // Type, inferred Arrow field, rebuilt reader field, and SQL CopyField own names.
+            (*prefix, length.checked_mul(4).ok_or_else(invalid_page)?)
+        };
+        let path = if self.schema_path.is_empty() {
+            0 // SchemaDescriptor paths exclude the message name.
+        } else {
+            prefix.checked_add(length).ok_or_else(invalid_page)?
+        };
+        if let Some(children) = children.filter(|children| root || *children != 0) {
+            // The already charged SchemaElement slots also bound this smaller traversal stack.
+            self.schema_path
+                .try_reserve_exact(1)
+                .map_err(|_| invalid_page())?;
+            self.schema_path.push((children, path));
+        } else {
+            // Each primitive ColumnDescriptor owns the names of all its ancestors.
+            retained = retained.checked_add(path).ok_or_else(invalid_page)?;
+        }
+        self.charge_metadata(retained, "RetainedMetadata")
     }
 
     fn remaining(&self) -> u64 {
@@ -313,9 +367,14 @@ impl<R: Read> CompactHeader<R> {
             return Err(invalid_page());
         }
         let mut id = 0_i16;
+        let mut schema_name = None;
+        let mut schema_children = None;
         loop {
             let field = self.byte()?;
             if field == 0 {
+                if context == "SchemaElement" {
+                    self.schema_name(schema_name.ok_or_else(invalid_page)?, schema_children)?;
+                }
                 return Ok(());
             }
             id = self.field_id(field, id)?;
@@ -326,7 +385,13 @@ impl<R: Read> CompactHeader<R> {
                 return Err(invalid_page());
             }
             // Compact field booleans carry their value in the field tag.
-            if context == "FileKeyValue" && id == 1 {
+            if context == "SchemaElement" && id == 4 {
+                schema_name = Some(self.metadata_binary("", false)?);
+            } else if context == "SchemaElement" && id == 5 {
+                let children = self.integer()?;
+                let children = i32::try_from(children).map_err(|_| invalid_page())?;
+                schema_children = Some(u64::try_from(children).map_err(|_| invalid_page())?);
+            } else if context == "FileKeyValue" && id == 1 {
                 self.metadata_binary(context, true)?;
             } else if kind != 1 && kind != 2 {
                 let child = if known.is_some() && context == "FileKeyValue" {

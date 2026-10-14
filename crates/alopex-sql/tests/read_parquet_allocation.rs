@@ -361,6 +361,134 @@ fn issue577_created_by_metadata_budget_checked_before_allocation() {
 }
 
 #[test]
+fn issue577_schema_names_budget_checked_before_allocation() {
+    schema_names_budget_checked_before_allocation(false);
+}
+
+#[test]
+fn issue577_schema_names_zero_children_budget_checked_before_allocation() {
+    schema_names_budget_checked_before_allocation(true);
+}
+
+fn schema_names_budget_checked_before_allocation(zero_children: bool) {
+    for (limit, width, rows, may_reject) in [
+        (None, 8 * 1024, 512, false),
+        (Some(LIMIT), 8, 1, false),
+        (Some(LIMIT), 8 * 1024, 1, true),
+        (Some(LIMIT), 8, 512, false),
+        (Some(LIMIT), 8 * 1024, 512, true),
+        (Some(LIMIT * 4), 8 * 1024, 512, false),
+    ] {
+        let file = row_count_fixture(rows);
+        let encoded = rewritten_metadata_footer(&file, |footer| {
+            let name = "x".repeat(width);
+            footer.schema[1].name = name.clone();
+            if zero_children {
+                footer.schema[1].num_children = Some(0);
+            }
+            footer.row_groups[0].columns[0]
+                .meta_data
+                .as_mut()
+                .unwrap()
+                .path_in_schema[0] = name;
+        });
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "schema names zero_children={zero_children} limit={limit:?} width={width} rows={rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(observed.peak <= limit, "schema names exceeded their budget");
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected schema metadata rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+        }
+    }
+}
+
+#[test]
+fn issue577_schema_names_tree_walk_preserves_controlled_errors() {
+    for (schema, children, exceeds_budget) in [
+        (
+            "message fixture { REQUIRED group branch { REQUIRED INT64 a; REQUIRED group deep { REQUIRED INT64 b; } } REQUIRED INT64 c; }".to_owned(),
+            None,
+            false,
+        ),
+        (
+            format!(
+                "message fixture {{ REQUIRED group {} {{ REQUIRED INT64 a; REQUIRED INT64 b; REQUIRED INT64 c; REQUIRED INT64 d; }} REQUIRED INT64 e; }}",
+                "x".repeat(8 * 1024)
+            ),
+            None,
+            true,
+        ),
+        (
+            "message fixture { REQUIRED group branch { REQUIRED INT64 a; } REQUIRED INT64 b; }".to_owned(),
+            Some(3),
+            false,
+        ),
+        (
+            "message fixture { REQUIRED group branch { REQUIRED INT64 a; } REQUIRED INT64 b; }".to_owned(),
+            Some(1),
+            false,
+        ),
+        (
+            "message fixture { REQUIRED group branch { REQUIRED INT64 a; } REQUIRED INT64 b; }".to_owned(),
+            Some(-1),
+            false,
+        ),
+    ] {
+        let file = row_count_fixture(1);
+        let encoded = rewritten_metadata_footer(&file, |footer| {
+            footer.schema =
+                parquet::schema::types::to_thrift(&parse_message_type(&schema).unwrap()).unwrap();
+            if let Some(children) = children {
+                footer.schema[0].num_children = Some(children);
+            }
+            footer.num_rows = 0;
+            footer.row_groups.clear();
+            footer.column_orders = None;
+        });
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        assert!(maximum <= LIMIT);
+        assert!(observed.peak <= LIMIT);
+        if exceeds_budget {
+            assert!(matches!(result, Err(ExecutorError::ResourceExhausted { .. })));
+        } else {
+            let Err(ExecutorError::BulkLoad(error)) = result else {
+                panic!("expected controlled schema error");
+            };
+            if children.is_some() {
+                assert!(error.contains("invalid parquet page or chunk declaration"));
+            } else {
+                // Nested columns remain outside READ_PARQUET's supported SQL type contract.
+                assert!(error.contains("unsupported parquet/arrow type"));
+            }
+        }
+    }
+}
+
+#[test]
 fn issue577_metadata_workspace_sum_checked_before_allocation() {
     for (limit, width, rows, column_metadata, reject) in [
         (None, 24 * 1024, 1, false, false),
