@@ -995,6 +995,15 @@ fn row_group_metadata_shared_budget_before_allocation(sorted: bool) {
 
 #[test]
 fn issue577_column_metadata_shared_budget_before_allocation() {
+    column_metadata_shared_budget_before_allocation(false);
+}
+
+#[test]
+fn issue577_column_field_id_metadata_shared_budget_before_allocation() {
+    column_metadata_shared_budget_before_allocation(true);
+}
+
+fn column_metadata_shared_budget_before_allocation(field_ids: bool) {
     for (limit, columns, rows, may_reject) in [
         (None, 32, 16, false),
         (Some(LIMIT), 1, 1, false),
@@ -1005,7 +1014,14 @@ fn issue577_column_metadata_shared_budget_before_allocation() {
     ] {
         let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
         let fields = (0..columns)
-            .map(|index| format!("REQUIRED INT64 id{index};"))
+            .map(|index| {
+                if field_ids {
+                    let id = [0, i32::MIN, i32::MAX][index % 3];
+                    format!("REQUIRED INT64 id{index} = {id};")
+                } else {
+                    format!("REQUIRED INT64 id{index};")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         let schema =

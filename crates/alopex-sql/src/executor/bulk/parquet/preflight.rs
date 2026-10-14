@@ -345,7 +345,12 @@ impl<R: Read> CompactHeader<R> {
         Ok(length)
     }
 
-    fn schema_name(&mut self, length: u64, children: Option<u64>) -> Result<()> {
+    fn schema_name(
+        &mut self,
+        length: u64,
+        children: Option<u64>,
+        field_id: Option<i32>,
+    ) -> Result<()> {
         let root = !self.schema_root_seen;
         self.charge_metadata(arc_bytes::<Type>() as u64, "RetainedMetadata")?;
         if !root {
@@ -353,6 +358,13 @@ impl<R: Read> CompactHeader<R> {
                 (2 * arc_bytes::<arrow_schema::Field>()) as u64,
                 "RetainedMetadata",
             )?;
+        }
+        if !root && field_id.is_some() {
+            // Parquet 53 owns an inferred map and a reader clone; std hashbrown uses
+            // four buckets plus controls (at most 16 bytes per SIMD group).
+            let table = 4 * std::mem::size_of::<(String, String)>() + 4 + 16;
+            let strings = parquet::arrow::PARQUET_FIELD_ID_META_KEY.len() + "-2147483648".len();
+            self.charge_metadata((2 * (table + strings)) as u64, "RetainedMetadata")?;
         }
         let (prefix, mut retained) = if root {
             self.schema_root_seen = true;
@@ -455,11 +467,16 @@ impl<R: Read> CompactHeader<R> {
         let mut id = 0_i16;
         let mut schema_name = None;
         let mut schema_children = None;
+        let mut schema_field_id = None;
         loop {
             let field = self.byte()?;
             if field == 0 {
                 if context == "SchemaElement" {
-                    self.schema_name(schema_name.ok_or_else(invalid_page)?, schema_children)?;
+                    self.schema_name(
+                        schema_name.ok_or_else(invalid_page)?,
+                        schema_children,
+                        schema_field_id,
+                    )?;
                 }
                 return Ok(());
             }
@@ -477,6 +494,8 @@ impl<R: Read> CompactHeader<R> {
                 let children = self.integer()?;
                 let children = i32::try_from(children).map_err(|_| invalid_page())?;
                 schema_children = Some(u64::try_from(children).map_err(|_| invalid_page())?);
+            } else if context == "SchemaElement" && id == 9 {
+                schema_field_id = Some(i32::try_from(self.integer()?).map_err(|_| invalid_page())?);
             } else if context == "FileKeyValue" && id == 1 {
                 self.metadata_binary(context, true)?;
             } else if kind != 1 && kind != 2 {
@@ -865,4 +884,101 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ("TimestampType", 2) => (12, "TimeUnit", 0, 0),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::RecordBatchReader;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::basic::{Repetition, Type as PhysicalType};
+    use parquet::data_type::Int64Type;
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use parquet::file::writer::SerializedFileWriter;
+
+    fn field_id_fixture(id: Option<i32>) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let field = Arc::new(
+            Type::primitive_type_builder("value", PhysicalType::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .with_id(id)
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("fixture")
+                .with_fields(vec![field])
+                .build()
+                .unwrap(),
+        );
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(EnabledStatistics::None)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[7], None, None)
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        writer.close().unwrap();
+        file
+    }
+
+    #[test]
+    fn issue577_field_id_map_shared_budget() {
+        let plain = field_id_fixture(None);
+        let baseline = check_footer(&mut File::open(plain.path()).unwrap(), u64::MAX).unwrap();
+        for id in [0, i32::MIN, i32::MAX] {
+            let file = field_id_fixture(Some(id));
+            let reservation =
+                check_footer(&mut File::open(file.path()).unwrap(), u64::MAX).unwrap();
+            let builder =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap()).unwrap();
+            let schema = builder.schema();
+            let metadata = schema.fields()[0].metadata();
+            assert_eq!(
+                metadata[parquet::arrow::PARQUET_FIELD_ID_META_KEY],
+                id.to_string()
+            );
+            let reader = super::super::pages::reader(
+                File::open(file.path()).unwrap(),
+                builder.metadata().clone(),
+                schema,
+                1024,
+                u64::MAX,
+                0,
+            )
+            .unwrap();
+            let reader_schema = reader.schema();
+            let reader_metadata = reader_schema.fields()[0].metadata();
+            assert_eq!(reader_metadata, metadata);
+            assert!(!std::ptr::eq(reader_metadata, metadata));
+            let owned_lower_bound = [metadata, reader_metadata]
+                .into_iter()
+                .map(|map| {
+                    map.capacity() * std::mem::size_of::<(String, String)>()
+                        + map
+                            .iter()
+                            .map(|(key, value)| key.capacity() + value.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+            let added = reservation.retained_metadata_bytes - baseline.retained_metadata_bytes;
+            println!(
+                "field_id={id} actual_map_lower_bound={owned_lower_bound} retained_reservation_delta={added}"
+            );
+            assert!(
+                added >= owned_lower_bound as u64,
+                "Field ID map storage must enter the shared reservation before Arrow conversion"
+            );
+        }
+    }
 }
