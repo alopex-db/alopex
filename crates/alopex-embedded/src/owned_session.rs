@@ -441,6 +441,11 @@ mod tests {
             .unwrap();
         transaction.create_savepoint("second").unwrap();
         transaction.rollback_to_savepoint("first").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard_again", &[2.0, 0.0], b"")
+            .unwrap();
+        // A rollback retains its target savepoint for another recovery.
+        transaction.rollback_to_savepoint("first").unwrap();
         transaction.commit().unwrap();
 
         let (results, _) = database
@@ -451,30 +456,26 @@ mod tests {
     }
 
     #[test]
-    fn sql_after_direct_hnsw_change_commits_the_staged_graph() {
+    fn sql_after_direct_hnsw_change_can_drop_the_index() {
         let database = Arc::new(Database::new());
         database
-            .create_hnsw_index(
-                "vec_idx",
-                HnswConfig::default()
-                    .with_dimension(2)
-                    .with_metric(Metric::L2),
+            .execute_sql(
+                "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2)); \
+                 CREATE INDEX vec_idx ON items (embedding) USING HNSW; \
+                 INSERT INTO items VALUES (1, [0.0, 0.0]);",
             )
             .unwrap();
         let mut transaction = Arc::clone(&database)
             .begin_owned_embedded_transaction(TxnMode::ReadWrite)
             .unwrap();
         transaction
-            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .upsert_to_hnsw("vec_idx", &2u64.to_be_bytes(), &[1.0, 0.0], b"")
             .unwrap();
-        transaction.execute_sql("SELECT 1").unwrap();
+        transaction.execute_sql("DROP INDEX vec_idx").unwrap();
         transaction.commit().unwrap();
-
-        let (results, _) = database
+        assert!(database
             .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
-            .unwrap();
-        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
-        assert_eq!(keys, vec![b"keep".to_vec()]);
+            .is_err());
     }
 
     #[test]
