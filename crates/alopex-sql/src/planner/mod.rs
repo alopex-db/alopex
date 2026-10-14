@@ -4705,6 +4705,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
         }
         let source = resolve_group_by_expression(expr, projection_aliases, projection)?;
+        if expr_contains_window(&source) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY cannot contain window functions".to_string(),
+            ));
+        }
         let typed = self.infer_expr_with_scope(&source, scope, ctes)?;
         if typed_expr_contains_aggregate(&typed) {
             return Err(PlannerError::invalid_expression(
@@ -7064,6 +7069,21 @@ fn resolve_group_by_expression(
     projection_aliases: &HashMap<String, Expr>,
     projection: &[SelectItem],
 ) -> Result<Expr, PlannerError> {
+    if let ExprKind::UnaryOp {
+        op: crate::ast::expr::UnaryOp::Minus,
+        operand,
+    } = &expr.kind
+        && matches!(
+            &operand.kind,
+            ExprKind::Literal {
+                literal: Literal::Number(_)
+            }
+        )
+    {
+        return Err(PlannerError::invalid_expression(
+            "GROUP BY position must be a positive integer".to_string(),
+        ));
+    }
     let ExprKind::Literal {
         literal: Literal::Number(number),
     } = &expr.kind
@@ -7078,9 +7098,9 @@ fn resolve_group_by_expression(
             },
         );
     };
-    let Ok(position) = number.parse::<usize>() else {
-        return Ok(expr.clone());
-    };
+    let position = number.parse::<usize>().map_err(|_| {
+        PlannerError::invalid_expression("GROUP BY position must be a positive integer".to_string())
+    })?;
     let index = position.checked_sub(1).ok_or_else(|| {
         PlannerError::invalid_expression("GROUP BY position must be positive".to_string())
     })?;
