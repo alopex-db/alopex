@@ -1077,6 +1077,219 @@ fn column_metadata_shared_budget_before_allocation(field_ids: bool) {
 }
 
 #[test]
+fn issue577_statistics_shared_budget_before_allocation() {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+
+    for (limit, rows, width, may_reject) in [
+        (None, 384, 24 * 1024, false),
+        (Some(LIMIT), 1, 1, false),
+        (Some(LIMIT), 384, 1, false),
+        (Some(LIMIT), 384, 24 * 1024, true),
+        (Some(LIMIT * 4), 384, 24 * 1024, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::SNAPPY)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        column
+            .typed::<ByteArrayType>()
+            .write_batch(&vec![ByteArray::from(vec![0x42; 8]); rows], None, None)
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        writer.close().unwrap();
+        let encoded = rewritten_metadata_footer(&file, |footer| {
+            footer.row_groups[0].columns[0]
+                .meta_data
+                .as_mut()
+                .unwrap()
+                .statistics = Some(parquet::format::Statistics {
+                max: None,
+                min: None,
+                null_count: Some(0),
+                distinct_count: None,
+                max_value: Some(vec![0x7f; width]),
+                min_value: Some(vec![0]),
+                is_max_value_exact: Some(false),
+                is_min_value_exact: Some(false),
+            });
+        });
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) =
+            execute_observed_with_alias(&file, "", limit, || replace_footer(&file, &encoded));
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "statistics limit={limit:?} rows={rows} width={width} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "statistics and rows exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected statistics rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Blob(vec![0x42; 8])]; rows]);
+        }
+    }
+}
+
+fn page_statistics_fixture(width: usize) -> tempfile::NamedTempFile {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema =
+        Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_writer_version(parquet::file::properties::WriterVersion::PARQUET_1_0)
+            .set_compression(Compression::SNAPPY)
+            .set_dictionary_enabled(false)
+            .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+            .set_data_page_row_count_limit(1024)
+            .set_write_batch_size(1)
+            .build(),
+    );
+    let mut writer =
+        SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties).unwrap();
+    let mut group = writer.next_row_group().unwrap();
+    let mut column = group.next_column().unwrap().unwrap();
+    column
+        .typed::<ByteArrayType>()
+        .write_batch(&vec![ByteArray::from(vec![0x42; 8]); 1200], None, None)
+        .unwrap();
+    column.close().unwrap();
+    group.close().unwrap();
+    let mut footer = writer.close().unwrap();
+    let bytes = std::fs::read(file.path()).unwrap();
+    let footer_size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer_start = bytes.len() - 8 - footer_size;
+    let metadata = footer.row_groups[0].columns[0].meta_data.as_ref().unwrap();
+    let start = metadata.data_page_offset as usize;
+    let end = start + metadata.total_compressed_size as usize;
+    let mut rewritten = bytes[..start].to_vec();
+    let mut position = start;
+    let mut pages = 0;
+    while position < end {
+        let mut input = Cursor::new(&bytes[position..end]);
+        let mut header = parquet::format::PageHeader::read_from_in_protocol(
+            &mut TCompactInputProtocol::new(&mut input),
+        )
+        .unwrap();
+        let payload_start = position + input.position() as usize;
+        let payload_end = payload_start + header.compressed_page_size as usize;
+        if pages == 1 {
+            header.data_page_header.as_mut().unwrap().statistics =
+                Some(parquet::format::Statistics {
+                    max: None,
+                    min: None,
+                    null_count: Some(0),
+                    distinct_count: None,
+                    max_value: Some(vec![0x7f; width]),
+                    min_value: Some(vec![0]),
+                    is_max_value_exact: Some(false),
+                    is_min_value_exact: Some(false),
+                });
+        }
+        header
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut rewritten))
+            .unwrap();
+        rewritten.extend_from_slice(&bytes[payload_start..payload_end]);
+        position = payload_end;
+        pages += 1;
+    }
+    assert_eq!(pages, 2);
+    let growth = rewritten.len() as i64 - end as i64;
+    rewritten.extend_from_slice(&bytes[end..footer_start]);
+    let group = &mut footer.row_groups[0];
+    group.total_byte_size += growth;
+    if let Some(size) = &mut group.total_compressed_size {
+        *size += growth;
+    }
+    let chunk = &mut group.columns[0];
+    chunk.offset_index_offset = None;
+    chunk.offset_index_length = None;
+    chunk.column_index_offset = None;
+    chunk.column_index_length = None;
+    let metadata = chunk.meta_data.as_mut().unwrap();
+    metadata.total_compressed_size += growth;
+    metadata.total_uncompressed_size += growth;
+    let mut encoded = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+        .unwrap();
+    rewritten.extend_from_slice(&encoded);
+    rewritten.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    rewritten.extend_from_slice(b"PAR1");
+    std::fs::write(file.path(), rewritten).unwrap();
+    file
+}
+
+#[test]
+fn issue577_page_statistics_shared_budget_before_allocation() {
+    for (limit, width, may_reject) in [
+        (None, 192 * 1024, false),
+        (Some(LIMIT * 4), 1, false),
+        (Some(LIMIT * 4), 192 * 1024, true),
+        (Some(LIMIT * 8), 192 * 1024, false),
+    ] {
+        let file = page_statistics_fixture(width);
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "page statistics limit={limit:?} width={width} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "page statistics and retained rows exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected page statistics rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Blob(vec![0x42; 8])]; 1200]);
+        }
+    }
+}
+
+#[test]
 fn issue577_query_row_container_shared_budget() {
     let rows = 2048;
     let limit = rows * (std::mem::size_of::<SqlValue>() + 2 * std::mem::size_of::<Vec<SqlValue>>())

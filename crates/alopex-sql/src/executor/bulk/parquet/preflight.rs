@@ -144,8 +144,19 @@ pub(super) fn check_pages(
                 let consumed = maximum - header.remaining();
                 check_declared_bytes(uncompressed, limit)?;
                 check_declared_bytes(compressed, limit)?;
+                // Bound the header copy, decoded binary fields, and moved statistics owners.
+                let header_storage = consumed
+                    .checked_mul(2)
+                    .and_then(|bytes| {
+                        bytes.checked_add((2 * std::mem::size_of::<bytes::Bytes>()) as u64)
+                    })
+                    .and_then(|bytes| {
+                        bytes.checked_add(std::mem::size_of::<parquet::format::PageHeader>() as u64)
+                    })
+                    .ok_or_else(invalid_page)?;
                 reserved_bytes = reserved_bytes
-                    .checked_add(uncompressed)
+                    .checked_add(header_storage)
+                    .and_then(|bytes| bytes.checked_add(uncompressed))
                     .and_then(|bytes| bytes.checked_add(compressed))
                     .ok_or_else(invalid_page)?;
                 if let Some(count) = dictionary_values {
@@ -332,7 +343,17 @@ impl<R: Read> CompactHeader<R> {
         if length > self.remaining() {
             return Err(invalid_page());
         }
+        let statistics = context == "RetainedStatistics";
+        let context = if statistics {
+            "RetainedMetadata"
+        } else {
+            context
+        };
         self.charge_metadata(length, context)?;
+        if statistics {
+            // Bytes owns the moved statistics payload through a shared allocation.
+            self.charge_metadata(std::mem::size_of::<bytes::Bytes>() as u64, context)?;
+        }
         let schema_key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
         let mut arrow_key = inspect_arrow_key && length == schema_key.len() as u64;
         for index in 0..length {
@@ -775,7 +796,7 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
             std::mem::size_of::<parquet::format::KeyValue>(),
             12,
         ),
-        ("ColumnMetaData", 12) => (12, "Statistics", 0, 0),
+        ("ColumnMetaData", 12) => (12, "RetainedStatistics", 0, 0),
         ("ColumnMetaData", 13) => (
             9,
             "PageEncodingStats",
@@ -870,11 +891,18 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         }
         ("SortingColumn", 1) => (5, "", 0, 0),
         ("SortingColumn", 2) | ("SortingColumn", 3) => (1, "", 0, 0),
-        ("Statistics", 1) | ("Statistics", 2) | ("Statistics", 5) | ("Statistics", 6) => {
-            (8, "", 0, 0)
-        }
-        ("Statistics", 3) | ("Statistics", 4) => (6, "", 0, 0),
-        ("Statistics", 7) | ("Statistics", 8) => (1, "", 0, 0),
+        ("Statistics" | "RetainedStatistics", 1 | 2 | 5 | 6) => (
+            8,
+            if context == "RetainedStatistics" {
+                "RetainedStatistics"
+            } else {
+                ""
+            },
+            0,
+            0,
+        ),
+        ("Statistics" | "RetainedStatistics", 3 | 4) => (6, "", 0, 0),
+        ("Statistics" | "RetainedStatistics", 7 | 8) => (1, "", 0, 0),
         ("TimeType", 1) => (1, "", 0, 0),
         ("TimeType", 2) => (12, "TimeUnit", 0, 0),
         ("TimeUnit", 1) => (12, "MilliSeconds", 0, 0),
