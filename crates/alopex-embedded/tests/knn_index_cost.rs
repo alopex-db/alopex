@@ -353,8 +353,16 @@ fn sql_knn_hnsw_cost_process_worker() {
     let query = query(&table);
     if arm == "hnsw" {
         assert_hnsw_path(&db, &query);
+        assert_live_hnsw_path(&db, &query);
     }
-    db.execute_sql(&query).expect("warm query");
+    let ExecutionResult::Query(warm_result) = db.execute_sql(&query).expect("warm query") else {
+        panic!("kNN must return rows");
+    };
+    assert_eq!(
+        warm_result.rows.len(),
+        K,
+        "kNN must return all requested rows"
+    );
     for (sample_index, elapsed_ms) in elapsed_millis(&db, &query).into_iter().enumerate() {
         append_raw_sample(
             &raw_path,
@@ -439,7 +447,12 @@ fn seed(db: &Database, table: &str, rows: usize, hnsw: bool) {
                 if dimension != 0 {
                     sql.push(',');
                 }
-                write!(&mut sql, "{}", (row_id + dimension) % 997).expect("write vector");
+                write!(
+                    &mut sql,
+                    "{}",
+                    (row_id * (dimension + 17) + dimension * 31) % 65_521
+                )
+                .expect("write vector");
             }
             sql.push_str("]) ");
         }
@@ -469,6 +482,27 @@ fn assert_hnsw_path(db: &Database, query: &str) {
     assert!(
         plan.contains("HnswSearch"),
         "the indexed query must select HnswSearch: {plan}"
+    );
+}
+
+fn assert_live_hnsw_path(db: &Database, query: &str) {
+    let ExecutionResult::Query(result) = db
+        .execute_sql(&format!("EXPLAIN ANALYZE {query}"))
+        .expect("analyze hnsw query")
+    else {
+        panic!("EXPLAIN ANALYZE must return a query result");
+    };
+    let alopex_sql::SqlValue::Text(plan) = &result.rows[0][0] else {
+        panic!("EXPLAIN ANALYZE must return text");
+    };
+    assert!(plan.contains("HnswSearch"), "live HNSW path: {plan}");
+    assert!(
+        plan.contains("fallback=none"),
+        "unexpected fallback: {plan}"
+    );
+    assert!(
+        plan.contains(&format!("rows={K}")),
+        "incomplete kNN rows: {plan}"
     );
 }
 
