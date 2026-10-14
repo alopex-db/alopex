@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arrow_schema::Schema;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups};
 use parquet::arrow::{ProjectionMask, parquet_to_arrow_field_levels};
+use parquet::basic::Encoding;
 use parquet::column::page::{Page, PageIterator, PageMetadata, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ParquetMetaData;
@@ -115,27 +116,33 @@ impl Iterator for ColumnChunks {
             } else {
                 None
             };
-            if matches!(
+            let inner: Box<dyn PageReader> = if matches!(
                 column.compression(),
                 parquet::basic::Compression::GZIP(_)
                     | parquet::basic::Compression::ZSTD(_)
                     | parquet::basic::Compression::BROTLI(_)
             ) {
-                return Ok(Box::new(bounded::BoundedPages::new(
+                Box::new(bounded::BoundedPages::new(
                     Arc::clone(&self.file),
                     column,
                     group.num_rows() as usize,
                     locations,
                     self.limit,
-                )?) as Box<dyn PageReader>);
-            }
-            let inner = SerializedPageReader::new(
-                Arc::clone(&self.file),
-                column,
-                group.num_rows() as usize,
-                locations,
-            )?;
-            Ok(Box::new(ColumnPages { inner }) as Box<dyn PageReader>)
+                )?)
+            } else {
+                Box::new(SerializedPageReader::new(
+                    Arc::clone(&self.file),
+                    column,
+                    group.num_rows() as usize,
+                    locations,
+                )?)
+            };
+            Ok(Box::new(ColumnPages {
+                inner,
+                max_rep_level: column.column_descr().max_rep_level(),
+                max_def_level: column.column_descr().max_def_level(),
+                limit: self.limit,
+            }) as Box<dyn PageReader>)
         })())
     }
 }
@@ -143,7 +150,98 @@ impl Iterator for ColumnChunks {
 impl PageIterator for ColumnChunks {}
 
 struct ColumnPages {
-    inner: SerializedPageReader<File>,
+    inner: Box<dyn PageReader>,
+    max_rep_level: i16,
+    max_def_level: i16,
+    limit: u64,
+}
+
+fn invalid_delta() -> ParquetError {
+    ParquetError::General("invalid or over-budget parquet DELTA length declaration".into())
+}
+
+fn delta_varint(input: &mut &[u8]) -> Result<u64> {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let (&byte, rest) = input.split_first().ok_or_else(invalid_delta)?;
+        *input = rest;
+        if shift == 63 && byte > 1 {
+            return Err(invalid_delta());
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(invalid_delta())
+}
+
+impl ColumnPages {
+    fn check_delta_lengths(&self, page: &Page) -> Result<()> {
+        if page.encoding() != Encoding::DELTA_LENGTH_BYTE_ARRAY {
+            return Ok(());
+        }
+        let mut input = page.buffer().as_ref();
+        match page {
+            Page::DataPage {
+                num_values,
+                rep_level_encoding,
+                def_level_encoding,
+                ..
+            } => {
+                for (level, encoding) in [
+                    (self.max_rep_level, *rep_level_encoding),
+                    (self.max_def_level, *def_level_encoding),
+                ] {
+                    if level == 0 {
+                        continue;
+                    }
+                    let size = match encoding {
+                        Encoding::RLE => {
+                            let prefix = input.get(..4).ok_or_else(invalid_delta)?;
+                            let size = u32::from_le_bytes(prefix.try_into().unwrap()) as usize;
+                            input = &input[4..];
+                            size
+                        }
+                        #[allow(deprecated)]
+                        Encoding::BIT_PACKED => {
+                            let width = 16 - level.leading_zeros();
+                            (u64::from(*num_values) * u64::from(width)).div_ceil(8) as usize
+                        }
+                        _ => return Err(invalid_delta()),
+                    };
+                    input = input.get(size..).ok_or_else(invalid_delta)?;
+                }
+            }
+            Page::DataPageV2 {
+                rep_levels_byte_len,
+                def_levels_byte_len,
+                ..
+            } => {
+                let offset = (*rep_levels_byte_len as usize)
+                    .checked_add(*def_levels_byte_len as usize)
+                    .ok_or_else(invalid_delta)?;
+                input = input.get(offset..).ok_or_else(invalid_delta)?;
+            }
+            Page::DictionaryPage { .. } => return Err(invalid_delta()),
+        }
+        // parquet 53.4.1 resizes its i32 lengths vector from this encoded count.
+        let block = delta_varint(&mut input)?;
+        let mini_blocks = delta_varint(&mut input)?;
+        let count = delta_varint(&mut input)?;
+        if block == 0
+            || !block.is_multiple_of(128)
+            || mini_blocks == 0
+            || !block.is_multiple_of(mini_blocks)
+            || !(block / mini_blocks).is_multiple_of(32)
+            || count > u64::from(page.num_values())
+            || count.checked_mul(4).is_none_or(|bytes| bytes > self.limit)
+            || mini_blocks > self.limit
+        {
+            return Err(invalid_delta());
+        }
+        Ok(())
+    }
 }
 
 impl Iterator for ColumnPages {
@@ -156,8 +254,11 @@ impl Iterator for ColumnPages {
 
 impl PageReader for ColumnPages {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
-        // shortcut: Brotli and legacy LZ4 working allocations still need budget enforcement.
-        self.inner.get_next_page()
+        let page = self.inner.get_next_page()?;
+        if let Some(page) = &page {
+            self.check_delta_lengths(page)?;
+        }
+        Ok(page)
     }
 
     fn peek_next_page(&mut self) -> Result<Option<PageMetadata>> {

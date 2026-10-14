@@ -320,6 +320,173 @@ fn issue577_streaming_reader_exceeds_materialized_row_limit() {
 }
 
 #[test]
+fn issue577_delta_length_header_checked_before_allocation() {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+    use parquet::file::properties::EnabledStatistics;
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    let cases: [(&str, Option<&[u8]>); 4] = [
+        ("normal", None),
+        // Block 128, four mini blocks, 131072 lengths, first length zero.
+        ("count", Some(&[0x80, 1, 4, 0x80, 0x80, 8, 0])),
+        ("zero mini blocks", Some(&[0x80, 1, 0, 1, 0])),
+        ("varint overflow", Some(&[0xff; 10])),
+    ];
+    for (case, replacement) in cases {
+        let oversized = replacement.is_some();
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema =
+            Arc::new(parse_message_type("message fixture { REQUIRED BYTE_ARRAY body; }").unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(EnabledStatistics::None)
+                .set_encoding(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        column
+            .typed::<ByteArrayType>()
+            .write_batch(&[ByteArray::from(vec![0x42])], None, None)
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        let mut footer = writer.close().unwrap();
+        let (result, maximum) = execute_observed_after_planning(&file, || {
+            let Some(input) = replacement else {
+                return;
+            };
+            let mut bytes = std::fs::read(file.path()).unwrap();
+            let metadata = footer.row_groups[0].columns[0].meta_data.as_mut().unwrap();
+            let offset = metadata.data_page_offset as usize;
+            let mut header = parquet::format::PageHeader::read_from_in_protocol(
+                &mut TCompactInputProtocol::new(Cursor::new(&bytes[offset..])),
+            )
+            .unwrap();
+            header.uncompressed_page_size = input.len() as i32;
+            header.compressed_page_size = input.len() as i32;
+            let mut encoded_header = Vec::new();
+            header
+                .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_header))
+                .unwrap();
+            let size = (encoded_header.len() + input.len()) as i64;
+            metadata.total_compressed_size = size;
+            metadata.total_uncompressed_size = size;
+            let chunk = &mut footer.row_groups[0].columns[0];
+            chunk.offset_index_offset = None;
+            chunk.offset_index_length = None;
+            chunk.column_index_offset = None;
+            chunk.column_index_length = None;
+            footer.row_groups[0].total_byte_size = size;
+            footer.row_groups[0].total_compressed_size = Some(size);
+            bytes.truncate(offset);
+            bytes.extend_from_slice(&encoded_header);
+            bytes.extend_from_slice(input);
+            let mut encoded_footer = Vec::new();
+            footer
+                .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_footer))
+                .unwrap();
+            bytes.extend_from_slice(&encoded_footer);
+            bytes.extend_from_slice(&(encoded_footer.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(b"PAR1");
+            assert!(bytes.len() < 4096);
+            std::fs::write(file.path(), bytes).unwrap();
+        });
+        println!(
+            "DELTA length control case={case} oversized={oversized} maximum_request={maximum}"
+        );
+        assert!(
+            maximum <= LIMIT,
+            "DELTA length header exceeded its allocation budget"
+        );
+        if oversized {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal DELTA length rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::Blob(vec![0x42])]]);
+        }
+    }
+}
+
+#[test]
+fn issue577_delta_length_nullable_pages_preserve_rows() {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+    use parquet::file::properties::WriterVersion;
+
+    for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
+        for compression in [
+            Compression::UNCOMPRESSED,
+            Compression::GZIP(Default::default()),
+        ] {
+            for all_null in [false, true] {
+                let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+                let schema = Arc::new(
+                    parse_message_type("message fixture { OPTIONAL BYTE_ARRAY body; }").unwrap(),
+                );
+                let properties = Arc::new(
+                    WriterProperties::builder()
+                        .set_writer_version(version)
+                        .set_compression(compression)
+                        .set_dictionary_enabled(false)
+                        .set_encoding(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY)
+                        .build(),
+                );
+                let mut writer = SerializedFileWriter::new(
+                    File::create(file.path()).unwrap(),
+                    schema,
+                    properties,
+                )
+                .unwrap();
+                let mut group = writer.next_row_group().unwrap();
+                let mut column = group.next_column().unwrap().unwrap();
+                let values = if all_null {
+                    vec![]
+                } else {
+                    vec![ByteArray::from(vec![0x42]), ByteArray::from(vec![0x43])]
+                };
+                let levels = if all_null { [0, 0, 0] } else { [1, 0, 1] };
+                column
+                    .typed::<ByteArrayType>()
+                    .write_batch(&values, Some(&levels), None)
+                    .unwrap();
+                column.close().unwrap();
+                group.close().unwrap();
+                writer.close().unwrap();
+                let (result, maximum) = execute_observed_after_planning(&file, || {});
+                println!(
+                    "DELTA nullable version={version:?} compression={compression:?} all_null={all_null} maximum_request={maximum}"
+                );
+                assert!(maximum <= LIMIT);
+                let ExecutionResult::Query(result) = result.unwrap() else {
+                    panic!("expected nullable DELTA length rows");
+                };
+                let expected = if all_null {
+                    vec![vec![SqlValue::Null]; 3]
+                } else {
+                    vec![
+                        vec![SqlValue::Blob(vec![0x42])],
+                        vec![SqlValue::Null],
+                        vec![SqlValue::Blob(vec![0x43])],
+                    ]
+                };
+                assert_eq!(result.rows, expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn issue577_gzip_output_checked_before_capacity_growth() {
     codec_output_checked_before_capacity_growth(Compression::GZIP(Default::default()));
 }
