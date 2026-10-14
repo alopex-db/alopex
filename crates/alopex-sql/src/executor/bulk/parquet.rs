@@ -125,7 +125,9 @@ impl ParquetReader {
             }
             count = declared;
         }
-        let mut reserved_bytes = footer.as_ref().map_or(0, |footer| footer.key_value_bytes);
+        let mut reserved_bytes = footer
+            .as_ref()
+            .map_or(0, |footer| footer.retained_metadata_bytes);
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             // Reject a declared result that cannot fit even its row/value slots
             // before inspecting or decoding pages.

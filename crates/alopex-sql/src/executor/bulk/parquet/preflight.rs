@@ -22,7 +22,7 @@ fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
 
 pub(super) struct FooterReservation {
     pub(super) start: u64,
-    pub(super) key_value_bytes: u64,
+    pub(super) retained_metadata_bytes: u64,
     pub(super) has_arrow_schema: bool,
 }
 
@@ -49,20 +49,22 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         maximum: limit,
         decoded_bytes: size,
         retained_key_values: 0,
+        retained_other_metadata: 0,
         has_arrow_schema: false,
     };
     footer.metadata_fields(0, "FileMetaData")?;
     let has_arrow_schema = footer.has_arrow_schema;
-    let key_value_bytes = footer
+    let retained_metadata_bytes = footer
         .retained_key_values
         .checked_mul(if has_arrow_schema { 2 } else { 1 })
+        .and_then(|bytes| bytes.checked_add(footer.retained_other_metadata))
         .ok_or_else(invalid_page)?;
-    check_declared_bytes(key_value_bytes, limit)?;
+    check_declared_bytes(retained_metadata_bytes, limit)?;
     drop(footer);
     file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
     Ok(FooterReservation {
         start,
-        key_value_bytes,
+        retained_metadata_bytes,
         has_arrow_schema,
     })
 }
@@ -101,6 +103,7 @@ pub(super) fn check_pages(
                     maximum,
                     decoded_bytes: 0,
                     retained_key_values: 0,
+                    retained_other_metadata: 0,
                     has_arrow_schema: false,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
@@ -156,6 +159,7 @@ pub(super) fn read_page_header_bytes(
         maximum,
         decoded_bytes: 0,
         retained_key_values: 0,
+        retained_other_metadata: 0,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = header.page()?;
@@ -180,6 +184,7 @@ pub(super) fn read_page_header_bytes(
         maximum: consumed,
         decoded_bytes: 0,
         retained_key_values: 0,
+        retained_other_metadata: 0,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = copied.page()?;
@@ -202,6 +207,7 @@ pub(super) fn read_page_header_bytes(
         maximum: consumed,
         decoded_bytes: 0,
         retained_key_values: 0,
+        retained_other_metadata: 0,
         has_arrow_schema: false,
     };
     typed.metadata_fields(0, "PageHeader")?;
@@ -218,6 +224,7 @@ struct CompactHeader<R: Read> {
     maximum: u64,
     decoded_bytes: u64,
     retained_key_values: u64,
+    retained_other_metadata: u64,
     has_arrow_schema: bool,
 }
 
@@ -231,6 +238,12 @@ impl<R: Read> CompactHeader<R> {
         if context == "FileKeyValue" {
             self.retained_key_values = self
                 .retained_key_values
+                .checked_add(bytes)
+                .ok_or_else(invalid_page)?;
+        }
+        if context == "RetainedMetadata" {
+            self.retained_other_metadata = self
+                .retained_other_metadata
                 .checked_add(bytes)
                 .ok_or_else(invalid_page)?;
         }
@@ -600,7 +613,8 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
             std::mem::size_of::<parquet::format::KeyValue>(),
             12,
         ),
-        ("FileMetaData", 6) | ("FileMetaData", 9) => (8, "", 0, 0),
+        ("FileMetaData", 6) => (8, "RetainedMetadata", 0, 0),
+        ("FileMetaData", 9) => (8, "", 0, 0),
         ("FileMetaData", 7) => (
             9,
             "ColumnOrder",
