@@ -282,13 +282,13 @@ mod tests {
 
     #[test]
     fn evaluate_function_type_mismatch_first_argument() {
-        let col = TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty());
+        let col = make_vector_column(0, 0);
         let args = vec![
             col,
             make_vector_literal(vec![1.0, 2.0]),
             make_metric_expr("cosine"),
         ];
-        let row = vec![SqlValue::Null];
+        let row = vec![SqlValue::Integer(7)];
         let ctx = EvalContext::new(&row);
 
         let err =
@@ -296,6 +296,23 @@ mod tests {
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(VectorError::TypeMismatch)) => {}
             other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_vector_functions_return_sql_null_for_a_null_argument() {
+        let args = vec![
+            TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty()),
+            make_vector_literal(vec![1.0, 2.0]),
+            make_metric_expr("cosine"),
+        ];
+        let ctx = EvalContext::new(&[]);
+
+        for function in ["vector_similarity", "vector_distance"] {
+            assert_eq!(
+                evaluate_function_call(function, &args, false, false, &ctx).unwrap(),
+                SqlValue::Null
+            );
         }
     }
 
