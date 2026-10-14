@@ -6,7 +6,9 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from host_resources import HostMonitor
 
 from verification_watchdog import ResourcePolicy, run_guarded
 
@@ -37,6 +39,23 @@ class Observations:
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_host_initialization_grace_preserves_runtime_deadline(self):
+        monitor = HostMonitor()
+        process = Mock()
+        process.stdout.read.return_value = (
+            json.dumps(dict(SAFE, observed_elapsed_ms=0)).encode() + b'\n'
+        )
+        monitor.selector = Mock()
+        monitor.selector.select.side_effect = [[True], [], [True], [], []]
+        with patch.object(monitor, '_start', side_effect=lambda: setattr(monitor, 'process', process)), \
+             patch('host_resources.time.monotonic', side_effect=[10, 10, 10, 11, 11, 11, 12, 12]):
+            monitor.read()
+            monitor.read()
+            with self.assertRaisesRegex(OSError, 'within 5 seconds'):
+                monitor.read()
+        waits = [call.args[0] for call in monitor.selector.select.call_args_list]
+        self.assertEqual(waits, [30, 0, 5, 0, 5])
+
     def run_case(self, monitor, code, runtime='10', policy=None, descendant=False, watchdog=False):
         with tempfile.TemporaryDirectory(prefix='codex-watchdog-') as directory:
             base = Path(directory)

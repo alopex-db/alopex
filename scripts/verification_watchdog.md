@@ -17,6 +17,9 @@ also reserves the entire 4 GiB verification memory allowance. During execution,
 the watchdog stops the unit if any reserve is lost, if host CPU usage stays at
 90% or higher for 10 seconds, or if host observations are unavailable or older
 than 5 seconds. The watchdog refuses to start on an already busy host.
+The observer may take up to 30 seconds to initialize before the unit starts.
+The watchdog starts no test without an observation; subsequent reads retain
+the 5-second deadline.
 The verification unit separately enforces 4 GiB RAM, no swap, one CPU equivalent,
 128 tasks and a 600-second deadline. The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.

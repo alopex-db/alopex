@@ -33,15 +33,18 @@ class HostMonitor:
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
 
     def read(self):
+        starting = self.process is None
         if self.process is None:
             self._start()
         self.process.stdin.write(b'\n')
         self.process.stdin.flush()
-        deadline = time.monotonic() + 5
+        # No test starts until initialization yields an observation; runtime stays strict.
+        timeout = 30 if starting else 5
+        deadline = time.monotonic() + timeout
         while b'\n' not in self.pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self.selector.select(remaining):
-                raise OSError('No host observation received within five seconds')
+                raise OSError(f'No host observation received within {timeout} seconds')
             data = self.process.stdout.read(4096)
             if not data:
                 error = self.process.stderr.read(4096).decode('utf-8', errors='replace')
