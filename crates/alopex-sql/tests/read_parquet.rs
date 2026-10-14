@@ -146,3 +146,32 @@ fn copy_reports_the_source_row_for_out_of_range_int64() {
         "{error}"
     );
 }
+
+#[test]
+fn insert_from_read_parquet_reports_the_input_row_for_out_of_range_int64() {
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let mut ids = vec![1_i64; 1024];
+    ids.push(i64::from(i32::MAX) + 1);
+    let batch =
+        RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int64Array::from(ids))]).unwrap();
+    write_parquet(&file, schema, batch);
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let path = file.path().display();
+    let error = run(
+        &mut executor,
+        &catalog,
+        &format!(
+            "CREATE TABLE selected (id INTEGER); \
+             INSERT INTO selected SELECT * FROM read_parquet('{path}')"
+        ),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("cannot cast BigInt to INTEGER: input row 1025: value is out of range"),
+        "{error}"
+    );
+}
