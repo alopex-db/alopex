@@ -325,6 +325,10 @@ class ReleaseContractTests(unittest.TestCase):
             strict_step,
         )
         self.assertIn("exposes_the_nim_wire_contract_version -- --exact", strict_step)
+        self.assertIn(
+            "distinct_on_crosses_the_nim_messagepack_boundary -- --exact",
+            strict_step,
+        )
 
     def test_release_has_no_repair_forward_path(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
