@@ -152,25 +152,111 @@ fn analysis_date_differences_are_numeric_and_interval_units_are_sql_standard() {
 }
 
 #[test]
-fn date_diff_rejects_unsupported_units() {
+fn fractional_interval_units_preserve_calendar_and_clock_parts() {
     let mut harness = Harness::new();
-    let statement = Parser::parse_sql(
-        &AlopexDialect,
-        "SELECT DATE_DIFF('hour', TIMESTAMP '2017-01-01', TIMESTAMP '2017-01-09')",
-    )
-    .expect("parse DATE_DIFF")
-    .pop()
-    .expect("one statement");
-    let plan = Planner::new(&*harness.catalog.read().expect("catalog lock"))
-        .plan(&statement)
-        .expect("plan DATE_DIFF");
-    let error = harness
-        .executor
-        .execute(plan)
-        .expect_err("unsupported DATE_DIFF units must fail");
-    assert!(
-        error.to_string().contains("unsupported date part 'hour'"),
-        "{error}"
+    let query = harness.query(
+        "SELECT INTERVAL '1.5' DAY, INTERVAL '1.75' MONTH, \
+                INTERVAL '-1.5' WEEK, INTERVAL '1.25' HOUR",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Interval {
+                months: 0,
+                days: 1,
+                micros: 43_200_000_000
+            },
+            SqlValue::Interval {
+                months: 1,
+                days: 22,
+                micros: 43_200_000_000
+            },
+            SqlValue::Interval {
+                months: 0,
+                days: -10,
+                micros: -43_200_000_000
+            },
+            SqlValue::Interval {
+                months: 0,
+                days: 0,
+                micros: 4_500_000_000
+            },
+        ]]
+    );
+}
+
+#[test]
+fn year_to_month_interval_qualifier_parses_and_executes() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT INTERVAL '1-2' YEAR TO MONTH, INTERVAL '-1-2' YEAR TO MONTH, \
+                INTERVAL '1' YEAR TO MONTH",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Interval {
+                months: 14,
+                days: 0,
+                micros: 0
+            },
+            SqlValue::Interval {
+                months: -14,
+                days: 0,
+                micros: 0
+            },
+            SqlValue::Interval {
+                months: 12,
+                days: 0,
+                micros: 0
+            },
+        ]]
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn fractional_year_interval_matches_tenths_reference(tenths in -1200i32..1200) {
+        prop_assume!(tenths % 10 != 0);
+        let magnitude = tenths.abs();
+        let sign = if tenths < 0 { "-" } else { "" };
+        let sql = format!("SELECT INTERVAL '{sign}{}.{:01}' YEAR", magnitude / 10, magnitude % 10);
+        let total_month_tenths = tenths * 12;
+        let expected = SqlValue::Interval {
+            months: total_month_tenths / 10,
+            days: (total_month_tenths % 10) * 3,
+            micros: 0,
+        };
+        let mut harness = Harness::new();
+        prop_assert_eq!(harness.query(&sql).rows, vec![vec![expected]]);
+    }
+}
+
+#[test]
+fn analysis_date_differences_preserve_sign_day_boundaries_and_nulls() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT DATE_DIFF('day', TIMESTAMP '2017-01-09', TIMESTAMP '2017-01-01'),
+                DATE_DIFF('day', TIMESTAMP '1969-12-31 23:59:59', TIMESTAMP '1970-01-01'),
+                DATE_DIFF('day', TIMESTAMP '2017-01-01', CAST(NULL AS TIMESTAMP)),
+                EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01' - TIMESTAMP '1970-01-01 00:00:00.5'),
+                TIMESTAMP '1970-01-02' + INTERVAL '-1' DAY",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::BigInt(-8),
+            SqlValue::BigInt(1),
+            SqlValue::Null,
+            SqlValue::Double(-0.5),
+            SqlValue::Timestamp(0),
+        ]]
     );
 }
 
