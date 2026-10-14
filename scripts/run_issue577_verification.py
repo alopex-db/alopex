@@ -36,6 +36,8 @@ if os.environ.get("CODEX_RESOURCE_CHILD") != "1":
     result = run_guarded(launch, unit, evidence / label, HostMonitor(), ResourcePolicy())
     if not result["cleanup_complete"]:
         sys.exit(125)
+    if result["exit"] == 0 and not (evidence / (label + ".json")).is_file():
+        sys.exit(125)
     sys.exit(result["exit"] if result["exit"] is not None else 125)
 
 group = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[1]
