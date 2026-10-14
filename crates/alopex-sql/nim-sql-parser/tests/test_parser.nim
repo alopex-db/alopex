@@ -1212,6 +1212,15 @@ suite "DDL — CREATE TABLE":
     check ast.children.anyIt(it.kind == nkWithOptions)
     check ast.children.anyIt(it.kind == nkSelect)
 
+  test "CTAS accepts trailing storage options and rejects duplicate options":
+    let ast = parseSql("CREATE TABLE copy AS SELECT 1 AS id WITH (storage='columnar')")
+    check ast.kind == nkCreateTable
+    check ast.children.anyIt(it.kind == nkWithOptions)
+    check ast.children.anyIt(it.kind == nkSelect)
+    check parseErrorMessage(
+      "CREATE TABLE copy WITH (storage='row') AS SELECT 1 AS id WITH (storage='columnar')"
+    ).contains("duplicate CREATE TABLE WITH options")
+
   test "CREATE TABLE with common constraints":
     let ast = parseSql("""
       CREATE TABLE users (

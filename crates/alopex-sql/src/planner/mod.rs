@@ -1836,14 +1836,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                                 column.name
                             )));
                         }
-                        // A bare NULL has no storable column type. Resolve it to
-                        // TEXT while preserving explicitly cast NULL types.
-                        let data_type = if column.data_type == ResolvedType::Null {
-                            ResolvedType::Text
-                        } else {
-                            column.data_type.clone()
-                        };
-                        Ok(ColumnMetadata::new(column.name.clone(), data_type))
+                        if column.data_type == ResolvedType::Null {
+                            return Err(PlannerError::invalid_expression(format!(
+                                "CTAS output column '{}' has no type; cast NULL explicitly",
+                                column.name
+                            )));
+                        }
+                        Ok(ColumnMetadata::new(
+                            column.name.clone(),
+                            column.data_type.clone(),
+                        ))
                     })
                     .collect::<Result<Vec<_>, PlannerError>>()?
             }

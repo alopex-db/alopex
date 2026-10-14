@@ -2112,8 +2112,10 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
     result.children.add(newIdent("IF NOT EXISTS"))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
+  var hasWithOptions = false
   if p.check(tkWith):
     result.children.add(p.parseWithOptions())
+    hasWithOptions = true
     if not p.check(tkAs):
       p.error("expected AS after CREATE TABLE WITH options")
   if p.check(tkAs):
@@ -2124,7 +2126,13 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
     defer: p.leaveNesting()
     let query = p.parseSelectStmt()
     result.children.add(query)
-    result.span = spanThrough(tokenSpan(start), query.span)
+    if p.check(tkWith):
+      if hasWithOptions:
+        p.error("duplicate CREATE TABLE WITH options")
+      result.children.add(p.parseWithOptions())
+      result.span = spanThrough(tokenSpan(start), tokenSpan(p.previous))
+    else:
+      result.span = spanThrough(tokenSpan(start), query.span)
     return
   discard p.expect(tkLParen)
   result.children.add(p.parseColumnDef())

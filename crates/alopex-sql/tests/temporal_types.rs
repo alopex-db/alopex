@@ -214,6 +214,36 @@ fn year_to_month_interval_qualifier_parses_and_executes() {
     );
 }
 
+#[test]
+fn interval_qualifier_boundaries_and_malformed_values() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query("SELECT INTERVAL '178956970-7' YEAR TO MONTH")
+            .rows,
+        vec![vec![SqlValue::Interval {
+            months: i32::MAX,
+            days: 0,
+            micros: 0,
+        }]]
+    );
+
+    for sql in [
+        "SELECT INTERVAL '1-12' YEAR TO MONTH",
+        "SELECT INTERVAL '178956970-8' YEAR TO MONTH",
+        "SELECT INTERVAL '1.1234567890123456789' DAY",
+    ] {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse interval qualifier")
+            .pop()
+            .expect("one statement");
+        let plan = Planner::new(&*harness.catalog.read().expect("catalog read"))
+            .plan(&statement)
+            .expect("plan interval qualifier");
+        assert!(harness.executor.execute(plan).is_err(), "{sql}");
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
