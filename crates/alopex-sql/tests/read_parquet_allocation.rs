@@ -239,13 +239,21 @@ fn execute_observed_with_alias(
     limit: Option<usize>,
     change: impl FnOnce(),
 ) -> (Result<ExecutionResult, ExecutorError>, usize) {
-    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
-    let catalog = MemoryCatalog::new();
     let sql = format!(
         "SELECT * FROM read_parquet('{}') {alias}",
         file.path().display()
     );
-    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    execute_observed_sql(&sql, limit, change)
+}
+
+fn execute_observed_sql(
+    sql: &str,
+    limit: Option<usize>,
+    change: impl FnOnce(),
+) -> (Result<ExecutionResult, ExecutorError>, usize) {
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     change();
     let mut transaction = bridge.begin_write().unwrap();
@@ -266,33 +274,55 @@ fn execute_observed_with_alias(
     (result, maximum)
 }
 
-#[test]
-fn issue577_metadata_workspace_sum_checked_before_allocation() {
+fn metadata_footer(
+    file: &tempfile::NamedTempFile,
+    values: Vec<parquet::format::KeyValue>,
+    column_metadata: bool,
+) -> Vec<u8> {
     use std::io::Cursor;
     use thrift::protocol::TCompactInputProtocol;
 
+    let bytes = std::fs::read(file.path()).unwrap();
+    let size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+        &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - size..])),
+    )
+    .unwrap();
+    footer.key_value_metadata = Some(values);
+    if column_metadata {
+        footer.row_groups[0].columns[0]
+            .meta_data
+            .as_mut()
+            .unwrap()
+            .key_value_metadata = footer.key_value_metadata.take();
+    }
+    let mut encoded = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+        .unwrap();
+    assert!(encoded.len() < LIMIT);
+    encoded
+}
+
+#[test]
+fn issue577_metadata_workspace_sum_checked_before_allocation() {
     for (limit, width, rows, column_metadata, reject) in [
         (None, 24 * 1024, 1, false, false),
         (Some(LIMIT), 8, 1, false, false),
         (Some(LIMIT), 24 * 1024, 1, false, true),
         (Some(LIMIT * 4), 8, 1, false, false),
         (Some(LIMIT * 4), 24 * 1024, 1, false, false),
-        (Some(LIMIT), 8, 256, false, false),
+        (Some(LIMIT), 8, 512, false, false),
         (Some(LIMIT), 12 * 1024, 1, false, false),
-        (Some(LIMIT), 12 * 1024, 256, false, true),
-        (Some(LIMIT), 12 * 1024, 256, true, false),
-        (Some(LIMIT * 4), 12 * 1024, 256, false, false),
-        (None, 12 * 1024, 256, false, false),
+        (Some(LIMIT), 12 * 1024, 512, false, true),
+        (Some(LIMIT), 12 * 1024, 512, true, false),
+        (Some(LIMIT * 4), 12 * 1024, 512, false, false),
+        (None, 12 * 1024, 512, false, false),
     ] {
         let file = row_count_fixture(rows);
-        let bytes = std::fs::read(file.path()).unwrap();
-        let size = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
-            as usize;
-        let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
-            &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - size..])),
-        )
-        .unwrap();
-        footer.key_value_metadata = Some(
+        let encoded = metadata_footer(
+            &file,
             ["budget_a", "budget_b"]
                 .into_iter()
                 .map(|key| parquet::format::KeyValue {
@@ -300,19 +330,8 @@ fn issue577_metadata_workspace_sum_checked_before_allocation() {
                     value: Some("x".repeat(width)),
                 })
                 .collect(),
+            column_metadata,
         );
-        if column_metadata {
-            footer.row_groups[0].columns[0]
-                .meta_data
-                .as_mut()
-                .unwrap()
-                .key_value_metadata = footer.key_value_metadata.take();
-        }
-        let mut encoded = Vec::new();
-        footer
-            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
-            .unwrap();
-        assert!(encoded.len() < LIMIT);
         LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
         let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
             replace_footer(&file, &encoded);
@@ -341,6 +360,166 @@ fn issue577_metadata_workspace_sum_checked_before_allocation() {
                 panic!("expected normal metadata rows");
             };
             assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+        }
+    }
+}
+
+#[test]
+fn issue577_materialized_projection_preserves_values_and_names() {
+    let file = row_count_fixture(512);
+    for (projection, predicate, value, rows) in [
+        ("*", "", 7, 512),
+        ("id + 1 AS next", "WHERE id = 7", 8, 512),
+        ("id + 1 AS next", "WHERE id = 8", 8, 0),
+    ] {
+        let sql = format!(
+            "SELECT {projection} FROM read_parquet('{}') {predicate}",
+            file.path().display()
+        );
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_sql(&sql, Some(LIMIT), || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "projection={projection} rows={rows} maximum_request={maximum} rust_live_peak_bytes={}",
+            observed.peak
+        );
+        assert!(maximum <= LIMIT);
+        assert!(observed.peak <= LIMIT);
+        let ExecutionResult::Query(result) = result.unwrap() else {
+            panic!("expected projected rows");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::BigInt(value)]; rows]);
+        assert_eq!(
+            result.columns[0].name,
+            if projection == "*" { "id" } else { "next" }
+        );
+    }
+}
+
+#[test]
+fn issue577_metadata_map_capacity_checked_before_allocation() {
+    for (limit, count, column_metadata, may_reject) in [
+        (None, 513, false, false),
+        (Some(LIMIT), 1, false, false),
+        (Some(LIMIT), 513, false, true),
+        (Some(LIMIT), 513, true, false),
+        (Some(LIMIT * 4), 513, false, false),
+    ] {
+        let file = row_count_fixture(1);
+        let encoded = metadata_footer(
+            &file,
+            (0..count)
+                .map(|index| parquet::format::KeyValue {
+                    key: format!("kv_{index:04}"),
+                    value: Some("x".into()),
+                })
+                .collect(),
+            column_metadata,
+        );
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "metadata map limit={limit:?} count={count} column_metadata={column_metadata} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(observed.peak <= limit, "metadata map exceeded its budget");
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::BulkLoad(_)) | Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected normal metadata map rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+        }
+    }
+}
+
+#[test]
+fn issue577_embedded_arrow_schema_preserves_results_and_errors() {
+    for limit in [None, Some(LIMIT), Some(LIMIT * 4)] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "id",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(arrow_array::Int64Array::from(vec![7]))],
+        )
+        .unwrap();
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let metadata = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+        assert!(
+            metadata
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .any(|value| value.key == "ARROW:schema")
+        );
+        drop(metadata);
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        if let Some(limit) = limit {
+            assert!(maximum <= limit && observed.peak <= limit);
+        }
+        let ExecutionResult::Query(result) = result.unwrap() else {
+            panic!("expected embedded schema rows");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+    }
+    for (limit, column_metadata, value, invalid_schema) in [
+        (None, false, Some("x"), true),
+        (Some(LIMIT), false, Some("x"), true),
+        (Some(LIMIT * 4), false, Some("x"), true),
+        (Some(LIMIT), true, Some("x"), false),
+        (Some(LIMIT), false, None, false),
+    ] {
+        let file = row_count_fixture(1);
+        let encoded = metadata_footer(
+            &file,
+            vec![parquet::format::KeyValue {
+                key: "ARROW:schema".into(),
+                value: value.map(str::to_owned),
+            }],
+            column_metadata,
+        );
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        if let Some(limit) = limit {
+            assert!(maximum <= limit && observed.peak <= limit);
+        }
+        if invalid_schema {
+            assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected ordinary column metadata rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
         }
     }
 }

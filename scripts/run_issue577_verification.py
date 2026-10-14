@@ -85,6 +85,8 @@ source_files = ["Cargo.toml", "Cargo.lock", "crates/alopex-sql/Cargo.toml",
                 "crates/alopex-sql/src/executor/bulk/parquet/pages/bounded.rs",
                 "crates/alopex-sql/tests/read_parquet_allocation.rs"]
 source_files.append("scripts/verification_results.py")
+source_files.extend(["crates/alopex-sql/src/executor/query/mod.rs",
+                     "crates/alopex-sql/src/executor/query/project.rs"])
 source_digests = {name: hashlib.sha256((worktree / name).read_bytes()).hexdigest()
                   for name in source_files}
 with log.open("w") as output:

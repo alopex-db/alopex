@@ -23,6 +23,7 @@ fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
 pub(super) struct FooterReservation {
     pub(super) start: u64,
     pub(super) key_value_bytes: u64,
+    pub(super) has_arrow_schema: bool,
 }
 
 pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservation> {
@@ -48,14 +49,21 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         maximum: limit,
         decoded_bytes: size,
         retained_key_values: 0,
+        has_arrow_schema: false,
     };
     footer.metadata_fields(0, "FileMetaData")?;
-    let key_value_bytes = footer.retained_key_values;
+    let has_arrow_schema = footer.has_arrow_schema;
+    let key_value_bytes = footer
+        .retained_key_values
+        .checked_mul(if has_arrow_schema { 2 } else { 1 })
+        .ok_or_else(invalid_page)?;
+    check_declared_bytes(key_value_bytes, limit)?;
     drop(footer);
     file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
     Ok(FooterReservation {
         start,
         key_value_bytes,
+        has_arrow_schema,
     })
 }
 
@@ -93,6 +101,7 @@ pub(super) fn check_pages(
                     maximum,
                     decoded_bytes: 0,
                     retained_key_values: 0,
+                    has_arrow_schema: false,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
                 let consumed = maximum - header.remaining();
@@ -147,6 +156,7 @@ pub(super) fn read_page_header_bytes(
         maximum,
         decoded_bytes: 0,
         retained_key_values: 0,
+        has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = header.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -170,6 +180,7 @@ pub(super) fn read_page_header_bytes(
         maximum: consumed,
         decoded_bytes: 0,
         retained_key_values: 0,
+        has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = copied.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -191,6 +202,7 @@ pub(super) fn read_page_header_bytes(
         maximum: consumed,
         decoded_bytes: 0,
         retained_key_values: 0,
+        has_arrow_schema: false,
     };
     typed.metadata_fields(0, "PageHeader")?;
     if typed.remaining() != 0 {
@@ -206,6 +218,7 @@ struct CompactHeader<R: Read> {
     maximum: u64,
     decoded_bytes: u64,
     retained_key_values: u64,
+    has_arrow_schema: bool,
 }
 
 impl<R: Read> CompactHeader<R> {
@@ -216,13 +229,30 @@ impl<R: Read> CompactHeader<R> {
             .ok_or_else(invalid_page)?;
         check_declared_bytes(self.decoded_bytes, self.maximum)?;
         if context == "FileKeyValue" {
-            // File KV payloads are retained by both Parquet and Arrow Schema.
-            self.retained_key_values = bytes
-                .checked_mul(2)
-                .and_then(|bytes| self.retained_key_values.checked_add(bytes))
+            self.retained_key_values = self
+                .retained_key_values
+                .checked_add(bytes)
                 .ok_or_else(invalid_page)?;
-            check_declared_bytes(self.retained_key_values, self.maximum)?;
         }
+        Ok(())
+    }
+
+    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<()> {
+        let length = self.varint()?;
+        check_declared_bytes(length, self.maximum)?;
+        if length > self.remaining() {
+            return Err(invalid_page());
+        }
+        self.charge_metadata(length, context)?;
+        let schema_key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
+        let mut arrow_key = inspect_arrow_key && length == schema_key.len() as u64;
+        for index in 0..length {
+            let byte = self.byte()?;
+            if arrow_key && schema_key.get(index as usize) != Some(&byte) {
+                arrow_key = false;
+            }
+        }
+        self.has_arrow_schema |= arrow_key;
         Ok(())
     }
 
@@ -283,7 +313,9 @@ impl<R: Read> CompactHeader<R> {
                 return Err(invalid_page());
             }
             // Compact field booleans carry their value in the field tag.
-            if kind != 1 && kind != 2 {
+            if context == "FileKeyValue" && id == 1 {
+                self.metadata_binary(context, true)?;
+            } else if kind != 1 && kind != 2 {
                 let child = if known.is_some() && context == "FileKeyValue" {
                     context
                 } else {
@@ -318,15 +350,7 @@ impl<R: Read> CompactHeader<R> {
                 }
             }
             8 => {
-                let length = self.varint()?;
-                check_declared_bytes(length, self.maximum)?;
-                if length > self.remaining() {
-                    return Err(invalid_page());
-                }
-                self.charge_metadata(length, context)?;
-                for _ in 0..length {
-                    self.byte()?;
-                }
+                self.metadata_binary(context, false)?;
             }
             9 | 10 => {
                 let list = self.byte()?;

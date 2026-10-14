@@ -9,7 +9,9 @@ use arrow_array::{
     TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderOptions, ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
+};
 
 use crate::catalog::{ColumnMetadata, TableMetadata};
 use crate::executor::memory::MemoryPolicy;
@@ -57,9 +59,16 @@ impl ParquetReader {
             .map(|limit| check_footer(&mut file, limit))
             .transpose()?;
         let input = file.try_clone().map_err(parquet_io_error)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(|e| {
-            ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
-        })?;
+        // SQL exposes fields and rows; ordinary root KV need not be cloned into Arrow Schema.
+        let options = ArrowReaderOptions::new().with_skip_arrow_metadata(
+            footer
+                .as_ref()
+                .is_some_and(|footer| !footer.has_arrow_schema),
+        );
+        let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(input, options)
+            .map_err(|e| {
+                ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
+            })?;
         let fields = builder
             .schema()
             .fields()

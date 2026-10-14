@@ -8,7 +8,7 @@ Resource boundaries are separate:
 
 | Boundary and owner | Purpose and use | What the number means |
 | --- | --- | --- |
-| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes File KV declared slots/payload for Parquet and Arrow copies, row/value slots, compressed and uncompressed page bytes, dictionary slots, DELTA expansion capacity across columns, pages, and row groups, and ZSTD/Brotli decoding workspace. This conservative reservation is not measured process RAM or proof that all metadata and codec allocations are bounded. |
+| Caller `MemoryPolicy`, enforced by READ_PARQUET preflight and page reader | Reject declared reservations before page decoding under a finite caller budget; preserve the existing unlimited path when the limit is `None`. | The shared reservation includes retained File KV declared slots/payload, row/value slots, compressed and uncompressed page bytes, dictionary slots, DELTA expansion capacity across columns, pages, and row groups, and ZSTD/Brotli decoding workspace. This conservative reservation is not measured process RAM or proof that all metadata and codec allocations are bounded. |
 | Allocation observer, owned by the integration-test executable | Detect regressions at the SQL execution boundary and check normal results under the same explicitly supplied budget. | The 64 KiB and 128 KiB cases are deliberately small fixture policies. `maximum_request` is one requested heap allocation; `rust_live_peak_bytes` is the peak sum of tracked live heap allocations on the executing thread. Neither is RSS. Planning, pre-existing allocations, other threads, stack storage, allocator overhead, and C internals are outside the ledger. |
 | Verification watchdog and runner | Protect the machine while building and executing tests; stop the owned process tree if host reserves or unit limits are lost. | The unit's 4 GiB allowance and measured peak include setup/build/test. An exhausted allowance makes that run invalid; it cannot establish a product allocation failure. Cargo compilation and executed product assertions have separate result fields. |
 
@@ -51,14 +51,25 @@ product default or deployment sizing recommendation.
 
 Footer preflight checks raw footer bytes plus cumulative Thrift list slots and
 string/binary payloads before the normal metadata decoder runs. It returns the
-footer offset and the File KV declaration reservation separately: only retained
-File KV slots/payload, including the Arrow copy, join the rows/pages/codec budget.
-Column KV declarations do not receive an Arrow copy charge. The metadata fixture
-uses 64 KiB and 256 KiB caller policies and one/256-row controls to distinguish
-temporary decoding from the overlap of retained File KV and result rows.
+footer offset and the File KV declaration reservation separately. When the footer
+has no `ARROW:schema` key, the finite SQL reader skips unused Arrow root metadata:
+CopySchema exposes field names/types and rows, so ordinary KV need not be cloned
+into an Arrow HashMap. The Parquet KV copy remains reserved with rows/pages/codecs.
+When the key is present, including a missing value, the reader keeps the existing
+Arrow schema decoding path and its conservative double-copy KV declaration.
+The unlimited reader and planning helpers retain their existing paths.
+Column KV declarations do not receive an Arrow copy charge. Metadata fixtures
+use 64 KiB and 256 KiB policies and one/512-row controls for retained overlap;
+513 short KV pairs check the previously unbudgeted Map construction peak.
+The SQL materializer releases exhausted input iterators before projecting rows
+and transfers the values buffer for full-column output. Projection consumes
+owned rows rather than retaining every input value while cloning the complete
+result. Computed projections use the existing expression kernel; outer-row and
+subquery evaluation retain their transaction-aware path. The 512-row control checks this execution boundary,
+including output values and column names, rather than compilation memory.
 This increment does not establish bounds for other retained metadata, schema
-conversion, `ARROW:schema` expansion, or HashMap bucket/control storage. These
-remaining allocations still prevent a whole-reader memory-bound claim.
+conversion, `ARROW:schema` expansion, or Map storage in that embedded-schema path.
+These remaining allocations still prevent a whole-reader memory-bound claim.
 
 Use a fresh run ID. The watchdog refuses to overwrite its previous event stream.
 The watchdog writes its start record before observing the host or starting the unit.

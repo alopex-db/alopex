@@ -460,6 +460,7 @@ fn execute_query_result_with_context<
     while let Some(result) = iter.next_row() {
         rows.push(result?);
     }
+    drop(iter);
     execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer, context)
 }
 
@@ -1094,6 +1095,7 @@ fn build_iterator_pipeline_with_outer<
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
             }
+            drop(input_iter);
             let projected = execute_project_with_subqueries(
                 txn,
                 catalog,
@@ -1750,6 +1752,7 @@ fn build_streaming_pipeline_inner<
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
             }
+            drop(input_iter);
             let projected = project::execute_project(rows, &projection, &schema)?;
             let output_schema = projected
                 .columns
