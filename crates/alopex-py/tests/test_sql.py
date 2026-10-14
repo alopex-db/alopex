@@ -143,6 +143,19 @@ def test_prepared_execute_many_is_atomic(db):
         statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
 
 
+def test_prepared_execute_many_keeps_400_vectors_out_of_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE batch_vectors (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    statement = db.prepare("INSERT INTO batch_vectors (id, embedding) VALUES (?, ?)")
+    batch = [[row, [0.25] * dimensions] for row in range(rows)]
+
+    assert statement.execute_many(batch) == [1] * rows
+    assert db.execute_sql("SELECT COUNT(*) AS n FROM batch_vectors") == [{"n": rows}]
+
+
 def test_execute_sql_portable_metadata_exact_rows(db):
     db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
 
@@ -774,7 +787,9 @@ def test_execute_sql_vector_batch_params_do_not_expand_parser_payload(db):
         for value in (row, [0.25] * dimensions)
     ]
 
+    assert len(sql.encode("utf-8")) < 1_048_576
     assert db.execute_sql(sql, params) == rows
+    assert db.execute_sql("SELECT COUNT(*) AS n FROM docs") == [{"n": rows}]
 
 
 def test_execute_sql_numpy_vector_param(db):
