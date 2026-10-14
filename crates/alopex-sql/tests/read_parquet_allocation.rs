@@ -994,6 +994,238 @@ fn row_group_metadata_shared_budget_before_allocation(sorted: bool) {
 }
 
 #[test]
+fn issue577_column_metadata_shared_budget_before_allocation() {
+    for (limit, columns, rows, may_reject) in [
+        (None, 32, 16, false),
+        (Some(LIMIT), 1, 1, false),
+        (Some(LIMIT), 4, 16, false),
+        (Some(LIMIT), 5, 16, false),
+        (Some(LIMIT), 32, 16, true),
+        (Some(LIMIT * 4), 32, 16, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let fields = (0..columns)
+            .map(|index| format!("REQUIRED INT64 id{index};"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let schema =
+            Arc::new(parse_message_type(&format!("message fixture {{ {fields} }}")).unwrap());
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::SNAPPY)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        while let Some(mut column) = group.next_column().unwrap() {
+            column
+                .typed::<Int64Type>()
+                .write_batch(&vec![7; rows], None, None)
+                .unwrap();
+            column.close().unwrap();
+        }
+        group.close().unwrap();
+        writer.close().unwrap();
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "column metadata limit={limit:?} columns={columns} rows={rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "column metadata exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected column metadata rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7); columns]; rows]);
+        }
+    }
+}
+
+#[test]
+fn issue577_query_row_container_shared_budget() {
+    let rows = 2048;
+    let limit = rows * (std::mem::size_of::<SqlValue>() + 2 * std::mem::size_of::<Vec<SqlValue>>())
+        + LIMIT / 2;
+    declared_row_count_batch_cases(rows, limit, true);
+}
+
+#[test]
+fn issue577_declared_row_count_batch_capacity_shared_budget() {
+    let rows = 2048;
+    let limit = rows
+        * (std::mem::size_of::<SqlValue>()
+            + std::mem::size_of::<Vec<SqlValue>>()
+            + std::mem::size_of::<alopex_sql::executor::Row>())
+        + LIMIT / 2;
+    declared_row_count_batch_cases(rows, limit, false);
+}
+
+#[test]
+fn issue577_query_row_container_growth_shared_budget() {
+    declared_row_count_batch_cases(513, LIMIT, true);
+}
+
+fn declared_row_count_batch_cases(rows: usize, limit: usize, ordinary_may_reject: bool) {
+    for (budget, declared, may_reject) in [
+        (None, None, false),
+        (Some(limit), None, ordinary_may_reject),
+        (None, Some(1000), false),
+        (Some(limit), Some(1000), true),
+    ] {
+        let file = row_count_fixture(rows);
+        let encoded = rewritten_metadata_footer(&file, |footer| {
+            if let Some(declared) = declared {
+                footer.num_rows = declared;
+            }
+        });
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", budget, || {
+            replace_footer(&file, &encoded);
+        });
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "declared batch budget={budget:?} declared={declared:?} rows={rows} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(budget) = budget {
+            assert!(maximum <= budget);
+            assert!(
+                observed.peak <= budget,
+                "batch growth exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected declared batch rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; rows]);
+        }
+    }
+}
+
+#[test]
+fn issue577_query_variable_payload_shared_budget() {
+    query_variable_payload_shared_budget(false);
+}
+
+#[test]
+fn issue577_query_variable_payload_nullable_shared_budget() {
+    query_variable_payload_shared_budget(true);
+}
+
+fn query_variable_payload_shared_budget(nullable: bool) {
+    use parquet::data_type::{ByteArray, ByteArrayType};
+
+    let count = 513;
+    let limit = LIMIT + LIMIT / 4;
+    for (budget, width, may_reject) in [
+        (None, 32, false),
+        (Some(limit), 8, false),
+        (Some(limit), 32, true),
+        (Some(LIMIT * 4), 32, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema = Arc::new(
+            parse_message_type(if nullable {
+                "message fixture { OPTIONAL BYTE_ARRAY body; }"
+            } else {
+                "message fixture { REQUIRED BYTE_ARRAY body; }"
+            })
+            .unwrap(),
+        );
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                .set_encoding(parquet::basic::Encoding::DELTA_BYTE_ARRAY)
+                .build(),
+        );
+        let mut writer =
+            SerializedFileWriter::new(File::create(file.path()).unwrap(), schema, properties)
+                .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut column = group.next_column().unwrap().unwrap();
+        let mut definitions = vec![1; count];
+        if nullable {
+            definitions[0] = 0;
+        }
+        column
+            .typed::<ByteArrayType>()
+            .write_batch(
+                &vec![ByteArray::from(vec![0x42; width]); count - usize::from(nullable)],
+                nullable.then_some(definitions.as_slice()),
+                None,
+            )
+            .unwrap();
+        column.close().unwrap();
+        group.close().unwrap();
+        writer.close().unwrap();
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", budget, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "query payload budget={budget:?} width={width} rows={count} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(budget) = budget {
+            assert!(maximum <= budget);
+            assert!(
+                observed.peak <= budget,
+                "variable payload and query rows exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            match result {
+                Err(ExecutorError::ResourceExhausted { .. }) => {}
+                Err(ExecutorError::BulkLoad(message)) => assert_eq!(
+                    message,
+                    "failed to read parquet batch: Parquet argument error: Parquet error: invalid or over-budget parquet DELTA length declaration"
+                ),
+                _ => panic!("expected controlled budget refusal"),
+            }
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected query payload rows");
+            };
+            let mut expected = vec![vec![SqlValue::Blob(vec![0x42; width])]; count];
+            if nullable {
+                expected[0][0] = SqlValue::Null;
+            }
+            assert_eq!(result.rows, expected);
+        }
+    }
+}
+
+#[test]
 fn issue577_row_limit_boundary_preserves_rows() {
     let file = row_count_fixture(100_000);
     let limit = 32 * 1024 * 1024;

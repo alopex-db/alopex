@@ -1,9 +1,17 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
+
+use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor, Type};
 
 use crate::executor::{ExecutorError, Result};
+use crate::planner::types::ResolvedType;
 
-use super::parquet_io_error;
+use super::{CopyField, parquet_io_error};
+
+fn arc_bytes<T>() -> usize {
+    std::mem::size_of::<(usize, usize, T)>()
+}
 
 fn invalid_page() -> ExecutorError {
     ExecutorError::BulkLoad("invalid parquet page or chunk declaration".into())
@@ -52,8 +60,14 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         retained_other_metadata: 0,
         schema_path: Vec::new(),
         schema_root_seen: false,
+        schema_leaves: 0,
         has_arrow_schema: false,
     };
+    let roots = arc_bytes::<parquet::file::metadata::ParquetMetaData>()
+        + arc_bytes::<SchemaDescriptor>()
+        + arc_bytes::<parquet::arrow::FieldLevels>()
+        + 2 * arc_bytes::<arrow_schema::Schema>();
+    footer.charge_metadata(roots as u64, "RetainedMetadata")?;
     footer.metadata_fields(0, "FileMetaData")?;
     if footer
         .schema_path
@@ -61,6 +75,14 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         .any(|(remaining, _)| *remaining != 0)
     {
         return Err(invalid_page());
+    }
+    for width in [
+        std::mem::size_of::<Arc<ColumnDescriptor>>(),
+        std::mem::size_of::<usize>(),
+        std::mem::size_of::<CopyField>(),
+        std::mem::size_of::<ResolvedType>(),
+    ] {
+        footer.reserve_converted_metadata(footer.schema_leaves, width)?;
     }
     let has_arrow_schema = footer.has_arrow_schema;
     let retained_metadata_bytes = footer
@@ -115,6 +137,7 @@ pub(super) fn check_pages(
                     retained_other_metadata: 0,
                     schema_path: Vec::new(),
                     schema_root_seen: false,
+                    schema_leaves: 0,
                     has_arrow_schema: false,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
@@ -173,6 +196,7 @@ pub(super) fn read_page_header_bytes(
         retained_other_metadata: 0,
         schema_path: Vec::new(),
         schema_root_seen: false,
+        schema_leaves: 0,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = header.page()?;
@@ -200,6 +224,7 @@ pub(super) fn read_page_header_bytes(
         retained_other_metadata: 0,
         schema_path: Vec::new(),
         schema_root_seen: false,
+        schema_leaves: 0,
         has_arrow_schema: false,
     };
     let (uncompressed, compressed, _) = copied.page()?;
@@ -225,6 +250,7 @@ pub(super) fn read_page_header_bytes(
         retained_other_metadata: 0,
         schema_path: Vec::new(),
         schema_root_seen: false,
+        schema_leaves: 0,
         has_arrow_schema: false,
     };
     typed.metadata_fields(0, "PageHeader")?;
@@ -244,6 +270,7 @@ struct CompactHeader<R: Read> {
     retained_other_metadata: u64,
     schema_path: Vec<(u64, u64)>,
     schema_root_seen: bool,
+    schema_leaves: u64,
     has_arrow_schema: bool,
 }
 
@@ -274,7 +301,13 @@ impl<R: Read> CompactHeader<R> {
             return Ok(());
         }
         // Parquet 53 pushes into empty Vecs; account for their retained growth capacity.
-        let initial = if width <= 1024 { 4 } else { 1 };
+        let initial = if width == 1 {
+            8
+        } else if width <= 1024 {
+            4
+        } else {
+            1
+        };
         let capacity = count
             .checked_next_power_of_two()
             .ok_or_else(invalid_page)?
@@ -314,6 +347,13 @@ impl<R: Read> CompactHeader<R> {
 
     fn schema_name(&mut self, length: u64, children: Option<u64>) -> Result<()> {
         let root = !self.schema_root_seen;
+        self.charge_metadata(arc_bytes::<Type>() as u64, "RetainedMetadata")?;
+        if !root {
+            self.charge_metadata(
+                (2 * arc_bytes::<arrow_schema::Field>()) as u64,
+                "RetainedMetadata",
+            )?;
+        }
         let (prefix, mut retained) = if root {
             self.schema_root_seen = true;
             if children.is_none() {
@@ -335,12 +375,34 @@ impl<R: Read> CompactHeader<R> {
             prefix.checked_add(length).ok_or_else(invalid_page)?
         };
         if let Some(children) = children.filter(|children| root || *children != 0) {
+            self.reserve_converted_metadata(children, std::mem::size_of::<Arc<Type>>())?;
+            // FieldLevels contains the private ParquetField inline and bounds its slot size.
+            self.reserve_converted_metadata(
+                children,
+                std::mem::size_of::<parquet::arrow::FieldLevels>(),
+            )?;
+            for _ in 0..2 {
+                self.reserve_converted_metadata(
+                    children,
+                    std::mem::size_of::<arrow_schema::FieldRef>(),
+                )?;
+                self.charge_metadata(
+                    (2 * std::mem::size_of::<usize>()) as u64,
+                    "RetainedMetadata",
+                )?;
+            }
             // The already charged SchemaElement slots also bound this smaller traversal stack.
             self.schema_path
                 .try_reserve_exact(1)
                 .map_err(|_| invalid_page())?;
             self.schema_path.push((children, path));
         } else {
+            self.schema_leaves = self.schema_leaves.checked_add(1).ok_or_else(invalid_page)?;
+            self.charge_metadata(arc_bytes::<ColumnDescriptor>() as u64, "RetainedMetadata")?;
+            self.reserve_converted_metadata(
+                self.schema_path.len() as u64,
+                std::mem::size_of::<String>(),
+            )?;
             // Each primitive ColumnDescriptor owns the names of all its ancestors.
             retained = retained.checked_add(path).ok_or_else(invalid_page)?;
         }
@@ -473,7 +535,7 @@ impl<R: Read> CompactHeader<R> {
                 }
                 self.charge_metadata(
                     bytes,
-                    if context == "SortingColumn" {
+                    if matches!(context, "SortingColumn" | "ColumnHistogram") {
                         "RetainedMetadata"
                     } else {
                         context
@@ -483,6 +545,11 @@ impl<R: Read> CompactHeader<R> {
                     "RowGroup" => std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>(),
                     "ColumnChunk" => {
                         std::mem::size_of::<parquet::file::metadata::ColumnChunkMetaData>()
+                    }
+                    "ColumnOrder" => std::mem::size_of::<parquet::basic::ColumnOrder>(),
+                    "ColumnEncoding" => std::mem::size_of::<parquet::basic::Encoding>(),
+                    "PageEncodingStats" => {
+                        std::mem::size_of::<parquet::file::page_encoding_stats::PageEncodingStats>()
                     }
                     _ => 0,
                 };
@@ -660,7 +727,8 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ("AesGcmCtrV1", 3) => (1, "", 0, 0),
         ("AesGcmV1", 1) | ("AesGcmV1", 2) => (8, "", 0, 0),
         ("AesGcmV1", 3) => (1, "", 0, 0),
-        ("ColumnChunk", 1) | ("ColumnChunk", 9) => (8, "", 0, 0),
+        ("ColumnChunk", 1) => (8, "RetainedMetadata", 0, 0),
+        ("ColumnChunk", 9) => (8, "", 0, 0),
         ("ColumnChunk", 2) | ("ColumnChunk", 4) | ("ColumnChunk", 6) => (6, "", 0, 0),
         ("ColumnChunk", 3) => (12, "ColumnMetaData", 0, 0),
         ("ColumnChunk", 5) | ("ColumnChunk", 7) => (5, "", 0, 0),
@@ -668,7 +736,12 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ("ColumnCryptoMetaData", 1) => (12, "EncryptionWithFooterKey", 0, 0),
         ("ColumnCryptoMetaData", 2) => (12, "EncryptionWithColumnKey", 0, 0),
         ("ColumnMetaData", 1) | ("ColumnMetaData", 4) | ("ColumnMetaData", 15) => (5, "", 0, 0),
-        ("ColumnMetaData", 2) => (9, "", std::mem::size_of::<parquet::format::Encoding>(), 5),
+        ("ColumnMetaData", 2) => (
+            9,
+            "ColumnEncoding",
+            std::mem::size_of::<parquet::format::Encoding>(),
+            5,
+        ),
         ("ColumnMetaData", 3) => (9, "", std::mem::size_of::<String>(), 8),
         ("ColumnMetaData", 5)
         | ("ColumnMetaData", 6)
@@ -773,7 +846,9 @@ fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8
         ("SchemaElement", 4) => (8, "", 0, 0),
         ("SchemaElement", 10) => (12, "LogicalType", 0, 0),
         ("SizeStatistics", 1) => (6, "", 0, 0),
-        ("SizeStatistics", 2) | ("SizeStatistics", 3) => (9, "", std::mem::size_of::<i64>(), 6),
+        ("SizeStatistics", 2) | ("SizeStatistics", 3) => {
+            (9, "ColumnHistogram", std::mem::size_of::<i64>(), 6)
+        }
         ("SortingColumn", 1) => (5, "", 0, 0),
         ("SortingColumn", 2) | ("SortingColumn", 3) => (1, "", 0, 0),
         ("Statistics", 1) | ("Statistics", 2) | ("Statistics", 5) | ("Statistics", 6) => {

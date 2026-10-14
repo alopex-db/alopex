@@ -26,6 +26,7 @@ mod preflight;
 use preflight::{check_footer, check_pages};
 
 const MAX_READ_PARQUET_ROWS: u64 = 100_000;
+const READ_PARQUET_BATCH_SIZE: usize = 1024;
 
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
@@ -45,12 +46,12 @@ impl ParquetReader {
     }
 
     fn from_file(file: File, table_meta: &TableMetadata) -> Result<Self> {
-        Self::from_file_with_memory(file, table_meta, None, false)
+        Self::from_file_with_memory(file, &table_meta.columns, None, false)
     }
 
     fn from_file_with_memory(
         mut file: File,
-        table_meta: &TableMetadata,
+        planned: &[ColumnMetadata],
         memory: Option<&MemoryPolicy>,
         validate_planned_schema: bool,
     ) -> Result<Self> {
@@ -80,18 +81,18 @@ impl ParquetReader {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        if validate_planned_schema && fields.len() != table_meta.columns.len() {
+        if validate_planned_schema && fields.len() != planned.len() {
             return Err(ExecutorError::SchemaMismatch {
-                expected: table_meta.columns.len(),
+                expected: planned.len(),
                 actual: fields.len(),
                 reason: "READ_PARQUET column count changed after planning".into(),
             });
         }
-        for (position, (field, column)) in fields.iter().zip(&table_meta.columns).enumerate() {
+        for (position, (field, column)) in fields.iter().zip(planned).enumerate() {
             // SQL aliases change planned names, not the source's positional types.
             if validate_planned_schema && field.data_type.as_ref() != Some(&column.data_type) {
                 return Err(ExecutorError::SchemaMismatch {
-                    expected: table_meta.columns.len(),
+                    expected: planned.len(),
                     actual: fields.len(),
                     reason: format!("READ_PARQUET column {position} type changed after planning"),
                 });
@@ -129,18 +130,44 @@ impl ParquetReader {
             .as_ref()
             .map_or(0, |footer| footer.retained_metadata_bytes);
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
-            // Reject a declared result that cannot fit even its row/value slots
-            // before inspecting or decoding pages.
-            let minimum = (table_meta.columns.len() as u64)
+            // Source batches and the later query containers have separate lifetimes.
+            let row_capacity = if count <= READ_PARQUET_BATCH_SIZE as u64 {
+                count
+            } else {
+                count.checked_next_power_of_two().ok_or_else(overflow)?
+            };
+            let row_slots = row_capacity
+                .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
+                .ok_or_else(overflow)?;
+            let values_and_metadata = (planned.len() as u64)
                 .checked_mul(std::mem::size_of::<SqlValue>() as u64)
-                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<SqlValue>>() as u64))
                 .and_then(|bytes| bytes.checked_mul(count))
                 .and_then(|bytes| bytes.checked_add(reserved_bytes))
                 .ok_or_else(overflow)?;
-            if policy.over_limit(minimum) {
+            let minimum = values_and_metadata
+                .checked_add(row_slots)
+                .ok_or_else(overflow)?;
+            let query_capacity = if count == 0 {
+                0
+            } else {
+                count
+                    .checked_next_power_of_two()
+                    .ok_or_else(overflow)?
+                    .max(4)
+            };
+            // The iterator backing and the receiving Vec<Row> coexist during collection.
+            let query_minimum = count
+                .checked_add(query_capacity)
+                .and_then(|slots| {
+                    slots.checked_mul(std::mem::size_of::<crate::executor::Row>() as u64)
+                })
+                .and_then(|bytes| bytes.checked_add(values_and_metadata))
+                .ok_or_else(overflow)?;
+            let declared_minimum = minimum.max(query_minimum);
+            if policy.over_limit(declared_minimum) {
                 return Err(ExecutorError::ResourceExhausted {
                     message: format!(
-                        "READ_PARQUET requires at least {minimum} bytes for declared rows and metadata (limit {}); spilling this operator is not supported",
+                        "READ_PARQUET requires at least {declared_minimum} bytes for declared rows and metadata (limit {}); spilling this operator is not supported",
                         policy.limit_bytes().unwrap_or(u64::MAX)
                     ),
                 });
@@ -158,25 +185,24 @@ impl ParquetReader {
         }
 
         let reader = if let Some(limit) = limit {
+            let metadata = builder.metadata().clone();
+            let schema = builder.schema().clone();
+            drop(builder);
             pages::reader(
                 file,
-                builder.metadata().clone(),
-                builder.schema(),
-                1024,
+                metadata,
+                &schema,
+                READ_PARQUET_BATCH_SIZE,
                 limit,
                 reserved_bytes,
             )
         } else {
-            builder.with_batch_size(1024).build()
+            builder.with_batch_size(READ_PARQUET_BATCH_SIZE).build()
         }
         .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
         // TODO: バッチサイズを open 引数で受け取れるようにし、呼び出し側で柔軟に制御できるようにする。
 
-        let target_types: Vec<ResolvedType> = table_meta
-            .columns
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect();
+        let target_types: Vec<ResolvedType> = planned.iter().map(|c| c.data_type.clone()).collect();
 
         Ok(Self {
             schema: CopySchema { fields },
@@ -251,14 +277,13 @@ pub(crate) fn read_parquet_with_plan(
         None => File::open(path)
             .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
     };
-    let table = TableMetadata::new("read_parquet", planned.to_vec());
-    let mut reader = ParquetReader::from_file_with_memory(file, &table, memory, true)?;
+    let mut reader = ParquetReader::from_file_with_memory(file, planned, memory, true)?;
     let mut rows: Vec<Vec<SqlValue>> = Vec::new();
     let mut retained_bytes = 0_u64;
     let overflow = || ExecutorError::ResourceExhausted {
         message: "READ_PARQUET retained size overflow".into(),
     };
-    while let Some(batch) = reader.next_batch(1024)? {
+    while let Some(batch) = reader.next_batch(READ_PARQUET_BATCH_SIZE)? {
         if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
             for row in &batch {
                 retained_bytes = retained_bytes
@@ -285,10 +310,22 @@ pub(crate) fn read_parquet_with_plan(
             } else {
                 rows.capacity()
             };
+            let query_capacity = if required == 0 {
+                0
+            } else {
+                required
+                    .checked_next_power_of_two()
+                    .ok_or_else(overflow)?
+                    .max(4)
+            };
+            let query_slots = required
+                .checked_add(query_capacity)
+                .and_then(|slots| slots.checked_mul(std::mem::size_of::<crate::executor::Row>()))
+                .ok_or_else(overflow)? as u64;
             let enforce_capacity = |capacity: usize| {
                 let bytes = (capacity as u64)
                     .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
-                    .and_then(|bytes| retained_bytes.checked_add(bytes))
+                    .and_then(|bytes| retained_bytes.checked_add(bytes.max(query_slots)))
                     .ok_or_else(overflow)?;
                 // This reader retains rows in memory and cannot spill them.
                 if policy.over_limit(bytes) {

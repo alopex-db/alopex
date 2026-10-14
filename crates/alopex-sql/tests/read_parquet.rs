@@ -479,7 +479,7 @@ fn issue577_parquet_metadata_budget_precedes_page_decode() {
     let minimum = (values.len()
         * (std::mem::size_of::<Vec<SqlValue>>() + std::mem::size_of::<SqlValue>()))
         as u64;
-    let sufficient = minimum + (values.len() * std::mem::size_of::<i64>()) as u64;
+    let row_data_only = minimum + (values.len() * std::mem::size_of::<i64>()) as u64;
     let mut failures = Vec::new();
     for (name, spill_policy) in [
         ("fail_fast", SpillPolicy::FailFast),
@@ -490,19 +490,24 @@ fn issue577_parquet_metadata_budget_precedes_page_decode() {
             },
         ),
     ] {
-        for (limit, before_decode) in [(minimum - 1, true), (sufficient, false)] {
-            let policy = MemoryPolicy::new(Some(limit), spill_policy.clone());
+        for (limit, budget_reject) in [
+            (Some(minimum - 1), true),
+            (Some(row_data_only), true),
+            (None, false),
+            (Some(1024 * 1024), false),
+        ] {
+            let policy = MemoryPolicy::new(limit, spill_policy.clone());
             let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy));
-            let matched = if before_decode {
+            let matched = if budget_reject {
                 matches!(&result, Err(ExecutorError::ResourceExhausted { .. }))
             } else {
                 matches!(&result, Err(ExecutorError::BulkLoad(_)))
             };
             eprintln!(
-                "PARQUET_PREDECODE policy={name} before_decode={before_decode} matched={matched}"
+                "PARQUET_PREDECODE policy={name} limit={limit:?} budget_reject={budget_reject} matched={matched}"
             );
             if !matched {
-                failures.push(format!("{name} limit={limit}: {result:?}"));
+                failures.push(format!("{name} limit={limit:?}: {result:?}"));
             }
         }
     }
@@ -531,7 +536,7 @@ fn issue577_memory_policy_reaches_read_parquet() {
     let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     let mut txn = bridge.begin_write().unwrap();
-    let sufficient = MemoryPolicy::new(Some(4096), SpillPolicy::FailFast);
+    let sufficient = MemoryPolicy::new(Some(1024 * 1024), SpillPolicy::FailFast);
     let result =
         execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&sufficient)).unwrap();
     let ExecutionResult::Query(result) = result else {
@@ -545,13 +550,17 @@ fn issue577_memory_policy_reaches_read_parquet() {
             .collect::<Vec<_>>()
     );
 
-    let insufficient = MemoryPolicy::new(Some(64), SpillPolicy::FailFast);
-    let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient))
-        .expect_err("READ_PARQUET must apply the supplied FailFast memory policy");
-    assert!(
-        matches!(error, ExecutorError::ResourceExhausted { .. }),
-        "expected the memory-policy error, got {error:?}"
-    );
+    // Preserve the old bounds: neither includes enough space for all metadata.
+    for limit in [4096, 64] {
+        let insufficient = MemoryPolicy::new(Some(limit), SpillPolicy::FailFast);
+        let error =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&insufficient))
+                .expect_err("READ_PARQUET must apply the supplied FailFast memory policy");
+        assert!(
+            matches!(error, ExecutorError::ResourceExhausted { .. }),
+            "expected the memory-policy error, got {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -583,8 +592,17 @@ fn issue577_read_parquet_null_rows_consume_memory_budget() {
 
         let retained_bytes = (row_count.next_power_of_two() * std::mem::size_of::<Vec<SqlValue>>()
             + row_count * std::mem::size_of::<SqlValue>()) as u64;
-        let exact = MemoryPolicy::new(Some(retained_bytes), SpillPolicy::FailFast);
-        assert!(execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&exact)).is_ok());
+        let row_slots_only = MemoryPolicy::new(Some(retained_bytes), SpillPolicy::FailFast);
+        let result =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&row_slots_only));
+        eprintln!(
+            "PARQUET_NULL_BUDGET rows={row_count} budget={retained_bytes} budget_reject={}",
+            matches!(&result, Err(ExecutorError::ResourceExhausted { .. }))
+        );
+        assert!(matches!(
+            result,
+            Err(ExecutorError::ResourceExhausted { .. })
+        ));
         let below = MemoryPolicy::new(Some(retained_bytes - 1), SpillPolicy::FailFast);
         assert!(matches!(
             execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&below)),
@@ -592,7 +610,7 @@ fn issue577_read_parquet_null_rows_consume_memory_budget() {
         ));
 
         // NULL payloads are empty, but retaining rows and value slots still costs memory.
-        // This checks retained-row accounting, not the Arrow decoder's allocation peak.
+        // Row slots alone exclude metadata; the supplied policy covers both owners.
         let insufficient = MemoryPolicy::new(Some(64), SpillPolicy::FailFast);
         let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient))
             .expect_err("READ_PARQUET must account for retained NULL rows");
@@ -628,10 +646,22 @@ fn issue577_read_parquet_unimplemented_spill_respects_memory_budget() {
     let spill_policy = SpillPolicy::SpillToDisk {
         directory: spill.path().to_path_buf(),
     };
-    for limit in [None, Some(4096), Some(retained_bytes)] {
+    for (limit, reject) in [
+        (None, false),
+        (Some(1024 * 1024), false),
+        (Some(4096), true),
+        (Some(retained_bytes), true),
+    ] {
         let policy = MemoryPolicy::new(limit, spill_policy.clone());
-        let result =
-            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy)).unwrap();
+        let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy));
+        if reject {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+            continue;
+        }
+        let result = result.unwrap();
         let ExecutionResult::Query(result) = result else {
             panic!("expected all NULL rows within the memory budget");
         };

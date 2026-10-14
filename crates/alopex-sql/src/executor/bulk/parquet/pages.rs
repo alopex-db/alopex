@@ -50,7 +50,7 @@ pub(super) fn reader(
     ParquetRecordBatchReader::try_new_with_row_groups(
         &levels,
         &groups,
-        batch_size.min(declared_rows),
+        batch_size.min(declared_rows.max(num_rows)),
         None,
     )
 }
@@ -243,6 +243,7 @@ impl ColumnPages {
         suffix: Bytes,
         count: u64,
         payload_bytes: usize,
+        levels: u32,
     ) -> Result<()> {
         let count = usize::try_from(count).map_err(|_| invalid_delta())?;
         let mut prefixes = DeltaBitPackDecoder::<Int32Type>::new();
@@ -254,6 +255,7 @@ impl ColumnPages {
         let mut remaining = count;
         let mut previous = 0_u64;
         let mut expanded = 0_u64;
+        let mut widest = 0_u64;
         let mut payload = 0_u64;
         while remaining != 0 {
             let count = remaining.min(prefix_values.len());
@@ -270,6 +272,7 @@ impl ColumnPages {
                 }
                 previous = prefix.checked_add(suffix).ok_or_else(invalid_delta)?;
                 expanded = expanded.checked_add(previous).ok_or_else(invalid_delta)?;
+                widest = widest.max(previous);
                 payload = payload.checked_add(suffix).ok_or_else(invalid_delta)?;
                 if expanded > self.limit || payload > payload_bytes as u64 {
                     return Err(invalid_delta());
@@ -277,11 +280,53 @@ impl ColumnPages {
             }
             remaining -= count;
         }
-        let capacity = if expanded == 0 {
+        let arrow_capacity = if expanded == 0 {
             0
         } else {
             expanded.checked_mul(2).ok_or_else(invalid_delta)?.max(8)
         };
+        // Arrow growth can relocate its backing; SQL copies each decoded value.
+        let payload_peak = arrow_capacity
+            .checked_add(expanded.max(arrow_capacity / 2))
+            .ok_or_else(invalid_delta)?;
+        let previous_capacity = if widest == 0 {
+            0
+        } else {
+            widest.checked_mul(2).ok_or_else(invalid_delta)?.max(8)
+        };
+        let length_vectors = (count as u64)
+            .checked_mul((2 * std::mem::size_of::<i32>()) as u64)
+            .ok_or_else(invalid_delta)?;
+        // LargeBinary offsets cover both Arrow offset widths and nullable slots.
+        let offsets = (u64::from(levels) + 1)
+            .checked_mul(2)
+            .and_then(|slots| slots.max(4).checked_mul(std::mem::size_of::<i64>() as u64))
+            .ok_or_else(invalid_delta)?;
+        let bitmap_capacity = if self.max_def_level == 0 || levels == 0 {
+            0
+        } else {
+            u64::from(levels)
+                .div_ceil(8)
+                .checked_next_power_of_two()
+                .ok_or_else(invalid_delta)?
+                .max(64)
+        };
+        let level_width = (u64::from(self.max_def_level > 0) + u64::from(self.max_rep_level > 0))
+            * std::mem::size_of::<i16>() as u64;
+        let level_capacity = u64::from(levels).checked_mul(2).ok_or_else(invalid_delta)?;
+        let level_buffers = level_capacity
+            .checked_add(level_capacity / 2)
+            .and_then(|slots| slots.checked_mul(level_width))
+            .ok_or_else(invalid_delta)?;
+        let capacity = payload_peak
+            .checked_add(previous_capacity)
+            .and_then(|bytes| bytes.checked_add(previous_capacity / 2))
+            .and_then(|bytes| bytes.checked_add(length_vectors))
+            .and_then(|bytes| bytes.checked_add(offsets))
+            .and_then(|bytes| bytes.checked_add(bitmap_capacity))
+            .and_then(|bytes| bytes.checked_add(bitmap_capacity / 2))
+            .and_then(|bytes| bytes.checked_add(level_buffers))
+            .ok_or_else(invalid_delta)?;
         self.reserved_bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 let used = used.checked_add(capacity)?;
@@ -360,6 +405,7 @@ impl ColumnPages {
                 page.buffer().slice(suffix_start..),
                 count,
                 input.len(),
+                page.num_values(),
             )?;
         }
         Ok(())
