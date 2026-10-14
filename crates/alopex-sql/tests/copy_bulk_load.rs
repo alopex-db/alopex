@@ -13,7 +13,7 @@ use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, ex
 use alopex_sql::executor::{ConstraintViolation, ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
-use alopex_sql::storage::{SqlTxn, SqlValue, TxnBridge};
+use alopex_sql::storage::{SqlValue, TxnBridge};
 
 fn create_table(
     executor: &mut Executor<MemoryKV, MemoryCatalog>,
