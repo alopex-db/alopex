@@ -396,6 +396,14 @@ fn extract_interval_part(
             + f64::from(months % 12) * 2_592_000.0
             + f64::from(days) * 86_400.0
             + micros as f64 / 1_000_000.0),
+        "year" | "years" => Ok(f64::from(months / 12)),
+        "month" | "months" => Ok(f64::from(months % 12)),
+        "day" | "days" => Ok(f64::from(days)),
+        "hour" | "hours" => Ok((micros / 3_600_000_000) as f64),
+        "minute" | "minutes" => Ok(((micros / 60_000_000) % 60) as f64),
+        "second" | "seconds" => Ok((micros % 60_000_000) as f64 / 1_000_000.0),
+        "millisecond" | "milliseconds" => Ok((micros % 60_000_000) as f64 / 1_000.0),
+        "microsecond" | "microseconds" => Ok((micros % 60_000_000) as f64),
         _ => Err(invalid(
             function,
             format!("unsupported interval part '{unit}'"),

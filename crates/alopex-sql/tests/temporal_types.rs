@@ -551,6 +551,52 @@ fn interval_epoch_mixed_sign_preserves_fraction_and_null() {
 }
 
 #[test]
+fn interval_extract_calendar_and_time_fields() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT EXTRACT(YEAR FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(MONTH FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(DAY FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(HOUR FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(MINUTE FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(SECOND FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(MILLISECOND FROM INTERVAL '14 months 3 days 04:05:06.789123'), \
+                EXTRACT(MICROSECOND FROM INTERVAL '14 months 3 days 04:05:06.789123')",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Double(1.0),
+            SqlValue::Double(2.0),
+            SqlValue::Double(3.0),
+            SqlValue::Double(4.0),
+            SqlValue::Double(5.0),
+            SqlValue::Double(6.789_123),
+            SqlValue::Double(6_789.123),
+            SqlValue::Double(6_789_123.0),
+        ]]
+    );
+}
+
+#[test]
+fn interval_extract_negative_fields_preserve_sign() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT EXTRACT(YEAR FROM INTERVAL '-13' MONTH), \
+                EXTRACT(MONTH FROM INTERVAL '-13' MONTH), \
+                EXTRACT(SECOND FROM MAKE_INTERVAL(0, 0, 0, 0, 0, 0, -1.5))",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Double(-1.0),
+            SqlValue::Double(-1.0),
+            SqlValue::Double(-1.5),
+        ]]
+    );
+}
+
+#[test]
 fn temporal_storage_comparison_and_month_end_arithmetic_round_trip() {
     assert!(ResolvedType::Text.can_cast_to(&ResolvedType::Date));
     let mut harness = Harness::new();
