@@ -58,6 +58,7 @@ const MAX_BTREE_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 
 fn index_predicate(
     predicate: &crate::planner::typed_expr::TypedExpr,
+    table: &crate::catalog::TableMetadata,
 ) -> Option<(usize, IndexPredicate)> {
     let TypedExprKind::BinaryOp { left, op, right } = &predicate.kind else {
         return None;
@@ -226,10 +227,11 @@ pub(crate) fn selected_btree_index_name<C: Catalog + ?Sized>(
     let LogicalPlan::Scan { table, .. } = input.as_ref() else {
         return None;
     };
-    if catalog.get_table(table)?.storage_options.storage_type != StorageType::Row {
+    let table_meta = catalog.get_table(table)?;
+    if table_meta.storage_options.storage_type != StorageType::Row {
         return None;
     }
-    let (column, _) = index_predicate(predicate)?;
+    let (column, _) = index_predicate(predicate, table_meta)?;
     matching_btree_index(catalog, table, column).map(|index| index.name)
 }
 
@@ -975,7 +977,7 @@ fn build_iterator_pipeline_with_outer<
                 && let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
                 && table_meta.storage_options.storage_type == StorageType::Row
-                && let Some((column, index_predicate)) = index_predicate(&predicate)
+                && let Some((column, index_predicate)) = index_predicate(&predicate, table_meta)
                 && let Some(index) = matching_btree_index(catalog, table, column)
             {
                 let schema = table_meta.columns.clone();
