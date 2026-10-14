@@ -147,14 +147,14 @@ fn columnar_sql_dml_preserves_copied_rows() {
     run("CREATE TABLE row_source (id INT PRIMARY KEY, value INT)").unwrap();
     run("INSERT INTO row_source VALUES (1, 20), (2, 30)").unwrap();
     let mut csv = tempfile::NamedTempFile::new().unwrap();
-    writeln!(csv, "id,value\n1,10").unwrap();
+    writeln!(csv, "id,value\n1,10\n2,11").unwrap();
     assert_eq!(
         run(&format!(
             "COPY columnar_target FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
             csv.path().display()
         ))
         .unwrap(),
-        ExecutionResult::RowsAffected(1)
+        ExecutionResult::RowsAffected(2)
     );
     for sql in [
         "INSERT INTO columnar_target VALUES (2, 30)",
@@ -162,7 +162,9 @@ fn columnar_sql_dml_preserves_copied_rows() {
         "INSERT INTO columnar_target VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET value = excluded.value",
         "INSERT INTO columnar_target VALUES (1, 20) ON CONFLICT (id) DO NOTHING",
         "UPDATE columnar_target SET value = 20 WHERE id = 1",
+        "UPDATE columnar_target SET value = 20 WHERE id = 999",
         "DELETE FROM columnar_target WHERE id = 1",
+        "DELETE FROM columnar_target WHERE id = 999",
         "MERGE INTO columnar_target USING row_source ON columnar_target.id = row_source.id WHEN MATCHED THEN UPDATE SET value = row_source.value",
     ] {
         let error = run(sql).expect_err(sql);
@@ -172,13 +174,17 @@ fn columnar_sql_dml_preserves_copied_rows() {
                 && message.contains("columnar") && message.contains("COPY")),
             "{sql}: {error}"
         );
-        let ExecutionResult::Query(result) = run("SELECT id, value FROM columnar_target").unwrap()
+        let ExecutionResult::Query(result) =
+            run("SELECT id, value FROM columnar_target ORDER BY id").unwrap()
         else {
             panic!("query result expected")
         };
         assert_eq!(
             result.rows,
-            vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+                vec![SqlValue::Integer(2), SqlValue::Integer(11)],
+            ]
         );
     }
 }
