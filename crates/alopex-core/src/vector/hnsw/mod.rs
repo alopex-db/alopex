@@ -22,8 +22,21 @@ use std::collections::HashSet;
 /// コンパクション待ちのタイムアウト（長時間ブロックを避けるため）。
 const COMPACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const BULK_PRUNE_INTERVAL: usize = 256;
+/// Upper bound for an HNSW search breadth accepted by public entry points.
+pub const MAX_HNSW_EF_SEARCH: usize = 1_000_000;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
+
+/// Validates the public HNSW search-breadth contract.
+pub fn validate_ef_search(ef_search: usize) -> Result<()> {
+    if !(1..=MAX_HNSW_EF_SEARCH).contains(&ef_search) {
+        return Err(Error::InvalidParameter {
+            param: "ef_search".to_string(),
+            reason: format!("must be between 1 and {MAX_HNSW_EF_SEARCH}"),
+        });
+    }
+    Ok(())
+}
 
 /// HNSW インデックスの公開 API。
 ///
@@ -141,6 +154,7 @@ impl HnswIndex {
         let start = Instant::now();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
         let ef = ef_search.unwrap_or(k.max(50));
+        validate_ef_search(ef)?;
         let (results, mut stats) = graph.search(query, k, ef)?;
         stats.search_time_us = start.elapsed().as_micros() as u64;
 

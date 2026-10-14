@@ -548,8 +548,17 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkInterval:
     let intervalTok = p.advance()
     let valueTok = p.expect(tkString)
-    result = newIntervalLit(valueTok.value,
-      Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
+    var value = valueTok.value
+    var lastTok = valueTok
+    if p.check(tkIdent) and p.current.value.toLowerAscii in [
+        "year", "years", "month", "months", "week", "weeks", "day", "days",
+        "hour", "hours", "minute", "minutes", "second", "seconds",
+        "millisecond", "milliseconds", "microsecond", "microseconds"]:
+      let unitTok = p.advance()
+      value.add(" " & unitTok.value)
+      lastTok = unitTok
+    result = newIntervalLit(value,
+      Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(lastTok).`end`))
   of tkDecimal:
     let typeTok = p.advance()
     let valueTok = p.expect(tkString)
@@ -2132,6 +2141,16 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
     result.children.add(newIdent("IF NOT EXISTS"))
   let table = p.expectIdent("table name")
   result.children.add(newIdent(table.value, tokenSpan(table)))
+  if p.check(tkAs):
+    discard p.advance()
+    if not p.check(tkSelect):
+      p.error("expected SELECT query after AS")
+    p.enterNesting()
+    defer: p.leaveNesting()
+    let query = p.parseSelectStmt()
+    result.children.add(query)
+    result.span = spanThrough(tokenSpan(start), query.span)
+    return
   discard p.expect(tkLParen)
   result.children.add(p.parseColumnDef())
   while p.check(tkComma):
@@ -2176,9 +2195,11 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
   if p.check(tkWith):
     result.children.add(p.parseWithOptions())
 
-proc parseCreateIndexAfterCreate(p: var Parser; start: Token): SqlNode =
+proc parseCreateIndexAfterCreate(p: var Parser; start: Token; unique = false): SqlNode =
   discard p.expect(tkIndex)
   result = newNode(nkCreateIndex, tokenSpan(start))
+  if unique:
+    result.children.add(newIdent("UNIQUE"))
   if p.check(tkIf):
     discard p.advance()
     discard p.expect(tkNot)
@@ -2222,6 +2243,9 @@ proc parseCreateStmt(p: var Parser): SqlNode =
     result = p.parseCreateTableAfterCreate(start, true)
   elif p.check(tkIndex):
     result = p.parseCreateIndexAfterCreate(start)
+  elif p.check(tkUnique):
+    discard p.advance()
+    result = p.parseCreateIndexAfterCreate(start, true)
   elif p.checkContextual("view"):
     discard p.advance()
     result = newNode(nkCreateView, tokenSpan(start))

@@ -1,6 +1,12 @@
-use crate::ast::ddl::CreateContinuousAggregate;
-use crate::ast::dml::{FromItem, QueryBody, Select, SelectItem, SetOperation, SetOperator, Values};
-use crate::ast::expr::{Expr, ExprKind};
+use crate::ast::ddl::{
+    AlterColumnAction, AlterTableAction, ColumnConstraint, CreateContinuousAggregate,
+    TableConstraint,
+};
+use crate::ast::dml::{
+    CopySource, FromItem, InsertSource, JoinType, MergeAction, OnConflictAction, QueryBody, Select,
+    SelectItem, SetOperation, SetOperator, Values,
+};
+use crate::ast::expr::{Expr, ExprKind, WindowSpec};
 use crate::ast::{Location, Span, Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
@@ -241,7 +247,7 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
 
 fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {
     ensure_linked_parser_contract(&nim_ffi::parser_contract_version())?;
-    let natural_join_markers = natural_join_markers(sql);
+    let natural_join_markers = natural_join_markers(sql)?;
     let normalized_sql = normalize_identifier_case(sql);
     let result = nim_ffi::parse_sql(&normalized_sql).map_err(parser_error_from_ffi_input)?;
     match result.kind {
@@ -905,13 +911,17 @@ fn normalize_identifier_case(sql: &str) -> String {
     normalized
 }
 
-fn natural_join_markers(sql: &str) -> Vec<bool> {
+fn natural_join_markers(sql: &str) -> Result<Vec<bool>> {
     let mut markers = Vec::new();
     let mut saw_natural = false;
+    let mut saw_cross = false;
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' | '"' => skip_quoted(&mut chars, ch),
+            '\'' | '"' => {
+                skip_quoted(&mut chars, ch);
+                saw_cross = false;
+            }
             '-' if chars.peek() == Some(&'-') => {
                 chars.next();
                 for comment_ch in chars.by_ref() {
@@ -930,7 +940,10 @@ fn natural_join_markers(sql: &str) -> Vec<bool> {
                     previous = comment_ch;
                 }
             }
-            ';' => saw_natural = false,
+            ';' => {
+                saw_natural = false;
+                saw_cross = false;
+            }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut word = String::from(c);
                 while chars
@@ -941,17 +954,32 @@ fn natural_join_markers(sql: &str) -> Vec<bool> {
                 }
                 match word.to_ascii_lowercase().as_str() {
                     "natural" => saw_natural = true,
+                    "cross" => saw_cross = true,
                     "join" => {
-                        markers.push(saw_natural);
+                        if saw_cross && saw_natural {
+                            return Err(ParserError::UnexpectedToken {
+                                line: 0,
+                                column: 0,
+                                expected: "NATURAL INNER, LEFT, RIGHT, or FULL JOIN".into(),
+                                found: "NATURAL CROSS JOIN".into(),
+                            });
+                        }
+                        // Both comma and explicit CROSS joins become Cross
+                        // AST nodes; neither carries a NATURAL annotation.
+                        if !saw_cross {
+                            markers.push(saw_natural);
+                        }
                         saw_natural = false;
+                        saw_cross = false;
                     }
-                    _ => {}
+                    _ => saw_cross = false,
                 }
             }
-            _ => {}
+            c if c.is_whitespace() => {}
+            _ => saw_cross = false,
         }
     }
-    markers
+    Ok(markers)
 }
 
 fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char) {
@@ -977,26 +1005,194 @@ fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<boo
     let mut natural_markers = natural_markers.into_iter();
     let mut consumed = 0usize;
     for statement in statements {
-        match &mut statement.kind {
-            StatementKind::Select(select) => {
-                annotate_select_natural_joins(select, &mut natural_markers, &mut consumed);
-            }
-            StatementKind::Values(values) => {
-                annotate_values_natural_joins(values, &mut natural_markers, &mut consumed);
-            }
-            _ => {}
-        }
+        annotate_statement_natural_joins(statement, &mut natural_markers, &mut consumed);
     }
 
     if consumed != supplied {
         return Err(ParserError::UnexpectedToken {
             line: 0,
             column: 0,
-            expected: format!("{supplied} NATURAL join markers, one per join"),
-            found: format!("{consumed} joins in the AST"),
+            expected: format!("{supplied} NATURAL join markers, one per non-CROSS join"),
+            found: format!("{consumed} non-CROSS joins in the AST"),
         });
     }
     Ok(())
+}
+
+fn annotate_statement_natural_joins(
+    statement: &mut Statement,
+    markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
+    match &mut statement.kind {
+        StatementKind::Explain { statement, .. } => {
+            annotate_statement_natural_joins(statement, markers, consumed)
+        }
+        StatementKind::Select(select) => annotate_select_natural_joins(select, markers, consumed),
+        StatementKind::Values(values) => annotate_values_natural_joins(values, markers, consumed),
+        StatementKind::CreateView(view) => {
+            annotate_statement_natural_joins(&mut view.query, markers, consumed)
+        }
+        StatementKind::CreateContinuousAggregate(aggregate) => {
+            annotate_select_natural_joins(&mut aggregate.query, markers, consumed)
+        }
+        StatementKind::Insert(insert) => {
+            match &mut insert.source {
+                InsertSource::Values { values } => {
+                    for expr in values.iter_mut().flatten() {
+                        annotate_expr_natural_joins(expr, markers, consumed);
+                    }
+                }
+                InsertSource::Select { select } => {
+                    annotate_select_natural_joins(select, markers, consumed)
+                }
+                InsertSource::Query { query } => {
+                    annotate_query_body_natural_joins(query, markers, consumed)
+                }
+            }
+            if let Some(conflict) = &mut insert.on_conflict
+                && let OnConflictAction::DoUpdate {
+                    assignments,
+                    selection,
+                } = &mut conflict.action
+            {
+                for assignment in assignments {
+                    annotate_expr_natural_joins(&mut assignment.value, markers, consumed);
+                }
+                if let Some(selection) = selection {
+                    annotate_expr_natural_joins(selection, markers, consumed);
+                }
+            }
+            annotate_items_natural_joins(&mut insert.returning, markers, consumed);
+        }
+        StatementKind::Update(update) => {
+            for assignment in &mut update.assignments {
+                annotate_expr_natural_joins(&mut assignment.value, markers, consumed);
+            }
+            for from in &mut update.from {
+                annotate_from_natural_joins(from, markers, consumed);
+            }
+            if let Some(selection) = &mut update.selection {
+                annotate_expr_natural_joins(selection, markers, consumed);
+            }
+            annotate_items_natural_joins(&mut update.returning, markers, consumed);
+        }
+        StatementKind::Delete(delete) => {
+            for from in &mut delete.using {
+                annotate_from_natural_joins(from, markers, consumed);
+            }
+            if let Some(selection) = &mut delete.selection {
+                annotate_expr_natural_joins(selection, markers, consumed);
+            }
+            annotate_items_natural_joins(&mut delete.returning, markers, consumed);
+        }
+        StatementKind::Merge(merge) => {
+            annotate_from_natural_joins(&mut merge.target, markers, consumed);
+            annotate_from_natural_joins(&mut merge.source, markers, consumed);
+            annotate_expr_natural_joins(&mut merge.on, markers, consumed);
+            for clause in &mut merge.clauses {
+                if let Some(condition) = &mut clause.condition {
+                    annotate_expr_natural_joins(condition, markers, consumed);
+                }
+                match &mut clause.action {
+                    MergeAction::Update { assignments } => {
+                        for assignment in assignments {
+                            annotate_expr_natural_joins(&mut assignment.value, markers, consumed);
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for value in values {
+                            annotate_expr_natural_joins(value, markers, consumed);
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
+                }
+            }
+            annotate_items_natural_joins(&mut merge.returning, markers, consumed);
+        }
+        StatementKind::Copy(copy) => {
+            if let CopySource::Query { query } = &mut copy.source {
+                annotate_query_body_natural_joins(query, markers, consumed);
+            }
+        }
+        StatementKind::CreateTable(table) => {
+            // Column and table constraints can be interleaved in SQL even though
+            // the AST stores them separately. Restore their source order.
+            let mut expressions = Vec::new();
+            for column in &mut table.columns {
+                expressions.extend(
+                    column
+                        .constraints
+                        .iter_mut()
+                        .filter_map(constraint_expression),
+                );
+            }
+            for constraint in &mut table.constraints {
+                if let TableConstraint::Check { expression, .. } = constraint {
+                    expressions.push(expression.as_mut());
+                }
+            }
+            expressions.sort_by_key(|expr| (expr.span.start.line, expr.span.start.column));
+            for expression in expressions {
+                annotate_expr_natural_joins(expression, markers, consumed);
+            }
+            if let Some(query) = &mut table.query {
+                annotate_select_natural_joins(query, markers, consumed);
+            }
+        }
+        StatementKind::AlterTable(table) => match &mut table.action {
+            AlterTableAction::AddColumn { column, .. } => {
+                for expression in column
+                    .constraints
+                    .iter_mut()
+                    .filter_map(constraint_expression)
+                {
+                    annotate_expr_natural_joins(expression, markers, consumed);
+                }
+            }
+            AlterTableAction::AlterColumn {
+                action: AlterColumnAction::SetDefault { value },
+                ..
+            } => annotate_expr_natural_joins(value, markers, consumed),
+            _ => {}
+        },
+        StatementKind::DropTable(_)
+        | StatementKind::DropView(_)
+        | StatementKind::Truncate(_)
+        | StatementKind::CreateIndex(_)
+        | StatementKind::DropIndex(_)
+        | StatementKind::CreateSequence(_)
+        | StatementKind::AlterSequence(_)
+        | StatementKind::DropSequence(_)
+        | StatementKind::Pragma { .. }
+        | StatementKind::Begin { .. }
+        | StatementKind::SetTransaction { .. }
+        | StatementKind::Commit
+        | StatementKind::Rollback
+        | StatementKind::Savepoint { .. }
+        | StatementKind::RollbackToSavepoint { .. }
+        | StatementKind::ReleaseSavepoint { .. } => {}
+    }
+}
+
+fn constraint_expression(constraint: &mut ColumnConstraint) -> Option<&mut Expr> {
+    match constraint {
+        ColumnConstraint::Default { value, .. } => Some(value),
+        ColumnConstraint::Check { expression, .. } => Some(expression),
+        _ => None,
+    }
+}
+
+fn annotate_items_natural_joins(
+    items: &mut [SelectItem],
+    markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
+    for item in items {
+        if let SelectItem::Expr { expr, .. } = item {
+            annotate_expr_natural_joins(expr, markers, consumed);
+        }
+    }
 }
 
 fn annotate_select_natural_joins(
@@ -1009,11 +1205,10 @@ fn annotate_select_natural_joins(
             annotate_query_body_natural_joins(&mut cte.query, natural_markers, consumed);
         }
     }
-    for item in &mut select.projection {
-        if let SelectItem::Expr { expr, .. } = item {
-            annotate_expr_natural_joins(expr, natural_markers, consumed);
-        }
+    for expression in &mut select.distinct_on {
+        annotate_expr_natural_joins(expression, natural_markers, consumed);
     }
+    annotate_items_natural_joins(&mut select.projection, natural_markers, consumed);
     for from in &mut select.from {
         annotate_from_natural_joins(from, natural_markers, consumed);
     }
@@ -1029,6 +1224,12 @@ fn annotate_select_natural_joins(
     }
     if let Some(having) = &mut select.having {
         annotate_expr_natural_joins(having, natural_markers, consumed);
+    }
+    for window in &mut select.windows {
+        annotate_window_natural_joins(&mut window.spec, natural_markers, consumed);
+    }
+    if let Some(qualify) = &mut select.qualify {
+        annotate_expr_natural_joins(qualify, natural_markers, consumed);
     }
     for operation in &mut select.set_operations {
         annotate_query_body_natural_joins(&mut operation.right, natural_markers, consumed);
@@ -1098,14 +1299,21 @@ fn annotate_from_natural_joins(
             left,
             right,
             natural,
+            condition,
+            join_type,
             ..
         } => {
             annotate_from_natural_joins(left, natural_markers, consumed);
-            if let Some(marker) = natural_markers.next() {
-                *natural |= marker;
+            if *join_type != JoinType::Cross {
+                if let Some(marker) = natural_markers.next() {
+                    *natural |= marker;
+                }
                 *consumed += 1;
             }
             annotate_from_natural_joins(right, natural_markers, consumed);
+            if let Some(condition) = condition {
+                annotate_expr_natural_joins(condition, natural_markers, consumed);
+            }
         }
         FromItem::Derived { subquery, .. } => {
             annotate_query_body_natural_joins(subquery, natural_markers, consumed);
@@ -1128,16 +1336,12 @@ fn annotate_expr_natural_joins(
 ) {
     match &mut expr.kind {
         ExprKind::ScalarSubquery { subquery } | ExprKind::Exists { subquery, .. } => {
-            if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers, consumed);
-            }
+            annotate_statement_natural_joins(subquery, natural_markers, consumed);
         }
         ExprKind::InSubquery { expr, subquery, .. }
         | ExprKind::Quantified { expr, subquery, .. } => {
             annotate_expr_natural_joins(expr, natural_markers, consumed);
-            if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers, consumed);
-            }
+            annotate_statement_natural_joins(subquery, natural_markers, consumed);
         }
         ExprKind::BinaryOp { left, right, .. } => {
             annotate_expr_natural_joins(left, natural_markers, consumed);
@@ -1179,6 +1383,7 @@ fn annotate_expr_natural_joins(
             order_by,
             within_group,
             filter,
+            over,
             ..
         } => {
             for argument in args {
@@ -1192,6 +1397,9 @@ fn annotate_expr_natural_joins(
             }
             if let Some(filter) = filter {
                 annotate_expr_natural_joins(filter, natural_markers, consumed);
+            }
+            if let Some(over) = over {
+                annotate_window_natural_joins(over, natural_markers, consumed);
             }
         }
         ExprKind::Between {
@@ -1226,6 +1434,19 @@ fn annotate_expr_natural_joins(
         | ExprKind::Literal { .. }
         | ExprKind::ColumnRef { .. }
         | ExprKind::VectorLiteral { .. } => {}
+    }
+}
+
+fn annotate_window_natural_joins(
+    window: &mut WindowSpec,
+    markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
+    for expression in &mut window.partition_by {
+        annotate_expr_natural_joins(expression, markers, consumed);
+    }
+    for order in &mut window.order_by {
+        annotate_expr_natural_joins(&mut order.expr, markers, consumed);
     }
 }
 

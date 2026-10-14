@@ -723,7 +723,7 @@ fn table_lifecycle_candidates(
     let mut candidates = Vec::new();
     for statement in planned {
         match &statement.plan {
-            LogicalPlan::CreateTable { table, .. } => {
+            LogicalPlan::CreateTable { table, .. } | LogicalPlan::CreateTableAs { table, .. } => {
                 candidates.push(TableLifecycleCandidate::Created {
                     table_name: table.name.clone(),
                     before: table_lifecycle_state(state, &table.name)?,
@@ -1282,6 +1282,86 @@ fn is_write_sql(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ctas_lifecycle_tracks_creation_and_rolls_back_only_new_tables() {
+        use alopex_sql::planner::plan_sql_for_routing;
+
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = &server.state;
+        let planned = {
+            let catalog = state.catalog.read().expect("catalog");
+            plan_sql_for_routing(&*catalog, "CREATE TABLE copied AS SELECT 1 AS id")
+                .expect("plan CTAS")
+        };
+        let candidates = table_lifecycle_candidates(state, &planned).expect("CTAS candidates");
+        assert!(matches!(
+            candidates.as_slice(),
+            [TableLifecycleCandidate::Created { table_name, before: None }]
+                if table_name == "copied"
+        ));
+
+        let LogicalPlan::CreateTableAs { table, .. } = &planned[0].plan else {
+            panic!("expected CTAS plan");
+        };
+        // Isolate lifecycle bookkeeping from row execution: expose the catalog
+        // mutation that the executor makes before effects are collected.
+        state
+            .catalog
+            .write()
+            .expect("catalog")
+            .create_table(table.clone())
+            .expect("register created table");
+        let (effects, rollback) =
+            statement_effects_after_execution(state, candidates).expect("creation effects");
+        assert!(matches!(
+            effects.as_slice(),
+            [TableLifecycleEffect::Created { table_id, .. }] if *table_id == table.table_id
+        ));
+        assert!(matches!(
+            rollback.as_slice(),
+            [CatalogRollbackEffect::DropTable { table_name }] if table_name == "copied"
+        ));
+
+        let no_op = {
+            let catalog = state.catalog.read().expect("catalog");
+            plan_sql_for_routing(
+                &*catalog,
+                "CREATE TABLE IF NOT EXISTS copied AS SELECT 2 AS id",
+            )
+            .expect("plan no-op CTAS")
+        };
+        let no_op_candidates = table_lifecycle_candidates(state, &no_op).expect("no-op candidates");
+        let (no_op_effects, no_op_rollback) =
+            statement_effects_after_execution(state, no_op_candidates).expect("no-op effects");
+        assert!(no_op_effects.is_empty());
+        assert!(no_op_rollback.is_empty());
+        state
+            .apply_catalog_rollback_effects(no_op_rollback)
+            .expect("no-op rollback");
+        assert!(state
+            .catalog
+            .read()
+            .expect("catalog")
+            .table_exists("copied"));
+
+        state
+            .apply_catalog_rollback_effects(rollback)
+            .expect("rollback new CTAS table");
+        assert!(!state
+            .catalog
+            .read()
+            .expect("catalog")
+            .table_exists("copied"));
+    }
 
     fn continuous_aggregate_statement_kind() -> alopex_sql::ast::StatementKind {
         alopex_sql::ast::StatementKind::CreateContinuousAggregate(

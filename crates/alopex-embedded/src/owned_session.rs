@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{
-    AnyKV, KVTransaction, OwnedKVTransactionAdapter, OwnedReadOptions, OwnedReadSession,
-    OwnedSessionFactory as CoreOwnedSessionFactory, OwnedTransactionSession,
+    AnyKV, KVTransaction, KeySearchPage, KeySearchRequest, OwnedKVTransactionAdapter,
+    OwnedReadOptions, OwnedReadSession, OwnedSessionFactory as CoreOwnedSessionFactory,
+    OwnedTransactionSession,
 };
 use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
 use alopex_core::TxnMode;
@@ -173,6 +174,50 @@ impl OwnedEmbeddedTransaction {
             .map_err(Error::Core)
     }
 
+    /// Collect key-value pairs whose keys start with `prefix`.
+    pub fn scan_prefix(&mut self, prefix: &[u8]) -> Result<Vec<(alopex_core::Key, Vec<u8>)>> {
+        let prefix = prefix.to_vec();
+        self.session
+            .with_transaction(|transaction| {
+                let mut scan = transaction.scan_prefix(&prefix)?;
+                let mut entries = Vec::new();
+                while let Some(entry) = scan.next_entry()? {
+                    entries.push(entry);
+                }
+                scan.close()?;
+                Ok(entries)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Collect key-value pairs in the half-open range `[start, end)`.
+    pub fn scan_range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(alopex_core::Key, Vec<u8>)>> {
+        let start = start.to_vec();
+        let end = end.to_vec();
+        self.session
+            .with_transaction(|transaction| {
+                let mut scan = transaction.scan_range(&start, &end)?;
+                let mut entries = Vec::new();
+                while let Some(entry) = scan.next_entry()? {
+                    entries.push(entry);
+                }
+                scan.close()?;
+                Ok(entries)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Search opaque keys with the shared bounded search contract.
+    pub fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
+        self.session
+            .with_transaction(|transaction| transaction.search_keys(request))
+            .map_err(Error::Core)
+    }
+
     /// Execute SQL without committing this transaction.
     ///
     /// The implementation is in `sql_api.rs` so it uses the same planner, catalog overlay, and
@@ -181,7 +226,11 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
-    pub(crate) fn execute_prepared_statement(
+    /// Execute one parsed SQL statement with native bound values without committing.
+    ///
+    /// Callers that own an embedded transaction can preserve typed parameter values
+    /// instead of rendering them into SQL text before execution.
+    pub fn execute_prepared_statement(
         &mut self,
         statement: &alopex_sql::Statement,
         parameters: &[alopex_sql::SqlValue],

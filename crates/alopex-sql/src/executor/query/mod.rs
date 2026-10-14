@@ -3,8 +3,10 @@ use alopex_core::sql::stream::ByteSized;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::LITERAL_TABLE;
+use crate::ast::expr::BinaryOp;
 use crate::catalog::{Catalog, StorageType};
-use crate::executor::evaluator::EvalContext;
+use crate::executor::bulk::CopySecurityConfig;
+use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
 use crate::planner::logical_plan::{LogicalPlan, RecursiveCteLimits, SetOperator};
@@ -40,6 +42,218 @@ pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
 };
 
+#[derive(Debug)]
+enum IndexPredicate {
+    Equality(SqlValue),
+    Range {
+        start: Option<SqlValue>,
+        end: Option<SqlValue>,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    },
+}
+
+fn index_predicate(
+    predicate: &crate::planner::typed_expr::TypedExpr,
+    table: &crate::catalog::TableMetadata,
+) -> Option<(usize, IndexPredicate)> {
+    let TypedExprKind::BinaryOp { left, op, right } = &predicate.kind else {
+        return None;
+    };
+
+    let (column, value, reversed) = match (&left.kind, &right.kind) {
+        (
+            TypedExprKind::ColumnRef { column_index, .. },
+            TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
+        ) => (
+            *column_index,
+            evaluate(right, &EvalContext::new(&[])).ok()?,
+            false,
+        ),
+        (
+            TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_),
+            TypedExprKind::ColumnRef { column_index, .. },
+        ) => (
+            *column_index,
+            evaluate(left, &EvalContext::new(&[])).ok()?,
+            true,
+        ),
+        _ => return None,
+    };
+
+    // Index keys encode the stored type. Cross-type SQL comparisons must use
+    // the evaluator: converting a boundary can lose precision or change which
+    // rows match, even when a numeric cast is accepted by the planner.
+    if value.resolved_type() != table.columns.get(column)?.data_type {
+        return None;
+    }
+
+    // Candidate lookup must preserve the evaluator's comparison semantics.
+    // FLOAT/DOUBLE keys distinguish signed zero; BIGINT comparisons round to
+    // f64. TEXT's NUL terminator and BLOB's length prefix do not preserve SQL
+    // range order, although their equality lookups are safe with the residual
+    // filter below. Keep unsupported encodings on the ordinary scan path.
+    match &value {
+        SqlValue::Integer(_)
+        | SqlValue::Boolean(_)
+        | SqlValue::Timestamp(_)
+        | SqlValue::Date(_)
+        | SqlValue::Time(_) => {}
+        SqlValue::Text(_) | SqlValue::Blob(_) if *op == BinaryOp::Eq => {}
+        _ => return None,
+    }
+
+    let predicate = match (op, reversed) {
+        (BinaryOp::Eq, _) => IndexPredicate::Equality(value),
+        (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => IndexPredicate::Range {
+            start: Some(value),
+            end: None,
+            start_inclusive: false,
+            end_inclusive: false,
+        },
+        (BinaryOp::GtEq, false) | (BinaryOp::LtEq, true) => IndexPredicate::Range {
+            start: Some(value),
+            end: None,
+            start_inclusive: true,
+            end_inclusive: false,
+        },
+        (BinaryOp::Lt, false) | (BinaryOp::Gt, true) => IndexPredicate::Range {
+            start: None,
+            end: Some(value),
+            start_inclusive: false,
+            end_inclusive: false,
+        },
+        (BinaryOp::LtEq, false) | (BinaryOp::GtEq, true) => IndexPredicate::Range {
+            start: None,
+            end: Some(value),
+            start_inclusive: false,
+            end_inclusive: true,
+        },
+        _ => return None,
+    };
+    Some((column, predicate))
+}
+
+fn execute_index_scan<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table_meta: &crate::catalog::TableMetadata,
+    index: &crate::catalog::IndexMetadata,
+    predicate: IndexPredicate,
+) -> Result<Vec<Row>> {
+    let row_ids = match predicate {
+        IndexPredicate::Equality(value) => {
+            if value.is_null() {
+                return Ok(Vec::new());
+            }
+            txn.with_index(
+                index.index_id,
+                index.unique,
+                index.column_indices.clone(),
+                |storage| storage.lookup(&value),
+            )?
+        }
+        IndexPredicate::Range {
+            start,
+            end,
+            start_inclusive,
+            end_inclusive,
+        } => txn.with_index(
+            index.index_id,
+            index.unique,
+            index.column_indices.clone(),
+            |storage| {
+                storage
+                    .range_scan(start.as_ref(), end.as_ref(), start_inclusive, end_inclusive)?
+                    .collect()
+            },
+        )?,
+    };
+    let mut row_ids = row_ids;
+    row_ids.sort_unstable();
+    Ok(txn.with_table(table_meta, |storage| {
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row_id in row_ids {
+            if let Some(values) = storage.get(row_id)? {
+                rows.push(Row::new(row_id, values));
+            }
+        }
+        Ok(rows)
+    })?)
+}
+
+fn matching_btree_index<C: Catalog + ?Sized>(
+    catalog: &C,
+    table: &str,
+    column: usize,
+) -> Option<crate::catalog::IndexMetadata> {
+    catalog
+        .get_indexes_for_table(table)
+        .into_iter()
+        .find(|index| {
+            index.column_indices == [column]
+                && matches!(
+                    index.method,
+                    None | Some(crate::ast::ddl::IndexMethod::BTree)
+                )
+        })
+        .cloned()
+}
+
+pub(crate) fn selected_btree_indexes<C: Catalog + ?Sized>(
+    plan: &LogicalPlan,
+    catalog: &C,
+) -> Vec<Option<String>> {
+    fn collect<C: Catalog + ?Sized>(
+        plan: &LogicalPlan,
+        catalog: &C,
+        selected: Option<String>,
+        has_outer: bool,
+        indexes: &mut Vec<Option<String>>,
+    ) {
+        if matches!(plan, LogicalPlan::Scan { .. }) {
+            indexes.push(selected);
+            return;
+        }
+        // The executor disables indexed filtering when an outer row is present.
+        // A lateral right input supplies that row to every descendant operator.
+        if let LogicalPlan::LateralJoin { left, right, .. } = plan {
+            collect(left, catalog, None, has_outer, indexes);
+            collect(right, catalog, None, true, indexes);
+            return;
+        }
+        let selected = if has_outer {
+            None
+        } else {
+            selected_btree_index_name(plan, catalog)
+        };
+        for child in plan.explain_children() {
+            collect(child, catalog, selected.clone(), has_outer, indexes);
+        }
+    }
+
+    let mut indexes = Vec::new();
+    collect(plan, catalog, None, false, &mut indexes);
+    indexes
+}
+
+fn selected_btree_index_name<C: Catalog + ?Sized>(
+    plan: &LogicalPlan,
+    catalog: &C,
+) -> Option<String> {
+    let LogicalPlan::Filter { input, predicate } = plan else {
+        return None;
+    };
+    let LogicalPlan::Scan { table, .. } = input.as_ref() else {
+        return None;
+    };
+    let table_meta = catalog.get_table(table)?;
+    if table_meta.storage_options.storage_type != StorageType::Row {
+        return None;
+    }
+    let (column, _) = index_predicate(predicate, table_meta)?;
+    matching_btree_index(catalog, table, column).map(|index| index.name)
+}
+
 #[derive(Clone)]
 struct RecursiveWorkingTable {
     rows: Vec<Vec<SqlValue>>,
@@ -51,6 +265,7 @@ struct RecursiveWorkingTable {
 #[derive(Clone, Default)]
 struct QueryExecutionContext {
     recursive_tables: HashMap<String, RecursiveWorkingTable>,
+    copy_security: Option<CopySecurityConfig>,
 }
 
 struct RecursiveCteExecution {
@@ -63,6 +278,11 @@ struct RecursiveCteExecution {
 }
 
 impl QueryExecutionContext {
+    fn with_copy_security(mut self, copy_security: Option<CopySecurityConfig>) -> Self {
+        self.copy_security = copy_security;
+        self
+    }
+
     fn with_recursive_table(
         &self,
         name: String,
@@ -168,15 +388,11 @@ pub fn execute_query_with_policy<
     plan: LogicalPlan,
     memory: Option<&MemoryPolicy>,
 ) -> Result<ExecutionResult> {
-    if let Some((pattern, projection, filter)) = knn::extract_knn_context(&plan) {
-        return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
-    }
-
-    let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
-    Ok(ExecutionResult::Query(result))
+    let security = txn.read_security().cloned();
+    execute_query_with_policy_and_copy_security(txn, catalog, plan, memory, security.as_ref())
 }
 
-pub(crate) fn execute_query_result_with_outer<
+pub(crate) fn execute_query_with_policy_and_copy_security<
     'txn,
     S: KVStore + 'txn,
     C: Catalog + ?Sized,
@@ -185,9 +401,16 @@ pub(crate) fn execute_query_result_with_outer<
     txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
-    outer: Option<&Row>,
-) -> Result<QueryResult> {
-    execute_query_result_with_outer_and_policy(txn, catalog, plan, outer, None)
+    memory: Option<&MemoryPolicy>,
+    copy_security: Option<&CopySecurityConfig>,
+) -> Result<ExecutionResult> {
+    if let Some((pattern, projection, filter)) = knn::extract_knn_context(&plan) {
+        return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
+    }
+
+    let context = QueryExecutionContext::default().with_copy_security(copy_security.cloned());
+    let result = execute_query_result_with_context(txn, catalog, plan, None, memory, &context)?;
+    Ok(ExecutionResult::Query(result))
 }
 
 fn execute_query_result_with_outer_and_policy<
@@ -231,7 +454,7 @@ fn execute_query_result_with_context<
     while let Some(result) = iter.next_row() {
         rows.push(result?);
     }
-    execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer)
+    execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer, context)
 }
 
 /// Execute a SELECT logical plan and return a streaming query result.
@@ -268,10 +491,27 @@ pub fn execute_query_streaming_with_policy<
     plan: LogicalPlan,
     memory: Option<&MemoryPolicy>,
 ) -> Result<QueryRowIterator<'static>> {
+    execute_query_streaming_with_policy_and_copy_security(txn, catalog, plan, memory, None)
+}
+
+pub(crate) fn execute_query_streaming_with_policy_and_copy_security<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
+    copy_security: Option<&CopySecurityConfig>,
+) -> Result<QueryRowIterator<'static>> {
+    let context = QueryExecutionContext::default().with_copy_security(copy_security.cloned());
     // KNN queries not yet supported for streaming - fall back would need different handling
     if knn::extract_knn_context(&plan).is_some() {
         // For KNN, we materialize and wrap in VecIterator
-        let result = execute_query_with_policy(txn, catalog, plan, memory)?;
+        let result =
+            execute_query_with_policy_and_copy_security(txn, catalog, plan, memory, copy_security)?;
         if let ExecutionResult::Query(qr) = result {
             let (iter, projection, schema) = materialize_query_result(qr);
             return Ok(QueryRowIterator::new(iter, projection, schema));
@@ -290,12 +530,13 @@ pub fn execute_query_streaming_with_policy<
         || plan_contains_recursive_cte(&plan)
         || plan_contains_lateral(&plan)
     {
-        let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
+        let result = execute_query_result_with_context(txn, catalog, plan, None, memory, &context)?;
         let (iter, projection, schema) = materialize_query_result(result);
         return Ok(QueryRowIterator::new(iter, projection, schema));
     }
 
-    let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan, memory)?;
+    let (iter, projection, schema) =
+        build_iterator_pipeline_with_outer(txn, catalog, plan, memory, None, &context)?;
 
     Ok(QueryRowIterator::new(iter, projection, schema))
 }
@@ -509,32 +750,6 @@ fn ensure_recursive_row_limit(name: &str, rows: usize, max_rows: usize) -> Resul
     Err(ExecutorError::ResourceExhausted {
         message: format!("recursive CTE '{name}' reached row limit {max_rows}"),
     })
-}
-
-/// Build an iterator pipeline from a logical plan.
-///
-/// This recursively constructs a tree of iterators that mirrors the logical plan
-/// structure. The scan phase reads rows into memory, then subsequent operators
-/// process them through an iterator pipeline enabling streaming execution and
-/// early termination.
-fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
-    txn: &mut T,
-    catalog: &C,
-    plan: LogicalPlan,
-    memory: Option<&MemoryPolicy>,
-) -> Result<(
-    Box<dyn RowIterator>,
-    Projection,
-    Vec<crate::catalog::ColumnMetadata>,
-)> {
-    build_iterator_pipeline_with_outer(
-        txn,
-        catalog,
-        plan,
-        memory,
-        None,
-        &QueryExecutionContext::default(),
-    )
 }
 
 /// Build a primary-key range path for the precise shape where an index already
@@ -786,14 +1001,30 @@ fn build_iterator_pipeline_with_outer<
                 let mut kept = Vec::new();
                 for row in rows {
                     let eval_row = combine_outer_for_eval(&row, outer);
-                    if let SqlValue::Boolean(true) = subquery::evaluate_expr_with_subqueries(
-                        txn, catalog, &predicate, &eval_row,
-                    )? {
+                    if let SqlValue::Boolean(true) =
+                        subquery::evaluate_expr_with_subqueries_with_context(
+                            txn, catalog, &predicate, &eval_row, context,
+                        )?
+                    {
                         kept.push(row);
                     }
                 }
                 let iter = iterator::VecIterator::new(kept, schema.clone());
                 return Ok((Box::new(iter), projection, schema));
+            }
+            if outer.is_none()
+                && !subquery::contains_subquery(&predicate)
+                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let Some(table_meta) = catalog.get_table(table)
+                && table_meta.storage_options.storage_type == StorageType::Row
+                && let Some((column, index_predicate)) = index_predicate(&predicate, table_meta)
+                && let Some(index) = matching_btree_index(catalog, table, column)
+            {
+                let schema = table_meta.columns.clone();
+                let rows = execute_index_scan(txn, table_meta, &index, index_predicate)?;
+                let input_iter = iterator::VecIterator::new(rows, schema.clone());
+                let filter_iter = FilterIterator::new(input_iter, predicate);
+                return Ok((Box::new(filter_iter), projection.clone(), schema));
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
@@ -821,9 +1052,11 @@ fn build_iterator_pipeline_with_outer<
                 while let Some(result) = input_iter.next_row() {
                     let row = result?;
                     let eval_row = combine_outer_for_eval(&row, outer);
-                    if let SqlValue::Boolean(true) = subquery::evaluate_expr_with_subqueries(
-                        txn, catalog, &predicate, &eval_row,
-                    )? {
+                    if let SqlValue::Boolean(true) =
+                        subquery::evaluate_expr_with_subqueries_with_context(
+                            txn, catalog, &predicate, &eval_row, context,
+                        )?
+                    {
                         rows.push(row);
                     }
                 }
@@ -842,8 +1075,15 @@ fn build_iterator_pipeline_with_outer<
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
             }
-            let projected =
-                execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer)?;
+            let projected = execute_project_with_subqueries(
+                txn,
+                catalog,
+                rows,
+                &projection,
+                &schema,
+                outer,
+                context,
+            )?;
             let output_schema = projected
                 .columns
                 .iter()
@@ -932,7 +1172,7 @@ fn build_iterator_pipeline_with_outer<
             args,
             schema,
         } => {
-            let rows = execute_table_function(txn, catalog, function, &args, outer)?;
+            let rows = execute_table_function(txn, catalog, function, &args, outer, context)?;
             let projection =
                 Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1723,8 +1963,9 @@ fn execute_lateral_join<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<
             let combined = Row::new(row_id, values);
             if let Some(condition) = condition {
                 let eval_row = combine_outer_for_eval(&combined, outer);
-                let keep =
-                    subquery::evaluate_expr_with_subqueries(txn, catalog, condition, &eval_row)?;
+                let keep = subquery::evaluate_expr_with_subqueries_with_context(
+                    txn, catalog, condition, &eval_row, context,
+                )?;
                 if !matches!(keep, SqlValue::Boolean(true)) {
                     continue;
                 }
@@ -1753,6 +1994,7 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
     function: crate::planner::TableFunctionKind,
     args: &[crate::planner::typed_expr::TypedExpr],
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<Vec<Row>> {
     use crate::planner::TableFunctionKind;
 
@@ -1760,8 +2002,8 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
     let eval_row = combine_outer_for_eval(&empty, outer);
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        values.push(subquery::evaluate_expr_with_subqueries(
-            txn, catalog, arg, &eval_row,
+        values.push(subquery::evaluate_expr_with_subqueries_with_context(
+            txn, catalog, arg, &eval_row, context,
         )?);
     }
 
@@ -1833,7 +2075,11 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     reason: "requires a TEXT path".into(),
                 });
             };
-            crate::executor::bulk::read_parquet(path).map(|(_, rows)| {
+            let result = match &context.copy_security {
+                Some(config) => crate::executor::bulk::read_parquet_with_security(path, config),
+                None => crate::executor::bulk::read_parquet(path),
+            };
+            result.map(|(_, rows)| {
                 rows.into_iter()
                     .enumerate()
                     .map(|(index, values)| Row::new(index as u64, values))
@@ -2196,6 +2442,7 @@ fn execute_project_with_subqueries<
     projection: &Projection,
     schema: &[crate::catalog::ColumnMetadata],
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<QueryResult> {
     match projection {
         Projection::All(_) => project::execute_project(rows, projection, schema),
@@ -2212,8 +2459,8 @@ fn execute_project_with_subqueries<
                 let eval_row = combine_outer_for_eval(&row, outer);
                 let mut values = Vec::with_capacity(cols.len());
                 for col in cols {
-                    values.push(subquery::evaluate_expr_with_subqueries(
-                        txn, catalog, &col.expr, &eval_row,
+                    values.push(subquery::evaluate_expr_with_subqueries_with_context(
+                        txn, catalog, &col.expr, &eval_row, context,
                     )?);
                 }
                 projected_rows.push(values);
@@ -2300,13 +2547,23 @@ fn column_infos_from_all(
 mod tests {
     use super::*;
     use crate::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
-    use crate::executor::SpillPolicy;
+    use crate::dialect::AlopexDialect;
+    use crate::executor::bulk::CopySecurityConfig;
     use crate::executor::ddl::create_table::execute_create_table;
+    use crate::executor::{ExecutorError, SpillPolicy};
+    use crate::parser::Parser;
+    use crate::planner::Planner;
     use crate::planner::typed_expr::{ProjectedColumn, TypedExpr};
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
     use alopex_core::kv::memory::MemoryKV;
+    use arrow_array::{Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::fs::File;
+    use std::path::Path;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn text_literal_plan(value: &str) -> LogicalPlan {
         LogicalPlan::Project {
@@ -2319,6 +2576,71 @@ mod tests {
                 ResolvedType::Text,
                 crate::Span::default(),
             ))]),
+        }
+    }
+
+    fn write_int_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![7]))],
+        )
+        .expect("record batch");
+        let mut writer =
+            ArrowWriter::try_new(File::create(path).expect("parquet file"), schema, None)
+                .expect("parquet writer");
+        writer.write(&batch).expect("parquet batch");
+        writer.close().expect("parquet close");
+    }
+
+    fn plan_without_copy_security(catalog: &MemoryCatalog, sql: &str) -> LogicalPlan {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse unsecured query")
+            .into_iter()
+            .next()
+            .expect("one statement");
+        Planner::new(catalog)
+            .plan(&statement)
+            .expect("unsecured planner accepts the existing parquet path")
+    }
+
+    #[test]
+    fn subquery_read_parquet_preserves_copy_security() {
+        let temp = tempdir().expect("tempdir");
+        let allowed_dir = temp.path().join("allowed");
+        std::fs::create_dir(&allowed_dir).expect("allowed directory");
+        let outside_file = temp.path().join("outside.parquet");
+        write_int_parquet(&outside_file);
+
+        let security = CopySecurityConfig {
+            allowed_base_dirs: Some(vec![
+                allowed_dir.canonicalize().expect("canonical allowed dir"),
+            ]),
+            allow_symlinks: false,
+        };
+        let path = outside_file.display();
+        let queries = [
+            format!("SELECT (SELECT id FROM read_parquet('{path}'))"),
+            format!("SELECT 1 = ANY (SELECT id FROM read_parquet('{path}'))"),
+        ];
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let mut txn = bridge.begin_write().expect("transaction");
+
+        for sql in queries {
+            let plan = plan_without_copy_security(&catalog, &sql);
+            let error = execute_query_with_policy_and_copy_security(
+                &mut txn,
+                &catalog,
+                plan,
+                None,
+                Some(&security),
+            )
+            .expect_err("secured execution must reject the outside parquet path");
+            assert!(
+                matches!(error, ExecutorError::PathValidationFailed { .. }),
+                "secured subquery must reject the outside parquet path, got: {error}"
+            );
         }
     }
 

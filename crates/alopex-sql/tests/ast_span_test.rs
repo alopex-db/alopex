@@ -20,12 +20,14 @@ fn ddl_nodes_carry_spans() {
         columns: vec![],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(1, 1),
     };
     assert_eq!(tbl.span().start.line, 1);
 
     let idx = CreateIndex {
         if_not_exists: false,
+        unique: false,
         name: "idx".into(),
         table: "t".into(),
         column: "c".into(),

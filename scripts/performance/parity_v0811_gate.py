@@ -88,7 +88,10 @@ def evaluate(name: str, contract: dict[str, object], measurement: dict[str, obje
             limit = thresholds.get("max_ratio_by_metric", {}).get(
                 metric, thresholds["max_latency_ratio"]
             )
-            if ratio > limit:
+            absolute_limit = thresholds.get("max_absolute_by_metric", {}).get(metric)
+            if ratio > limit and (
+                absolute_limit is None or float(subject[metric]) > absolute_limit
+            ):
                 errors.append(f"{name}: {metric} ratio {ratio:.4f} exceeds {limit}")
     return errors
 

@@ -199,6 +199,144 @@ fn knn_query_options_reject_non_knn_query() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn knn_query_options_reject_unsafe_ef_search_before_execution() {
+    let (_executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let stmt = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (ef_search = 10000000000000)",
+    )
+    .expect("parse SQL")
+    .pop()
+    .expect("one statement");
+
+    let error = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&stmt)
+        .expect_err("unsafe ef_search must be rejected before HNSW execution");
+    assert!(error.to_string().contains("ef_search"), "{error}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn enable_hnsw_true_forces_hnsw_plan_below_cost_threshold() {
+    let sql = r#"
+        CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+        CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;
+        INSERT INTO items (id, embedding) VALUES
+            (1, [0.0, 0.0]),
+            (2, [1.0, 0.0]),
+            (3, [2.0, 0.0]);
+    "#;
+    let (mut executor, catalog) = run_sql(sql);
+    let plan = explain_text(
+        &mut executor,
+        &catalog,
+        "EXPLAIN SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)",
+    );
+    assert!(
+        plan.contains("HnswSearch index=idx_items_embedding k=2"),
+        "{plan}"
+    );
+
+    let forced_query = "SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)";
+    assert_eq!(query_ids(&mut executor, &catalog, forced_query), vec![1, 2]);
+    let analyzed = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {forced_query}"),
+    );
+    assert!(analyzed.contains("HnswSearch"), "{analyzed}");
+    assert!(analyzed.contains("nodes_visited="), "{analyzed}");
+    assert!(!analyzed.contains("nodes_visited=0"), "{analyzed}");
+
+    let filtered_plan = explain_text(
+        &mut executor,
+        &catalog,
+        "EXPLAIN SELECT id FROM items WHERE id = 3 ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)",
+    );
+    assert!(
+        filtered_plan.contains("HnswSearchPostFilter"),
+        "{filtered_plan}"
+    );
+    assert!(
+        filtered_plan.contains("fallback=ExactKnnScan"),
+        "{filtered_plan}"
+    );
+
+    let filtered_query = "SELECT id FROM items WHERE id = 3 ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)";
+    assert_eq!(query_ids(&mut executor, &catalog, filtered_query), vec![3]);
+    let filtered_analyzed = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {filtered_query}"),
+    );
+    assert!(
+        filtered_analyzed.contains("nodes_visited="),
+        "{filtered_analyzed}"
+    );
+    assert!(
+        !filtered_analyzed.contains("nodes_visited=0"),
+        "{filtered_analyzed}"
+    );
+    assert!(
+        filtered_analyzed.contains("fallback=ExactKnnScan"),
+        "{filtered_analyzed}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn enable_hnsw_true_rejects_missing_hnsw_index() {
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let stmt = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)",
+    )
+    .expect("parse query")
+    .pop()
+    .expect("one query");
+    let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&stmt)
+        .expect("plan query");
+
+    let error = executor
+        .execute(plan)
+        .expect_err("enable_hnsw=true without an HNSW index must be rejected");
+    assert!(
+        error.to_string().contains("requires an HNSW index"),
+        "{error}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn enable_hnsw_true_rejects_columnar_storage() {
+    let (mut executor, catalog) = run_sql(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2)) WITH (storage='columnar');",
+    );
+    let stmt = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)",
+    )
+    .expect("parse query")
+    .pop()
+    .expect("one query");
+    let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&stmt)
+        .expect("plan query");
+
+    let error = executor
+        .execute(plan)
+        .expect_err("enable_hnsw=true on columnar storage must be rejected");
+    assert!(
+        error.to_string().contains("requires row storage"),
+        "{error}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn hnsw_index_accepts_search_ef_default() {
     let (_executor, catalog) = run_sql(
         "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
@@ -217,38 +355,79 @@ fn hnsw_index_accepts_search_ef_default() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn hnsw_index_rejects_unsafe_ef_search_without_leaving_catalog_state() {
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let stmt = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=10000000000000)",
+    )
+    .expect("parse DDL")
+    .pop()
+    .expect("one statement");
+    let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+        .plan(&stmt)
+        .expect("plan DDL");
+
+    let error = executor
+        .execute(plan)
+        .expect_err("unsafe HNSW index ef_search must be rejected");
+    assert!(error.to_string().contains("ef_search"), "{error}");
+    assert!(
+        catalog
+            .read()
+            .expect("catalog lock")
+            .get_index("idx_items_embedding")
+            .is_none(),
+        "failed CREATE INDEX must not leave an index in the catalog"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn knn_query_ef_search_changes_recall_against_exact_path() {
-    const ROWS: u64 = 8_193;
+    use std::collections::BTreeSet;
+
+    const ROWS: usize = 8_193;
     const DIMENSIONS: usize = 128;
-    const BATCH_SIZE: u64 = 256;
+    const BATCH_SIZE: usize = 256;
+    const K: usize = 10;
+    const QUERIES: usize = 4;
+
+    // Fixed xorshift32 input, not a process-random seed or periodic row-id fixture.
+    // Integer coordinates keep squared L2 sums below 128 * 255^2 < 2^24,
+    // so SIMD reduction order cannot change their f32 representation.
+    let mut state = 0x4620_0816u32;
+    let mut next_vector = || {
+        (0..DIMENSIONS)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 24) as u8
+            })
+            .collect::<Vec<_>>()
+    };
+    let vectors = (0..ROWS).map(|_| next_vector()).collect::<Vec<_>>();
+    let queries = (0..QUERIES).map(|_| next_vector()).collect::<Vec<_>>();
+    assert_eq!(vectors.iter().collect::<BTreeSet<_>>().len(), ROWS);
+    let vector_sql = |vector: &[u8]| {
+        format!(
+            "[{}]",
+            vector
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
 
     let (mut executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2));");
-    let query_vector = format!(
-        "[{}]",
-        std::iter::repeat_n("0.0", DIMENSIONS)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
-        let end = (start + BATCH_SIZE - 1).min(ROWS);
-        let values = (start..=end)
-            .map(|id| {
-                let vector = if id == ROWS {
-                    query_vector.clone()
-                } else {
-                    format!(
-                        "[{}]",
-                        (0..DIMENSIONS)
-                            .map(|dimension| {
-                                ((id * (dimension as u64 + 17) * 31) % 1_009).to_string()
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                format!("({id}, {vector})")
-            })
+    for start in (0..ROWS).step_by(BATCH_SIZE) {
+        let end = (start + BATCH_SIZE).min(ROWS);
+        let values = (start..end)
+            .map(|row| format!("({}, {})", row + 1, vector_sql(&vectors[row])))
             .collect::<Vec<_>>()
             .join(", ");
         execute_sql(
@@ -263,30 +442,92 @@ fn knn_query_ef_search_changes_recall_against_exact_path() {
         "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64);",
     );
 
-    let query = format!(
-        "SELECT id FROM items ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 10"
-    );
-    let exact = query_ids(
-        &mut executor,
-        &catalog,
-        &format!("{query} WITH (enable_hnsw = false)"),
-    );
-    let low = query_ids(
-        &mut executor,
-        &catalog,
-        &format!("{query} WITH (ef_search = 10)"),
-    );
-    let high = query_ids(
-        &mut executor,
-        &catalog,
-        &format!("{query} WITH (ef_search = {ROWS})"),
-    );
+    let mut low_recall = 0;
+    let mut high_recall = 0;
+    let mut observations = Vec::new();
+    for (query_index, query_vector) in queries.iter().enumerate() {
+        // This oracle does not call either engine's distance function or top-k code.
+        let mut oracle = vectors
+            .iter()
+            .enumerate()
+            .map(|(row, vector)| {
+                let distance = vector
+                    .iter()
+                    .zip(query_vector)
+                    .map(|(&value, &query)| {
+                        let difference = i64::from(value) - i64::from(query);
+                        (difference * difference) as u64
+                    })
+                    .sum::<u64>();
+                (distance, (row + 1) as i32)
+            })
+            .collect::<Vec<_>>();
+        oracle.sort_unstable();
+        assert!(
+            oracle[K - 1].0 < oracle[K].0,
+            "query {query_index} must have an unambiguous top-k boundary: {:?}",
+            &oracle[..=K],
+        );
+        let expected = oracle[..K]
+            .iter()
+            .map(|&(_, id)| id)
+            .collect::<BTreeSet<_>>();
+        let query = format!(
+            "SELECT id FROM items ORDER BY vector_distance(embedding, {}, 'l2') ASC LIMIT {K}",
+            vector_sql(query_vector),
+        );
+        let exact_sql = format!("{query} WITH (enable_hnsw = false)");
+        let exact_plan = explain_text(&mut executor, &catalog, &format!("EXPLAIN {exact_sql}"));
+        assert!(exact_plan.starts_with("ExactKnnScan\n"), "{exact_plan}");
+        let exact = query_ids(&mut executor, &catalog, &exact_sql);
+        assert_eq!(exact.len(), K, "query {query_index}");
+        assert_eq!(exact.iter().copied().collect::<BTreeSet<_>>(), expected);
 
-    let low_recall = low.iter().filter(|id| exact.contains(id)).count();
-    let high_recall = high.iter().filter(|id| exact.contains(id)).count();
+        for (ef, recall) in [(K, &mut low_recall), (ROWS, &mut high_recall)] {
+            let sql = format!("{query} WITH (ef_search = {ef})");
+            let results = query_ids(&mut executor, &catalog, &sql);
+            let actual = results.iter().copied().collect::<BTreeSet<_>>();
+            assert_eq!(results.len(), K, "query {query_index}, ef={ef}");
+            assert_eq!(
+                actual.len(),
+                K,
+                "duplicate IDs: query {query_index}, ef={ef}"
+            );
+            assert!(actual.iter().all(|&id| (1..=ROWS as i32).contains(&id)));
+            *recall += actual.intersection(&expected).count();
+            if ef == ROWS {
+                assert_eq!(
+                    actual,
+                    expected,
+                    "query {query_index}, oracle={:?}",
+                    &oracle[..=K]
+                );
+            }
+            observations.push((query_index, ef, results, oracle[..=K].to_vec()));
+            let plan = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {sql}"));
+            assert!(
+                plan.contains("HnswSearch index=idx_items_embedding k=10"),
+                "{plan}"
+            );
+            assert!(
+                plan.contains(&format!("ef_search={ef} fallback=none")),
+                "{plan}"
+            );
+            assert!(
+                plan.contains("nodes_visited=") && !plan.contains("nodes_visited=0"),
+                "{plan}"
+            );
+        }
+    }
+    assert_eq!(high_recall, QUERIES * K);
     assert!(
         high_recall > low_recall,
-        "higher ef_search must improve recall: low={low:?} high={high:?} exact={exact:?}"
+        "higher ef_search must improve aggregate recall: low={low_recall}, high={high_recall}, observations={observations:?}"
+    );
+    eprintln!(
+        "ef_search recall over {QUERIES} fixed queries: low={low_recall}/{}, high={high_recall}/{}",
+        QUERIES * K,
+        QUERIES * K
     );
 }
 

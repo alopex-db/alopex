@@ -56,6 +56,7 @@ job's owner.
 | `ci.yml:fmt` | Development CI | exact-SHA formatting result |
 | `ci.yml:formal` | Development CI | exact-SHA bounded model result |
 | `ci.yml:clippy` | Development CI | exact-SHA lint result |
+| `ci.yml:clippy-beta` | Development CI | exact-SHA Rust beta lint result |
 | `ci.yml:test` | Development CI | exact-SHA behavior result |
 | `ci.yml:coverage` | Development CI | exact-SHA coverage result |
 | `ci.yml:security-audit` | Development CI | exact-SHA dependency policy result |

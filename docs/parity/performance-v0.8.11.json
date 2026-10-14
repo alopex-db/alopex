@@ -129,7 +129,7 @@
       },
       "metrics": ["plan_latency_p50_ms", "execution_latency_p50_ms", "latency_p50_ms", "latency_p95_ms", "queries_per_second", "peak_rss_bytes", "temporary_io_bytes"],
       "compatibility_thresholds": {"max_latency_ratio": 3.0, "min_throughput_ratio": 0.34, "max_peak_memory_ratio": 2.0, "max_temporary_io_ratio": 2.0},
-      "thresholds": {"max_latency_ratio": 35.0, "min_throughput_ratio": 0.025, "max_peak_memory_ratio": 4.5, "max_temporary_io_ratio": 2.0, "max_ratio_by_metric": {"plan_latency_p50_ms": 60.0}},
+      "thresholds": {"max_latency_ratio": 35.0, "min_throughput_ratio": 0.025, "max_peak_memory_ratio": 4.5, "max_temporary_io_ratio": 2.0, "max_absolute_by_metric": {"plan_latency_p50_ms": 1.25}, "max_ratio_by_metric": {"plan_latency_p50_ms": 60.0}},
       "comparison": {"method": "paired-median-ratio", "failure_confidence": 0.95}
     },
     "sql-postgresql-v1": {

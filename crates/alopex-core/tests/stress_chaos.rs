@@ -1363,12 +1363,12 @@ impl ChaosMatrix {
             return;
         };
         let mut links = Vec::new();
-        for i in 0..self.links.len() {
-            for j in 0..self.links.len() {
+        for (i, row) in self.links.iter().enumerate() {
+            for (j, link) in row.iter().enumerate() {
                 if i == j {
                     continue;
                 }
-                if predicate(&self.links[i][j]) {
+                if predicate(link) {
                     links.push(format!("{i}->{j}"));
                 }
             }

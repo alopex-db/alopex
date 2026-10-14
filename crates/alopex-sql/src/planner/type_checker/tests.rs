@@ -78,6 +78,25 @@ fn number_expr(value: &str) -> Expr {
 }
 
 #[test]
+fn test_infer_parameter_keeps_whole_floats_as_double() {
+    let catalog = create_test_catalog();
+
+    let float_values = [SqlValue::Float(2.0)];
+    let float = TypeChecker::new(&catalog)
+        .with_parameters(&float_values)
+        .infer_parameter(1, test_span())
+        .unwrap();
+    assert_eq!(float.resolved_type, ResolvedType::Double);
+
+    let double_values = [SqlValue::Double(2.0)];
+    let double = TypeChecker::new(&catalog)
+        .with_parameters(&double_values)
+        .infer_parameter(1, test_span())
+        .unwrap();
+    assert_eq!(double.resolved_type, ResolvedType::Double);
+}
+
+#[test]
 fn test_infer_case_promotes_result_branches_and_keeps_simple_operand() {
     let catalog = create_test_catalog();
     let type_checker = TypeChecker::new(&catalog);
@@ -1333,6 +1352,38 @@ fn test_check_vector_distance_wrong_arg_count() {
 
     let result = type_checker.check_vector_distance(&args, test_span());
     assert!(result.is_err());
+}
+
+#[test]
+fn test_check_vector_functions_accept_null_vectors() {
+    let catalog = create_vector_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let null = TypedExpr::literal(Literal::Null, ResolvedType::Null, test_span());
+    let vector = TypedExpr::vector_literal(vec![1.0, 0.0], 2, test_span());
+    let metric = TypedExpr::literal(
+        Literal::String("cosine".into()),
+        ResolvedType::Text,
+        test_span(),
+    );
+    for (first, second) in [
+        (null.clone(), vector.clone()),
+        (vector, null.clone()),
+        (null.clone(), null),
+    ] {
+        let args = vec![first, second, metric.clone()];
+        assert_eq!(
+            type_checker
+                .check_vector_distance(&args, test_span())
+                .unwrap(),
+            ResolvedType::Double,
+        );
+        assert_eq!(
+            type_checker
+                .check_vector_similarity(&args, test_span())
+                .unwrap(),
+            ResolvedType::Double,
+        );
+    }
 }
 
 #[test]

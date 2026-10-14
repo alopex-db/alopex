@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -917,6 +918,91 @@ print(matches[0])
             path: path.read_bytes() if path.exists() else None for path in repo_outputs
         }
         self.assertEqual(after, before, "test build must not mutate worktree output")
+
+    def test_build_script_uses_explicit_python_before_manifest_read(self) -> None:
+        fake_bin = self.root / "system-python-bin"
+        fake_bin.mkdir()
+        system_python = fake_bin / "python3"
+        system_python.write_text(
+            "#!/bin/sh\necho 'unexpected system Python' >&2\nexit 70\n",
+            encoding="utf-8",
+        )
+        system_python.chmod(0o755)
+
+        selected_python = self.root / "selected-python"
+        selected_python.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "with Path(os.environ['ALOPEX_SELECTED_PYTHON_LOG']).open('a', encoding='utf-8') as log:\n"
+            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if len(sys.argv) > 2 and sys.argv[2] == 'verify-inputs':\n"
+            "    raise SystemExit(0)\n"
+            "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        selected_python.chmod(0o755)
+        invocation_log = self.root / "selected-python.log"
+
+        host = platform.system()
+        machine = platform.machine().lower()
+        if host == "Darwin" and machine in {"arm64", "aarch64"}:
+            target = "aarch64-apple-darwin"
+        elif host == "Darwin" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-apple-darwin"
+        elif host == "Linux" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-unknown-linux-gnu"
+        elif host == "Windows" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-pc-windows-msvc"
+        else:
+            self.skipTest(f"unsupported parser builder host: {host} {machine}")
+
+        environment = self.build_script_fixture()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "PYTHON": str(selected_python),
+                "ALOPEX_SELECTED_PYTHON_LOG": str(invocation_log),
+            }
+        )
+
+        output_dir = self.root / "explicit-python-output"
+        output_dir.mkdir()
+        output = output_dir / TARGET_LIBRARIES[target]
+        result = subprocess.run(
+            [
+                "bash",
+                str(BUILD_SCRIPT),
+                "--backend",
+                "host",
+                "--target",
+                target,
+                "--output",
+                str(output),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertTrue(output.is_file())
+        self.assertTrue((output_dir / TARGET_STATIC_LIBRARIES[target]).is_file())
+        self.assertEqual(
+            (output_dir / "CONTRACT_VERSION").read_text(encoding="utf-8"),
+            "0.26.0\n",
+        )
+        invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(invocations[0], f"- {REPOSITORY_ROOT / 'Cargo.toml'}")
+        self.assertTrue(invocations[1].startswith(f"{MANIFEST_TOOL} verify-inputs "))
+        self.assertEqual(len(invocations), 2)
 
     def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
         fake_bin = self.root / "fake-docker-bin"

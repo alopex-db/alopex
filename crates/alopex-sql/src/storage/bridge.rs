@@ -237,6 +237,11 @@ fn replay_id(payload: &[RangeChangePayload]) -> CoreResult<String> {
 }
 
 pub trait SqlTxn<'txn, S: KVStore + 'txn> {
+    /// File-read restrictions inherited by nested query and DML execution.
+    fn read_security(&self) -> Option<&crate::executor::bulk::CopySecurityConfig> {
+        None
+    }
+
     fn mode(&self) -> TxnMode;
 
     fn ensure_write_txn(&self) -> CoreResult<()>;
