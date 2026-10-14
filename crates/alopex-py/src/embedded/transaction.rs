@@ -801,6 +801,7 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn transaction(
         database: Arc<alopex_embedded::Database>,
