@@ -1,8 +1,12 @@
+import os
 import shutil
+import sys
+from pathlib import Path
 
 import pytest
 
 from alopex import AlopexError, Database, EmbeddedConfig, TxnMode
+from support.fork_lock_runner import run_probe
 
 
 def test_open_in_memory():
@@ -90,9 +94,29 @@ def test_second_open_of_one_database_is_rejected(tmp_path):
     try:
         with pytest.raises(AlopexError) as excinfo:
             Database.open(str(container))
-        assert "already open by another process" in str(excinfo.value)
+        message = str(excinfo.value)
+        if os.name == "posix":
+            assert "already open in this process" in message
+            assert "Database, Transaction or PreparedStatement handles" in message
+        else:
+            assert "already open" in message
     finally:
         db.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize("finish", ["gc", "close"])
+def test_forked_database_drop_preserves_parent_lock(tmp_path, finish):
+    probe = Path(__file__).parent / "support" / "fork_lock_probe.py"
+    result = run_probe([sys.executable, str(probe), finish, str(tmp_path / "forked.alopex")])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_parent_close_releases_lock_before_forked_child_exits(tmp_path):
+    probe = Path(__file__).parent / "support" / "fork_lock_probe.py"
+    result = run_probe([sys.executable, str(probe), "parent_close", str(tmp_path / "forked.alopex")])
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_in_memory_databases_are_not_locked():

@@ -390,7 +390,9 @@ mod tests {
         #[cfg(unix)]
         {
             assert!(err.to_string().contains("already open in this process"));
-            assert!(err.to_string().contains("Database or Transaction handles"));
+            assert!(err
+                .to_string()
+                .contains("Database, Transaction or PreparedStatement handles"));
         }
         // Windows may reject reads of the held lock's diagnostic record.
         #[cfg(not(unix))]
