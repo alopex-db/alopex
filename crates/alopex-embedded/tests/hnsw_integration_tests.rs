@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use alopex_core::{HnswConfig, HnswIndex, Metric, TxnMode};
-use alopex_embedded::Database;
+use alopex_embedded::{Database, Error};
 use tempfile::tempdir;
 
 fn config() -> HnswConfig {
@@ -13,6 +13,50 @@ fn config() -> HnswConfig {
 }
 
 const MIXED_INDEX: &str = "idx_items_embedding";
+
+#[test]
+fn concurrent_hnsw_writers_retry_the_whole_transaction() {
+    use alopex_sql::storage::SqlValue;
+
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    )
+    .unwrap();
+
+    let mut first = db.begin(TxnMode::ReadWrite).unwrap();
+    let mut second = db.begin(TxnMode::ReadWrite).unwrap();
+    first
+        .execute_sql("INSERT INTO items VALUES (1, [0,0])")
+        .unwrap();
+    second
+        .execute_sql("INSERT INTO items VALUES (2, [1,0])")
+        .unwrap();
+    first.commit().unwrap();
+    assert!(matches!(
+        second.commit(),
+        Err(Error::Core(alopex_core::Error::TxnConflict))
+    ));
+
+    let mut retry = db.begin(TxnMode::ReadWrite).unwrap();
+    retry
+        .execute_sql("INSERT INTO items VALUES (2, [1,0])")
+        .unwrap();
+    retry.commit().unwrap();
+
+    assert_eq!(
+        query_rows(db.execute_sql("SELECT id FROM items ORDER BY id").unwrap()),
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+    assert_eq!(
+        db.search_hnsw(MIXED_INDEX, &[0.0, 0.0], 2, Some(16))
+            .unwrap()
+            .0
+            .len(),
+        2
+    );
+}
 
 fn seed_borrowed_sql_hnsw(db: &Database) -> (Vec<u8>, Vec<u8>) {
     db.execute_sql(
