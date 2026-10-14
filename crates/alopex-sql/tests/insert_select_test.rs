@@ -207,6 +207,29 @@ fn columnar_ctas_plan_rejects_before_catalog_mutation_and_preserves_noop() {
 }
 
 #[test]
+fn ctas_with_options_reaches_existing_storage_guard() {
+    use alopex_sql::planner::LogicalPlan;
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE TABLE copied WITH (storage='columnar') AS SELECT 1 AS id",
+    )
+    .expect("parse CTAS WITH")
+    .remove(0);
+    let plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .expect("plan CTAS WITH");
+    let LogicalPlan::CreateTableAs { with_options, .. } = &plan else {
+        panic!("expected CTAS plan");
+    };
+    assert_eq!(with_options, &vec![("storage".into(), "columnar".into())]);
+    assert!(matches!(executor.execute(plan),
+        Err(ExecutorError::UnsupportedOperation(message)) if message.contains("columnar")));
+    assert!(!catalog.read().unwrap().table_exists("copied"));
+}
+
+#[test]
 fn create_table_as_select_keeps_output_schema_without_source_constraints() {
     let results = execute_sql(
         "CREATE TABLE source (id INT PRIMARY KEY, cat TEXT NOT NULL);
