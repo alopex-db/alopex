@@ -146,6 +146,17 @@ jobs:
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
+      - name: Verify SQL HNSW path and cost across table sizes
+        id: sql_knn_cost
+        env:
+          ALOPEX_KNN_COST_RAW_NDJSON: ${{ github.workspace }}/performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
+          ALOPEX_KNN_COST_SOURCE_COMMIT: ${{ github.sha }}
+          ALOPEX_KNN_COST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -o pipefail
+          taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test knn_index_cost \
+            sql_knn_hnsw_cost_process_separated_evidence -- --ignored --exact --nocapture \
+            2>&1 | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
       - name: Enforce curated/full performance contracts
         id: gate
         env:
@@ -165,6 +176,7 @@ jobs:
           HNSW_DATASET: ${{ steps.hnsw_dataset.outcome }}
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
+          SQL_KNN_COST: ${{ steps.sql_knn_cost.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -173,7 +185,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "sql_knn_cost", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)
