@@ -176,9 +176,60 @@ fn delta_varint(input: &mut &[u8]) -> Result<u64> {
     Err(invalid_delta())
 }
 
+fn delta_header(input: &mut &[u8], max_values: u64, limit: u64) -> Result<(u64, u64, u64)> {
+    let block = delta_varint(input)?;
+    let mini_blocks = delta_varint(input)?;
+    let count = delta_varint(input)?;
+    if block == 0
+        || !block.is_multiple_of(128)
+        || mini_blocks == 0
+        || !block.is_multiple_of(mini_blocks)
+        || !(block / mini_blocks).is_multiple_of(32)
+        || count > max_values
+        || count.checked_mul(4).is_none_or(|bytes| bytes > limit)
+        || mini_blocks > limit
+    {
+        return Err(invalid_delta());
+    }
+    Ok((block, mini_blocks, count))
+}
+
+fn skip_delta_prefix(input: &mut &[u8], block: u64, mini_blocks: u64, count: u64) -> Result<()> {
+    delta_varint(input)?;
+    let per_mini = block / mini_blocks;
+    let mini_blocks = usize::try_from(mini_blocks).map_err(|_| invalid_delta())?;
+    let mut remaining = count.saturating_sub(1);
+    while remaining != 0 {
+        delta_varint(input)?;
+        let data = *input;
+        let widths = data.get(..mini_blocks).ok_or_else(invalid_delta)?;
+        *input = &data[mini_blocks..];
+        for &width in widths {
+            if remaining == 0 {
+                break;
+            }
+            if width > 32 {
+                return Err(invalid_delta());
+            }
+            // parquet's suffix offset includes the full final mini block's padding.
+            let size = per_mini
+                .checked_mul(u64::from(width))
+                .ok_or_else(invalid_delta)?
+                / 8;
+            let size = usize::try_from(size).map_err(|_| invalid_delta())?;
+            *input = input.get(size..).ok_or_else(invalid_delta)?;
+            remaining = remaining.saturating_sub(per_mini);
+        }
+    }
+    Ok(())
+}
+
 impl ColumnPages {
     fn check_delta_lengths(&self, page: &Page) -> Result<()> {
-        if page.encoding() != Encoding::DELTA_LENGTH_BYTE_ARRAY {
+        if !matches!(
+            page.encoding(),
+            Encoding::DELTA_LENGTH_BYTE_ARRAY | Encoding::DELTA_BYTE_ARRAY
+        ) {
             return Ok(());
         }
         let mut input = page.buffer().as_ref();
@@ -225,20 +276,16 @@ impl ColumnPages {
             }
             Page::DictionaryPage { .. } => return Err(invalid_delta()),
         }
-        // parquet 53.4.1 resizes its i32 lengths vector from this encoded count.
-        let block = delta_varint(&mut input)?;
-        let mini_blocks = delta_varint(&mut input)?;
-        let count = delta_varint(&mut input)?;
-        if block == 0
-            || !block.is_multiple_of(128)
-            || mini_blocks == 0
-            || !block.is_multiple_of(mini_blocks)
-            || !(block / mini_blocks).is_multiple_of(32)
-            || count > u64::from(page.num_values())
-            || count.checked_mul(4).is_none_or(|bytes| bytes > self.limit)
-            || mini_blocks > self.limit
-        {
-            return Err(invalid_delta());
+        // parquet 53.4.1 resizes its i32 vectors from the encoded counts.
+        let (block, mini_blocks, count) =
+            delta_header(&mut input, u64::from(page.num_values()), self.limit)?;
+        if page.encoding() == Encoding::DELTA_BYTE_ARRAY {
+            skip_delta_prefix(&mut input, block, mini_blocks, count)?;
+            let (_, _, suffix_count) =
+                delta_header(&mut input, u64::from(page.num_values()), self.limit)?;
+            if suffix_count != count {
+                return Err(invalid_delta());
+            }
         }
         Ok(())
     }

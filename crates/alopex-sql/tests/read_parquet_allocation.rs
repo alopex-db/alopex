@@ -321,6 +321,29 @@ fn issue577_streaming_reader_exceeds_materialized_row_limit() {
 
 #[test]
 fn issue577_delta_length_header_checked_before_allocation() {
+    delta_header_checked_before_allocation(
+        parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        &[0x80, 1, 4, 0x80, 0x80, 8, 0],
+    );
+}
+
+#[test]
+fn issue577_delta_byte_array_prefix_checked_before_allocation() {
+    delta_header_checked_before_allocation(
+        parquet::basic::Encoding::DELTA_BYTE_ARRAY,
+        &[0x80, 1, 4, 0x80, 0x80, 8, 0],
+    );
+}
+
+#[test]
+fn issue577_delta_byte_array_suffix_checked_before_allocation() {
+    delta_header_checked_before_allocation(
+        parquet::basic::Encoding::DELTA_BYTE_ARRAY,
+        &[0x80, 1, 4, 1, 0, 0x80, 1, 4, 0x80, 0x80, 8, 0],
+    );
+}
+
+fn delta_header_checked_before_allocation(encoding: parquet::basic::Encoding, count_input: &[u8]) {
     use parquet::data_type::{ByteArray, ByteArrayType};
     use parquet::file::properties::EnabledStatistics;
     use std::io::Cursor;
@@ -328,8 +351,7 @@ fn issue577_delta_length_header_checked_before_allocation() {
 
     let cases: [(&str, Option<&[u8]>); 4] = [
         ("normal", None),
-        // Block 128, four mini blocks, 131072 lengths, first length zero.
-        ("count", Some(&[0x80, 1, 4, 0x80, 0x80, 8, 0])),
+        ("count", Some(count_input)),
         ("zero mini blocks", Some(&[0x80, 1, 0, 1, 0])),
         ("varint overflow", Some(&[0xff; 10])),
     ];
@@ -343,7 +365,7 @@ fn issue577_delta_length_header_checked_before_allocation() {
                 .set_compression(Compression::UNCOMPRESSED)
                 .set_dictionary_enabled(false)
                 .set_statistics_enabled(EnabledStatistics::None)
-                .set_encoding(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY)
+                .set_encoding(encoding)
                 .build(),
         );
         let mut writer =
@@ -399,7 +421,7 @@ fn issue577_delta_length_header_checked_before_allocation() {
             std::fs::write(file.path(), bytes).unwrap();
         });
         println!(
-            "DELTA length control case={case} oversized={oversized} maximum_request={maximum}"
+            "DELTA {encoding:?} control case={case} oversized={oversized} maximum_request={maximum}"
         );
         assert!(
             maximum <= LIMIT,
@@ -421,6 +443,17 @@ fn issue577_delta_length_header_checked_before_allocation() {
 
 #[test]
 fn issue577_delta_length_nullable_pages_preserve_rows() {
+    delta_nullable_pages_preserve_rows(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY, 3);
+}
+
+#[test]
+fn issue577_delta_byte_array_nullable_pages_preserve_rows() {
+    for count in [3, 300] {
+        delta_nullable_pages_preserve_rows(parquet::basic::Encoding::DELTA_BYTE_ARRAY, count);
+    }
+}
+
+fn delta_nullable_pages_preserve_rows(encoding: parquet::basic::Encoding, count: usize) {
     use parquet::data_type::{ByteArray, ByteArrayType};
     use parquet::file::properties::WriterVersion;
 
@@ -439,7 +472,7 @@ fn issue577_delta_length_nullable_pages_preserve_rows() {
                         .set_writer_version(version)
                         .set_compression(compression)
                         .set_dictionary_enabled(false)
-                        .set_encoding(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY)
+                        .set_encoding(encoding)
                         .build(),
                 );
                 let mut writer = SerializedFileWriter::new(
@@ -450,12 +483,32 @@ fn issue577_delta_length_nullable_pages_preserve_rows() {
                 .unwrap();
                 let mut group = writer.next_row_group().unwrap();
                 let mut column = group.next_column().unwrap().unwrap();
-                let values = if all_null {
-                    vec![]
-                } else {
-                    vec![ByteArray::from(vec![0x42]), ByteArray::from(vec![0x43])]
-                };
-                let levels = if all_null { [0, 0, 0] } else { [1, 0, 1] };
+                let expected: Vec<_> = (0..count)
+                    .map(|index| {
+                        vec![if all_null || index % 3 == 1 {
+                            SqlValue::Null
+                        } else {
+                            SqlValue::Blob(format!("shared-prefix-{index:04}").into_bytes())
+                        }]
+                    })
+                    .collect();
+                let values: Vec<_> = expected
+                    .iter()
+                    .filter_map(|row| match &row[0] {
+                        SqlValue::Blob(value) => Some(ByteArray::from(value.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                let levels: Vec<_> = expected
+                    .iter()
+                    .map(|row| {
+                        if matches!(row[0], SqlValue::Null) {
+                            0
+                        } else {
+                            1
+                        }
+                    })
+                    .collect();
                 column
                     .typed::<ByteArrayType>()
                     .write_batch(&values, Some(&levels), None)
@@ -465,20 +518,11 @@ fn issue577_delta_length_nullable_pages_preserve_rows() {
                 writer.close().unwrap();
                 let (result, maximum) = execute_observed_after_planning(&file, || {});
                 println!(
-                    "DELTA nullable version={version:?} compression={compression:?} all_null={all_null} maximum_request={maximum}"
+                    "DELTA {encoding:?} nullable version={version:?} compression={compression:?} count={count} all_null={all_null} maximum_request={maximum}"
                 );
                 assert!(maximum <= LIMIT);
                 let ExecutionResult::Query(result) = result.unwrap() else {
                     panic!("expected nullable DELTA length rows");
-                };
-                let expected = if all_null {
-                    vec![vec![SqlValue::Null]; 3]
-                } else {
-                    vec![
-                        vec![SqlValue::Blob(vec![0x42])],
-                        vec![SqlValue::Null],
-                        vec![SqlValue::Blob(vec![0x43])],
-                    ]
                 };
                 assert_eq!(result.rows, expected);
             }
