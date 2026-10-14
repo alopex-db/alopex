@@ -503,6 +503,23 @@ fn check_text_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
     check_timestamp(&args[1..])
 }
 
+fn check_text_date_or_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_text(&args[..1])?;
+    for arg in &args[1..] {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Date | ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Date or Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_text_timestamp_or_interval(args: &[TypedExpr]) -> Result<(), PlannerError> {
     check_text(&args[..1])?;
     for arg in &args[1..] {
@@ -1338,7 +1355,7 @@ static SIGNATURES: &[ScalarSignature] = &[
     sig(
         "date_diff",
         Arity::Exact(3),
-        check_text_timestamp,
+        check_text_date_or_timestamp,
         ReturnRule::Fixed(ResolvedType::BigInt),
     ),
     sig(

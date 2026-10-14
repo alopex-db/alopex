@@ -405,15 +405,48 @@ fn extract_interval_part(
 
 fn date_diff(values: &[SqlValue]) -> Result<SqlValue> {
     let unit = text(values.first(), "date_diff")?.to_ascii_lowercase();
-    let start = timestamp(values.get(1), "date_diff")?;
-    let end = timestamp(values.get(2), "date_diff")?;
-    let scale = match unit.as_str() {
-        "day" | "days" => 86_400_000_000,
-        "hour" | "hours" => 3_600_000_000,
-        "minute" | "minutes" => 60_000_000,
-        "second" | "seconds" => 1_000_000,
-        "millisecond" | "milliseconds" => 1_000,
-        "microsecond" | "microseconds" => 1,
+    let start = values
+        .get(1)
+        .ok_or_else(|| invalid("date_diff", "missing argument"))?;
+    let end = values
+        .get(2)
+        .ok_or_else(|| invalid("date_diff", "missing argument"))?;
+    let result = match unit.as_str() {
+        "year" | "years" | "quarter" | "quarters" | "month" | "months" | "week" | "weeks" => {
+            let boundary = |value| {
+                let date = date_diff_date(value)?;
+                let year = i64::from(date.year());
+                let month = i64::from(date.month0());
+                Ok::<i64, ExecutorError>(match unit.as_str() {
+                    "year" | "years" => year,
+                    "quarter" | "quarters" => year * 4 + month / 3,
+                    "month" | "months" => year * 12 + month,
+                    // 1970-01-01 was Thursday; week boundaries fall on Monday.
+                    _ => (date
+                        .signed_duration_since(
+                            NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"),
+                        )
+                        .num_days()
+                        + 3)
+                    .div_euclid(7),
+                })
+            };
+            boundary(end)? - boundary(start)?
+        }
+        "day" | "days" | "hour" | "hours" | "minute" | "minutes" | "second" | "seconds"
+        | "millisecond" | "milliseconds" | "microsecond" | "microseconds" => {
+            let scale: i128 = match unit.as_str() {
+                "day" | "days" => 86_400_000_000,
+                "hour" | "hours" => 3_600_000_000,
+                "minute" | "minutes" => 60_000_000,
+                "second" | "seconds" => 1_000_000,
+                "millisecond" | "milliseconds" => 1_000,
+                _ => 1,
+            };
+            let start = date_diff_micros(start)?.div_euclid(scale);
+            let end = date_diff_micros(end)?.div_euclid(scale);
+            i64::try_from(end - start).map_err(|_| EvaluationError::Overflow)?
+        }
         _ => {
             return Err(invalid(
                 "date_diff",
@@ -421,11 +454,31 @@ fn date_diff(values: &[SqlValue]) -> Result<SqlValue> {
             ));
         }
     };
-    let result = end
-        .div_euclid(scale)
-        .checked_sub(start.div_euclid(scale))
-        .ok_or(EvaluationError::Overflow)?;
     Ok(SqlValue::BigInt(result))
+}
+
+fn date_diff_micros(value: &SqlValue) -> Result<i128> {
+    match value {
+        SqlValue::Timestamp(micros) => Ok(i128::from(*micros)),
+        SqlValue::Date(days) => Ok(i128::from(*days) * 86_400_000_000),
+        value => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Date or Timestamp".into(),
+            actual: value.type_name().into(),
+        })),
+    }
+}
+
+fn date_diff_date(value: &SqlValue) -> Result<NaiveDate> {
+    match value {
+        SqlValue::Timestamp(micros) => Ok(datetime(*micros, "date_diff")?.date_naive()),
+        SqlValue::Date(days) => NaiveDate::from_ymd_opt(1970, 1, 1)
+            .and_then(|epoch| epoch.checked_add_signed(Duration::days(i64::from(*days))))
+            .ok_or_else(|| invalid("date_diff", "date is out of range")),
+        value => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Date or Timestamp".into(),
+            actual: value.type_name().into(),
+        })),
+    }
 }
 
 fn truncate(unit: &str, micros: i64) -> Result<i64> {

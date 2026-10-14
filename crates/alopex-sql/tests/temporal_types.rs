@@ -10,6 +10,8 @@ use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::SqlValue;
+use chrono::{Datelike, Duration, NaiveDate, Weekday};
+use proptest::prelude::*;
 
 struct Harness {
     executor: Executor<MemoryKV, MemoryCatalog>,
@@ -328,6 +330,162 @@ fn date_diff_fixed_microsecond_positive_overflow() {
 #[test]
 fn date_diff_fixed_microsecond_negative_overflow() {
     assert_microsecond_overflow("9000000000000000000", "-9000000000000000000");
+}
+
+#[test]
+fn date_diff_accepts_date_and_mixed_temporal_arguments() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT DATE_DIFF('day', DATE '2024-02-28', DATE '2024-03-01'), \
+                 DATE_DIFF('hour', DATE '2024-02-29', TIMESTAMP '2024-03-01 01:00:00'), \
+                 DATE_DIFF('day', CAST(NULL AS DATE), DATE '2024-03-01')"
+            )
+            .rows,
+        vec![vec![
+            SqlValue::BigInt(2),
+            SqlValue::BigInt(25),
+            SqlValue::Null
+        ]]
+    );
+}
+
+#[test]
+fn date_diff_calendar_units_count_boundaries() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT DATE_DIFF('month', DATE '2024-01-31', DATE '2024-02-01'), \
+                 DATE_DIFF('MONTHS', DATE '2024-02-01', DATE '2024-01-31'), \
+                 DATE_DIFF('year', DATE '2023-12-31', DATE '2024-01-01'), \
+                 DATE_DIFF('quarter', DATE '2024-03-31', DATE '2024-04-01'), \
+                 DATE_DIFF('week', DATE '2024-01-07', DATE '2024-01-08')"
+            )
+            .rows,
+        vec![vec![
+            SqlValue::BigInt(1),
+            SqlValue::BigInt(-1),
+            SqlValue::BigInt(1),
+            SqlValue::BigInt(1),
+            SqlValue::BigInt(1),
+        ]]
+    );
+}
+
+#[test]
+fn date_diff_calendar_units_preserve_same_bucket_and_mixed_types() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT DATE_DIFF('month', DATE '2024-02-01', TIMESTAMP '2024-02-29 23:59:59'), \
+                 DATE_DIFF('year', TIMESTAMP '1969-12-31 23:59:59', DATE '1970-01-01'), \
+                 DATE_DIFF('QUARTERS', DATE '2024-04-01', DATE '2024-06-30')"
+            )
+            .rows,
+        vec![vec![
+            SqlValue::BigInt(0),
+            SqlValue::BigInt(1),
+            SqlValue::BigInt(0),
+        ]]
+    );
+}
+
+#[test]
+fn date_diff_calendar_timestamp_inputs_count_month_boundary() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT DATE_DIFF('month', TIMESTAMP '2024-01-31 23:59:59', TIMESTAMP '2024-02-01')"
+            )
+            .rows,
+        vec![vec![SqlValue::BigInt(1)]]
+    );
+}
+
+#[test]
+fn date_diff_rejects_non_temporal_arguments() {
+    let harness = Harness::new();
+    for sql in [
+        "SELECT DATE_DIFF('day', TIME '12:00:00', DATE '2024-01-01')",
+        "SELECT DATE_DIFF('day', DATE '2024-01-01', INTERVAL '1' DAY)",
+        "SELECT DATE_DIFF(1, DATE '2024-01-01', DATE '2024-01-02')",
+    ] {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse SQL")
+            .pop()
+            .expect("one statement");
+        let error = Planner::new(&*harness.catalog.read().expect("catalog read"))
+            .plan(&statement)
+            .expect_err("invalid DATE_DIFF argument type");
+        assert!(
+            matches!(
+                error,
+                alopex_sql::planner::PlannerError::TypeMismatch { .. }
+            ),
+            "{sql}: {error:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn date_diff_calendar_matches_counted_boundaries(
+        start_offset in 0i64..1500,
+        end_offset in 0i64..1500,
+    ) {
+        let epoch = NaiveDate::from_ymd_opt(2022, 1, 1).expect("valid epoch");
+        let start = epoch + Duration::days(start_offset);
+        let end = epoch + Duration::days(end_offset);
+        let (earlier, later, sign) = if start <= end {
+            (start, end, 1)
+        } else {
+            (end, start, -1)
+        };
+        let mut expected = [0i64; 4];
+        let mut day = earlier + Duration::days(1);
+        while day <= later {
+            if day.month() == 1 && day.day() == 1 {
+                expected[0] += 1;
+            }
+            if day.day() == 1 {
+                expected[2] += 1;
+                if (day.month() - 1).is_multiple_of(3) {
+                    expected[1] += 1;
+                }
+            }
+            if day.weekday() == Weekday::Mon {
+                expected[3] += 1;
+            }
+            day += Duration::days(1);
+        }
+        let mut harness = Harness::new();
+        let sql = format!(
+            "SELECT DATE_DIFF('year', DATE '{start}', DATE '{end}'), \
+             DATE_DIFF('quarter', DATE '{start}', DATE '{end}'), \
+             DATE_DIFF('month', DATE '{start}', DATE '{end}'), \
+             DATE_DIFF('week', DATE '{start}', DATE '{end}')"
+        );
+        prop_assert_eq!(
+            harness.query(&sql).rows,
+            vec![vec![
+                SqlValue::BigInt(sign * expected[0]),
+                SqlValue::BigInt(sign * expected[1]),
+                SqlValue::BigInt(sign * expected[2]),
+                SqlValue::BigInt(sign * expected[3]),
+            ]],
+            "{}", sql
+        );
+    }
 }
 
 #[test]
