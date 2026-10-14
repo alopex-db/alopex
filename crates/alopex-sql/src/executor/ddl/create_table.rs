@@ -105,18 +105,6 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     Ok(ExecutionResult::Success)
 }
 
-/// Resolve PRIMARY KEY and UNIQUE index metadata for both catalog execution paths.
-pub(crate) fn constraint_indexes<C: Catalog + ?Sized>(
-    catalog: &mut C,
-    table: &TableMetadata,
-) -> Result<Vec<IndexMetadata>> {
-    let mut indexes = constraint_index_definitions(table)?;
-    for index in &mut indexes {
-        index.index_id = catalog.next_index_id();
-    }
-    Ok(indexes)
-}
-
 /// Resolve constraint definitions without allocating IDs or mutating the catalog.
 pub(crate) fn constraint_index_definitions(table: &TableMetadata) -> Result<Vec<IndexMetadata>> {
     let mut unique_columns = Vec::new();
