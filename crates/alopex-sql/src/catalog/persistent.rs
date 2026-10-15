@@ -658,6 +658,18 @@ impl TryFrom<PersistedTableMeta> for TableMetadata {
         table.comment = value.comment;
         table.properties = value.properties;
         table.constraints = constraints;
+        for name in defaults.keys() {
+            if !table
+                .columns
+                .iter()
+                .any(|column| column.name.as_str() == name.as_str())
+            {
+                return Err(CatalogError::InvalidMetadata(format!(
+                    "table {}, {COLUMN_DEFAULTS_PROPERTY}: unknown column '{name}'",
+                    table.name
+                )));
+            }
+        }
         for column in &mut table.columns {
             if let Some(default) = defaults.get(&column.name) {
                 column.default = Some(default.clone());
