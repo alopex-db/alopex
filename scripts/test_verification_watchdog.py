@@ -132,7 +132,7 @@ class WatchdogTests(unittest.TestCase):
         waits = [call.args[0] for call in monitor.selector.select.call_args_list]
         self.assertEqual(waits, [30, 5, 5])
 
-    def run_case(self, monitor, code, runtime=None, policy=None, descendant=False, watchdog=False):
+    def run_case(self, monitor, code, runtime=None, policy=None, descendant=False, watchdog=False, unit_child=False):
         with tempfile.TemporaryDirectory(prefix='codex-watchdog-') as directory:
             base = Path(directory)
             unit = f'codex-issue597-test-{os.getpid()}-{time.time_ns()}'
@@ -143,9 +143,15 @@ class WatchdogTests(unittest.TestCase):
                       sys.executable, '-B', '-c', code, str(base / 'child.pid')]
             if runtime is not None:
                 launch.insert(6, '--property=RuntimeMaxSec=' + runtime)
-            if watchdog:
+            if unit_child:
+                command_index = launch.index(sys.executable)
+                launch[command_index:command_index] = [
+                    sys.executable, '-B', str(Path(__file__).with_name('verification_watchdog.py')),
+                    '--unit-child', str(base / 'run-events.jsonl')]
+            if watchdog or unit_child:
                 launch[6:6] = ['--property=Type=notify', '--property=NotifyAccess=all',
-                              '--property=WatchdogSec=1', '--property=WatchdogSignal=SIGTERM']
+                              '--property=WatchdogSec=' + ('4' if unit_child else '1'),
+                              '--property=WatchdogSignal=SIGTERM']
             result = run_guarded(launch, unit, base / 'run', monitor,
                                  policy or ResourcePolicy())
             self.assertTrue(monitor.closed)
@@ -166,6 +172,14 @@ class WatchdogTests(unittest.TestCase):
             result, events = self.run_case(Observations(), code)
             self.assertEqual(result['status'], status)
             self.assertTrue(any(event['event'] == 'sample' for event in events))
+
+    def test_unit_child_preserves_status_and_renews_the_os_watchdog(self):
+        for exit_code, expected in [(0, 'success'), (7, 'failed')]:
+            code = f'import time; time.sleep(5); raise SystemExit({exit_code})'
+            result, _ = self.run_case(Observations(), code, unit_child=True)
+            self.assertEqual(result['status'], expected)
+            self.assertEqual(result['exit'], exit_code)
+            self.assertEqual(result['unit_state']['ExecMainStatus'], str(exit_code))
 
     def test_rejects_before_launch(self):
         for unsafe in ({'host_available_bytes': 0}, {'host_commit_available_bytes': 0},

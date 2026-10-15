@@ -92,7 +92,19 @@ responses to previous requests and measures the round trip with the guest's
 monotonic clock. Windows Stopwatch and WSL clock drift cannot accumulate into
 an observation-age error; missing or late correlated responses still stop the run.
 The verification unit separately enforces 4 GiB RAM, no swap, one CPU equivalent,
-128 tasks, with no elapsed execution-time limit. The watchdog stops the entire unit, including
+128 tasks, with no elapsed execution-time limit.
+
+The Windows observer remains available
+while its request pipe is open and exits on EOF; it has no idle deadline.
+The caller still requires a fresh correlated observation before continuing.
+
+For a generic verification command, launch
+`python3 -B scripts/verification_watchdog.py --unit-child EVENTS COMMAND [ARGS...]`
+inside a `Type=notify`, `NotifyAccess=all` unit with the existing OS watchdog.
+The wrapper renews that watchdog only while the parent's event stream advances
+and propagates the command's exit status.
+
+The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.
 The unit's OS watchdog receives heartbeats only while the parent event stream
 continues to advance. The parent heartbeat allows 20 seconds for the 5-second

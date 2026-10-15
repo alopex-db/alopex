@@ -202,3 +202,15 @@ def run_guarded(launch, unit, output_base, monitor, policy):
                 os.fsync(output.fileno())
             os.replace(temporary, final_path)
     return receipt
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 4 or sys.argv[1] != '--unit-child':
+        sys.exit('usage: verification_watchdog.py --unit-child EVENTS COMMAND [ARGS...]')
+    import threading
+
+    subprocess.run(['systemd-notify', '--ready'], check=True, timeout=2)
+    threading.Thread(target=keep_watchdog_alive, args=(Path(sys.argv[2]),),
+                     daemon=True).start()
+    code = subprocess.call(sys.argv[3:])
+    sys.exit(code if code >= 0 else 128 - code)

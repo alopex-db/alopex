@@ -23,12 +23,10 @@ $previous = $null
 $requestId = 0
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $heartbeat = [HostResources]::Heartbeat()
-$lastHeartbeat = $clock.Elapsed.TotalSeconds
-while (($null -ne $heartbeat) -and (($clock.Elapsed.TotalSeconds - $lastHeartbeat) -lt 10)) {
+while ($null -ne $heartbeat) {
     if ($heartbeat.IsCompleted) {
         if ($null -eq $heartbeat.Result) { break }
         $requestId = [long]::Parse($heartbeat.Result)
-        $lastHeartbeat = $clock.Elapsed.TotalSeconds
         $heartbeat = [HostResources]::Heartbeat()
     }
     $memory = [HostResources+Memory]::new()
