@@ -460,7 +460,7 @@ fn persistence_test_default_metadata_properties_do_not_escape_after_reload() {
 #[test]
 fn persistence_test_default_invalid_properties_fail_instead_of_losing_defaults() {
     use alopex_core::storage::format::bincode_config;
-    use alopex_sql::ast::expr::{Expr, ExprKind};
+    use alopex_sql::ast::expr::{Expr, ExprKind, Literal};
     use alopex_sql::catalog::RELATIONAL_CONSTRAINTS_PROPERTY;
     use alopex_sql::catalog::persistent::{PersistedTableMeta, TABLES_PREFIX};
     use bincode::Options;
@@ -477,9 +477,20 @@ fn persistence_test_default_invalid_properties_fail_instead_of_losing_defaults()
         ),
     )]))
     .unwrap();
+    let unknown_column_default = serde_json::to_string(&HashMap::from([(
+        "removed_column",
+        Expr::new(
+            ExprKind::Literal {
+                literal: Literal::Number("7".into()),
+            },
+            Default::default(),
+        ),
+    )]))
+    .unwrap();
     for (property, payload) in [
         ("alopex.column.defaults", "not valid JSON".to_owned()),
         ("alopex.column.defaults", non_finite_default),
+        ("alopex.column.defaults", unknown_column_default),
         (RELATIONAL_CONSTRAINTS_PROPERTY, "not valid JSON".to_owned()),
     ] {
         let store = Arc::new(MemoryKV::new());
@@ -502,14 +513,17 @@ fn persistence_test_default_invalid_properties_fail_instead_of_losing_defaults()
             .as_bytes(),
         );
         let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
-        txn.put(key, bincode_config().serialize(&persisted).unwrap())
-            .unwrap();
+        let original = bincode_config().serialize(&persisted).unwrap();
+        txn.put(key.clone(), original.clone()).unwrap();
         txn.commit_self().unwrap();
 
         assert!(
-            PersistentCatalog::load(store).is_err(),
+            PersistentCatalog::load(store.clone()).is_err(),
             "invalid {property} must not silently load a table with missing defaults/constraints"
         );
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(txn.get(&key).unwrap(), Some(original));
+        txn.rollback_self().unwrap();
     }
 }
 
