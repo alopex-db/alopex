@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor, Type};
@@ -497,6 +497,10 @@ impl<R: Read> CompactHeader<R> {
         let length = self.metadata_binary_length(context)?;
         let schema_key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
         let mut arrow_key = inspect_arrow_key && length == schema_key.len() as u64;
+        if !arrow_key {
+            self.skip_bytes(length)?;
+            return Ok((length, false));
+        }
         for index in 0..length {
             let byte = self.byte()?;
             if arrow_key && schema_key.get(index as usize) != Some(&byte) {
@@ -756,6 +760,22 @@ impl<R: Read> CompactHeader<R> {
         Ok(byte[0])
     }
 
+    fn skip_bytes(&mut self, mut length: u64) -> Result<()> {
+        // Reuse the existing buffer rather than decoding opaque payloads byte by byte.
+        while length != 0 {
+            let buffered = self.input.buffer().len() as u64;
+            if buffered == 0 {
+                self.byte()?;
+                length -= 1;
+            } else {
+                let consumed = length.min(buffered);
+                self.input.consume(consumed as usize);
+                length -= consumed;
+            }
+        }
+        Ok(())
+    }
+
     fn varint(&mut self) -> Result<u64> {
         let mut value = 0_u64;
         for shift in (0..70).step_by(7) {
@@ -862,9 +882,7 @@ impl<R: Read> CompactHeader<R> {
                 self.varint()?;
             }
             7 => {
-                for _ in 0..8 {
-                    self.byte()?;
-                }
+                self.skip_bytes(8)?;
             }
             8 => {
                 self.metadata_binary(context, false)?;
@@ -1013,18 +1031,14 @@ impl<R: Read> CompactHeader<R> {
                 self.varint()?;
             }
             7 => {
-                for _ in 0..8 {
-                    self.byte()?;
-                }
+                self.skip_bytes(8)?;
             }
             8 => {
                 let length = self.varint()?;
                 if length > self.remaining() {
                     return Err(invalid_page());
                 }
-                for _ in 0..length {
-                    self.byte()?;
-                }
+                self.skip_bytes(length)?;
             }
             9 | 10 => {
                 let list = self.byte()?;
@@ -1325,6 +1339,84 @@ mod tests {
                 added >= owned_lower_bound as u64,
                 "Field ID map storage must enter the shared reservation before Arrow conversion"
             );
+        }
+    }
+
+    #[test]
+    fn issue577_metadata_payload_consumption_preserves_bounds_and_reservation() {
+        let header = |bytes: Vec<u8>, capacity, maximum| {
+            let length = bytes.len() as u64;
+            CompactHeader {
+                input: BufReader::with_capacity(capacity, std::io::Cursor::new(bytes).take(length)),
+                maximum,
+                decoded_bytes: 0,
+                retained_key_values: 0,
+                retained_other_metadata: 0,
+                schema_path: Vec::new(),
+                schema_root_seen: false,
+                schema_leaves: 0,
+                has_arrow_schema: false,
+                arrow_schema: None,
+                file_key_values: 0,
+            }
+        };
+        let length = 4097_u64;
+        let reservation = length + std::mem::size_of::<bytes::Bytes>() as u64;
+        let mut bytes = vec![0x81, 0x20];
+        bytes.resize(2 + length as usize, b'x');
+        bytes.push(0x2a);
+        for capacity in [0, 1, 7, 4096] {
+            let mut input = header(bytes.clone(), capacity, reservation);
+            assert_eq!(
+                input.metadata_binary("RetainedStatistics", false).unwrap(),
+                (length, false)
+            );
+            assert_eq!(input.decoded_bytes, reservation);
+            assert_eq!(input.retained_other_metadata, reservation);
+            assert_eq!(input.remaining(), 1);
+            assert_eq!(input.byte().unwrap(), 0x2a);
+            assert_eq!(input.remaining(), 0);
+
+            let mut input = header(bytes.clone(), capacity, reservation - 1);
+            assert!(matches!(
+                input.metadata_binary("RetainedStatistics", false),
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+            assert_eq!(input.remaining(), length + 1);
+
+            let mut input = header(bytes.clone(), capacity, reservation);
+            input.skip(8, 0).unwrap();
+            assert_eq!(input.decoded_bytes, 0);
+            assert_eq!(input.remaining(), 1);
+            assert_eq!(input.byte().unwrap(), 0x2a);
+
+            // A file can become shorter after its declared length was checked.
+            let mut input = header(bytes[..bytes.len() - 2].to_vec(), capacity, reservation);
+            input.input.get_mut().set_limit(bytes.len() as u64);
+            assert!(input.metadata_binary("RetainedStatistics", false).is_err());
+
+            let key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
+            for matches in [true, false] {
+                let mut bytes = vec![key.len() as u8];
+                bytes.extend_from_slice(key);
+                if !matches {
+                    *bytes.last_mut().unwrap() = b'!';
+                }
+                bytes.push(0x2a);
+                let mut input = header(bytes, capacity, reservation);
+                assert_eq!(
+                    input.metadata_binary("FileKeyValue", true).unwrap(),
+                    (key.len() as u64, matches)
+                );
+                assert_eq!(input.retained_key_values, key.len() as u64);
+                assert_eq!(input.byte().unwrap(), 0x2a);
+            }
+
+            for available in 0..8 {
+                let mut input = header(vec![0; available], capacity, reservation);
+                input.input.get_mut().set_limit(8);
+                assert!(input.metadata_value(7, 0, "", 0, 0).is_err());
+            }
         }
     }
 
