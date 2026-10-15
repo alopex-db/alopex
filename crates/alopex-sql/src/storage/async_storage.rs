@@ -20,8 +20,7 @@ use crate::executor::{
 };
 use crate::parser::Parser;
 use crate::planner::{
-    LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing,
-    plan_sql_for_routing_with_copy_security,
+    LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing_with_read_options,
 };
 use crate::storage::bridge::HnswTxnEntry;
 use crate::storage::error::{Result as StorageResult, StorageError};
@@ -125,16 +124,15 @@ where
         };
         let sql = sql.to_string();
         let copy_security = self.copy_security.clone();
+        let memory_policy = self.memory_policy.clone();
         Box::pin(async move {
             let guard = catalog.read().expect("catalog lock poisoned");
-            let result = match copy_security {
-                Some(config) => plan_sql_for_routing_with_copy_security(&*guard, &sql, &config),
-                None => plan_sql_for_routing(&*guard, &sql),
-            };
-            result.map_err(|err| ExecutorError::InvalidOperation {
-                operation: "async_plan_for_routing".into(),
-                reason: err.to_string(),
-            })
+            plan_sql_for_routing_with_read_options(
+                &*guard,
+                &sql,
+                copy_security.as_ref(),
+                memory_policy.as_ref(),
+            )
         })
     }
 
@@ -516,10 +514,12 @@ where
     for stmt in statements {
         let plan = {
             let guard = catalog.read().expect("catalog lock poisoned");
-            match read_security {
-                Some(config) => Planner::with_copy_security(&*guard, config.clone()).plan(&stmt)?,
-                None => Planner::new(&*guard).plan(&stmt)?,
+            let planner = match read_security {
+                Some(config) => Planner::with_copy_security(&*guard, config.clone()),
+                None => Planner::new(&*guard),
             }
+            .with_memory_policy(txn.memory_policy());
+            planner.plan(&stmt)?
         };
 
         let op_name = plan.operation_name();
@@ -845,12 +845,12 @@ fn stream_query_blocking<T>(
 
     let plan = {
         let guard = catalog.read().expect("catalog lock poisoned");
-        let result = match read_security {
-            Some(config) => {
-                Planner::with_copy_security(&*guard, config.clone()).plan(&statements[0])
-            }
-            None => Planner::new(&*guard).plan(&statements[0]),
-        };
+        let planner = match read_security {
+            Some(config) => Planner::with_copy_security(&*guard, config.clone()),
+            None => Planner::new(&*guard),
+        }
+        .with_memory_policy(txn.memory_policy());
+        let result = planner.plan(&statements[0]);
         match result {
             Ok(plan) => plan,
             Err(err) => {

@@ -1086,36 +1086,41 @@ fn issue577_embedded_arrow_root_metadata_shared_budget_before_allocation() {
     embedded_arrow_metadata_shared_budget(true);
 }
 
-fn embedded_arrow_metadata_shared_budget(root: bool) {
+fn embedded_arrow_metadata_fixture(root: bool, entries: usize) -> tempfile::NamedTempFile {
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
 
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let metadata = (0..entries)
+        .map(|index| (format!("k{index:04}"), String::new()))
+        .collect();
+    let field = Field::new("id", DataType::Int64, false);
+    let schema = Arc::new(if root {
+        Schema::new_with_metadata(vec![field], metadata)
+    } else {
+        Schema::new(vec![field.with_metadata(metadata)])
+    });
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(vec![7; 16]))],
+    )
+    .unwrap();
+    let mut writer =
+        ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    file
+}
+
+fn embedded_arrow_metadata_shared_budget(root: bool) {
     for (limit, entries, may_reject) in [
         (None, 400, false),
         (Some(LIMIT), 1, false),
         (Some(LIMIT), 400, true),
         (Some(LIMIT * 4), 400, false),
     ] {
-        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
-        let metadata = (0..entries)
-            .map(|index| (format!("k{index:04}"), String::new()))
-            .collect();
-        let field = Field::new("id", DataType::Int64, false);
-        let schema = Arc::new(if root {
-            Schema::new_with_metadata(vec![field], metadata)
-        } else {
-            Schema::new(vec![field.with_metadata(metadata)])
-        });
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int64Array::from(vec![7; 16]))],
-        )
-        .unwrap();
-        let mut writer =
-            ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
+        let file = embedded_arrow_metadata_fixture(root, entries);
         LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
         let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
         let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
@@ -1144,6 +1149,163 @@ fn embedded_arrow_metadata_shared_budget(root: bool) {
             assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; 16]);
         }
     }
+}
+
+#[cfg(feature = "tokio")]
+fn begin_async_observation() {
+    LIVE_ALLOCATIONS.with(|observed| {
+        let mut value = LiveAllocations::new();
+        value.active = true;
+        *observed.borrow_mut() = Some(value);
+    });
+    MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
+}
+
+#[cfg(feature = "tokio")]
+fn end_async_observation() -> (usize, usize, bool) {
+    let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+    LIVE_ALLOCATIONS.with(|observed| {
+        let value = observed.borrow_mut().take().unwrap();
+        (value.peak, maximum, value.exhausted)
+    })
+}
+
+#[cfg(feature = "tokio")]
+fn async_planning_metadata_budget(api: &str) {
+    use alopex_core::kv::AsyncKVStore;
+    use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
+    use alopex_core::types::TxnMode;
+    use alopex_sql::catalog::Catalog;
+    use alopex_sql::executor::bulk::CopySecurityConfig;
+    use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
+    use futures::StreamExt;
+    use std::sync::RwLock;
+
+    // The KV adapter owns one worker; the other follows the observed public SQL call.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(2)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for secured in [false, true] {
+            for (limit, entries) in [
+                (None, 400),
+                (Some(LIMIT), 1),
+                (Some(LIMIT), 400),
+                (Some(LIMIT * 4), 400),
+            ] {
+                let file = embedded_arrow_metadata_fixture(false, entries);
+                let path = file.path().canonicalize().unwrap();
+                let sql = format!("SELECT * FROM read_parquet('{}')", path.display());
+                let store = AsyncKVStoreAdapter::from_arc(
+                    Arc::new(MemoryKV::new()),
+                    TxnMode::ReadWrite,
+                );
+                let transaction = store.begin_async().await.unwrap();
+                let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+                    Arc::new(RwLock::new(MemoryCatalog::new()));
+                let mut bridge =
+                    AsyncTxnBridge::with_catalog(transaction, TxnMode::ReadWrite, catalog);
+                bridge.async_execute("SELECT 1").await.unwrap();
+                bridge.set_memory_policy(limit.map(|limit| {
+                    MemoryPolicy::new(Some(limit as u64), SpillPolicy::FailFast)
+                }));
+                if secured {
+                    bridge.set_copy_security(CopySecurityConfig {
+                        allowed_base_dirs: Some(vec![path.parent().unwrap().to_path_buf()]),
+                        allow_symlinks: false,
+                    });
+                }
+                if api == "routing" {
+                    begin_async_observation();
+                } else {
+                    tokio::task::spawn_blocking(begin_async_observation)
+                        .await
+                        .unwrap();
+                }
+                let result = match api {
+                    "execute" => bridge.async_execute(&sql).await.map(|result| {
+                        let ExecutionResult::Query(result) = result else {
+                            panic!("expected query rows");
+                        };
+                        result.rows
+                    }),
+                    "query" => {
+                        let rows: Vec<_> = bridge.async_query(&sql).collect().await;
+                        rows.into_iter().map(|row| row.map(|row| row.values)).collect()
+                    }
+                    "routing" => bridge.async_plan_for_routing(&sql).await.map(|plans| {
+                        assert_eq!(plans.len(), 1);
+                        Vec::new()
+                    }),
+                    _ => unreachable!(),
+                };
+                let (peak, maximum, exhausted) = if api == "routing" {
+                    end_async_observation()
+                } else {
+                    tokio::task::spawn_blocking(end_async_observation)
+                        .await
+                        .unwrap()
+                };
+                println!(
+                    "async_metadata api={api} secured={secured} limit={limit:?} entries={entries} rust_live_peak_bytes={peak} maximum_request={maximum} rejected={}",
+                    result.is_err()
+                );
+                assert!(!exhausted);
+                if let Some(limit) = limit {
+                    assert!(maximum <= limit, "planning requested an allocation beyond its budget");
+                    assert!(peak <= limit, "planning metadata exceeded its shared budget");
+                }
+                if limit == Some(LIMIT) && entries == 400 {
+                    assert!(matches!(result, Err(ExecutorError::ResourceExhausted { .. })));
+                } else if api == "routing" {
+                    result.unwrap();
+                } else {
+                    assert_eq!(result.unwrap(), vec![vec![SqlValue::BigInt(7)]; 16]);
+                }
+            }
+        }
+    });
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn issue577_async_execute_planning_metadata_budget() {
+    async_planning_metadata_budget("execute");
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn issue577_async_query_planning_metadata_budget() {
+    async_planning_metadata_budget("query");
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn issue577_async_routing_planning_metadata_budget() {
+    async_planning_metadata_budget("routing");
+}
+
+#[test]
+fn issue577_planning_resource_error_preserves_kind_and_code() {
+    use alopex_sql::SqlError;
+    use alopex_sql::planner::PlannerError;
+
+    let ordinary = ExecutorError::from(PlannerError::invalid_expression("invalid input"));
+    assert!(matches!(&ordinary, ExecutorError::Planner(_)));
+    assert!(std::error::Error::source(&ordinary).is_some());
+
+    let resource = PlannerError::ResourceExhausted {
+        message: "configured metadata limit".into(),
+    };
+    let execution = ExecutorError::from(resource.clone());
+    assert!(matches!(
+        &execution,
+        ExecutorError::ResourceExhausted { .. }
+    ));
+    assert_eq!(SqlError::from(execution).code(), "ALOPEX-E003");
+    assert_eq!(SqlError::from(resource).code(), "ALOPEX-E003");
 }
 
 #[test]

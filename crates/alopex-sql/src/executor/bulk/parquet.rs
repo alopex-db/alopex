@@ -215,15 +215,31 @@ impl ParquetReader {
 }
 
 pub fn parquet_schema(path: &str) -> Result<CopySchema> {
-    let file = File::open(path)
-        .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?;
-    parquet_schema_from_file(file)
+    parquet_schema_with_read_options(path, None, None)
 }
 
-fn parquet_schema_from_file(file: File) -> Result<CopySchema> {
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
-        ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
-    })?;
+pub(crate) fn parquet_schema_with_read_options(
+    path: &str,
+    security: Option<&CopySecurityConfig>,
+    limit: Option<u64>,
+) -> Result<CopySchema> {
+    let mut file = match security {
+        Some(config) => open_input_file(path, config)?,
+        None => File::open(path)
+            .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
+    };
+    let footer = limit
+        .map(|limit| check_footer(&mut file, limit))
+        .transpose()?;
+    let options = ArrowReaderOptions::new().with_skip_arrow_metadata(
+        footer
+            .as_ref()
+            .is_some_and(|footer| !footer.has_arrow_schema),
+    );
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new_with_options(file, options).map_err(|error| {
+            ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
+        })?;
     builder
         .schema()
         .fields()
@@ -236,13 +252,6 @@ fn parquet_schema_from_file(file: File) -> Result<CopySchema> {
         })
         .collect::<Result<Vec<_>>>()
         .map(|fields| CopySchema { fields })
-}
-
-pub(crate) fn parquet_schema_with_security(
-    path: &str,
-    config: &CopySecurityConfig,
-) -> Result<CopySchema> {
-    parquet_schema_from_file(open_input_file(path, config)?)
 }
 
 pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {

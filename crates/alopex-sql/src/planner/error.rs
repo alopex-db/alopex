@@ -11,6 +11,9 @@ use thiserror::Error;
 /// Planner errors for the Alopex SQL dialect.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PlannerError {
+    /// Configured READ_PARQUET metadata budget exceeded before decoding.
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted { message: String },
     /// Invalid PRAGMA name or value.
     #[error("invalid PRAGMA '{name}': {reason}")]
     InvalidPragma { name: String, reason: String },
