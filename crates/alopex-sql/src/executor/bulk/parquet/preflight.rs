@@ -219,12 +219,16 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
 }
 
 pub(super) fn check_pages(
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     metadata: &parquet::file::metadata::ParquetMetaData,
     footer_start: u64,
     limit: u64,
     mut reserved_bytes: u64,
 ) -> Result<u64> {
+    // Transient buffering uses only headroom not already reserved for retained data.
+    let capacity = limit.saturating_sub(reserved_bytes).min(4096) as usize;
+    let mut input = BufReader::with_capacity(capacity, file);
+    let mut previous_end = None;
     for group in metadata.row_groups() {
         for column in group.columns() {
             let offset = column
@@ -239,16 +243,16 @@ pub(super) fn check_pages(
             if start < 4 {
                 return Err(invalid_page());
             }
+            if previous_end != Some(start) {
+                input
+                    .seek(SeekFrom::Start(start))
+                    .map_err(parquet_io_error)?;
+            }
             let mut position = start;
             while position < end {
-                file.seek(SeekFrom::Start(position))
-                    .map_err(parquet_io_error)?;
                 let maximum = (end - position).min(limit);
                 let mut header = CompactHeader {
-                    input: BufReader::with_capacity(
-                        maximum.min(4096) as usize,
-                        (&mut *file).take(maximum),
-                    ),
+                    input: BufReader::with_capacity(0, (&mut input).take(maximum)),
                     maximum,
                     decoded_bytes: 0,
                     retained_key_values: 0,
@@ -262,6 +266,7 @@ pub(super) fn check_pages(
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
                 let consumed = maximum - header.remaining();
+                drop(header);
                 check_declared_bytes(uncompressed, limit)?;
                 check_declared_bytes(compressed, limit)?;
                 // Bound the header copy, decoded binary fields, and moved statistics owners.
@@ -304,7 +309,11 @@ pub(super) fn check_pages(
                     .and_then(|p| p.checked_add(compressed))
                     .filter(|p| *p <= end)
                     .ok_or_else(invalid_page)?;
+                input
+                    .seek_relative(i64::try_from(compressed).map_err(|_| invalid_page())?)
+                    .map_err(parquet_io_error)?;
             }
+            previous_end = Some(end);
         }
     }
     Ok(reserved_bytes)
@@ -1317,5 +1326,94 @@ mod tests {
                 "Field ID map storage must enter the shared reservation before Arrow conversion"
             );
         }
+    }
+
+    #[test]
+    fn issue577_page_preflight_buffers_io_and_preserves_shared_budget() {
+        struct CountedFile {
+            file: File,
+            reads: usize,
+        }
+        impl Read for CountedFile {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                self.file.read(bytes)
+            }
+        }
+        impl Seek for CountedFile {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(position)
+            }
+        }
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let fields = (0..4)
+            .map(|column| {
+                Arc::new(
+                    Type::primitive_type_builder(&format!("c{column}"), PhysicalType::INT64)
+                        .with_repetition(Repetition::REQUIRED)
+                        .build()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let schema = Arc::new(
+            Type::group_type_builder("fixture")
+                .with_fields(fields)
+                .build()
+                .unwrap(),
+        );
+        let mut writer = SerializedFileWriter::new(
+            File::create(file.path()).unwrap(),
+            schema,
+            Arc::new(WriterProperties::default()),
+        )
+        .unwrap();
+        for value in 0..128 {
+            let mut group = writer.next_row_group().unwrap();
+            while let Some(mut column) = group.next_column().unwrap() {
+                column
+                    .typed::<Int64Type>()
+                    .write_batch(&[value], None, None)
+                    .unwrap();
+                column.close().unwrap();
+            }
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let footer = check_footer(&mut File::open(file.path()).unwrap(), u64::MAX).unwrap();
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap()).unwrap();
+        let metadata = builder.metadata();
+        let mut input = CountedFile {
+            file: File::open(file.path()).unwrap(),
+            reads: 0,
+        };
+        let reserved = check_pages(&mut input, metadata, footer.start, u64::MAX, 0).unwrap();
+        // Contiguous tiny pages must share bounded reads, rather than one read per header.
+        let maximum_reads = footer.start.div_ceil(4096) as usize + 2;
+        println!(
+            "page_preflight_reads={} maximum_reads={maximum_reads} reserved={reserved}",
+            input.reads
+        );
+        assert!(
+            input.reads <= maximum_reads,
+            "page reads must scale with bytes, not page count"
+        );
+        assert_eq!(
+            check_pages(&mut input, metadata, footer.start, reserved, 0).unwrap(),
+            reserved
+        );
+        assert!(matches!(
+            check_pages(&mut input, metadata, footer.start, reserved - 1, 0),
+            Err(ExecutorError::ResourceExhausted { .. })
+        ));
+        let reversed = parquet::file::metadata::ParquetMetaData::new(
+            metadata.file_metadata().clone(),
+            metadata.row_groups().iter().rev().cloned().collect(),
+        );
+        assert_eq!(
+            check_pages(&mut input, &reversed, footer.start, u64::MAX, 0).unwrap(),
+            reserved
+        );
     }
 }
