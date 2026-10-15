@@ -71,6 +71,26 @@ def test_transaction_stream_rendered_decimal_is_exact(db):
         txn.rollback()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1E+38"),
+        Decimal("1E-39"),
+        Decimal("1E+1000000"),
+    ],
+)
+def test_transaction_stream_rejects_unrepresentable_decimal_before_render(db, value):
+    txn = db.begin(TxnMode.READ_WRITE)
+    try:
+        with pytest.raises(ValueError, match="Decimal") as error:
+            txn.execute_sql_stream("SELECT ? AS amount", [value])
+        assert error.value.code == "ALOPEX-PY017"
+    finally:
+        txn.rollback()
+
+
 def test_parameter_binding_keeps_native_and_mixed_paths(db):
     db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
     assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1

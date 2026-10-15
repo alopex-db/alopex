@@ -90,7 +90,11 @@ fn native_binding(native: SqlValue) -> PyPreparedBinding {
     PyPreparedBinding::Native(native)
 }
 
-fn decimal_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<Option<PyPreparedBinding>> {
+/// Apply the same finite, precision, and scale limits to native and rendered Decimals.
+fn decimal_value(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+) -> PyResult<Option<(DecimalValue, String)>> {
     let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
     if !value.is_instance(&decimal_type)? {
         return Ok(None);
@@ -123,7 +127,7 @@ fn decimal_binding(value: &Bound<'_, PyAny>, index: usize) -> PyResult<Option<Py
         .call_method1("__format__", ("f",))?
         .extract::<String>()?;
     let decimal = DecimalValue::parse(&rendered).ok_or_else(invalid)?;
-    Ok(Some(native_binding(SqlValue::Decimal(decimal))))
+    Ok(Some((decimal, rendered)))
 }
 
 pub(crate) fn render_prepared_binding(
@@ -208,8 +212,8 @@ pub(crate) fn prepared_binding(
     if value.is_instance_of::<PyBytes>() || value.is_instance_of::<PyByteArray>() {
         return Ok(PyPreparedBinding::Rendered(render_param(value, index)?));
     }
-    if let Some(binding) = decimal_binding(value, index)? {
-        return Ok(binding);
+    if let Some((decimal, _)) = decimal_value(value, index)? {
+        return Ok(native_binding(SqlValue::Decimal(decimal)));
     }
     reject_mapping_or_set(value, index)?;
     if let Ok(iter) = value.try_iter() {
@@ -460,11 +464,7 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
-    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
-    if value.is_instance(&decimal_type)? {
-        let text = value
-            .call_method1("__format__", ("f",))?
-            .extract::<String>()?;
+    if let Some((_, text)) = decimal_value(value, index)? {
         return Ok(format!("DECIMAL {}", escape_text(&text)));
     }
     if value.is_instance_of::<PyString>() {
@@ -742,6 +742,25 @@ mod tests {
             for text in ["NaN", "Infinity", "1E+38", "1E-39"] {
                 let value = decimal.call1((text,)).unwrap();
                 assert!(super::prepared_binding(&value, 0).is_err(), "{text}");
+            }
+        });
+    }
+
+    #[test]
+    fn rendered_decimal_is_exact_and_bounded_before_sql_allocation() {
+        with_py(|py| {
+            let decimal = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            let valid = decimal.call1(("12345678901234567.89",)).unwrap();
+            assert_eq!(
+                super::render_param(&valid, 0).unwrap(),
+                "DECIMAL '12345678901234567.89'"
+            );
+            for text in ["NaN", "Infinity", "1E+38", "1E-39", "1E+1000000"] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(super::render_param(&value, 0).is_err(), "{text}");
             }
         });
     }

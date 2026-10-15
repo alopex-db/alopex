@@ -344,6 +344,16 @@ def test_remote_decimal_binding_preserves_digits_and_rejects_containers(stub):
         for invalid in (UserDict({1: "x"}), MappingProxyType({1: "x"}), {1}):
             with pytest.raises(TypeError):
                 db.execute_sql("SELECT ? AS amount", [invalid])
+        for invalid in (
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("1E+38"),
+            Decimal("1E-39"),
+            Decimal("1E+1000000"),
+        ):
+            with pytest.raises(ValueError, match="Decimal") as error:
+                db.execute_sql("SELECT ? AS amount", [invalid])
+            assert error.value.code == "ALOPEX-PY017"
         assert len(stub.requests) == before
 
 
