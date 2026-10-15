@@ -361,8 +361,18 @@ build_host() (
     set +e
     cleanup_status=0
     if [[ "${build_root_created}" == "1" ]]; then
-      rm -rf -- "${build_root}"
-      cleanup_status=$?
+      # Windows runners can retain a just-closed Nim output handle briefly.
+      # Retry only this invocation's canonical build root, then fail visibly.
+      for attempt in 1 2 3 4 5; do
+        if rm -rf -- "${build_root}" && [[ ! -e "${build_root}" ]]; then
+          cleanup_status=0
+          break
+        fi
+        cleanup_status=1
+        if [[ "${attempt}" != "5" ]]; then
+          sleep 1
+        fi
+      done
     fi
     if [[ "${build_lock_created}" == "1" ]]; then
       rmdir -- "${build_lock}" || cleanup_status=1
