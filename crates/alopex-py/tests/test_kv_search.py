@@ -64,3 +64,25 @@ def test_transaction_key_search_requires_a_supported_mode():
             txn.search_keys(b"*", mode="literal")
     finally:
         db.close()
+
+
+def test_transaction_enumeration_reflects_uncommitted_put_and_delete():
+    db = Database.new()
+    try:
+        seed = db.begin(TxnMode.READ_WRITE)
+        seed.put(b"cart:42:removed", b"old")
+        seed.put(b"cart:42:retained", b"keep")
+        seed.commit()
+
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.delete(b"cart:42:removed")
+        txn.put(b"cart:42:new", b"new")
+        expected = [(b"cart:42:new", b"new"), (b"cart:42:retained", b"keep")]
+
+        assert list(txn.scan_prefix(b"cart:42:")) == expected
+        assert list(txn.scan_range(b"cart:42:", b"cart:43:")) == expected
+        assert txn.search_keys(b"cart:42:*")["entries"] == expected
+        assert txn.search_keys(r"^cart:42:", mode="regex")["entries"] == expected
+        txn.rollback()
+    finally:
+        db.close()
