@@ -65,16 +65,24 @@ pub(super) fn rollback_tracked_for_database_close(
                 }
             };
             #[cfg(test)]
-            if rollback_fail_count
-                .fetch_update(
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                    |remaining| remaining.checked_sub(1),
-                )
-                .is_ok()
             {
-                first_error.get_or_insert(CloseError::Injected);
-                return true;
+                use std::sync::atomic::Ordering::SeqCst;
+
+                let mut remaining = rollback_fail_count.load(SeqCst);
+                while remaining != 0 {
+                    match rollback_fail_count.compare_exchange_weak(
+                        remaining,
+                        remaining - 1,
+                        SeqCst,
+                        SeqCst,
+                    ) {
+                        Ok(_) => {
+                            first_error.get_or_insert(CloseError::Injected);
+                            return true;
+                        }
+                        Err(actual) => remaining = actual,
+                    }
+                }
             }
             if let Some(txn) = transaction.as_mut() {
                 if let Err(error) = txn.rollback() {
