@@ -317,10 +317,9 @@ impl HnswGraph {
             }
         }
 
-        let mut ef = ef_search;
-        if ef < k {
-            ef = k;
-        }
+        // Deleted nodes still occupy candidate slots during traversal. Capping by
+        // active nodes can discard a live result when a tombstone is nearer.
+        let ef = ef_search.max(k).min(self.nodes.len());
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
 
