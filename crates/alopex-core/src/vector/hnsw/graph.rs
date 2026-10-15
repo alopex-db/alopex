@@ -317,8 +317,9 @@ impl HnswGraph {
             }
         }
 
-        let active_count = usize::try_from(self.active_count).unwrap_or(usize::MAX);
-        let ef = ef_search.max(k).min(active_count);
+        // Deleted nodes still occupy candidate slots during traversal. Capping by
+        // active nodes can discard a live result when a tombstone is nearer.
+        let ef = ef_search.max(k).min(self.nodes.len());
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
 
