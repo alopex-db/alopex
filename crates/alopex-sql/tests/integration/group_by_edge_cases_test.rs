@@ -121,6 +121,73 @@ fn group_by_rejects_invalid_positions_and_aggregate_keys() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn group_by_rejects_nonintegral_negative_and_overflow_positions() {
+    let mut harness = TestHarness::new();
+    harness.execute_sql("CREATE TABLE items (value INT);");
+
+    for key in ["1.5", "-1"] {
+        let sql = format!("SELECT COUNT(*) FROM items GROUP BY {key}");
+        let statements =
+            alopex_sql::parser::Parser::parse_sql(&alopex_sql::dialect::AlopexDialect, &sql)
+                .unwrap();
+        let guard = harness.catalog().read().unwrap();
+        let err = alopex_sql::planner::Planner::new(&*guard)
+            .plan(&statements[0])
+            .unwrap_err();
+        assert!(
+            matches!(err, PlannerError::InvalidExpression { .. }),
+            "{sql}: {err}"
+        );
+        assert!(
+            err.to_string().contains("GROUP BY position"),
+            "{sql}: {err}"
+        );
+    }
+
+    let sql = "SELECT COUNT(*) FROM items GROUP BY 9999999999999999999999999999999999999999999";
+    assert!(
+        alopex_sql::parser::Parser::parse_sql(&alopex_sql::dialect::AlopexDialect, sql).is_err(),
+        "out-of-range integer position must be rejected before planning"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn group_by_rejects_window_projection_position() {
+    let mut harness = TestHarness::new();
+    harness.execute_sql("CREATE TABLE items (value INT);");
+    let sql = "SELECT ROW_NUMBER() OVER (ORDER BY value) AS rn FROM items GROUP BY 1";
+    let statements =
+        alopex_sql::parser::Parser::parse_sql(&alopex_sql::dialect::AlopexDialect, sql).unwrap();
+    let guard = harness.catalog().read().unwrap();
+    let err = alopex_sql::planner::Planner::new(&*guard)
+        .plan(&statements[0])
+        .unwrap_err();
+    assert!(
+        matches!(err, PlannerError::InvalidExpression { .. }),
+        "{sql}: {err}"
+    );
+    assert!(err.to_string().contains("window functions"), "{sql}: {err}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn group_by_allows_negative_column_expression() {
+    let mut harness = TestHarness::new();
+    harness.execute_sql("CREATE TABLE items (value INT); INSERT INTO items VALUES (1), (1), (2);");
+    let result =
+        harness.query_sql("SELECT -value AS neg, COUNT(*) FROM items GROUP BY -value ORDER BY neg");
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(-2), SqlValue::BigInt(1)],
+            vec![SqlValue::Integer(-1), SqlValue::BigInt(2)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn group_by_expression_preserves_null_groups_and_having() {
     let mut harness = TestHarness::new();
     harness.execute_sql(

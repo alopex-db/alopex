@@ -24,7 +24,7 @@ pub mod registry;
 pub(crate) mod string;
 mod timestamp;
 pub(crate) mod type_fn;
-mod unary_op;
+pub(crate) mod unary_op;
 pub mod vector_ops;
 
 pub use vector_ops::{VectorError, VectorMetric, vector_distance, vector_similarity};
