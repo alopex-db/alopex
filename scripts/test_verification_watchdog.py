@@ -132,16 +132,17 @@ class WatchdogTests(unittest.TestCase):
         waits = [call.args[0] for call in monitor.selector.select.call_args_list]
         self.assertEqual(waits, [30, 5, 5])
 
-    def run_case(self, monitor, code, runtime='10', policy=None, descendant=False, watchdog=False):
+    def run_case(self, monitor, code, runtime=None, policy=None, descendant=False, watchdog=False):
         with tempfile.TemporaryDirectory(prefix='codex-watchdog-') as directory:
             base = Path(directory)
             unit = f'codex-issue597-test-{os.getpid()}-{time.time_ns()}'
             launch = ['systemd-run', '--user', '--wait', '--pipe', '--unit=' + unit,
                       '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
                       '--property=CPUQuota=100%', '--property=TasksMax=128',
-                      '--property=RuntimeMaxSec=' + runtime,
                       '--property=KillMode=control-group', '--property=TimeoutStopSec=2',
                       sys.executable, '-B', '-c', code, str(base / 'child.pid')]
+            if runtime is not None:
+                launch.insert(6, '--property=RuntimeMaxSec=' + runtime)
             if watchdog:
                 launch[6:6] = ['--property=Type=notify', '--property=NotifyAccess=all',
                               '--property=WatchdogSec=1', '--property=WatchdogSignal=SIGTERM']

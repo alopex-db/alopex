@@ -92,7 +92,7 @@ responses to previous requests and measures the round trip with the guest's
 monotonic clock. Windows Stopwatch and WSL clock drift cannot accumulate into
 an observation-age error; missing or late correlated responses still stop the run.
 The verification unit separately enforces 4 GiB RAM, no swap, one CPU equivalent,
-128 tasks and a 600-second deadline. The watchdog stops the entire unit, including
+128 tasks, with no elapsed execution-time limit. The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.
 The unit's OS watchdog receives heartbeats only while the parent event stream
 continues to advance. The parent heartbeat allows 20 seconds for the 5-second

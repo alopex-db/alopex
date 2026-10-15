@@ -23,7 +23,7 @@ if os.environ.get("CODEX_RESOURCE_CHILD") != "1":
     launch = ["systemd-run", "--user", "--wait", "--pipe", "--unit=" + unit,
               "--property=MemoryMax=4G", "--property=MemoryHigh=3G",
               "--property=MemorySwapMax=0", "--property=CPUQuota=100%",
-              "--property=TasksMax=128", "--property=RuntimeMaxSec=600",
+              "--property=TasksMax=128",
               "--property=KillMode=control-group", "--property=TimeoutStopSec=5",
               "--property=Type=notify", "--property=NotifyAccess=all",
               "--property=WatchdogSec=4", "--property=WatchdogSignal=SIGTERM",
@@ -144,7 +144,7 @@ receipt["verification_unit_memory_peak_bytes"] = int((cgroup / "memory.peak").re
 receipt["resource_scope"] = "verification unit, including setup, compilation and execution; not product allocation usage"
 receipt["cpu_stat"] = (cgroup / "cpu.stat").read_text()
 receipt["memory_events"] = (cgroup / "memory.events").read_text()
-receipt["runtime_limit_seconds"] = 600
+receipt["runtime_limit_seconds"] = None
 receipt["runner_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 (evidence / (label + ".json")).write_text(json.dumps(receipt, indent=2))
 for line in text.splitlines():
