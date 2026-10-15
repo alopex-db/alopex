@@ -6,7 +6,7 @@
 **Silent. Adaptive. Unbreakable.**
 
 The unified database engine that scales from a single embedded file to a globally distributed cluster.  
-Native SQL, Vector Search, and Graph capabilities in one Rust-based engine.
+Native SQL and Vector Search today, with a Property Graph track planned for v1.x.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/alopex-db/alopex?sort=semver&label=latest)](https://github.com/alopex-db/alopex/releases/latest)
@@ -43,15 +43,17 @@ Start small, scale infinitely without changing your data model.
 | **Single-Node** | Microservices, Dev/Test Envs | Standalone Server (Postgres-compatible*) |
 | **Distributed** | High-Availability Production | Shared-nothing Cluster (Range Sharding + Raft) |
 
-### 2. Native Vector & Graph Support
+### 2. Native Vector Support and a Planned Graph Layer
 Vectors are not an afterthought. Alopex treats `vector<float, N>` as a first-class citizen within ACID transactions.
 * **Hybrid Search:** Filter by SQL metadata and sort by vector similarity in a single query.
-* **Graph-Ready:** Optimized specifically for Knowledge Graph storage (nodes/edges) alongside embeddings.
+* **Property Graph (planned for v1.x):** Keep relational tables as the source of truth, then add a graph catalog, transactional adjacency index, SQL/PGQ-style queries, and GraphRAG traversal.
 
-### 3. Lake-Link Architecture (Parquet Integration)
+### 3. Lake-Link Architecture (planned for v1.x)
 Bridge the gap between your Data Lake (S3) and your AI Application.
-* **Zero-ETL Import:** Directly ingest Parquet files and transform them into indexed Vectors/Graphs on the fly.
-* **Cold/Hot Tiering:** Offload older graph data to Parquet and re-hydrate instantly when needed.
+* **Graph ETL:** Map CSV, Parquet, Arrow, DataFrame, and later S3 datasets into versioned graph generations.
+* **Cold/Hot Tiering:** Export and rehydrate graph generations through the storage-backend contract.
+
+> **Implementation status:** SQL, DataFrame operations, transactional local `COPY`, and HNSW vector search are implemented. Property Graph DDL/query, graph ETL, GraphRAG, S3 Lake-Link, and IVF are roadmap items rather than current capabilities.
 
 ---
 
@@ -84,19 +86,25 @@ LIMIT 5;
 always ranks nearest vectors with `ASC`. HNSW's optional `ef_search` index
 setting trades query latency for recall.
 
-### The "Lake-Link" Import
+### Property Graph and Lake-Link Direction (planned)
 
-Turn raw Parquet data into a queryable Knowledge Graph.
+The v1.x design aligns the SQL surface with SQL/PGQ concepts instead of reviving the former `COPY ... INTO GRAPH ... MAP COLUMNS` sketch verbatim.
 
 ```sql
-COPY FROM 's3://datalake/wiki_dump.parquet'
-INTO GRAPH wiki_graph
-MAP COLUMNS (
-    id => node_id,
-    vector_col => embedding,
-    links => edges -- Auto-generate graph edges from adjacency lists
+CREATE PROPERTY GRAPH wiki_graph
+  VERTEX TABLES (pages KEY (id))
+  EDGE TABLES (links SOURCE KEY (source_id) REFERENCES pages (id)
+                     DESTINATION KEY (target_id) REFERENCES pages (id));
+
+SELECT *
+FROM GRAPH_TABLE(
+  wiki_graph
+  MATCH (source)-[link]->(target)
+  COLUMNS (source.id AS source_id, target.id AS target_id)
 );
 ```
+
+Rust is the core typed API; SQL, Python, HTTP/gRPC, and CLI call the same catalog, planner, executor, and job lifecycle. The detailed scope is tracked in [issue #596](https://github.com/alopex-db/alopex/issues/596), the [v1.x roadmap](docs-internal/roadmap.md), and the [graph database comparison report](docs/graph-database-feature-performance-research.md).
 
 -----
 
@@ -106,7 +114,7 @@ Alopex DB is built in **Rust** for safety and performance.
 
   * **Storage Engine:** Custom LSM-Tree tailored for high-throughput vector writes.
   * **Consensus:** Raft (based on `raft-rs`) ensures consistency across distributed nodes.
-  * **Vector Index:** Pluggable indexing (HNSW / IVF) that is sharded alongside data ranges.
+  * **Vector Index:** HNSW is implemented. IVF remains an independent future index option and is not a prerequisite for the graph layer.
 
 -----
 
@@ -187,6 +195,12 @@ Rust向けparserは`alopex-sql`に静的同梱されます。実行時に`libalo
 The current release badge at the top of this README updates automatically from
 GitHub Releases. See the [published roadmap](https://alopex-db.github.io/roadmap/)
 for the current and planned capability boundaries.
+
+The v1.x Graph / Lake-Link work is divided into six acceptance-driven phases:
+contract and API, graph catalog and adjacency index, SQL/PGQ query MVP, local
+graph ETL, GraphRAG and incremental maintenance, then S3/tiering integration.
+The implementation is intentionally completed in v1.x; v2.0 is the integration
+and release-acceptance gate.
 
 -----
 

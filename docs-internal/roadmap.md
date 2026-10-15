@@ -1,20 +1,19 @@
-# AlopexDB ストレージロードマップ（v1.x → v2.0）
+# AlopexDB 統合ロードマップ（v1.x → v2.0）
 
-この文書は、GitHub Issue とマイルストーンで管理しているストレージ運用構想の実装順序と、v2.0 リリース時点で到達したい状態を整理したものです。
+この文書は、ストレージ運用構想と Graph／Lake-Link 構想を v1.x で実装し、v2.0 で統合受け入れする順序を示します。Graph ETL の正本は [Issue #596](https://github.com/alopex-db/alopex/issues/596) です。
 
 ## 方針
 
 v2.0 は「実装を開始する時期」ではなく、v1.x で段階的に実装した機能を統合し、リリース可能な状態として受け入れる最終ゴールです。
 
-したがって、個別機能の実装 Issue は v1.x のマイルストーンへ割り当て、v2.0 には最終受け入れ・リリース判定を残します。現在の v0.8.9 に属する不具合修正は、現行リリースの品質確保として扱い、このロードマップの実装マイルストーンへ移動しません。
+したがって、個別機能の実装 Issue は v1.x のマイルストーンへ割り当て、v2.0 には最終受け入れ・リリース判定を残します。現行の安定版は v0.8.15 です。現行版の不具合修正は品質確保として扱い、このロードマップの実装マイルストーンへ移動しません。
 
 正本は GitHub のマイルストーンと Issue #184 です。この文書は、それらの関係と依存順を説明します。
 
 ## 全体像
 
 ```text
-v0.8.9 現行リリース修正
-  #192
+v0.8.15 現行リリース
        |
        v
 v1.1 Storage Foundation
@@ -42,6 +41,15 @@ v1.6 Cluster Integration
                   v
 v2.0 Release Goal / Acceptance
   #184
+
+並行する Graph / Lake-Link track (#596)
+  G1 Contract & APIs
+   -> G2 Catalog & Adjacency
+   -> G3 SQL/PGQ Query MVP
+   -> G4 Local Graph ETL
+   -> G5 GraphRAG & Incremental ETL
+   -> G6 S3 Lake-Link & Tiering
+   -> v2.0 Joint Acceptance
 ```
 
 v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存関係を分離できる範囲で並行して進められます。v1.6 は分散・クラスタ統合の受け皿として、各バックエンドとランタイム形態の検証結果を統合します。
@@ -50,7 +58,7 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 
 | 段階 | マイルストーン | 目的 | 対象 Issue |
 | --- | --- | --- | --- |
-| 現行 | [v0.8.9](https://github.com/alopex-db/alopex/releases/tag/v0.8.9) | 現行リリースの不具合修正と品質確保 | [#192](https://github.com/alopex-db/alopex/issues/192) |
+| 現行 | [v0.8.15](https://github.com/alopex-db/alopex/releases/tag/v0.8.15) | 現行リリースの不具合修正と品質確保 | 現行版 Issue |
 | SQL 継続 | [v1.0-SQL](https://github.com/alopex-db/alopex/milestone/13) | SQL 機能の既存ロードマップ | SQL 関連 Issue |
 | SQL 継続 | [v0.10.0](https://github.com/alopex-db/alopex/milestone/15) | 既存の SQL／リリース計画 | 既存の v0.10.0 対象 |
 | 1 | [v1.1-Storage-Foundation](https://github.com/alopex-db/alopex/milestone/16) | 永続化の基礎契約とローカルファイルバックエンド | [#183](https://github.com/alopex-db/alopex/issues/183), [#186](https://github.com/alopex-db/alopex/issues/186) |
@@ -60,6 +68,21 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 | 5 | [v1.5-Runtime-Residency](https://github.com/alopex-db/alopex/milestone/20) | embedded・server・cluster のランタイム形態とHTTP QUERY API | [#198](https://github.com/alopex-db/alopex/issues/198), [#199](https://github.com/alopex-db/alopex/issues/199), [#205](https://github.com/alopex-db/alopex/issues/205)〜[#209](https://github.com/alopex-db/alopex/issues/209) |
 | 6 | [v1.6-Cluster-Integration](https://github.com/alopex-db/alopex/milestone/21) | Kubernetes 互換を含むクラスタ統合 | [#189](https://github.com/alopex-db/alopex/issues/189) |
 | 最終 | [v2.0](https://github.com/alopex-db/alopex/milestone/14) | 最終受け入れ、互換性確認、リリース判定 | [#184](https://github.com/alopex-db/alopex/issues/184) |
+
+## Graph／Lake-Link track（v1.x）
+
+Graph は独立したグラフストアを追加するのではなく、通常のリレーショナルテーブルを正本として、Property Graph カタログとトランザクショナルな隣接インデックスを重ねます。Rust の型付き API を中核に据え、SQL、Python、HTTP/gRPC、CLI は同じカタログ、プランナー、実行器、ジョブ状態を共有します。IVF は別系統の将来インデックスであり、Graph 実装の依存条件にはしません。
+
+| 段階 | 実装ゴール | 主な受け入れ条件 |
+| --- | --- | --- |
+| G1 Contract & APIs | Property Graph モデル、SQL/PGQ サブセット、Rust／Python／server API、mapping・job・generation・benchmark 契約を固定する | 同じマッピングとクエリを全 API から表現でき、未対応構文は明示的に失敗する |
+| G2 Catalog & Adjacency | グラフ定義、ラベル、プロパティ、方向、世代を管理し、コミットと同時に隣接インデックスを更新する | rollback、再起動、破損検出、snapshot 可視性を検証できる |
+| G3 SQL/PGQ Query MVP | `CREATE PROPERTY GRAPH` と `GRAPH_TABLE` を起点に、固定長および上限付き可変長パスを実行する | 方向、ラベル、プロパティ predicate、path bound、SQL への合流が一貫する |
+| G4 Local Graph ETL | CSV、Parquet、Arrow、DataFrame から node／edge を写像し、dry-run、reject、原子的 publish を提供する | 型変換、重複、欠損端点、再実行、失敗時の旧世代維持を検証できる |
+| G5 GraphRAG & Incremental | HNSW の候補を起点に bounded traversal、filter、rerank を行い、append／upsert／delete を増分反映する | idempotency、provenance、更新後の vector／graph 可視性を同じ commit 境界で保証する |
+| G6 S3 Lake-Link & Tiering | 外部 S3 Parquet の読込、再開、export、rehydrate を storage backend と接続する | #190 の DB 成果物配置と外部データソースを混同せず、障害再開と世代切替を検証できる |
+
+機能ゴールと競合比較の基準は[グラフデータベース機能・性能調査](../docs/graph-database-feature-performance-research.md)にまとめます。Neo4j、Kùzu、Amazon Neptune、TigerGraph 等のカタログ値は製品選定の比較軸であり、Alopex の実測値としては扱いません。Alopex の性能判定は、LDBC SNB を中心とした再現可能なデータセット、設定、ハードウェア、p50／p95／p99、throughput、recall、ロード時間、増分更新コストを成果物として残して行います。
 
 ## 各段階の完了条件
 
