@@ -62,6 +62,11 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/native");
     } else if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/native");
+        if profile == "release" {
+            // Have Apple's linker strip local symbols so dyld accepts the
+            // LINKEDIT string-pool alignment on macOS 27 and newer.
+            println!("cargo:rustc-link-arg=-Wl,-x");
+        }
     }
     if cfg!(target_os = "windows") {
         println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
