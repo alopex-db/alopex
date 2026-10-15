@@ -94,7 +94,7 @@ def test_second_open_of_one_database_is_rejected(tmp_path):
         message = str(excinfo.value)
         if os.name == "posix":
             assert "already open in this process" in message
-            assert "Database or Transaction handles" in message
+            assert "Database, Transaction or PreparedStatement handles" in message
         else:
             # Windows can prevent reading the holder's diagnostic record.
             assert "already open" in message
