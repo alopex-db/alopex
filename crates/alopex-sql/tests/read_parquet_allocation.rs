@@ -1077,6 +1077,280 @@ fn column_metadata_shared_budget_before_allocation(field_ids: bool) {
 }
 
 #[test]
+fn issue577_embedded_arrow_field_metadata_shared_budget_before_allocation() {
+    embedded_arrow_metadata_shared_budget(false);
+}
+
+#[test]
+fn issue577_embedded_arrow_root_metadata_shared_budget_before_allocation() {
+    embedded_arrow_metadata_shared_budget(true);
+}
+
+fn embedded_arrow_metadata_shared_budget(root: bool) {
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    for (limit, entries, may_reject) in [
+        (None, 400, false),
+        (Some(LIMIT), 1, false),
+        (Some(LIMIT), 400, true),
+        (Some(LIMIT * 4), 400, false),
+    ] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let metadata = (0..entries)
+            .map(|index| (format!("k{index:04}"), String::new()))
+            .collect();
+        let field = Field::new("id", DataType::Int64, false);
+        let schema = Arc::new(if root {
+            Schema::new_with_metadata(vec![field], metadata)
+        } else {
+            Schema::new(vec![field.with_metadata(metadata)])
+        });
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![7; 16]))],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) = execute_observed_with_alias(&file, "", limit, || {});
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "embedded_arrow root={root} limit={limit:?} entries={entries} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "embedded Arrow metadata exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected embedded Arrow rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; 16]);
+        }
+    }
+}
+
+#[test]
+fn issue577_embedded_arrow_invalid_integer_returns_error() {
+    embedded_arrow_invalid_field_returns_error(false);
+}
+
+#[test]
+fn issue577_embedded_arrow_invalid_list_returns_error() {
+    embedded_arrow_invalid_field_returns_error(true);
+}
+
+fn embedded_arrow_invalid_field_returns_error(list: bool) {
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use base64::Engine;
+    use parquet::arrow::ArrowWriter;
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(vec![7]))],
+    )
+    .unwrap();
+    let mut writer =
+        ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let encoded = rewritten_metadata_footer(&file, |footer| {
+        let value = footer
+            .key_value_metadata
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|value| value.key == parquet::arrow::ARROW_SCHEMA_META_KEY)
+            .unwrap()
+            .value
+            .as_mut()
+            .unwrap();
+        let mut decoded = base64::engine::general_purpose::STANDARD
+            .decode(&*value)
+            .unwrap();
+        if list {
+            let offset = {
+                let message = arrow_ipc::root_as_message(&decoded[8..]).unwrap();
+                let field = message.header_as_schema().unwrap().fields().unwrap().get(0);
+                let offset = field._tab.vtable().get(arrow_ipc::Field::VT_TYPE_TYPE) as usize;
+                assert_ne!(offset, 0);
+                8 + field._tab.loc() + offset
+            };
+            decoded[offset] = arrow_ipc::Type::List.0;
+        } else {
+            let offset = {
+                let message = arrow_ipc::root_as_message(&decoded[8..]).unwrap();
+                let field = message.header_as_schema().unwrap().fields().unwrap().get(0);
+                let integer = field.type_as_int().unwrap();
+                let offset = integer._tab.vtable().get(arrow_ipc::Int::VT_BITWIDTH) as usize;
+                assert_ne!(offset, 0);
+                8 + integer._tab.loc() + offset
+            };
+            decoded[offset..offset + 4].copy_from_slice(&7_i32.to_le_bytes());
+        }
+        assert!(arrow_ipc::root_as_message(&decoded[8..]).is_ok());
+        *value = base64::engine::general_purpose::STANDARD.encode(decoded);
+    });
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_observed_with_alias(&file, "", Some(LIMIT), || replace_footer(&file, &encoded))
+    }));
+    MAX_REQUEST.with(|maximum| maximum.set(None));
+    assert!(
+        attempt.is_ok(),
+        "IPC scalar metadata must return an error without panicking"
+    );
+    let (result, maximum) = attempt.unwrap();
+    assert!(maximum <= LIMIT);
+    assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+}
+
+#[test]
+fn issue577_embedded_arrow_union_id_range_returns_error() {
+    use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+    use arrow_schema::{DataType, Field, Schema, UnionFields, UnionMode};
+    use base64::Engine;
+
+    for (id, invalid) in [
+        (0_i32, false),
+        (127, false),
+        (256, true),
+        (-256, true),
+        (-1, true),
+    ] {
+        let file = fixture(false);
+        let fields = UnionFields::new([0], [Field::new("value", DataType::Int64, false)]);
+        let schema = Schema::new(vec![Field::new(
+            "id",
+            DataType::Union(fields, UnionMode::Sparse),
+            false,
+        )]);
+        let options = IpcWriteOptions::default();
+        let mut tracker =
+            DictionaryTracker::new_with_preserve_dict_id(true, options.preserve_dict_id());
+        let mut bytes = IpcDataGenerator::default()
+            .schema_to_bytes_with_dictionary_tracker(&schema, &mut tracker, &options)
+            .ipc_message;
+        let offset = {
+            let message = arrow_ipc::root_as_message(&bytes).unwrap();
+            let field = message.header_as_schema().unwrap().fields().unwrap().get(0);
+            let ids = field.type_as_union().unwrap().typeIds().unwrap();
+            ids.bytes().as_ptr() as usize - bytes.as_ptr() as usize
+        };
+        bytes[offset..offset + 4].copy_from_slice(&id.to_le_bytes());
+        assert!(arrow_ipc::root_as_message(&bytes).is_ok());
+        let encoded = metadata_footer(
+            &file,
+            vec![parquet::format::KeyValue {
+                key: parquet::arrow::ARROW_SCHEMA_META_KEY.into(),
+                value: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            }],
+            false,
+        );
+        let (result, maximum) =
+            execute_observed_with_alias(&file, "", Some(LIMIT), || replace_footer(&file, &encoded));
+        assert!(maximum <= LIMIT);
+        if invalid {
+            assert!(
+                matches!(result, Err(ExecutorError::BulkLoad(_))),
+                "out-of-range union ID {id} must be rejected"
+            );
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected native parquet rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+        }
+    }
+}
+
+#[test]
+fn issue577_embedded_arrow_nested_metadata_shared_budget_before_allocation() {
+    use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+    use arrow_schema::{DataType, Field, Schema};
+    use base64::Engine;
+
+    for (limit, entries, may_reject) in [
+        (None, 400, false),
+        (Some(LIMIT), 1, false),
+        (Some(LIMIT), 400, true),
+        (Some(LIMIT * 4), 400, false),
+    ] {
+        let file = fixture(false);
+        let metadata = (0..entries)
+            .map(|index| (format!("k{index:04}"), String::new()))
+            .collect();
+        let child = Field::new("value", DataType::Int64, false).with_metadata(metadata);
+        let schema = Schema::new(vec![Field::new(
+            "id",
+            DataType::Struct(vec![child].into()),
+            false,
+        )]);
+        let options = IpcWriteOptions::default();
+        let mut tracker =
+            DictionaryTracker::new_with_preserve_dict_id(true, options.preserve_dict_id());
+        let bytes = IpcDataGenerator::default()
+            .schema_to_bytes_with_dictionary_tracker(&schema, &mut tracker, &options)
+            .ipc_message;
+        // A valid legacy raw IPC hint is decoded before its incompatible type is discarded.
+        let encoded = metadata_footer(
+            &file,
+            vec![parquet::format::KeyValue {
+                key: parquet::arrow::ARROW_SCHEMA_META_KEY.into(),
+                value: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            }],
+            false,
+        );
+        LIVE_ALLOCATIONS.with(|observed| *observed.borrow_mut() = Some(LiveAllocations::new()));
+        let (result, maximum) =
+            execute_observed_with_alias(&file, "", limit, || replace_footer(&file, &encoded));
+        let observed = LIVE_ALLOCATIONS.with(|observed| observed.borrow_mut().take().unwrap());
+        assert!(!observed.exhausted);
+        println!(
+            "embedded_arrow_nested limit={limit:?} entries={entries} maximum_request={maximum} rust_live_peak_bytes={} rejected={}",
+            observed.peak,
+            result.is_err()
+        );
+        if let Some(limit) = limit {
+            assert!(maximum <= limit);
+            assert!(
+                observed.peak <= limit,
+                "nested IPC metadata exceeded shared budget"
+            );
+        }
+        if may_reject && result.is_err() {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+        } else {
+            let ExecutionResult::Query(result) = result.unwrap() else {
+                panic!("expected native parquet rows");
+            };
+            assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+        }
+    }
+}
+
+#[test]
 fn issue577_statistics_shared_budget_before_allocation() {
     use parquet::data_type::{ByteArray, ByteArrayType};
 

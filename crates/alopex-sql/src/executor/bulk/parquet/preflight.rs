@@ -13,6 +13,119 @@ fn arc_bytes<T>() -> usize {
     std::mem::size_of::<(usize, usize, T)>()
 }
 
+fn validate_arrow_field(field: arrow_ipc::Field<'_>) -> Result<()> {
+    use arrow_ipc::{TimeUnit, Type};
+    let time_unit = |unit| {
+        matches!(
+            unit,
+            TimeUnit::SECOND | TimeUnit::MILLISECOND | TimeUnit::MICROSECOND | TimeUnit::NANOSECOND
+        )
+    };
+    let integer = |value: arrow_ipc::Int<'_>| matches!(value.bitWidth(), 8 | 16 | 32 | 64);
+    if let Some(dictionary) = field.dictionary()
+        && !dictionary.indexType().is_some_and(integer)
+    {
+        return Err(invalid_page());
+    }
+    let children = field.children().map_or(0, |children| children.len());
+    // FlatBuffers validates structure; Arrow 53's owned converter assumes these semantics.
+    let valid = match field.type_type() {
+        Type::Null
+        | Type::Bool
+        | Type::Binary
+        | Type::LargeBinary
+        | Type::BinaryView
+        | Type::Utf8
+        | Type::LargeUtf8
+        | Type::Utf8View
+        | Type::Struct_ => true,
+        Type::Int => field.type_as_int().is_some_and(integer),
+        Type::FloatingPoint => field.type_as_floating_point().is_some_and(|value| {
+            matches!(
+                value.precision(),
+                arrow_ipc::Precision::HALF
+                    | arrow_ipc::Precision::SINGLE
+                    | arrow_ipc::Precision::DOUBLE
+            )
+        }),
+        Type::Date => field.type_as_date().is_some_and(|value| {
+            matches!(
+                value.unit(),
+                arrow_ipc::DateUnit::DAY | arrow_ipc::DateUnit::MILLISECOND
+            )
+        }),
+        Type::Time => field.type_as_time().is_some_and(|value| {
+            matches!(
+                (value.bitWidth(), value.unit()),
+                (32, TimeUnit::SECOND | TimeUnit::MILLISECOND)
+                    | (64, TimeUnit::MICROSECOND | TimeUnit::NANOSECOND)
+            )
+        }),
+        Type::Timestamp => field
+            .type_as_timestamp()
+            .is_some_and(|value| time_unit(value.unit())),
+        Type::Duration => field
+            .type_as_duration()
+            .is_some_and(|value| time_unit(value.unit())),
+        Type::Interval => field.type_as_interval().is_some_and(|value| {
+            matches!(
+                value.unit(),
+                arrow_ipc::IntervalUnit::YEAR_MONTH
+                    | arrow_ipc::IntervalUnit::DAY_TIME
+                    | arrow_ipc::IntervalUnit::MONTH_DAY_NANO
+            )
+        }),
+        Type::FixedSizeBinary => field
+            .type_as_fixed_size_binary()
+            .is_some_and(|value| value.byteWidth() >= 0),
+        Type::Decimal => field.type_as_decimal().is_some_and(|value| {
+            matches!(value.bitWidth(), 128 | 256)
+                && u8::try_from(value.precision()).is_ok()
+                && i8::try_from(value.scale()).is_ok()
+        }),
+        Type::List | Type::LargeList => children == 1,
+        Type::FixedSizeList => {
+            children == 1
+                && field
+                    .type_as_fixed_size_list()
+                    .is_some_and(|value| value.listSize() >= 0)
+        }
+        Type::Map => children == 1 && field.type_as_map().is_some(),
+        Type::RunEndEncoded => children == 2,
+        Type::Union => field.type_as_union().is_some_and(|value| {
+            if !matches!(
+                value.mode(),
+                arrow_ipc::UnionMode::Dense | arrow_ipc::UnionMode::Sparse
+            ) {
+                return false;
+            }
+            if let Some(ids) = value.typeIds() {
+                let mut seen = 0_u128;
+                ids.len() == children
+                    && ids.iter().all(|id| {
+                        let Ok(id) = i8::try_from(id) else {
+                            return false;
+                        };
+                        if id < 0 {
+                            return false;
+                        }
+                        let bit = 1_u128 << id;
+                        let unique = seen & bit == 0;
+                        seen |= bit;
+                        unique
+                    })
+            } else {
+                children <= i8::MAX as usize
+            }
+        }),
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid_page());
+    }
+    Ok(())
+}
+
 fn invalid_page() -> ExecutorError {
     ExecutorError::BulkLoad("invalid parquet page or chunk declaration".into())
 }
@@ -62,6 +175,8 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         schema_root_seen: false,
         schema_leaves: 0,
         has_arrow_schema: false,
+        arrow_schema: None,
+        file_key_values: 0,
     };
     let roots = arc_bytes::<parquet::file::metadata::ParquetMetaData>()
         + arc_bytes::<SchemaDescriptor>()
@@ -83,6 +198,9 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         std::mem::size_of::<ResolvedType>(),
     ] {
         footer.reserve_converted_metadata(footer.schema_leaves, width)?;
+    }
+    if let Some(encoded) = footer.arrow_schema.take() {
+        footer.reserve_arrow_schema(&encoded)?;
     }
     let has_arrow_schema = footer.has_arrow_schema;
     let retained_metadata_bytes = footer
@@ -139,6 +257,8 @@ pub(super) fn check_pages(
                     schema_root_seen: false,
                     schema_leaves: 0,
                     has_arrow_schema: false,
+                    arrow_schema: None,
+                    file_key_values: 0,
                 };
                 let (uncompressed, compressed, dictionary_values) = header.page()?;
                 let consumed = maximum - header.remaining();
@@ -209,6 +329,8 @@ pub(super) fn read_page_header_bytes(
         schema_root_seen: false,
         schema_leaves: 0,
         has_arrow_schema: false,
+        arrow_schema: None,
+        file_key_values: 0,
     };
     let (uncompressed, compressed, _) = header.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -237,6 +359,8 @@ pub(super) fn read_page_header_bytes(
         schema_root_seen: false,
         schema_leaves: 0,
         has_arrow_schema: false,
+        arrow_schema: None,
+        file_key_values: 0,
     };
     let (uncompressed, compressed, _) = copied.page()?;
     check_declared_bytes(uncompressed, limit)?;
@@ -263,6 +387,8 @@ pub(super) fn read_page_header_bytes(
         schema_root_seen: false,
         schema_leaves: 0,
         has_arrow_schema: false,
+        arrow_schema: None,
+        file_key_values: 0,
     };
     typed.metadata_fields(0, "PageHeader")?;
     if typed.remaining() != 0 {
@@ -283,6 +409,8 @@ struct CompactHeader<R: Read> {
     schema_root_seen: bool,
     schema_leaves: u64,
     has_arrow_schema: bool,
+    arrow_schema: Option<Vec<u8>>,
+    file_key_values: u64,
 }
 
 impl<R: Read> CompactHeader<R> {
@@ -337,7 +465,7 @@ impl<R: Read> CompactHeader<R> {
         Ok(())
     }
 
-    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<u64> {
+    fn metadata_binary_length(&mut self, context: &str) -> Result<u64> {
         let length = self.varint()?;
         check_declared_bytes(length, self.maximum)?;
         if length > self.remaining() {
@@ -351,9 +479,13 @@ impl<R: Read> CompactHeader<R> {
         };
         self.charge_metadata(length, context)?;
         if statistics {
-            // Bytes owns the moved statistics payload through a shared allocation.
             self.charge_metadata(std::mem::size_of::<bytes::Bytes>() as u64, context)?;
         }
+        Ok(length)
+    }
+
+    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<(u64, bool)> {
+        let length = self.metadata_binary_length(context)?;
         let schema_key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
         let mut arrow_key = inspect_arrow_key && length == schema_key.len() as u64;
         for index in 0..length {
@@ -362,8 +494,171 @@ impl<R: Read> CompactHeader<R> {
                 arrow_key = false;
             }
         }
-        self.has_arrow_schema |= arrow_key;
-        Ok(length)
+        Ok((length, arrow_key))
+    }
+
+    fn metadata_binary_copy(&mut self, context: &str) -> Result<Vec<u8>> {
+        let length = self.metadata_binary_length(context)?;
+        let length = usize::try_from(length).map_err(|_| invalid_page())?;
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(length)
+            .map_err(|_| invalid_page())?;
+        value.resize(length, 0);
+        self.input
+            .read_exact(&mut value)
+            .map_err(parquet_io_error)?;
+        Ok(value)
+    }
+
+    fn reserve_arrow_map(&mut self, count: u64) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        // std HashMap uses four buckets for up to three entries, then 7/8 occupancy.
+        let buckets = if count < 4 {
+            4
+        } else if count < 8 {
+            8
+        } else {
+            count
+                .checked_mul(8)
+                .and_then(|v| v.checked_div(7))
+                .and_then(u64::checked_next_power_of_two)
+                .ok_or_else(invalid_page)?
+        };
+        let table = buckets
+            .checked_mul((std::mem::size_of::<(String, String)>() + 1) as u64)
+            .and_then(|v| v.checked_add(16))
+            .ok_or_else(invalid_page)?;
+        // Original IPC metadata and the converted reader field can coexist.
+        self.charge_metadata(
+            table.checked_mul(2).ok_or_else(invalid_page)?,
+            "RetainedMetadata",
+        )?;
+        // Rehashing can retain the preceding smaller table until relocation finishes.
+        self.charge_metadata(table, "")
+    }
+
+    fn reserve_arrow_key_values<'a>(
+        &mut self,
+        values: impl Iterator<Item = arrow_ipc::KeyValue<'a>>,
+    ) -> Result<u64> {
+        let mut count = 0_u64;
+        for value in values {
+            if let (Some(key), Some(value)) = (value.key(), value.value()) {
+                count = count.checked_add(1).ok_or_else(invalid_page)?;
+                let bytes = key
+                    .len()
+                    .checked_add(value.len())
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(invalid_page)?;
+                self.charge_metadata(bytes as u64, "RetainedMetadata")?;
+            }
+        }
+        self.reserve_arrow_map(count)?;
+        Ok(count)
+    }
+
+    fn reserve_arrow_fields<'a>(
+        &mut self,
+        fields: impl Iterator<Item = arrow_ipc::Field<'a>>,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > 32 {
+            return Err(invalid_page());
+        }
+        let mut count = 0_u64;
+        for field in fields {
+            validate_arrow_field(field)?;
+            count = count.checked_add(1).ok_or_else(invalid_page)?;
+            let name = field.name().ok_or_else(invalid_page)?;
+            let owners = (2 * arc_bytes::<arrow_schema::Field>())
+                .checked_add(name.len().checked_mul(2).ok_or_else(invalid_page)?)
+                .ok_or_else(invalid_page)?;
+            // Visit each occurrence: IPC tables may be shared, owned Arrow Fields are not.
+            self.charge_metadata(owners as u64, "RetainedMetadata")?;
+            self.reserve_arrow_key_values(
+                field.custom_metadata().into_iter().flat_map(|v| v.iter()),
+            )?;
+            if field.dictionary().is_some() {
+                self.charge_metadata(
+                    (6 * std::mem::size_of::<arrow_schema::DataType>()) as u64,
+                    "RetainedMetadata",
+                )?;
+            }
+            if let Some(timestamp) = field.type_as_timestamp()
+                && let Some(zone) = timestamp.timezone()
+            {
+                let bytes = zone
+                    .len()
+                    .checked_add(2 * std::mem::size_of::<usize>())
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(invalid_page)?;
+                self.charge_metadata(bytes as u64, "RetainedMetadata")?;
+            }
+            if let Some(union) = field.type_as_union()
+                && let Some(ids) = union.typeIds()
+            {
+                self.reserve_converted_metadata(ids.len() as u64, std::mem::size_of::<i8>())?;
+            }
+            if let Some(children) = field.children() {
+                self.reserve_arrow_fields(children.iter(), depth + 1)?;
+            }
+        }
+        // IPC first builds Vec<Field>; nested Fields additionally retain Arc-backed slots.
+        self.reserve_converted_metadata(count, std::mem::size_of::<arrow_schema::Field>())?;
+        for _ in 0..2 {
+            self.reserve_converted_metadata(count, std::mem::size_of::<arrow_schema::FieldRef>())?;
+            if count != 0 {
+                self.charge_metadata(
+                    (2 * std::mem::size_of::<usize>()) as u64,
+                    "RetainedMetadata",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reserve_arrow_schema(&mut self, encoded: &[u8]) -> Result<()> {
+        use base64::Engine;
+        let capacity = base64::decoded_len_estimate(encoded.len());
+        self.charge_metadata(capacity as u64, "")?;
+        let mut decoded = Vec::new();
+        decoded
+            .try_reserve_exact(capacity)
+            .map_err(|_| invalid_page())?;
+        decoded.resize(capacity, 0);
+        let length = base64::engine::general_purpose::STANDARD
+            .decode_slice(encoded, &mut decoded)
+            .map_err(|_| invalid_page())?;
+        decoded.truncate(length);
+        // Match Parquet 53's continuation-marker and legacy raw-message boundary.
+        let message = if decoded.len() > 8 && decoded[..4] == [255; 4] {
+            &decoded[8..]
+        } else {
+            &decoded
+        };
+        let message = arrow_ipc::root_as_message(message).map_err(|_| invalid_page())?;
+        let schema = message.header_as_schema().ok_or_else(invalid_page)?;
+        let count = self.reserve_arrow_key_values(
+            schema.custom_metadata().into_iter().flat_map(|v| v.iter()),
+        )?;
+        // File key-values are cloned into the map that receives IPC root metadata.
+        self.reserve_arrow_map(
+            self.file_key_values
+                .checked_add(count)
+                .ok_or_else(invalid_page)?,
+        )?;
+        let fields = schema.fields().ok_or_else(invalid_page)?;
+        if schema.endianness() == arrow_ipc::Endianness::Big
+            && fields
+                .iter()
+                .any(|field| field.type_type() == arrow_ipc::Type::Decimal)
+        {
+            return Err(invalid_page());
+        }
+        self.reserve_arrow_fields(fields.iter(), 0)
     }
 
     fn schema_name(
@@ -489,6 +784,8 @@ impl<R: Read> CompactHeader<R> {
         let mut schema_name = None;
         let mut schema_children = None;
         let mut schema_field_id = None;
+        let mut arrow_key = false;
+        let mut metadata_value = None;
         loop {
             let field = self.byte()?;
             if field == 0 {
@@ -498,6 +795,10 @@ impl<R: Read> CompactHeader<R> {
                         schema_children,
                         schema_field_id,
                     )?;
+                }
+                if context == "FileKeyValue" && arrow_key && metadata_value.is_some() {
+                    self.arrow_schema = metadata_value;
+                    self.has_arrow_schema = true;
                 }
                 return Ok(());
             }
@@ -510,7 +811,7 @@ impl<R: Read> CompactHeader<R> {
             }
             // Compact field booleans carry their value in the field tag.
             if context == "SchemaElement" && id == 4 {
-                schema_name = Some(self.metadata_binary("", false)?);
+                schema_name = Some(self.metadata_binary("", false)?.0);
             } else if context == "SchemaElement" && id == 5 {
                 let children = self.integer()?;
                 let children = i32::try_from(children).map_err(|_| invalid_page())?;
@@ -518,7 +819,10 @@ impl<R: Read> CompactHeader<R> {
             } else if context == "SchemaElement" && id == 9 {
                 schema_field_id = Some(i32::try_from(self.integer()?).map_err(|_| invalid_page())?);
             } else if context == "FileKeyValue" && id == 1 {
-                self.metadata_binary(context, true)?;
+                arrow_key = self.metadata_binary(context, true)?.1;
+            } else if context == "FileKeyValue" && id == 2 {
+                // Thrift permits the value before its key; retain only the last matching value.
+                metadata_value = Some(self.metadata_binary_copy(context)?);
             } else if kind != 1 && kind != 2 {
                 let child = if known.is_some() && context == "FileKeyValue" {
                     context
@@ -594,6 +898,11 @@ impl<R: Read> CompactHeader<R> {
                     _ => 0,
                 };
                 self.reserve_converted_metadata(count, converted_width)?;
+                if context == "FileKeyValue" {
+                    self.arrow_schema = None;
+                    self.has_arrow_schema = false;
+                    self.file_key_values = count;
+                }
                 for _ in 0..count {
                     self.metadata_value(kind, depth + 1, context, 0, 0)?;
                 }

@@ -391,6 +391,7 @@ version = "0.8.16"
 dependencies = [
  "alopex-core 0.8.16",
  "arrow-array",
+ "arrow-ipc",
  "arrow-schema",
  "base64 0.22.1",
  "bincode",
