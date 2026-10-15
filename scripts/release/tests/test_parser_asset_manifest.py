@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -87,6 +88,24 @@ def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
 
 
 class ParserAssetManifestTests(unittest.TestCase):
+    def native_target(self) -> str:
+        host = platform.system()
+        machine = platform.machine().lower()
+        targets = {
+            ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+            ("Linux", "amd64"): "x86_64-unknown-linux-gnu",
+            ("Darwin", "x86_64"): "x86_64-apple-darwin",
+            ("Darwin", "amd64"): "x86_64-apple-darwin",
+            ("Darwin", "arm64"): "aarch64-apple-darwin",
+            ("Darwin", "aarch64"): "aarch64-apple-darwin",
+            ("Windows", "x86_64"): "x86_64-pc-windows-msvc",
+            ("Windows", "amd64"): "x86_64-pc-windows-msvc",
+        }
+        target = targets.get((host, machine))
+        if target is None:
+            self.skipTest(f"unsupported parser builder host: {host} {machine}")
+        return target
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="alopex-parser-manifest-")
         self.root = Path(self.temp.name)
@@ -367,9 +386,8 @@ print(matches[0])
     def run_build_script(
         self, environment: dict[str, str], destination: Path
     ) -> subprocess.CompletedProcess[str]:
-        isolated_output = self.root / "build-script-output" / TARGET_LIBRARIES[
-            "x86_64-unknown-linux-gnu"
-        ]
+        target = self.native_target()
+        isolated_output = self.root / "build-script-output" / TARGET_LIBRARIES[target]
         isolated_output.parent.mkdir(exist_ok=True)
         return subprocess.run(
             [
@@ -378,7 +396,7 @@ print(matches[0])
                 "--backend",
                 "host",
                 "--target",
-                "x86_64-unknown-linux-gnu",
+                target,
                 "--archive-dir",
                 str(destination),
                 "--output",
@@ -929,8 +947,9 @@ os.execv("/bin/rm", ["/bin/rm", *sys.argv[1:]])
         self.assertFalse(Path(f"{build_root}.lock").exists())
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
+        library_name = TARGET_LIBRARIES[self.native_target()]
         repo_outputs = [
-            PARSER_DIR / "libalopex_sql_parser.so",
+            PARSER_DIR / library_name,
             PARSER_DIR / "CONTRACT_VERSION",
             PARSER_DIR / "SHA256SUMS",
         ]
@@ -945,9 +964,7 @@ os.execv("/bin/rm", ["/bin/rm", *sys.argv[1:]])
         self.assertIn("Nimble 0.22.3 is required", result.stderr)
         self.assertFalse(destination.exists())
         isolated_output = self.root / "build-script-output"
-        self.assertFalse(
-            (isolated_output / "libalopex_sql_parser.so").exists()
-        )
+        self.assertFalse((isolated_output / library_name).exists())
         self.assertFalse((isolated_output / "CONTRACT_VERSION").exists())
         self.assertFalse((isolated_output / "SHA256SUMS").exists())
         after = {
@@ -956,6 +973,8 @@ os.execv("/bin/rm", ["/bin/rm", *sys.argv[1:]])
         self.assertEqual(after, before, "test build must not mutate worktree output")
 
     def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
+        if self.native_target() != "x86_64-unknown-linux-gnu":
+            self.skipTest("Docker parser builds require native x86_64 Linux")
         fake_bin = self.root / "fake-docker-bin"
         fake_bin.mkdir()
         capture = self.root / "docker-arguments.json"
@@ -1067,9 +1086,7 @@ raise SystemExit(43)
         docker.chmod(0o755)
         isolated_dir = self.root / "non-linux-output"
         isolated_dir.mkdir()
-        isolated_output = isolated_dir / TARGET_LIBRARIES[
-            "x86_64-unknown-linux-gnu"
-        ]
+        isolated_output = isolated_dir / TARGET_LIBRARIES[self.native_target()]
         isolated_output.write_bytes(b"existing-output")
         contract = isolated_dir / "CONTRACT_VERSION"
         checksum = isolated_dir / "SHA256SUMS"
