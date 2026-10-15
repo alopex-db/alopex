@@ -13,6 +13,7 @@ THROUGHPUT_METRICS = {
     "queries_per_second",
 }
 RESOURCE_METRICS = {"peak_rss_bytes", "index_size_bytes"}
+MEMORY_TOTAL_TOLERANCE_BYTES = 16 * 1024 * 1024
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -104,12 +105,21 @@ def validate_document(
         "cpu_model",
         "logical_cpu_count",
         "cpu_affinity",
-        "memory_bytes",
         "build_profile",
         "thread_count",
     ):
         if environment.get(field) != profile.get(field):
             errors.append(f"environment: {field} does not match the runner profile")
+    expected_memory = profile.get("memory_bytes")
+    observed_memory = environment.get("memory_bytes")
+    if (
+        type(expected_memory) is not int
+        or type(observed_memory) is not int
+        or expected_memory <= 0
+        or observed_memory <= 0
+        or abs(observed_memory - expected_memory) > MEMORY_TOTAL_TOLERANCE_BYTES
+    ):
+        errors.append("environment: memory_bytes does not match the runner profile")
     for field in (
         "alopex_version",
         "alopex_revision",
