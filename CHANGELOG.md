@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- The Nim parser wire contract is `0.26.0`; `Select` now carries query-level
+  HNSW options.
+
 ## [0.8.15] — 2026-09-24
 
 ### Fixed

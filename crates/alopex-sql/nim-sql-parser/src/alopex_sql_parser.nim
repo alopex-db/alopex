@@ -24,7 +24,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.25.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.25.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.26.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
