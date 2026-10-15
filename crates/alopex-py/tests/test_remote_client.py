@@ -821,6 +821,10 @@ def test_unsupported_transaction_methods_raise_with_a_reason(stub, name, args):
         with pytest.raises(NotImplementedError) as raised:
             getattr(txn, name)(*args)
     assert raised.value.code == "ALOPEX-PY204"
+    if name == "prepare":
+        assert "prepared statement handles" in str(raised.value)
+    elif name == "execute_many":
+        assert "atomic parameter batch endpoint" in str(raised.value)
 
 
 def _public_methods(cls):

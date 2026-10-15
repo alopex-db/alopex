@@ -781,12 +781,6 @@ class RemoteTransaction:
     def query_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.query_stream", _STREAM_REASON)
 
-    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise _unsupported("Transaction.prepare", _PREPARED_REASON)
-
-    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise _unsupported("Transaction.execute_many", _PREPARED_REASON)
-
     def get(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get", _KV_REASON)
 
