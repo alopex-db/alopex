@@ -54,15 +54,21 @@ jobs:
         with:
           python-version: "3.11.11"
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Prepare isolated Python environment
+        run: |
+          python -m venv .venv-performance
+          echo "VIRTUAL_ENV=$PWD/.venv-performance" >> "$GITHUB_ENV"
+          echo "$PWD/.venv-performance/bin" >> "$GITHUB_PATH"
       - name: Install pinned reference engines
         id: dependencies
         run: |
           python -m pip install --disable-pip-version-check \
             maturin==1.14.1 numpy==2.4.6 pandas==3.0.5 \
             polars==1.43.2 scikit-learn==1.9.0 \
-            faiss-cpu==1.15.0 hnswlib==0.8.0 \
+            faiss-cpu==1.15.0 hnswlib==0.8.0 h5py==3.15.1 \
             datafusion==50.0.0 duckdb==1.4.0 pysqlite3-binary==0.5.4 \
             'psycopg[binary]==3.2.10'
+          python -c 'import h5py; print(f"h5py={h5py.__version__}")'
       - name: Build release Alopex and pinned Nim parser
         id: build
         run: |
@@ -146,6 +152,17 @@ jobs:
             --suite "$SUITE" \
             --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
             --output performance-artifacts/measurements.json
+      - name: Verify SQL HNSW path and cost across table sizes
+        id: sql_knn_cost
+        env:
+          ALOPEX_KNN_COST_RAW_NDJSON: ${{ github.workspace }}/performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
+          ALOPEX_KNN_COST_SOURCE_COMMIT: ${{ github.sha }}
+          ALOPEX_KNN_COST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -o pipefail
+          taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test knn_index_cost \
+            sql_knn_hnsw_cost_process_separated_evidence -- --ignored --exact --nocapture \
+            2>&1 | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
       - name: Enforce curated/full performance contracts
         id: gate
         env:
@@ -165,6 +182,7 @@ jobs:
           HNSW_DATASET: ${{ steps.hnsw_dataset.outcome }}
           SCALE_DATASET: ${{ steps.scale_dataset.outcome }}
           BENCHMARK: ${{ steps.benchmark.outcome }}
+          SQL_KNN_COST: ${{ steps.sql_knn_cost.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
           mkdir -p performance-artifacts/hnsw
@@ -173,7 +191,7 @@ jobs:
           import os
           from pathlib import Path
 
-          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "gate")
+          names = ("dependencies", "build", "contracts", "differential", "hnsw_dataset", "scale_dataset", "benchmark", "sql_knn_cost", "gate")
           stages = {name: os.environ[name.upper()] for name in names}
           failure = next((name for name in names if stages[name] == "failure"), None)
           incomplete = next((name for name in names if stages[name] != "success"), None)

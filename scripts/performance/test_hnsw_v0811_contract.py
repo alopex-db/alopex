@@ -412,6 +412,12 @@ class HnswDiagnosticContractTests(unittest.TestCase):
         self.assertIn("issue_number:", workflow)
         self.assertIn("actions/checkout@v4", workflow)
         self.assertIn("maturin develop --release", workflow)
+        self.assertLess(
+            workflow.index("python -m venv .venv-performance"),
+            workflow.index("maturin develop --release"),
+        )
+        self.assertIn('VIRTUAL_ENV=$PWD/.venv-performance', workflow)
+        self.assertIn('$PWD/.venv-performance/bin" >> "$GITHUB_PATH"', workflow)
         self.assertIn("31764184/archive.zip", workflow)
         self.assertIn("glove-100-angular.hdf5", workflow)
         self.assertIn(
