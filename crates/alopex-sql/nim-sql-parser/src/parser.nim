@@ -1093,8 +1093,7 @@ proc parseUsingClause(p: var Parser): seq[string] =
     result.add(p.expectIdent("USING column").value)
   discard p.expect(tkRParen)
 
-proc parseFromClause(p: var Parser): SqlNode =
-  result = newNode(nkFromClause, p.currentSpan())
+proc parseJoinedFromItem(p: var Parser): SqlNode =
   var item = p.parseFromItem()
 
   while p.current.kind in {tkNatural, tkJoin, tkInner, tkLeft, tkRight, tkFull, tkCross}:
@@ -1125,6 +1124,8 @@ proc parseFromClause(p: var Parser): SqlNode =
       if p.check(tkOuter): discard p.advance()
       discard p.expect(tkJoin)
     of tkCross:
+      if natural:
+        p.error("NATURAL CROSS JOIN is not allowed")
       jk = jkCross
       discard p.advance()
       discard p.expect(tkJoin)
@@ -1137,6 +1138,8 @@ proc parseFromClause(p: var Parser): SqlNode =
     let right = p.parseFromItem()
     var cond: SqlNode = nil
     var usingCols: seq[string] = @[]
+    if natural and p.current.kind in {tkOn, tkUsing}:
+      p.error("NATURAL JOIN cannot have ON or USING")
     if p.check(tkOn):
       discard p.advance()
       cond = p.parseExpr()
@@ -1144,9 +1147,15 @@ proc parseFromClause(p: var Parser): SqlNode =
       usingCols = p.parseUsingClause()
     item = newJoin(jk, item, right, cond, usingCols, natural)
 
+  result = item
+
+proc parseFromClause(p: var Parser): SqlNode =
+  result = newNode(nkFromClause, p.currentSpan())
+  var item = p.parseJoinedFromItem()
+
   while p.check(tkComma):
     discard p.advance()
-    let right = p.parseFromItem()
+    let right = p.parseJoinedFromItem()
     item = newJoin(jkCross, item, right)
 
   result.children.add(item)

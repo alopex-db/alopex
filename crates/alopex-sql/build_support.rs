@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.26.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.27.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
@@ -828,7 +828,7 @@ mod tests {
             false,
             VENDOR_MANIFEST_SHA256,
         )
-        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.26.0")
+        .expect_err("the immutable pre-frame vendor must not satisfy the current contract")
         .to_string();
 
         assert!(message.contains("invalid parser vendor manifest"));
@@ -883,6 +883,23 @@ mod tests {
             &fixture.manifest_sha256(),
         )
         .expect_err("local source mode must reject stale sidecar")
+        .to_string();
+        assert!(message.contains("contract sidecar"));
+    }
+
+    #[test]
+    fn local_source_mode_rejects_pre_node_local_join_contract() {
+        let fixture = Fixture::stale(false);
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(explicit.join("CONTRACT_VERSION"), b"0.26.0\n").unwrap();
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("the previous wire contract must not pass the local source gate")
         .to_string();
         assert!(message.contains("contract sidecar"));
     }

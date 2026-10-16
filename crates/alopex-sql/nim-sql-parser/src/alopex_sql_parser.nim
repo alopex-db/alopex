@@ -25,7 +25,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.25.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.26.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.26.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.27.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -220,13 +221,16 @@ proc normalizedIndexMethod(name: string): string =
   of "FTS": "Fts"
   else: name
 
-proc writeStatement(s: Stream; node: SqlNode)
-proc writeExpr(s: Stream; node: SqlNode)
-proc writeFromItem(s: Stream; node: SqlNode; publicWire = true)
+# Propagate only the new JOIN key's mode through nested query/expression writers.
+# The staged encoder historically used public Select shapes inside subqueries;
+# reusing publicWire/includeWith for this mode would change those frozen bytes.
+proc writeStatement(s: Stream; node: SqlNode; emitNatural = true)
+proc writeExpr(s: Stream; node: SqlNode; emitNatural = true)
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true; emitNatural = true)
 proc writeDataType(s: Stream; node: SqlNode)
 proc writeSequenceOptions(s: Stream; options: seq[string])
-proc writeSelectKind(s: Stream; node: SqlNode)
-proc writeQueryBody(s: Stream; node: SqlNode)
+proc writeSelectKind(s: Stream; node: SqlNode; emitNatural = true)
+proc writeQueryBody(s: Stream; node: SqlNode; emitNatural = true)
 
 proc writeLiteralKind(s: Stream; node: SqlNode) =
   case node.kind
@@ -269,18 +273,18 @@ proc writeLiteralKind(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Null")
 
-proc writeExprOpt(s: Stream; node: SqlNode) =
+proc writeExprOpt(s: Stream; node: SqlNode; emitNatural = true) =
   if node == nil:
     s.writeNil()
   else:
-    s.writeExpr(node)
+    s.writeExpr(node, emitNatural = emitNatural)
 
-proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
+proc writeExprSeq(s: Stream; nodes: seq[SqlNode]; emitNatural = true) =
   s.pack_array(nodes.len)
   for child in nodes:
-    s.writeExpr(child)
+    s.writeExpr(child, emitNatural = emitNatural)
 
-proc writeGroupByItem(s: Stream; node: SqlNode) =
+proc writeGroupByItem(s: Stream; node: SqlNode; emitNatural = true) =
   ## Contract 0.13.0 (issue #149): group_by carries tagged GroupByItem values
   ## instead of bare expressions on the public Select wire.
   case node.kind
@@ -289,13 +293,13 @@ proc writeGroupByItem(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Rollup")
     s.writeKey("exprs")
-    s.writeExprSeq(node.children)
+    s.writeExprSeq(node.children, emitNatural = emitNatural)
   of nkCube:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Cube")
     s.writeKey("exprs")
-    s.writeExprSeq(node.children)
+    s.writeExprSeq(node.children, emitNatural = emitNatural)
   of nkGroupingSets:
     s.pack_map(2)
     s.writeKey("variant")
@@ -303,22 +307,22 @@ proc writeGroupByItem(s: Stream; node: SqlNode) =
     s.writeKey("sets")
     s.pack_array(node.children.len)
     for groupingSet in node.children:
-      s.writeExprSeq(groupingSet.children)
+      s.writeExprSeq(groupingSet.children, emitNatural = emitNatural)
   else:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Expr")
     s.writeKey("expr")
-    s.writeExpr(node)
+    s.writeExpr(node, emitNatural = emitNatural)
 
-proc writeCaseBranch(s: Stream; node: SqlNode) =
+proc writeCaseBranch(s: Stream; node: SqlNode; emitNatural = true) =
   s.pack_map(2)
   s.writeKey("when")
-  s.writeExpr(node.caseWhen)
+  s.writeExpr(node.caseWhen, emitNatural = emitNatural)
   s.writeKey("then")
-  s.writeExpr(node.caseThen)
+  s.writeExpr(node.caseThen, emitNatural = emitNatural)
 
-proc writeCommonTableExpr(s: Stream; node: SqlNode) =
+proc writeCommonTableExpr(s: Stream; node: SqlNode; emitNatural = true) =
   let hasColumns = node.children.len > 2 and
     node.children[1].kind == nkCteColumnList
   let queryIndex = if hasColumns: 2 else: 1
@@ -333,18 +337,18 @@ proc writeCommonTableExpr(s: Stream; node: SqlNode) =
   else:
     s.pack_array(0)
   s.writeKey("query")
-  s.writeQueryBody(node.children[queryIndex])
+  s.writeQueryBody(node.children[queryIndex], emitNatural = emitNatural)
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeWithClause(s: Stream; node: SqlNode) =
+proc writeWithClause(s: Stream; node: SqlNode; emitNatural = true) =
   s.pack_map(3)
   s.writeKey("recursive")
   s.pack_type(node.recursive)
   s.writeKey("ctes")
   s.pack_array(node.children.len)
   for cte in node.children:
-    s.writeCommonTableExpr(cte)
+    s.writeCommonTableExpr(cte, emitNatural = emitNatural)
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -356,7 +360,7 @@ proc writeStringSeqOpt(s: Stream; values: seq[string]) =
     for value in values:
       s.pack_type(value)
 
-proc writeSelectItem(s: Stream; node: SqlNode) =
+proc writeSelectItem(s: Stream; node: SqlNode; emitNatural = true) =
   if node.kind == nkStar:
     s.pack_map(2)
     s.writeKey("variant")
@@ -380,7 +384,7 @@ proc writeSelectItem(s: Stream; node: SqlNode) =
   s.writeKey("variant")
   s.pack_type("Expr")
   s.writeKey("expr")
-  s.writeExpr(exprNode)
+  s.writeExpr(exprNode, emitNatural = emitNatural)
   s.writeKey("alias")
   if node.kind == nkAlias:
     s.pack_type(node.aliasName)
@@ -389,11 +393,11 @@ proc writeSelectItem(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeOrderByExpr(s: Stream; node: SqlNode) =
+proc writeOrderByExpr(s: Stream; node: SqlNode; emitNatural = true) =
   let exprNode = if node.kind == nkAlias: node.aliasExpr else: node
   s.pack_map(4)
   s.writeKey("expr")
-  s.writeExpr(exprNode)
+  s.writeExpr(exprNode, emitNatural = emitNatural)
   s.writeKey("asc")
   s.writeBoolOpt(node.orderAsc)
   s.writeKey("nulls_first")
@@ -437,7 +441,7 @@ proc writeWindowFrame(s: Stream; node: SqlNode) =
   s.writeKey("end_bound")
   s.writeWindowFrameBound(node.frameEnd)
 
-proc writeWindowSpec(s: Stream; node: SqlNode) =
+proc writeWindowSpec(s: Stream; node: SqlNode; emitNatural = true) =
   var baseNode: SqlNode = nil
   var partitionByNode: SqlNode = nil
   var orderByNode: SqlNode = nil
@@ -465,14 +469,14 @@ proc writeWindowSpec(s: Stream; node: SqlNode) =
   if partitionByNode == nil:
     s.pack_array(0)
   else:
-    s.writeExprSeq(partitionByNode.children)
+    s.writeExprSeq(partitionByNode.children, emitNatural = emitNatural)
   s.writeKey("order_by")
   if orderByNode == nil:
     s.pack_array(0)
   else:
     s.pack_array(orderByNode.children.len)
     for item in orderByNode.children:
-      s.writeOrderByExpr(item)
+      s.writeOrderByExpr(item, emitNatural = emitNatural)
   s.writeKey("frame")
   if frameNode == nil:
     s.writeNil()
@@ -774,7 +778,8 @@ proc writeTableFromItem(s: Stream; name: string; alias: SqlNode;
   s.writeSpan(span)
 
 proc writeDerivedFromItem(s: Stream; derived: SqlNode; alias: SqlNode;
-                          columns: seq[string]; span: Span; publicWire: bool) =
+                          columns: seq[string]; span: Span; publicWire: bool;
+                          emitNatural = true) =
   # Contract 0.14.0 (issue #151): the public Derived variant carries `lateral`.
   # The staged encoder keeps its historical 5-key payload; the parser rejects
   # LATERAL inside CREATE CONTINUOUS AGGREGATE before encoding.
@@ -782,7 +787,7 @@ proc writeDerivedFromItem(s: Stream; derived: SqlNode; alias: SqlNode;
   s.writeKey("variant")
   s.pack_type("Derived")
   s.writeKey("subquery")
-  s.writeQueryBody(derived.children[0])
+  s.writeQueryBody(derived.children[0], emitNatural = emitNatural)
   s.writeKey("alias")
   if alias == nil:
     s.writeNil()
@@ -799,7 +804,7 @@ proc writeDerivedFromItem(s: Stream; derived: SqlNode; alias: SqlNode;
   s.writeSpan(span)
 
 proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
-                           columns: seq[string]; span: Span) =
+                           columns: seq[string]; span: Span; emitNatural = true) =
   # Contract 0.14.0 (issue #151). Only the public wire carries this variant;
   # the staged continuous-aggregate validator rejects it before encoding.
   s.pack_map(8)
@@ -810,7 +815,7 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
   s.writeKey("args")
   s.pack_array(max(function.children.len - 1, 0))
   for i in 1 ..< function.children.len:
-    s.writeExpr(function.children[i])
+    s.writeExpr(function.children[i], emitNatural = emitNatural)
   s.writeKey("alias")
   if alias == nil:
     s.writeNil()
@@ -827,7 +832,7 @@ proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
   s.writeKey("span")
   s.writeSpan(span)
 
-proc writeFromItem(s: Stream; node: SqlNode; publicWire = true) =
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true; emitNatural = true) =
   if node == nil:
     s.writeNil()
     return
@@ -837,44 +842,49 @@ proc writeFromItem(s: Stream; node: SqlNode; publicWire = true) =
     case node.aliasExpr.kind
     of nkFromDerived:
       s.writeDerivedFromItem(node.aliasExpr, node, node.aliasColumns, node.span,
-                             publicWire)
+                             publicWire, emitNatural = emitNatural)
     of nkFromFunction:
-      s.writeFunctionFromItem(node.aliasExpr, node, node.aliasColumns, node.span)
+      s.writeFunctionFromItem(node.aliasExpr, node, node.aliasColumns, node.span,
+                              emitNatural = emitNatural)
     else:
       s.writeTableFromItem(node.aliasExpr.firstIdent(), node, node.aliasColumns,
                            node.span, publicWire)
   of nkIdentifier:
     s.writeTableFromItem(node.strVal, nil, @[], node.span, publicWire)
   of nkFromDerived:
-    s.writeDerivedFromItem(node, nil, @[], node.span, publicWire)
+    s.writeDerivedFromItem(node, nil, @[], node.span, publicWire,
+                           emitNatural = emitNatural)
   of nkFromFunction:
-    s.writeFunctionFromItem(node, nil, @[], node.span)
+    s.writeFunctionFromItem(node, nil, @[], node.span, emitNatural = emitNatural)
   of nkJoin, nkFromJoin:
-    s.pack_map(7)
+    s.pack_map(if publicWire and emitNatural: 8 else: 7)
     s.writeKey("variant")
     s.pack_type("Join")
     s.writeKey("left")
-    s.writeFromItem(node.joinLeft, publicWire)
+    s.writeFromItem(node.joinLeft, publicWire, emitNatural = emitNatural)
     s.writeKey("right")
-    s.writeFromItem(node.joinRight, publicWire)
+    s.writeFromItem(node.joinRight, publicWire, emitNatural = emitNatural)
     s.writeKey("join_type")
     s.pack_type(normalizedJoinKind(node.joinKind))
     s.writeKey("condition")
-    s.writeExprOpt(node.joinCond)
+    s.writeExprOpt(node.joinCond, emitNatural = emitNatural)
     s.writeKey("using")
     s.writeStringSeqOpt(node.joinUsing)
+    if publicWire and emitNatural:
+      s.writeKey("natural")
+      s.pack_type(node.natural)
     s.writeKey("span")
     s.writeSpan(node.span)
   else:
     s.writeTableFromItem(node.firstIdent(), nil, @[], node.span, publicWire)
 
-proc writeExpr(s: Stream; node: SqlNode) =
+proc writeExpr(s: Stream; node: SqlNode; emitNatural = true) =
   if node == nil:
     s.writeNil()
     return
 
   if node.kind == nkAlias:
-    s.writeExpr(node.aliasExpr)
+    s.writeExpr(node.aliasExpr, emitNatural = emitNatural)
     return
 
   s.pack_map(2)
@@ -924,11 +934,11 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("variant")
       s.pack_type("Between")
       s.writeKey("expr")
-      s.writeExpr(node.binLeft)
+      s.writeExpr(node.binLeft, emitNatural = emitNatural)
       s.writeKey("low")
-      s.writeExpr(node.binRight.children[0])
+      s.writeExpr(node.binRight.children[0], emitNatural = emitNatural)
       s.writeKey("high")
-      s.writeExpr(node.binRight.children[1])
+      s.writeExpr(node.binRight.children[1], emitNatural = emitNatural)
       s.writeKey("negated")
       s.pack_type(node.binOp == opNotBetween)
     of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob, opSimilarTo, opNotSimilarTo:
@@ -936,15 +946,15 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("variant")
       s.pack_type("Like")
       s.writeKey("expr")
-      s.writeExpr(node.binLeft)
+      s.writeExpr(node.binLeft, emitNatural = emitNatural)
       s.writeKey("pattern")
       if node.binRight.kind == nkExprList:
-        s.writeExpr(node.binRight.children[0])
+        s.writeExpr(node.binRight.children[0], emitNatural = emitNatural)
       else:
-        s.writeExpr(node.binRight)
+        s.writeExpr(node.binRight, emitNatural = emitNatural)
       s.writeKey("escape")
       if node.binRight.kind == nkExprList and node.binRight.children.len > 1:
-        s.writeExpr(node.binRight.children[1])
+        s.writeExpr(node.binRight.children[1], emitNatural = emitNatural)
       else:
         s.writeNil()
       s.writeKey("negated")
@@ -956,9 +966,9 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("variant")
       s.pack_type("InList")
       s.writeKey("expr")
-      s.writeExpr(node.binLeft)
+      s.writeExpr(node.binLeft, emitNatural = emitNatural)
       s.writeKey("list")
-      s.writeExprSeq(node.binRight.children)
+      s.writeExprSeq(node.binRight.children, emitNatural = emitNatural)
       s.writeKey("negated")
       s.pack_type(node.binOp == opNotIn)
     else:
@@ -966,11 +976,11 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("variant")
       s.pack_type("BinaryOp")
       s.writeKey("left")
-      s.writeExpr(node.binLeft)
+      s.writeExpr(node.binLeft, emitNatural = emitNatural)
       s.writeKey("op")
       s.pack_type(normalizedBinaryOp(node.binOp))
       s.writeKey("right")
-      s.writeExpr(node.binRight)
+      s.writeExpr(node.binRight, emitNatural = emitNatural)
   of nkUnaryOp:
     case node.unOp
     of opIsNull, opIsNotNull:
@@ -978,7 +988,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("variant")
       s.pack_type("IsNull")
       s.writeKey("expr")
-      s.writeExpr(node.unOperand)
+      s.writeExpr(node.unOperand, emitNatural = emitNatural)
       s.writeKey("negated")
       s.pack_type(node.unOp == opIsNotNull)
     else:
@@ -988,19 +998,19 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("op")
       s.pack_type(normalizedUnaryOp(node.unOp))
       s.writeKey("operand")
-      s.writeExpr(node.unOperand)
+      s.writeExpr(node.unOperand, emitNatural = emitNatural)
   of nkRowConstructor:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Row")
     s.writeKey("items")
-    s.writeExprSeq(node.children)
+    s.writeExprSeq(node.children, emitNatural = emitNatural)
   of nkTruthPredicate:
     s.pack_map(4)
     s.writeKey("variant")
     s.pack_type("TruthPredicate")
     s.writeKey("expr")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("value")
     s.pack_type(node.children[1].strVal.toLowerAscii().capitalizeAscii())
     s.writeKey("negated")
@@ -1010,9 +1020,9 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("IsDistinctFrom")
     s.writeKey("left")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("right")
-    s.writeExpr(node.children[1])
+    s.writeExpr(node.children[1], emitNatural = emitNatural)
     s.writeKey("negated")
     s.pack_type(node.negated)
   of nkCase:
@@ -1020,13 +1030,13 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Case")
     s.writeKey("operand")
-    s.writeExprOpt(node.caseOperand)
+    s.writeExprOpt(node.caseOperand, emitNatural = emitNatural)
     s.writeKey("branches")
     s.pack_array(node.caseBranches.len)
     for branch in node.caseBranches:
-      s.writeCaseBranch(branch)
+      s.writeCaseBranch(branch, emitNatural = emitNatural)
     s.writeKey("else_expr")
-    s.writeExprOpt(node.caseElse)
+    s.writeExprOpt(node.caseElse, emitNatural = emitNatural)
   of nkFunctionCall:
     # Trailing clause nodes are appended by the parser after the argument
     # expressions in the fixed order [ORDER BY, WITHIN GROUP, FILTER, OVER].
@@ -1061,7 +1071,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.pack_array(max(argCount, 0))
     if not node.funcStar:
       for i in 1 ..< argEnd:
-        s.writeExpr(node.children[i])
+        s.writeExpr(node.children[i], emitNatural = emitNatural)
     s.writeKey("distinct")
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
@@ -1073,30 +1083,30 @@ proc writeExpr(s: Stream; node: SqlNode) =
       else:
         s.pack_array(orderByNode.children.len)
         for item in orderByNode.children:
-          s.writeOrderByExpr(item)
+          s.writeOrderByExpr(item, emitNatural = emitNatural)
       s.writeKey("within_group")
       if withinGroupNode == nil:
         s.pack_array(0)
       else:
         s.pack_array(withinGroupNode.children.len)
         for item in withinGroupNode.children:
-          s.writeOrderByExpr(item)
+          s.writeOrderByExpr(item, emitNatural = emitNatural)
       s.writeKey("filter")
       if filterNode == nil:
         s.writeNil()
       else:
-        s.writeExpr(filterNode.children[0])
+        s.writeExpr(filterNode.children[0], emitNatural = emitNatural)
     s.writeKey("over")
     if windowNode == nil:
       s.writeNil()
     else:
-      s.writeWindowSpec(windowNode)
+      s.writeWindowSpec(windowNode, emitNatural = emitNatural)
   of nkCast:
     s.pack_map(3)
     s.writeKey("variant")
     s.pack_type("Cast")
     s.writeKey("expr")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("target_type")
     s.writeDataType(node.children[1])
   of nkTryCast:
@@ -1104,7 +1114,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("TryCast")
     s.writeKey("expr")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("target_type")
     s.writeDataType(node.children[1])
   of nkVectorLiteral:
@@ -1120,15 +1130,15 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("ScalarSubquery")
     s.writeKey("subquery")
-    s.writeStatement(node.children[0])
+    s.writeStatement(node.children[0], emitNatural = emitNatural)
   of nkInSubquery:
     s.pack_map(4)
     s.writeKey("variant")
     s.pack_type("InSubquery")
     s.writeKey("expr")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("subquery")
-    s.writeStatement(node.children[1])
+    s.writeStatement(node.children[1], emitNatural = emitNatural)
     s.writeKey("negated")
     s.pack_type(node.negated)
   of nkExists:
@@ -1136,7 +1146,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Exists")
     s.writeKey("subquery")
-    s.writeStatement(node.children[0])
+    s.writeStatement(node.children[0], emitNatural = emitNatural)
     s.writeKey("negated")
     s.pack_type(node.negated)
   of nkQuantified:
@@ -1144,13 +1154,13 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Quantified")
     s.writeKey("expr")
-    s.writeExpr(node.children[0])
+    s.writeExpr(node.children[0], emitNatural = emitNatural)
     s.writeKey("op")
     s.pack_type(normalizedBinaryOp(node.children[1].firstIdent()))
     s.writeKey("quantifier")
     s.pack_type(normalizedQuantifier(node.quantifier))
     s.writeKey("subquery")
-    s.writeStatement(node.children[2])
+    s.writeStatement(node.children[2], emitNatural = emitNatural)
   else:
     s.pack_map(2)
     s.writeKey("variant")
@@ -1161,7 +1171,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
+proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true; emitNatural = true) =
   var withNode: SqlNode = nil
   var distinctFlag = false
   var distinctOnNode: SqlNode = nil
@@ -1219,7 +1229,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   s.pack_type("Select")
   if includeWith and withNode != nil:
     s.writeKey("with")
-    s.writeWithClause(withNode)
+    s.writeWithClause(withNode, emitNatural = emitNatural)
   s.writeKey("distinct")
   s.pack_type(distinctFlag)
   # The staged continuous-aggregate encoder intentionally remains byte-for-byte
@@ -1230,14 +1240,14 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     if distinctOnNode == nil:
       s.pack_array(0)
     else:
-      s.writeExprSeq(distinctOnNode.children)
+      s.writeExprSeq(distinctOnNode.children, emitNatural = emitNatural)
   s.writeKey("projection")
   if projectionNode == nil:
     s.pack_array(0)
   else:
     s.pack_array(projectionNode.children.len)
     for item in projectionNode.children:
-      s.writeSelectItem(item)
+      s.writeSelectItem(item, emitNatural = emitNatural)
   s.writeKey("from")
   if fromNode == nil:
     s.pack_array(0)
@@ -1246,9 +1256,9 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     for item in fromNode.children:
       # `includeWith` marks the public encoder; the staged continuous-aggregate
       # encoder keeps the historical FROM-item payload (contract 0.14.0).
-      s.writeFromItem(item, includeWith)
+      s.writeFromItem(item, includeWith, emitNatural = emitNatural)
   s.writeKey("selection")
-  s.writeExprOpt(selectionNode)
+  s.writeExprOpt(selectionNode, emitNatural = emitNatural)
   s.writeKey("group_by")
   if groupByNode == nil:
     s.writeNil()
@@ -1256,14 +1266,14 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     # Contract 0.13.0 (issue #149): tagged GroupByItem values.
     s.pack_array(groupByNode.children.len)
     for item in groupByNode.children:
-      s.writeGroupByItem(item)
+      s.writeGroupByItem(item, emitNatural = emitNatural)
   else:
     # The staged continuous-aggregate encoder intentionally remains
     # byte-for-byte compatible with its historical [Expr] payload; the parser
     # rejects grouping-set modifiers inside continuous aggregates (D10).
-    s.writeExprSeq(groupByNode.children)
+    s.writeExprSeq(groupByNode.children, emitNatural = emitNatural)
   s.writeKey("having")
-  s.writeExprOpt(havingNode)
+  s.writeExprOpt(havingNode, emitNatural = emitNatural)
   # The staged continuous-aggregate encoder intentionally remains byte-for-byte
   # compatible with its historical payload. Named windows and QUALIFY belong to
   # the current public Select contract only.
@@ -1278,11 +1288,11 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
         s.writeKey("name")
         s.pack_type(namedWindow.children[0].strVal)
         s.writeKey("spec")
-        s.writeWindowSpec(namedWindow.children[1])
+        s.writeWindowSpec(namedWindow.children[1], emitNatural = emitNatural)
         s.writeKey("span")
         s.writeSpan(namedWindow.span)
     s.writeKey("qualify")
-    s.writeExprOpt(qualifyNode)
+    s.writeExprOpt(qualifyNode, emitNatural = emitNatural)
   s.writeKey("set_operations")
   s.pack_array(setOperations.len)
   for setOperation in setOperations:
@@ -1292,7 +1302,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeKey("all")
     s.pack_type(setOperation.setAll)
     s.writeKey("right")
-    s.writeQueryBody(setOperation.setRight)
+    s.writeQueryBody(setOperation.setRight, emitNatural = emitNatural)
     s.writeKey("span")
     s.writeSpan(setOperation.span)
   s.writeKey("order_by")
@@ -1301,15 +1311,15 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   else:
     s.pack_array(orderByNode.children.len)
     for item in orderByNode.children:
-      s.writeOrderByExpr(item)
+      s.writeOrderByExpr(item, emitNatural = emitNatural)
   s.writeKey("limit")
   if limitNode != nil and limitNode.children.len > 0:
-    s.writeExpr(limitNode.children[0])
+    s.writeExpr(limitNode.children[0], emitNatural = emitNatural)
   else:
     s.writeNil()
   s.writeKey("offset")
   if offsetNode != nil and offsetNode.children.len > 0:
-    s.writeExpr(offsetNode.children[0])
+    s.writeExpr(offsetNode.children[0], emitNatural = emitNatural)
   else:
     s.writeNil()
   # The staged continuous-aggregate encoder intentionally remains byte-for-byte
@@ -1321,7 +1331,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeKey("knn_options")
     s.writeIndexOptions(knnOptionsNode)
 
-proc writeSelectKind(s: Stream; node: SqlNode) =
+proc writeSelectKind(s: Stream; node: SqlNode; emitNatural = true) =
   # 固定 16 キー(variant/distinct/distinct_on/projection/from/selection/
   # group_by/having/windows/qualify/set_operations/order_by/limit/offset/
   # limit_with_ties/knn_options)に、WITH 句があれば with を加えて 17 になる。
@@ -1331,9 +1341,9 @@ proc writeSelectKind(s: Stream; node: SqlNode) =
       fieldCount = 17
       break
   s.pack_map(fieldCount)
-  s.writeSelectFields(node)
+  s.writeSelectFields(node, emitNatural = emitNatural)
 
-proc writeValuesKind(s: Stream; node: SqlNode) =
+proc writeValuesKind(s: Stream; node: SqlNode; emitNatural = true) =
   var withNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
@@ -1363,11 +1373,11 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   s.pack_type("Values")
   if withNode != nil:
     s.writeKey("with")
-    s.writeWithClause(withNode)
+    s.writeWithClause(withNode, emitNatural = emitNatural)
   s.writeKey("rows")
   s.pack_array(rows.len)
   for row in rows:
-    s.writeExprSeq(row.children)
+    s.writeExprSeq(row.children, emitNatural = emitNatural)
   s.writeKey("set_operations")
   s.pack_array(setOperations.len)
   for setOperation in setOperations:
@@ -1377,7 +1387,7 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
     s.writeKey("all")
     s.pack_type(setOperation.setAll)
     s.writeKey("right")
-    s.writeQueryBody(setOperation.setRight)
+    s.writeQueryBody(setOperation.setRight, emitNatural = emitNatural)
     s.writeKey("span")
     s.writeSpan(setOperation.span)
   s.writeKey("order_by")
@@ -1386,15 +1396,15 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   else:
     s.pack_array(orderByNode.children.len)
     for item in orderByNode.children:
-      s.writeOrderByExpr(item)
+      s.writeOrderByExpr(item, emitNatural = emitNatural)
   s.writeKey("limit")
   if limitNode != nil and limitNode.children.len > 0:
-    s.writeExpr(limitNode.children[0])
+    s.writeExpr(limitNode.children[0], emitNatural = emitNatural)
   else:
     s.writeNil()
   s.writeKey("offset")
   if offsetNode != nil and offsetNode.children.len > 0:
-    s.writeExpr(offsetNode.children[0])
+    s.writeExpr(offsetNode.children[0], emitNatural = emitNatural)
   else:
     s.writeNil()
   s.writeKey("limit_with_ties")
@@ -1402,12 +1412,12 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeQueryBody(s: Stream; node: SqlNode) =
+proc writeQueryBody(s: Stream; node: SqlNode; emitNatural = true) =
   case node.kind
   of nkSelect:
-    s.writeSelectKind(node)
+    s.writeSelectKind(node, emitNatural = emitNatural)
   of nkValues:
-    s.writeValuesKind(node)
+    s.writeValuesKind(node, emitNatural = emitNatural)
   else:
     raise newException(ParseError,
       "unsupported query body node for MessagePack: " & $node.kind)
@@ -1416,8 +1426,9 @@ proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
   # 継続集約のクエリは WITH を含めない(includeWith = false)ため、
   # Historical staged payload: Select の固定 11 field と statement span の
   # 合計で常に 12。Current-only fields must not alter this byte contract.
+  # Nested public-shaped Select/Values payloads also retain their old JOIN keys.
   s.pack_map(12)
-  s.writeSelectFields(node, false)
+  s.writeSelectFields(node, false, emitNatural = false)
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -2415,7 +2426,7 @@ proc writeContinuousAggregateV040Kind(s: Stream; statement: SqlNode) =
   s.writeKey("span")
   s.writeSpan(statement.span)
 
-proc writeStatementKind(s: Stream; node: SqlNode) =
+proc writeStatementKind(s: Stream; node: SqlNode; emitNatural = true) =
   case node.kind
   of nkExplain:
     s.pack_map(4)
@@ -2428,13 +2439,13 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
     s.writeKey("statement")
     s.pack_map(2)
     s.writeKey("kind")
-    s.writeStatementKind(node.children[0])
+    s.writeStatementKind(node.children[0], emitNatural = emitNatural)
     s.writeKey("span")
     s.writeSpan(node.children[0].span)
   of nkSelect:
-    s.writeSelectKind(node)
+    s.writeSelectKind(node, emitNatural = emitNatural)
   of nkValues:
-    s.writeValuesKind(node)
+    s.writeValuesKind(node, emitNatural = emitNatural)
   of nkInsert:
     s.writeInsertKind(node)
   of nkUpdate:
@@ -2492,10 +2503,10 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
   else:
     raise newException(ParseError, "unsupported statement node for MessagePack: " & $node.kind)
 
-proc writeStatement(s: Stream; node: SqlNode) =
+proc writeStatement(s: Stream; node: SqlNode; emitNatural = true) =
   s.pack_map(2)
   s.writeKey("kind")
-  s.writeStatementKind(node)
+  s.writeStatementKind(node, emitNatural = emitNatural)
   s.writeKey("span")
   s.writeSpan(node.span)
 

@@ -33,7 +33,7 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
         return {
             "schema": "alopex-parser-vendor-manifest-v2",
             "alopex_version": "0.8.5",
-            "contract_version": "0.26.0",
+            "contract_version": "0.27.0",
             "assets": [
                 {
                     "target": target,
@@ -89,7 +89,7 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertEqual(build_support.read_text(), "unchanged")
 
-    def test_contract_v040_manifest_is_rejected_before_retargeting(self) -> None:
+    def test_old_contract_manifest_is_rejected_before_retargeting(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,15 +97,15 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
             destination = root / "vendor.json"
             build_support = root / "build_support.rs"
             manifest = self.manifest()
-            manifest["contract_version"] = "0.4.0"
-            source.write_text(json.dumps(manifest))
             build_support.write_text("unchanged")
-
-            with self.assertRaisesRegex(ValueError, "contract mismatch"):
-                module.retarget(source, destination, build_support)
-
-            self.assertFalse(destination.exists())
-            self.assertEqual(build_support.read_text(), "unchanged")
+            for version in ("0.4.0", "0.26.0"):
+                with self.subTest(version=version):
+                    manifest["contract_version"] = version
+                    source.write_text(json.dumps(manifest))
+                    with self.assertRaisesRegex(ValueError, "contract mismatch"):
+                        module.retarget(source, destination, build_support)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(build_support.read_text(), "unchanged")
 
     def test_selects_fixed_or_single_versioned_vendor_manifest(self) -> None:
         module = load_module()

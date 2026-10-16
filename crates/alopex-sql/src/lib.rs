@@ -38,6 +38,7 @@ pub mod fts;
 mod nim_bridge;
 mod nim_ffi;
 pub mod parser;
+mod parser_contract;
 pub mod planner;
 pub mod scalar;
 pub mod storage;
