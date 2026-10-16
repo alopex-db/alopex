@@ -88,7 +88,7 @@ fn read_parquet_and_copy_accept_pandas_shaped_columns() {
 }
 
 #[test]
-fn read_parquet_maps_large_binary_to_blob() {
+fn read_parquet_copy_and_insert_map_large_binary_to_blob() {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let payload = [0x00, 0xff, b'A'];
     let schema = Arc::new(Schema::new(vec![Field::new(
@@ -116,7 +116,31 @@ fn read_parquet_maps_large_binary_to_blob() {
     .unwrap()
     .unwrap();
 
-    assert_eq!(result.rows, vec![vec![SqlValue::Blob(payload.to_vec())]]);
+    let expected = vec![vec![SqlValue::Blob(payload.to_vec())]];
+    assert_eq!(result.rows, expected);
+
+    let path = file.path().display();
+    run(
+        &mut executor,
+        &catalog,
+        &format!(
+            "CREATE TABLE copied (payload BLOB);
+             COPY copied FROM '{path}' WITH (FORMAT PARQUET);
+             CREATE TABLE selected (payload BLOB);
+             INSERT INTO selected SELECT * FROM read_parquet('{path}')"
+        ),
+    )
+    .unwrap();
+    for table in ["copied", "selected"] {
+        let stored = run(
+            &mut executor,
+            &catalog,
+            &format!("SELECT payload FROM {table}"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.rows, expected, "{table}");
+    }
 }
 
 #[test]
@@ -143,6 +167,35 @@ fn copy_reports_the_source_row_for_out_of_range_int64() {
 
     assert!(
         error.contains("row 1025: cannot convert INT64 value 2147483648 to INTEGER"),
+        "{error}"
+    );
+}
+
+#[test]
+fn insert_from_read_parquet_reports_the_input_row_for_out_of_range_int64() {
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let mut ids = vec![1_i64; 1024];
+    ids.push(i64::from(i32::MAX) + 1);
+    let batch =
+        RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int64Array::from(ids))]).unwrap();
+    write_parquet(&file, schema, batch);
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let path = file.path().display();
+    let error = run(
+        &mut executor,
+        &catalog,
+        &format!(
+            "CREATE TABLE selected (id INTEGER); \
+             INSERT INTO selected SELECT * FROM read_parquet('{path}')"
+        ),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("cannot cast BigInt to INTEGER: input row 1025: value is out of range"),
         "{error}"
     );
 }
