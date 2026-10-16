@@ -5,13 +5,16 @@ use std::time::Instant;
 use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::types::TxnMode;
 use alopex_core::vector::hnsw::HnswIndex;
-use alopex_sql::storage::AsyncSqlTransaction;
 use axum::extract::Extension;
 use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ServerError};
+use crate::http::sql::{
+    execute_non_session_statements_with_routing,
+    execute_non_session_statements_with_routing_under_catalog_read,
+};
 use crate::http::{error_response, json_response, RequestContext};
 use crate::server::ServerState;
 
@@ -207,6 +210,14 @@ pub(crate) async fn search_impl(
     request: VectorSearchRequest,
 ) -> Result<VectorSearchResponse> {
     let start = Instant::now();
+    let deadline = tokio::time::Instant::now() + state.config.query_timeout;
+    let catalog_read = match acquire_catalog_read(&state, deadline).await {
+        Ok(guard) => guard,
+        Err(err) => {
+            state.metrics.record_query(start.elapsed(), false);
+            return Err(err);
+        }
+    };
     let (table_meta, vector_col, metric) =
         match resolve_vector_table(&state, &request.table, request.column.as_deref()) {
             Ok(values) => values,
@@ -228,28 +239,17 @@ pub(crate) async fn search_impl(
         request.k
     );
 
-    let mut txn = match state.begin_sql_txn().await {
-        Ok(txn) => txn,
+    let exec_result = match execute_vector_sql_under_catalog_read(
+        state.clone(),
+        start,
+        &sql,
+        "vector-search",
+        catalog_read,
+    )
+    .await
+    {
+        Ok(result) => result,
         Err(err) => {
-            state.metrics.record_query(start.elapsed(), false);
-            return Err(err);
-        }
-    };
-    let exec_result =
-        match tokio::time::timeout(state.config.query_timeout, txn.async_execute(&sql)).await {
-            Ok(result) => result.map_err(|err| ServerError::Sql(err.into())),
-            Err(_) => Err(ServerError::Timeout("query timeout".into())),
-        };
-    let exec_result = match exec_result {
-        Ok(result) => {
-            if let Err(err) = txn.async_rollback().await {
-                state.metrics.record_query(start.elapsed(), false);
-                return Err(ServerError::Sql(err.into()));
-            }
-            result
-        }
-        Err(err) => {
-            let _ = txn.async_rollback().await;
             state.metrics.record_query(start.elapsed(), false);
             return Err(err);
         }
@@ -331,6 +331,14 @@ pub(crate) async fn upsert_batch_impl(
             "vector upsert batch must not be empty".into(),
         ));
     }
+    let deadline = tokio::time::Instant::now() + state.config.query_timeout;
+    let catalog_read = match acquire_catalog_read(&state, deadline).await {
+        Ok(guard) => guard,
+        Err(err) => {
+            state.metrics.record_query(start.elapsed(), false);
+            return Err(err);
+        }
+    };
     let (table_meta, vector_col, _) =
         match resolve_vector_table(&state, &request.table, request.column.as_deref()) {
             Ok(values) => values,
@@ -375,42 +383,21 @@ pub(crate) async fn upsert_batch_impl(
         quote_ident(&vector_col),
     );
 
-    let mut txn = match state.begin_sql_txn().await {
-        Ok(txn) => txn,
-        Err(err) => {
-            state.metrics.record_query(start.elapsed(), false);
-            return Err(err);
-        }
-    };
-    let exec_result = match tokio::time::timeout(
-        state.config.query_timeout,
-        txn.async_execute(&insert_sql),
+    let exec_result = match execute_vector_sql_under_catalog_read(
+        state.clone(),
+        start,
+        &insert_sql,
+        "vector-upsert",
+        catalog_read,
     )
     .await
     {
         Ok(result) => result,
-        Err(_) => {
-            let _ = txn.async_rollback().await;
-            state.metrics.record_query(start.elapsed(), false);
-            return Err(ServerError::Timeout("query timeout".into()));
-        }
-    };
-
-    let exec_result = exec_result.map_err(|err| ServerError::Sql(err.into()));
-
-    let exec_result = match exec_result {
-        Ok(result) => result,
         Err(err) => {
-            let _ = txn.async_rollback().await;
             state.metrics.record_query(start.elapsed(), false);
             return Err(err);
         }
     };
-
-    if let Err(err) = txn.async_commit().await {
-        state.metrics.record_query(start.elapsed(), false);
-        return Err(ServerError::Sql(err.into()));
-    }
 
     let response = match exec_result {
         alopex_sql::executor::ExecutionResult::Success
@@ -435,6 +422,14 @@ pub(crate) async fn delete_impl(
 ) -> Result<VectorDeleteResponse> {
     let start = Instant::now();
     state.lifecycle_state.check_write_allowed()?;
+    let deadline = tokio::time::Instant::now() + state.config.query_timeout;
+    let catalog_read = match acquire_catalog_read(&state, deadline).await {
+        Ok(guard) => guard,
+        Err(err) => {
+            state.metrics.record_query(start.elapsed(), false);
+            return Err(err);
+        }
+    };
     let (table_meta, _, _) =
         resolve_vector_table(&state, &request.table, request.column.as_deref())?;
     let pk_index = primary_key_index(&table_meta).ok_or_else(|| {
@@ -453,28 +448,21 @@ pub(crate) async fn delete_impl(
         request.id
     );
 
-    let mut txn = state.begin_sql_txn().await?;
-    let exec_result = match tokio::time::timeout(
-        state.config.query_timeout,
-        txn.async_execute(&delete_sql),
+    let exec_result = match execute_vector_sql_under_catalog_read(
+        state.clone(),
+        start,
+        &delete_sql,
+        "vector-delete",
+        catalog_read,
     )
     .await
     {
-        Ok(result) => result.map_err(|err| ServerError::Sql(err.into())),
-        Err(_) => Err(ServerError::Timeout("query timeout".into())),
-    };
-    let exec_result = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            let _ = txn.async_rollback().await;
             state.metrics.record_query(start.elapsed(), false);
             return Err(err);
         }
     };
-    if let Err(err) = txn.async_commit().await {
-        state.metrics.record_query(start.elapsed(), false);
-        return Err(ServerError::Sql(err.into()));
-    }
 
     let success = match exec_result {
         alopex_sql::executor::ExecutionResult::RowsAffected(rows) => rows > 0,
@@ -482,7 +470,7 @@ pub(crate) async fn delete_impl(
         _ => {
             return Err(ServerError::BadRequest(
                 "vector delete returned unexpected result".into(),
-            ))
+            ));
         }
     };
 
@@ -526,7 +514,7 @@ pub(crate) async fn index_update_impl(
         &request.column,
         request.method.as_deref(),
         &request.options,
-        false,
+        true,
     ) {
         Ok(sql) => sql,
         Err(err) => {
@@ -556,7 +544,9 @@ pub(crate) async fn index_compact_impl(
     request: VectorIndexCompactRequest,
 ) -> Result<VectorIndexResponse> {
     let start = Instant::now();
+    let deadline = tokio::time::Instant::now() + state.config.query_timeout;
     state.lifecycle_state.check_write_allowed()?;
+    let catalog_txn_operation = acquire_catalog_read(&state, deadline).await?;
     let index = {
         let guard = match state.catalog.read() {
             Ok(guard) => guard,
@@ -582,17 +572,16 @@ pub(crate) async fn index_compact_impl(
 
     let store = state.store.clone();
     let name = request.name.clone();
-    let compacted = tokio::task::spawn_blocking(move || {
+    let compacted = match run_catalog_blocking_until(catalog_txn_operation, deadline, move || {
         let mut txn = store.begin(TxnMode::ReadWrite)?;
         let mut hnsw = HnswIndex::load(&name, &mut txn)?;
         let result = hnsw.compact()?;
         hnsw.save(&mut txn)?;
         txn.commit_self()?;
-        Ok::<_, ServerError>(result)
+        Ok(result)
     })
     .await
-    .map_err(|err| ServerError::Internal(err.to_string()));
-    let compacted = match compacted {
+    {
         Ok(result) => result,
         Err(err) => {
             state.metrics.record_query(start.elapsed(), false);
@@ -610,24 +599,13 @@ async fn execute_index_sql(
     start: Instant,
     sql: &str,
 ) -> Result<VectorIndexResponse> {
-    let mut txn = state.begin_sql_txn().await?;
-    let exec_result =
-        match tokio::time::timeout(state.config.query_timeout, txn.async_execute(sql)).await {
-            Ok(result) => result.map_err(|err| ServerError::Sql(err.into())),
-            Err(_) => Err(ServerError::Timeout("query timeout".into())),
-        };
-    let exec_result = match exec_result {
+    let exec_result = match execute_vector_sql(state.clone(), start, sql, "vector-index").await {
         Ok(result) => result,
         Err(err) => {
-            let _ = txn.async_rollback().await;
             state.metrics.record_query(start.elapsed(), false);
             return Err(err);
         }
     };
-    if let Err(err) = txn.async_commit().await {
-        state.metrics.record_query(start.elapsed(), false);
-        return Err(ServerError::Sql(err.into()));
-    }
 
     match exec_result {
         alopex_sql::executor::ExecutionResult::Success
@@ -641,6 +619,109 @@ async fn execute_index_sql(
                 "vector index operation returned unexpected result".into(),
             ))
         }
+    }
+}
+
+async fn execute_vector_sql(
+    state: Arc<ServerState>,
+    start: Instant,
+    sql: &str,
+    correlation_id: &str,
+) -> Result<alopex_sql::executor::ExecutionResult> {
+    let remaining = state.config.query_timeout.saturating_sub(start.elapsed());
+    if remaining.is_zero() {
+        return Err(ServerError::Timeout("query timeout".into()));
+    }
+    let (mut results, _) =
+        execute_non_session_statements_with_routing(state, sql, correlation_id, remaining).await?;
+    results
+        .pop()
+        .ok_or_else(|| ServerError::BadRequest("vector SQL must not be empty".into()))
+}
+
+async fn execute_vector_sql_under_catalog_read(
+    state: Arc<ServerState>,
+    start: Instant,
+    sql: &str,
+    correlation_id: &str,
+    catalog_read: tokio::sync::OwnedRwLockReadGuard<()>,
+) -> Result<alopex_sql::executor::ExecutionResult> {
+    let remaining = state.config.query_timeout.saturating_sub(start.elapsed());
+    if remaining.is_zero() {
+        return Err(ServerError::Timeout("query timeout".into()));
+    }
+    let (mut results, _) = execute_non_session_statements_with_routing_under_catalog_read(
+        state,
+        sql,
+        correlation_id,
+        remaining,
+        catalog_read,
+    )
+    .await?;
+    results
+        .pop()
+        .ok_or_else(|| ServerError::BadRequest("vector SQL must not be empty".into()))
+}
+
+async fn run_catalog_blocking_until<T, F>(
+    catalog_txn_operation: tokio::sync::OwnedRwLockReadGuard<()>,
+    deadline: tokio::time::Instant,
+    operation: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    if deadline <= tokio::time::Instant::now() {
+        return Err(ServerError::Timeout("query timeout".into()));
+    }
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let _catalog_txn_operation = catalog_txn_operation;
+            operation()
+        })
+        .await
+        .map_err(|err| ServerError::Internal(err.to_string()))
+        .and_then(|result| result);
+        if let Err(Err(err)) = response_tx.send(result) {
+            tracing::error!(error = %err, "detached vector operation failed");
+        }
+    });
+    await_vector_response_until(response_rx, deadline).await
+}
+
+async fn await_vector_response_until<T>(
+    response_rx: tokio::sync::oneshot::Receiver<Result<T>>,
+    deadline: tokio::time::Instant,
+) -> Result<T> {
+    let deadline_sleep = tokio::time::sleep_until(deadline);
+    tokio::pin!(deadline_sleep);
+    tokio::pin!(response_rx);
+    tokio::select! {
+        biased;
+        _ = deadline_sleep.as_mut() => Err(ServerError::Timeout("query timeout".into())),
+        response = response_rx.as_mut() => response.map_err(|_| {
+            ServerError::Internal("vector operation coordinator stopped before responding".into())
+        })?,
+    }
+}
+
+async fn acquire_catalog_read(
+    state: &Arc<ServerState>,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(ServerError::Timeout("query timeout".into()));
+    }
+    let deadline_sleep = tokio::time::sleep_until(deadline);
+    let read_guard = Arc::clone(&state.catalog_txn_gate).read_owned();
+    tokio::pin!(deadline_sleep);
+    tokio::pin!(read_guard);
+    tokio::select! {
+        biased;
+        _ = deadline_sleep.as_mut() => Err(ServerError::Timeout("query timeout".into())),
+        guard = read_guard.as_mut() => Ok(guard),
     }
 }
 
@@ -665,7 +746,7 @@ fn build_create_index_sql(
         Some(other) => {
             return Err(ServerError::BadRequest(format!(
                 "unsupported index method: {other}"
-            )))
+            )));
         }
     };
     let options_sql = build_index_options_sql(options);
@@ -727,7 +808,7 @@ fn resolve_vector_table(
                 _ => {
                     return Err(ServerError::BadRequest(
                         "specified column is not a vector".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -786,4 +867,245 @@ fn quote_ident(ident: &str) -> String {
 
 fn default_k() -> usize {
     10
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn failed_vector_index_sql_records_failure_metric() {
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+
+        execute_index_sql(server.state.clone(), Instant::now(), "not valid SQL")
+            .await
+            .expect_err("invalid index SQL");
+
+        let metrics = server.state.metrics.expose_prometheus().expect("metrics");
+        assert!(metrics.contains("error_count{kind=\"query\"} 1"));
+        assert!(metrics.contains("query_count 1"));
+    }
+
+    #[tokio::test]
+    async fn vector_metadata_is_resolved_under_execution_catalog_guard() {
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = server.state.clone();
+        execute_non_session_statements_with_routing(
+            state.clone(),
+            "CREATE TABLE vector_guard_rows (old_id INTEGER PRIMARY KEY, old_embedding VECTOR(2, L2))",
+            "vector-guard-setup",
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect("create original table");
+
+        let replacement_table = {
+            let catalog = state.catalog.read().expect("catalog");
+            let planned = alopex_sql::planner::plan_sql_for_routing(
+                &*catalog,
+                "CREATE TABLE replacement_vector_guard_rows (new_id INTEGER PRIMARY KEY, new_embedding VECTOR(2, L2))",
+            )
+            .expect("plan replacement table");
+            let alopex_sql::planner::LogicalPlan::CreateTable { table, .. } = &planned[0].plan
+            else {
+                panic!("expected CREATE TABLE plan");
+            };
+            let mut table = table.clone();
+            table.name = "vector_guard_rows".into();
+            table
+        };
+
+        let catalog_reader = Arc::clone(&state.catalog_txn_gate).read_owned().await;
+        let replacement_state = state.clone();
+        let replacement = async move {
+            let _ordering = Arc::clone(&replacement_state.catalog_ddl_order_gate)
+                .lock_owned()
+                .await;
+            let _writer = Arc::clone(&replacement_state.catalog_txn_gate)
+                .write_owned()
+                .await;
+            let mut catalog = replacement_state.catalog.write().expect("catalog");
+            catalog
+                .drop_table("vector_guard_rows")
+                .expect("drop original table");
+            catalog
+                .create_table(replacement_table)
+                .expect("create replacement table");
+        };
+        tokio::pin!(replacement);
+        assert!(futures::poll!(replacement.as_mut()).is_pending());
+
+        let mut writer_is_queued = false;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if Arc::clone(&state.catalog_txn_gate)
+                .try_read_owned()
+                .is_err()
+            {
+                writer_is_queued = true;
+                break;
+            }
+        }
+        assert!(
+            writer_is_queued,
+            "replacement DDL must queue its catalog writer"
+        );
+
+        let upsert = upsert_batch_impl(
+            state,
+            VectorUpsertBatchRequest {
+                table: "vector_guard_rows".into(),
+                vectors: vec![VectorUpsertBatchItem {
+                    id: 1,
+                    vector: vec![1.0, 0.0],
+                }],
+                column: Some("old_embedding".into()),
+            },
+        );
+        tokio::pin!(upsert);
+        assert!(futures::poll!(upsert.as_mut()).is_pending());
+
+        drop(catalog_reader);
+        replacement.await;
+        let error = upsert
+            .await
+            .expect_err("the replacement schema must reject the old vector column");
+        assert!(
+            matches!(error, ServerError::NotFound(ref message) if message == "vector column not found")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn catalog_read_deadline_expires_without_acquiring_after_release() {
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = server.state.clone();
+        let write_guard = Arc::clone(&state.catalog_txn_gate).write_owned().await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let read_guard = acquire_catalog_read(&state, deadline);
+        tokio::pin!(read_guard);
+        assert!(futures::poll!(read_guard.as_mut()).is_pending());
+
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        drop(write_guard);
+        assert!(matches!(read_guard.await, Err(ServerError::Timeout(_))));
+        assert!(Arc::clone(&state.catalog_txn_gate)
+            .try_write_owned()
+            .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_deadline_does_not_start_blocking_vector_operation() {
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let guard = Arc::clone(&server.state.catalog_txn_gate)
+            .read_owned()
+            .await;
+        let started = Arc::new(AtomicBool::new(false));
+        let started_for_operation = Arc::clone(&started);
+
+        let result = run_catalog_blocking_until(guard, tokio::time::Instant::now(), move || {
+            started_for_operation.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+        assert!(matches!(result, Err(ServerError::Timeout(_))));
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_deadline_wins_over_ready_vector_response() {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        response_tx.send(Ok(())).expect("response receiver");
+
+        let result = await_vector_response_until(response_rx, tokio::time::Instant::now()).await;
+
+        assert!(matches!(result, Err(ServerError::Timeout(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_blocking_vector_operation_holds_catalog_guard_until_completion() {
+        let temp_dir = tempfile::tempdir().expect("temporary server data");
+        let server = crate::Server::new(crate::config::ServerConfig {
+            data_dir: temp_dir.path().join("data"),
+            audit_log_enabled: false,
+            tracing_enabled: false,
+            metrics_enabled: false,
+            ..crate::config::ServerConfig::default()
+        })
+        .expect("server");
+        let state = server.state.clone();
+        let guard = Arc::clone(&state.catalog_txn_gate).read_owned().await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation = tokio::spawn(run_catalog_blocking_until(guard, deadline, move || {
+            started_tx.send(()).expect("started receiver");
+            release_rx.recv().expect("operation release");
+            Ok(())
+        }));
+        started_rx.await.expect("blocking operation starts");
+
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        assert!(matches!(
+            operation.await.expect("operation task"),
+            Err(ServerError::Timeout(_))
+        ));
+        assert!(Arc::clone(&state.catalog_txn_gate)
+            .try_write_owned()
+            .is_err());
+
+        let gate = Arc::clone(&state.catalog_txn_gate);
+        let (write_acquired_tx, write_acquired_rx) = std::sync::mpsc::channel();
+        let writer = tokio::spawn(async move {
+            let guard = gate.write_owned().await;
+            write_acquired_tx
+                .send(())
+                .expect("write acquisition receiver");
+            guard
+        });
+        release_tx.send(()).expect("release operation");
+        let write_acquired = tokio::task::spawn_blocking(move || {
+            write_acquired_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .expect("write acquisition waiter");
+        if let Err(err) = write_acquired {
+            writer.abort();
+            panic!("catalog guard must be released after blocking operation completion: {err}");
+        }
+        drop(writer.await.expect("catalog writer task"));
+    }
 }
