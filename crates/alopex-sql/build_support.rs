@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.26.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.27.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
@@ -516,10 +516,11 @@ mod tests {
             let vendor = crate_root.join("nim-sql-parser/vendor");
             fs::create_dir_all(&vendor).expect("fixture vendor directory");
 
-            let source_vendor =
+            let checked_in_vendor =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nim-sql-parser/vendor");
+            let source_vendor = temporary.path().join("fixture-vendor");
             fs::copy(
-                source_vendor.join("parser-vendor-manifest.json"),
+                checked_in_vendor.join("parser-vendor-manifest.json"),
                 vendor.join("parser-vendor-manifest.json"),
             )
             .expect("copy vendor manifest");
@@ -533,15 +534,37 @@ mod tests {
                 serde_json::Value::String(REQUIRED_ALOPEX_VERSION.to_owned());
             manifest["schema"] =
                 serde_json::Value::String("alopex-parser-vendor-manifest-v2".to_owned());
+            // Resolver tests validate identities, not executable parser code. Generate
+            // distinct dynamic/static payloads so the fixture works before and after
+            // release staging and cannot conflate their sizes or digests.
             for asset in manifest["assets"].as_array_mut().expect("manifest assets") {
-                let target = asset["target"].as_str().expect("manifest target");
-                let dynamic = asset["library"].clone();
-                let mut static_library = dynamic;
-                static_library["path"] = serde_json::Value::String(format!(
-                    "alopex-sql-parser/{target}/{}",
-                    static_library_name_for_target(target)
-                ));
-                asset["static_library"] = static_library;
+                let target = asset["target"]
+                    .as_str()
+                    .expect("manifest target")
+                    .to_owned();
+                let target_dir = source_vendor.join(&target);
+                fs::create_dir_all(&target_dir).expect("fixture source target");
+                for (field, name, payload) in [
+                    (
+                        "library",
+                        library_name_for_source(&target_dir),
+                        b"dynamic parser fixture".as_slice(),
+                    ),
+                    (
+                        "static_library",
+                        static_library_name_for_target(&target),
+                        b"distinct static parser archive fixture".as_slice(),
+                    ),
+                ] {
+                    fs::write(target_dir.join(name), payload).expect("write fixture library");
+                    asset[field] = serde_json::json!({
+                        "path": format!("alopex-sql-parser/{target}/{name}"),
+                        "sha256": sha256_bytes(payload),
+                        "size": payload.len(),
+                    });
+                }
+                fs::write(target_dir.join("CONTRACT_VERSION"), format!("{contract}\n"))
+                    .expect("write fixture source contract");
             }
             fs::write(
                 &manifest_path,
@@ -602,18 +625,8 @@ mod tests {
             library_name_for_source(source),
             static_library_name_for_source(source),
         ] {
-            let source_path = source.join(name);
-            if source_path.exists() {
-                fs::copy(source_path, destination.join(name)).expect("copy target identity");
-            } else if name == static_library_name_for_source(source) {
-                fs::copy(
-                    source.join(library_name_for_source(source)),
-                    destination.join(name),
-                )
-                .expect("copy fixture static library");
-            } else {
-                panic!("missing target identity fixture: {}", source_path.display());
-            }
+            fs::copy(source.join(name), destination.join(name))
+                .expect("copy synthetic target identity");
         }
         let dynamic_name = library_name_for_source(source);
         let static_name = static_library_name_for_source(source);
@@ -819,35 +832,35 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_v040_vendor_is_rejected_by_current_requirements() {
-        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fn stale_v040_vendor_is_rejected_by_current_requirements() {
+        let fixture = Fixture::stale(true);
         let message = resolve_native_library_with_options(
-            &crate_root,
+            &fixture.crate_root,
             LINUX_TARGET,
             None,
             false,
-            VENDOR_MANIFEST_SHA256,
+            &fixture.manifest_sha256(),
         )
-        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.26.0")
+        .expect_err("the stale vendor must not satisfy the current contract")
         .to_string();
 
-        assert!(message.contains("invalid parser vendor manifest"));
+        assert_eq!(message, "parser vendor manifest contract mismatch");
     }
 
     #[test]
     fn local_opt_in_without_an_explicit_source_directory_does_not_bypass_stale_vendor() {
-        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture = Fixture::stale(true);
         let message = resolve_native_library_with_options(
-            &crate_root,
+            &fixture.crate_root,
             LINUX_TARGET,
             None,
             true,
-            VENDOR_MANIFEST_SHA256,
+            &fixture.manifest_sha256(),
         )
         .expect_err("the local bypass requires both opt-in and an explicit source directory")
         .to_string();
 
-        assert!(message.contains("invalid parser vendor manifest"));
+        assert_eq!(message, "parser vendor manifest contract mismatch");
     }
 
     #[test]
@@ -864,9 +877,8 @@ mod tests {
         .expect("build time accepts self-consistent identity sidecars");
 
         assert_eq!(resolved.directory, explicit);
-        // This fixture deliberately contains the historical producer bytes.
-        // Acceptance here is not a contract-compatibility claim: the runtime
-        // exported-version gate rejects those bytes before MessagePack decode.
+        // Synthetic fixture bytes only prove sidecar/checksum consistency.
+        // Producer compatibility still requires the runtime exported-version gate.
     }
 
     #[test]
@@ -883,6 +895,23 @@ mod tests {
             &fixture.manifest_sha256(),
         )
         .expect_err("local source mode must reject stale sidecar")
+        .to_string();
+        assert!(message.contains("contract sidecar"));
+    }
+
+    #[test]
+    fn local_source_mode_rejects_pre_node_local_join_contract() {
+        let fixture = Fixture::stale(false);
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(explicit.join("CONTRACT_VERSION"), b"0.26.0\n").unwrap();
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("the previous wire contract must not pass the local source gate")
         .to_string();
         assert!(message.contains("contract sidecar"));
     }
