@@ -85,6 +85,7 @@ use std::time::Instant;
 fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
+    btree_index: Option<&str>,
     analyze: bool,
     format: ExplainFormat,
     elapsed_ns: Option<u64>,
@@ -96,6 +97,13 @@ fn explain_result(
             if let Some(path) = hnsw_path {
                 text = format!("{path}\n{text}");
             }
+            if let Some(index_name) = btree_index {
+                text = text.replacen(
+                    "Scan table=",
+                    &format!("IndexScan index={index_name} table="),
+                    1,
+                );
+            }
             ("QUERY PLAN", text)
         }
         ExplainFormat::Json => {
@@ -105,6 +113,12 @@ fn explain_result(
             if let Some(selected_path) = hnsw_path {
                 document["physical_plan"]["selected_path"] =
                     serde_json::Value::String(selected_path);
+            }
+            if let Some(index_name) = btree_index {
+                document["physical_plan"]["access_path"] = serde_json::json!({
+                    "node": "IndexScan",
+                    "index": index_name,
+                });
             }
             ("query_plan", document.to_string())
         }
@@ -249,12 +263,24 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let btree_index = {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::selected_btree_index_name(&input, &*catalog)
+                };
                 let hnsw_path = self.run_in_write_txn(|txn| {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     query::explain_knn_path(txn, &*catalog, &input)
                 })?;
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        btree_index.as_deref(),
+                        false,
+                        format,
+                        None,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
                 let result = self.execute((*input).clone())?;
@@ -262,6 +288,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
+                    btree_index.as_deref(),
                     true,
                     format,
                     Some(elapsed_ns),
@@ -661,13 +688,25 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 format,
                 input,
             } => {
+                let btree_index = {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::selected_btree_index_name(&input, &*catalog)
+                };
                 let hnsw_path = {
                     let (mut sql_txn, _) = txn.split_parts();
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
                 };
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        btree_index.as_deref(),
+                        false,
+                        format,
+                        None,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
                 let result = self.execute_in_txn((*input).clone(), txn)?;
@@ -675,6 +714,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
+                    btree_index.as_deref(),
                     true,
                     format,
                     Some(elapsed_ns),
