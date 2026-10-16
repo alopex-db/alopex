@@ -211,6 +211,9 @@ pub(crate) fn execute_sql_owned(
     transaction: &mut OwnedEmbeddedTransaction,
     sql: &str,
 ) -> Result<SqlResult> {
+    if transaction.failed {
+        return Err(Error::TxnFailed);
+    }
     let statements = match parse_sql(sql) {
         Ok(statements) => statements,
         Err(error) => {
@@ -221,6 +224,8 @@ pub(crate) fn execute_sql_owned(
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
+
+    transaction.stage_hnsw_before_sql()?;
 
     if statements.iter().any(stmt_requires_write) {
         let mut cache = transaction

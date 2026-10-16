@@ -4,7 +4,7 @@
 //! separate boundary used by Python and asynchronous stream work: it clones the database's
 //! storage `Arc` and returns only core-owned session state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{
@@ -141,6 +141,7 @@ struct OwnedEmbeddedSavepoint {
     vector_cache_invalidated: bool,
     vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
+    hnsw_index_names: HashSet<String>,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -185,6 +186,10 @@ impl OwnedEmbeddedTransaction {
         if self.failed {
             return Err(Error::TxnFailed);
         }
+        if let Err(error) = self.stage_hnsw_changes() {
+            self.failed = true;
+            return Err(error);
+        }
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -194,6 +199,7 @@ impl OwnedEmbeddedTransaction {
             vector_cache_invalidated: self.vector_cache_invalidated,
             vector_index: self.vector_index.clone(),
             vector_index_dirty: self.vector_index_dirty,
+            hnsw_index_names: self.hnsw_indices.keys().cloned().collect(),
         });
         Ok(())
     }
@@ -202,16 +208,21 @@ impl OwnedEmbeddedTransaction {
     pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
         let position = self.savepoint_position(name)?;
         let savepoint = &self.savepoints[position];
+        let hnsw_index_names = savepoint.hnsw_index_names.clone();
         self.session
             .rollback_to_savepoint(savepoint.core_id)
             .map_err(Error::Core)?;
+        // KV has moved back. The graph must be restored before this transaction can run again.
+        self.failed = true;
         self.overlay = savepoint.overlay.clone();
         self.catalog_modified = savepoint.catalog_modified;
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
         self.vector_index = savepoint.vector_index.clone();
         self.vector_index_dirty = savepoint.vector_index_dirty;
-        self.failed = false;
+        // Core already discarded descendants, even if restoring the graph fails.
         self.savepoints.truncate(position + 1);
+        self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
+        self.failed = false;
         Ok(())
     }
 
@@ -233,6 +244,65 @@ impl OwnedEmbeddedTransaction {
             .iter()
             .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| Error::SavepointNotFound(name.to_owned()))
+    }
+
+    pub(crate) fn stage_hnsw_before_sql(&mut self) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
+        if !self.hnsw_indices.is_empty() {
+            if let Err(error) = self.stage_hnsw_changes() {
+                self.failed = true;
+                return Err(error);
+            }
+            // SQL can update or drop the graph; direct operations must reload it.
+            self.hnsw_indices.clear();
+            self.db
+                .hnsw_cache
+                .write()
+                .expect("hnsw cache lock poisoned")
+                .clear();
+        }
+        Ok(())
+    }
+
+    fn stage_hnsw_changes(&mut self) -> Result<()> {
+        let mut preparation = Ok(());
+        self.session
+            .with_transaction(|transaction| {
+                let mut transaction = alopex_core::kv::any::AnyKVTransaction::Owned(
+                    OwnedKVTransactionAdapter::new(transaction),
+                );
+                for (index, state) in self.hnsw_indices.values_mut() {
+                    if preparation.is_ok() {
+                        preparation = index
+                            .commit_staged(&mut transaction, state)
+                            .map_err(Error::Core);
+                    }
+                }
+                Ok(())
+            })
+            .map_err(Error::Core)?;
+        preparation
+    }
+
+    fn rollback_hnsw_to_savepoint(&mut self, retained: &HashSet<String>) -> Result<()> {
+        // Drop stale graphs before loading, including when loading fails midway.
+        self.hnsw_indices.clear();
+        let restored = self
+            .session
+            .with_transaction(|transaction| {
+                let mut transaction = OwnedKVTransactionAdapter::new(transaction);
+                let mut restored = HashMap::with_capacity(retained.len());
+                for name in retained {
+                    let index = HnswIndex::load(name, &mut transaction)?;
+                    restored.insert(name.clone(), (index, HnswTransactionState::default()));
+                }
+                Ok(restored)
+            })
+            .map_err(Error::Core)?;
+        self.hnsw_indices = restored;
+        Ok(())
     }
 
     /// Preflight a streamable local SELECT against this transaction's catalog overlay.
@@ -343,10 +413,119 @@ impl OwnedEmbeddedTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{HnswConfig, Metric};
     use alopex_core::kv::OwnedReadOptions;
     use alopex_core::txn::OwnedLeaseOutcome;
     use alopex_core::TxnMode;
     use std::sync::Arc;
+
+    #[test]
+    fn savepoint_restores_hnsw_graph_after_nested_staging() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("first").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("second").unwrap();
+        transaction.rollback_to_savepoint("first").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard_again", &[2.0, 0.0], b"")
+            .unwrap();
+        // A rollback retains its target savepoint for another recovery.
+        transaction.rollback_to_savepoint("first").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+    }
+
+    #[test]
+    fn sql_after_direct_hnsw_change_can_drop_the_index() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql(
+                "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2)); \
+                 CREATE INDEX vec_idx ON items (embedding) USING HNSW; \
+                 INSERT INTO items VALUES (1, [0.0, 0.0]);",
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", &2u64.to_be_bytes(), &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.execute_sql("DROP INDEX vec_idx").unwrap();
+        transaction.commit().unwrap();
+        assert!(database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .is_err());
+    }
+
+    #[test]
+    fn failed_hnsw_restore_blocks_commit_until_earlier_savepoint_recovers() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("clean").unwrap();
+        transaction.put(b"hnsw:node:vec_idx:0", b"invalid").unwrap();
+        transaction.create_savepoint("unreadable").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("discarded_child").unwrap();
+
+        assert!(matches!(
+            transaction.rollback_to_savepoint("unreadable"),
+            Err(Error::Core(alopex_core::Error::InvalidFormat(_)))
+        ));
+        assert!(matches!(
+            transaction.rollback_to_savepoint("discarded_child"),
+            Err(Error::SavepointNotFound(_))
+        ));
+        assert!(matches!(transaction.commit(), Err(Error::TxnFailed)));
+        assert!(matches!(
+            transaction.execute_sql("SELECT 1"),
+            Err(Error::TxnFailed)
+        ));
+        transaction.rollback_to_savepoint("clean").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+    }
 
     #[test]
     fn embedded_factory_uses_owned_lifecycle_without_changing_borrowed_transactions() {
