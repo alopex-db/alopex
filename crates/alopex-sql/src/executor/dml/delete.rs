@@ -42,6 +42,7 @@ pub fn execute_delete_with_returning<
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    super::reject_columnar_dml(&table, "DELETE")?;
     let mut rows_affected = 0u64;
     let mut deleted_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;

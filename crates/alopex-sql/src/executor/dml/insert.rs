@@ -207,6 +207,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     conflict: Option<&OnConflictPlan>,
     returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
+    super::reject_columnar_dml(table, "INSERT")?;
     if let Some(plan) = conflict {
         reject_duplicate_conflict_keys(table, plan, &rows)?;
     }
