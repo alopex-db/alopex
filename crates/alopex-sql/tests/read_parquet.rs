@@ -29,6 +29,92 @@ fn write_parquet(file: &tempfile::NamedTempFile, schema: Arc<Schema>, batch: Rec
 }
 
 #[test]
+fn issue577_primitive_and_text_rows_preserve_nulls_across_batches() {
+    use arrow_array::{BooleanArray, Float32Array, Float64Array, Int32Array};
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("integer", DataType::Int32, true),
+        Field::new("bigint", DataType::Int64, true),
+        Field::new("float", DataType::Float32, true),
+        Field::new("double", DataType::Float64, true),
+        Field::new("boolean", DataType::Boolean, true),
+        Field::new("text", DataType::Utf8, true),
+    ]));
+    let values = (0..2051)
+        .map(|i| (i % 7 != 0).then_some(i))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i - 1024))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i64::MAX - i64::from(i)))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float32Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i as f32 / 2.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| f64::from(i) / 2.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i % 2 == 0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter(
+                values.iter().map(|v| v.map(|i| format!("row-{i}"))),
+            )),
+        ],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+    let expected = values
+        .into_iter()
+        .map(|value| match value {
+            None => vec![SqlValue::Null; 6],
+            Some(i) => vec![
+                SqlValue::Integer(i - 1024),
+                SqlValue::BigInt(i64::MAX - i64::from(i)),
+                SqlValue::Float(i as f32 / 2.0),
+                SqlValue::Double(f64::from(i) / 2.0),
+                SqlValue::Boolean(i % 2 == 0),
+                SqlValue::Text(format!("row-{i}")),
+            ],
+        })
+        .collect::<Vec<_>>();
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let mut txn = bridge.begin_write().unwrap();
+    let finite = MemoryPolicy::new(Some(16 * 1024 * 1024), SpillPolicy::FailFast);
+    for policy in [None, Some(&finite)] {
+        let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), policy).unwrap();
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected rows");
+        };
+        assert_eq!(result.rows, expected);
+    }
+}
+
+#[test]
 fn parquet_columnar_bigint_boundaries_preserve_exact_rows() {
     // Deliberately unsorted; every expected value/comparison stays in native i64.
     let values = [

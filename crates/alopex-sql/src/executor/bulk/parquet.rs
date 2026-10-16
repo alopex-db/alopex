@@ -462,6 +462,7 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
     }
 }
 
+#[inline]
 fn arrow_value_to_sql(
     array: &dyn Array,
     dt: &ArrowDataType,
@@ -478,6 +479,35 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::Integer(arr.value(row_idx)))
         }
+        (ArrowDataType::Int64, ResolvedType::BigInt) => {
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Ok(SqlValue::BigInt(arr.value(row_idx)))
+        }
+        (ArrowDataType::Float32, ResolvedType::Float) => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            Ok(SqlValue::Float(arr.value(row_idx)))
+        }
+        (ArrowDataType::Float64, ResolvedType::Double) => {
+            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            Ok(SqlValue::Double(arr.value(row_idx)))
+        }
+        (ArrowDataType::Boolean, ResolvedType::Boolean) => {
+            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            Ok(SqlValue::Boolean(arr.value(row_idx)))
+        }
+        _ => arrow_value_to_sql_converted(array, dt, expected, row_idx, source_row_idx),
+    }
+}
+
+// Keep recursive and fallible conversions out of the native scalar call boundary.
+fn arrow_value_to_sql_converted(
+    array: &dyn Array,
+    dt: &ArrowDataType,
+    expected: &ResolvedType,
+    row_idx: usize,
+    source_row_idx: usize,
+) -> Result<SqlValue> {
+    match (dt, expected) {
         (ArrowDataType::Int32, ResolvedType::BigInt) => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::BigInt(arr.value(row_idx) as i64))
@@ -489,10 +519,6 @@ fn arrow_value_to_sql(
         (ArrowDataType::Int32, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
-        }
-        (ArrowDataType::Int64, ResolvedType::BigInt) => {
-            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            Ok(SqlValue::BigInt(arr.value(row_idx)))
         }
         (ArrowDataType::Int64, ResolvedType::Integer) => {
             let value = array
@@ -511,21 +537,9 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
         }
-        (ArrowDataType::Float32, ResolvedType::Float) => {
-            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
-            Ok(SqlValue::Float(arr.value(row_idx)))
-        }
         (ArrowDataType::Float32, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
-        }
-        (ArrowDataType::Float64, ResolvedType::Double) => {
-            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            Ok(SqlValue::Double(arr.value(row_idx)))
-        }
-        (ArrowDataType::Boolean, ResolvedType::Boolean) => {
-            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            Ok(SqlValue::Boolean(arr.value(row_idx)))
         }
         (ArrowDataType::Utf8, ResolvedType::Text) => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
