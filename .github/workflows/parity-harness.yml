@@ -4,10 +4,22 @@ on:
   push:
     paths:
       - 'scripts/parity/**'
+      - 'scripts/reference_tests/**'
+      - 'scripts/performance/**'
+      - 'scripts/validate_v0811_ledgers.py'
+      - 'scripts/test_validate_v0811_ledgers.py'
+      - 'docs/parity/**'
+      - 'crates/**'
       - '.github/workflows/parity-harness.yml'
   pull_request:
     paths:
       - 'scripts/parity/**'
+      - 'scripts/reference_tests/**'
+      - 'scripts/performance/**'
+      - 'scripts/validate_v0811_ledgers.py'
+      - 'scripts/test_validate_v0811_ledgers.py'
+      - 'docs/parity/**'
+      - 'crates/**'
       - '.github/workflows/parity-harness.yml'
 
 jobs:
@@ -21,6 +33,7 @@ jobs:
           python -m unittest \
             scripts.parity.runner.test_report \
             scripts.parity.runner.test_surfaces \
-            scripts.parity.test_compat_fixture_contract
+            scripts.parity.test_compat_fixture_contract \
+            scripts.test_validate_v0811_ledgers
       - name: Verify v0.8.11 compatibility ledgers
         run: python scripts/validate_v0811_ledgers.py

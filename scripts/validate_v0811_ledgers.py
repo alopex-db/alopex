@@ -338,11 +338,13 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
     if payload.get("schema") == "alopex.hnsw-conformance/v1":
         try:
             from scripts.reference_tests.hnsw_public_inventory import (
+                capability_matrix as hnsw_capability_matrix,
                 inventory as hnsw_inventory,
                 materialize as materialize_hnsw,
             )
         except ModuleNotFoundError:
             from reference_tests.hnsw_public_inventory import (
+                capability_matrix as hnsw_capability_matrix,
                 inventory as hnsw_inventory,
                 materialize as materialize_hnsw,
             )
@@ -357,6 +359,15 @@ def validate(path: Path, performance: dict[str, object] | None = None) -> list[s
             errors.append(f"{path}: HNSW public inventory does not match source")
         if public_api != materialize_hnsw(payload):
             errors.append(f"{path}: HNSW public inventory does not match materialized claims")
+        capability_matrix = payload.get("capability_matrix", [])
+        if capability_matrix != hnsw_capability_matrix():
+            errors.append(f"{path}: HNSW capability matrix does not match source")
+        for capability in capability_matrix:
+            for cell in capability.get("surfaces", []):
+                if cell.get("status") == "supported":
+                    errors.extend(validate_test_evidence(path, cell.get("evidence"), "HNSW"))
+                elif cell.get("status") != "not_applicable" or not cell.get("reason"):
+                    errors.append(f"{path}: invalid HNSW capability cell {capability.get('capability')}")
         claims = {entry.get("api"): entry for entry in entries}
         unused_claims = set(claims).difference(row.get("claim") for row in public_api)
         if unused_claims:
