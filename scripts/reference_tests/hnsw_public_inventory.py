@@ -112,6 +112,7 @@ def claim_for(row: dict[str, object]) -> str:
         "upsert_staged": "upsert reconnect",
         "upsert_staged_batch": "upsert reconnect",
         "search": "cosine distance",
+        "search_with_effective_ef": "cosine distance",
         "delete": "HnswIndex.delete",
         "delete_staged": "HnswIndex staged commit/rollback",
         "drop": "HnswIndex.drop",

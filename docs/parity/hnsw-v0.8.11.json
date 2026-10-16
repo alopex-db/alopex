@@ -616,6 +616,17 @@
     },
     {
       "surface": "Rust",
+      "api": "Rust.HnswIndex.search_with_effective_ef",
+      "claim": "cosine distance",
+      "status": "known-performance-divergence",
+      "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/vector.c",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
+      "issue": 302,
+      "performance_contract": "hnsw-pareto-v1",
+      "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Rust",
       "api": "Rust.HnswIndex.stats",
       "claim": "HnswIndex.stats",
       "status": "alopex-extension",
