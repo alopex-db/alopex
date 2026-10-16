@@ -7,6 +7,7 @@ use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::storage::SqlValue;
+use proptest::prelude::*;
 
 fn execute_sql(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
     let dialect = AlopexDialect;
@@ -228,6 +229,29 @@ fn dml_subquery_is_null_predicate_executes() {
     assert_eq!(query.rows, vec![vec![SqlValue::Integer(3)]]);
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 32,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn subquery_coalesce_preserves_other_scalar_function_semantics(value in -100i32..=-1) {
+        // Ordinary scalar functions in a fallback must still apply their own
+        // operation, rather than accidentally using COALESCE's first-value rule.
+        let sql = format!(
+            "SELECT COALESCE((SELECT CAST(NULL AS INTEGER)), ABS({value}))"
+        );
+        prop_assert_eq!(last_query(&sql).rows, vec![vec![SqlValue::Integer(value.abs())]]);
+
+        // A function that does not support nested subqueries must retain its
+        // explicit error, not silently return the subquery's first argument.
+        let sql = format!("SELECT ABS((SELECT {value}))");
+        prop_assert!(execute_sql(&sql).is_err(), "unsupported scalar subquery was accepted: {}", sql);
+    }
+}
+
 #[test]
 fn scalar_subquery_rejects_multiple_rows() {
     let err = execute_sql(&setup_sql(
@@ -235,6 +259,27 @@ fn scalar_subquery_rejects_multiple_rows() {
     ))
     .unwrap_err();
     assert!(err.to_string().contains("multiple rows"));
+}
+
+#[test]
+fn update_correlated_assignment_and_delete_in_subquery_execute() {
+    let query = last_query(
+        "CREATE TABLE p (id INT PRIMARY KEY, cat TEXT);
+         CREATE TABLE o (id INT PRIMARY KEY, cat TEXT);
+         INSERT INTO p VALUES (1, 'a'), (2, 'b'), (3, 'c');
+         INSERT INTO o VALUES (1, 'changed'), (3, 'remove');
+         UPDATE p SET cat = (SELECT o.cat FROM o WHERE o.id = p.id)
+             WHERE EXISTS (SELECT 1 FROM o WHERE o.id = p.id);
+         DELETE FROM p WHERE id IN (SELECT id FROM o WHERE cat = 'remove');
+         SELECT id, cat FROM p ORDER BY id;",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("changed".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+        ]
+    );
 }
 
 #[test]

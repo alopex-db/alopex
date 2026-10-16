@@ -1,12 +1,11 @@
-#![cfg(not(target_arch = "wasm32"))]
-
-use alopex_core::storage::compression::CompressionAlgorithm;
 #[cfg(not(target_arch = "wasm32"))]
-use alopex_core::storage::format::AlopexFileWriter;
+use alopex_core::storage::compression::CompressionAlgorithm;
 use alopex_core::storage::format::{
-    AlopexFileReader, FileFlags, FileReader, FileSource, FileVersion, FormatError, SectionType,
-    HEADER_SIZE,
+    AlopexFileReader, FileReader, FileSource, FileVersion, FormatError, HEADER_SIZE,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use alopex_core::storage::format::{AlopexFileWriter, FileFlags, SectionType};
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -152,8 +151,6 @@ fn roundtrip_with_requested_compression() {
 mod wasm {
     use super::*;
     use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test]
     fn reads_v0_1_golden_file() {

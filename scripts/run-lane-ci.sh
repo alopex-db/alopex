@@ -23,9 +23,8 @@ if ! "${venv_python}" -c 'import numpy; assert int(numpy.__version__.split(".", 
     "${venv_python}" -m pip install "numpy<2"
 fi
 
-mapfile -t python_paths < <("${venv_python}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or ""); print(sysconfig.get_paths()["purelib"])')
-python_libdir="${python_paths[0]}"
-python_site="${python_paths[1]}"
+python_libdir="$("${venv_python}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+python_site="$("${venv_python}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
 export PYO3_PYTHON="${venv_python}"
 export PYTHON_SYS_EXECUTABLE="${venv_python}"

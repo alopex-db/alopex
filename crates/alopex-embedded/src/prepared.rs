@@ -1,25 +1,27 @@
 use std::sync::Arc;
 
-use alopex_sql::{AlopexDialect, Parser, SqlValue};
+use alopex_sql::{AlopexDialect, Parser, SqlValue, Statement};
 
 use crate::{Database, Error, Result, SqlResult, SqlSession};
 
 #[derive(Debug)]
 struct PreparedState {
     sql: String,
+    statement: Statement,
     bindings: Vec<Option<SqlValue>>,
     finalized: bool,
 }
 
 impl PreparedState {
     fn new(sql: &str) -> Result<Self> {
-        let statements =
+        let mut statements =
             Parser::parse_sql(&AlopexDialect, sql).map_err(alopex_sql::SqlError::from)?;
         if statements.len() != 1 {
             return Err(Error::PreparedStatementRequiresSingleStatement);
         }
         Ok(Self {
             sql: sql.to_owned(),
+            statement: statements.pop().expect("prepared statement count checked"),
             bindings: vec![None; positional_parameter_count(sql)],
             finalized: false,
         })
@@ -71,12 +73,47 @@ impl PreparedState {
                         .as_ref()
                         .expect("all bindings checked above");
                     parameter += 1;
-                    rendered.push_str(&sql_literal(value)?);
+                    rendered.push_str(&render_prepared_parameter(value)?);
                 }
             }
             Ok(())
         })?;
         Ok(rendered)
+    }
+
+    fn bound_values(&self) -> Result<Vec<SqlValue>> {
+        self.ensure_open()?;
+        let values = self
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .clone()
+                    .ok_or(Error::PreparedParameterUnbound(index + 1))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.validate_values(&values)?;
+        Ok(values)
+    }
+
+    fn validate_values(&self, values: &[SqlValue]) -> Result<()> {
+        self.ensure_open()?;
+        let count = self.parameter_count();
+        if values.len() > count {
+            return Err(Error::PreparedParameterOutOfRange {
+                index: count + 1,
+                count,
+            });
+        }
+        if values.len() < count {
+            return Err(Error::PreparedParameterUnbound(values.len() + 1));
+        }
+        if values.iter().all(is_supported_prepared_value) {
+            Ok(())
+        } else {
+            Err(Error::UnsupportedPreparedParameterType)
+        }
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -142,7 +179,37 @@ impl PreparedStatement {
 
     /// Execute with the current bindings in an auto-commit transaction.
     pub fn execute(&mut self) -> Result<SqlResult> {
-        self.database.execute_sql(&self.state.render()?)
+        self.database
+            .execute_prepared_statement(&self.state.statement, &self.state.bound_values()?)
+    }
+
+    /// Execute parameter rows atomically in one transaction.
+    pub fn execute_many<I, V>(&mut self, rows: I) -> Result<Vec<SqlResult>>
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<[SqlValue]>,
+    {
+        self.state.ensure_open()?;
+        let mut rows = rows.into_iter();
+        let Some(first) = rows.next() else {
+            return Ok(Vec::new());
+        };
+        let mut session = self.database.sql_session();
+        session.execute_sql("BEGIN")?;
+        let state = &self.state;
+        let outcome = session.execute_prepared_many(
+            &state.statement,
+            std::iter::once(first).chain(rows),
+            |values| state.validate_values(values),
+        );
+        let outcome = outcome.and_then(|results| {
+            session.execute_sql("COMMIT")?;
+            Ok(results)
+        });
+        if outcome.is_err() {
+            let _ = session.execute_sql("ROLLBACK");
+        }
+        outcome
     }
 }
 
@@ -185,7 +252,8 @@ impl PreparedSessionStatement<'_> {
 
     /// Execute with the current bindings in the borrowed SQL session.
     pub fn execute(&mut self) -> Result<SqlResult> {
-        self.session.execute_sql(&self.state.render()?)
+        self.session
+            .execute_prepared_statement(&self.state.statement, &self.state.bound_values()?)
     }
 }
 
@@ -261,15 +329,16 @@ fn scan_sql(sql: &str, mut visit: impl FnMut(SqlChunk<'_>) -> Result<()>) -> Res
     visit(SqlChunk::Text(&sql[text_start..]))
 }
 
-fn sql_literal(value: &SqlValue) -> Result<String> {
+/// Render a supported prepared value as a SQL literal for a fallback transport path.
+pub fn render_prepared_parameter(value: &SqlValue) -> Result<String> {
     let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
     Ok(match value {
         SqlValue::Null => "NULL".into(),
         SqlValue::Boolean(value) => value.to_string().to_uppercase(),
         SqlValue::Integer(value) => value.to_string(),
         SqlValue::BigInt(value) => value.to_string(),
-        SqlValue::Float(value) if value.is_finite() => value.to_string(),
-        SqlValue::Double(value) if value.is_finite() => value.to_string(),
+        SqlValue::Float(value) if value.is_finite() => format_finite_float(value.to_string())?,
+        SqlValue::Double(value) if value.is_finite() => format_finite_float(value.to_string())?,
         SqlValue::Text(value) => quote(value),
         SqlValue::Decimal(value) => value.to_string(),
         SqlValue::Json(value) => format!("CAST({} AS JSON)", quote(value.as_str())),
@@ -277,10 +346,36 @@ fn sql_literal(value: &SqlValue) -> Result<String> {
             "[{}]",
             values
                 .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
+                .map(|value| format_finite_float(value.to_string()))
+                .collect::<Result<Vec<_>>>()?
                 .join(",")
         ),
         _ => return Err(Error::UnsupportedPreparedParameterType),
     })
+}
+
+fn format_finite_float(mut value: String) -> Result<String> {
+    if value.contains(['e', 'E']) {
+        return Err(Error::UnsupportedPreparedParameterType);
+    }
+    if !value.contains('.') {
+        value.push_str(".0");
+    }
+    Ok(value)
+}
+
+fn is_supported_prepared_value(value: &SqlValue) -> bool {
+    match value {
+        SqlValue::Null
+        | SqlValue::Boolean(_)
+        | SqlValue::Integer(_)
+        | SqlValue::BigInt(_)
+        | SqlValue::Text(_)
+        | SqlValue::Decimal(_)
+        | SqlValue::Json(_) => true,
+        SqlValue::Float(value) => value.is_finite(),
+        SqlValue::Double(value) => value.is_finite(),
+        SqlValue::Vector(values) => values.iter().all(|value| value.is_finite()),
+        _ => false,
+    }
 }

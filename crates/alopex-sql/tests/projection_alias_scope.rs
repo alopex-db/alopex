@@ -1,7 +1,8 @@
 //! Projection alias visibility in GROUP BY, ORDER BY, and HAVING (issue #122).
 //!
 //! Projection aliases never apply to WHERE. GROUP BY, ORDER BY, and HAVING
-//! resolve an unqualified alias to its SELECT expression.
+//! resolve an unqualified alias to its SELECT expression. GROUP BY prefers
+//! input columns when an input name also names an output alias.
 
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
@@ -27,6 +28,36 @@ const FIXTURE: &str = r#"
     CREATE TABLE t (id INT PRIMARY KEY, n INT, val INT);
     INSERT INTO t (id, n, val) VALUES (2, 3, 7), (1, 5, 20), (3, 9, 40);
 "#;
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn group_by_prefers_input_columns_over_projection_aliases() {
+    let mut h = Harness::new();
+    h.run_ok("CREATE TABLE collision (value INT); INSERT INTO collision VALUES (1), (3);");
+    for key in ["value", "collision.value", "value + 0"] {
+        let result = query(
+            &mut h,
+            &format!("SELECT ({key}) % 2 AS value, COUNT(*) FROM collision GROUP BY {key}"),
+        );
+        // Alias precedence would incorrectly combine these into one group.
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::BigInt(1)],
+                vec![SqlValue::Integer(1), SqlValue::BigInt(1)],
+            ]
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn group_by_does_not_hide_ambiguous_input_with_projection_alias() {
+    let mut h = Harness::new();
+    h.run_ok("CREATE TABLE other (id INT);");
+    let error = h.run_err("SELECT t.id AS id, COUNT(*) FROM t CROSS JOIN other GROUP BY id");
+    assert!(error.contains("ambiguous"), "{error}");
+}
 
 struct Harness {
     executor: Executor<MemoryKV, MemoryCatalog>,

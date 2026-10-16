@@ -13,6 +13,7 @@ type
     errors*: seq[string]
     nestingDepth: int
     parameterCount: int
+    allowKnnQueryOptions: bool
 
   ParseError* = object of CatchableError
 
@@ -46,6 +47,7 @@ const
 proc initParser*(input: string): Parser =
   result.lex = initLexer(input)
   result.current = result.lex.nextToken()
+  result.allowKnnQueryOptions = true
 
 proc tokenSpan(tok: Token): Span =
   Span(start: Location(line: tok.line, column: tok.col),
@@ -840,6 +842,7 @@ proc comparisonOp(kind: TokenKind): BinaryOpKind =
   of tkLe: opLe
   of tkGt: opGt
   of tkGe: opGe
+  of tkTsMatch: opTsMatch
   else: opEq
 
 proc parseQuantified(p: var Parser; left: SqlNode; op: BinaryOpKind): SqlNode =
@@ -940,7 +943,7 @@ proc parseComparison(p: var Parser): SqlNode =
       discard p.expect(tkNull)
     return
 
-  if p.current.kind in {tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe}:
+  if p.current.kind in {tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe, tkTsMatch}:
     let op = comparisonOp(p.current.kind)
     discard p.advance()
     if p.current.kind in {tkAny, tkSome, tkAll}:
@@ -1097,8 +1100,7 @@ proc parseUsingClause(p: var Parser): seq[string] =
     result.add(p.expectIdent("USING column").value)
   discard p.expect(tkRParen)
 
-proc parseFromClause(p: var Parser): SqlNode =
-  result = newNode(nkFromClause, p.currentSpan())
+proc parseJoinedFromItem(p: var Parser): SqlNode =
   var item = p.parseFromItem()
 
   while p.current.kind in {tkNatural, tkJoin, tkInner, tkLeft, tkRight, tkFull, tkCross}:
@@ -1129,6 +1131,8 @@ proc parseFromClause(p: var Parser): SqlNode =
       if p.check(tkOuter): discard p.advance()
       discard p.expect(tkJoin)
     of tkCross:
+      if natural:
+        p.error("NATURAL CROSS JOIN is not allowed")
       jk = jkCross
       discard p.advance()
       discard p.expect(tkJoin)
@@ -1141,6 +1145,8 @@ proc parseFromClause(p: var Parser): SqlNode =
     let right = p.parseFromItem()
     var cond: SqlNode = nil
     var usingCols: seq[string] = @[]
+    if natural and p.current.kind in {tkOn, tkUsing}:
+      p.error("NATURAL JOIN cannot have ON or USING")
     if p.check(tkOn):
       discard p.advance()
       cond = p.parseExpr()
@@ -1148,9 +1154,15 @@ proc parseFromClause(p: var Parser): SqlNode =
       usingCols = p.parseUsingClause()
     item = newJoin(jk, item, right, cond, usingCols, natural)
 
+  result = item
+
+proc parseFromClause(p: var Parser): SqlNode =
+  result = newNode(nkFromClause, p.currentSpan())
+  var item = p.parseJoinedFromItem()
+
   while p.check(tkComma):
     discard p.advance()
-    let right = p.parseFromItem()
+    let right = p.parseJoinedFromItem()
     item = newJoin(jkCross, item, right)
 
   result.children.add(item)
@@ -1388,6 +1400,8 @@ proc parseFetchCount(p: var Parser): SqlNode =
   else:
     p.parseExpr()
 
+proc parseKnnQueryOptions(p: var Parser): SqlNode
+
 proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
   ## Query tail pagination (issue #152):
   ##   LIMIT (ALL | expr) / OFFSET expr [ROW | ROWS] /
@@ -1397,12 +1411,14 @@ proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
   var limitNode: SqlNode = nil
   var offsetNode: SqlNode = nil
   var sawLimitAll = false
+  var hasLimit = false
   while p.current.kind in {tkLimit, tkOffset, tkFetch}:
     case p.current.kind
     of tkLimit:
       if limitNode != nil or sawLimitAll:
         p.error("multiple LIMIT clauses are not allowed")
       discard p.advance()
+      hasLimit = true
       if p.check(tkAll):
         # LIMIT ALL means no limit; no nkLimitClause node is produced.
         discard p.advance()
@@ -1422,6 +1438,7 @@ proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
       if limitNode != nil or sawLimitAll:
         p.error("multiple LIMIT clauses are not allowed")
       discard p.advance()
+      hasLimit = true
       if p.current.kind notin {tkFirst, tkNext}:
         p.error("expected FIRST or NEXT after FETCH")
       discard p.advance()
@@ -1448,6 +1465,31 @@ proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
     target.children.add(limitNode)
   if offsetNode != nil:
     target.children.add(offsetNode)
+  if hasLimit and p.allowKnnQueryOptions and p.check(tkWith):
+    target.children.add(p.parseKnnQueryOptions())
+
+proc parseKnnQueryOptions(p: var Parser): SqlNode =
+  ## Per-query HNSW controls are deliberately limited to scalar values.
+  ## Semantic validation (known keys, ranges, and KNN-only use) belongs to
+  ## the Rust planner, which owns the resulting logical plan.
+  let start = p.expect(tkWith)
+  result = newNode(nkWithOptions, tokenSpan(start))
+  discard p.expect(tkLParen)
+  while true:
+    let key = p.expectIdent("kNN query option key")
+    discard p.expect(tkEq)
+    if p.current.kind notin {tkInteger, tkTrue, tkFalse}:
+      p.error("expected integer or boolean kNN query option value")
+    let value = p.advance()
+    let option = newNode(nkIndexOption, spanThrough(tokenSpan(key), tokenSpan(value)))
+    option.children.add(newIdent(key.value, tokenSpan(key)))
+    option.children.add(newStringLit(value.value, tokenSpan(value)))
+    result.children.add(option)
+    if not p.check(tkComma):
+      break
+    discard p.advance()
+  let closing = p.expect(tkRParen)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
 
 proc parseSelectStmt(p: var Parser): SqlNode =
   result = p.parseIntersectTerm()
@@ -2079,6 +2121,9 @@ proc parseCreateContinuousAggregateAfterCreate(
     p.error("expected SELECT query after AS")
   p.enterNesting()
   defer: p.leaveNesting()
+  let allowKnnQueryOptions = p.allowKnnQueryOptions
+  p.allowKnnQueryOptions = false
+  defer: p.allowKnnQueryOptions = allowKnnQueryOptions
   let query = p.parseSelectStmt()
   query.span = spanThrough(query.span, tokenSpan(p.previous))
   if not query.isSingleMeasurementSelect():
@@ -2178,9 +2223,11 @@ proc parseCreateTableAfterCreate(p: var Parser; start: Token; temporary = false)
   if p.check(tkWith):
     result.children.add(p.parseWithOptions())
 
-proc parseCreateIndexAfterCreate(p: var Parser; start: Token): SqlNode =
+proc parseCreateIndexAfterCreate(p: var Parser; start: Token; unique = false): SqlNode =
   discard p.expect(tkIndex)
   result = newNode(nkCreateIndex, tokenSpan(start))
+  if unique:
+    result.children.add(newIdent("UNIQUE"))
   if p.check(tkIf):
     discard p.advance()
     discard p.expect(tkNot)
@@ -2224,6 +2271,9 @@ proc parseCreateStmt(p: var Parser): SqlNode =
     result = p.parseCreateTableAfterCreate(start, true)
   elif p.check(tkIndex):
     result = p.parseCreateIndexAfterCreate(start)
+  elif p.check(tkUnique):
+    discard p.advance()
+    result = p.parseCreateIndexAfterCreate(start, true)
   elif p.checkContextual("view"):
     discard p.advance()
     result = newNode(nkCreateView, tokenSpan(start))

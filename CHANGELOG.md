@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- The Nim parser wire contract is `0.27.0`; JOIN nodes now carry their NATURAL
+  attribute directly, and the contract covers UNIQUE indexes, CTAS, and
+  unit-bearing INTERVAL literals. Incompatible parser/consumer versions are
+  rejected before decoding. Comma FROM items preserve explicit JOIN precedence.
+- The Nim parser wire contract `0.26.0` added query-level
+  HNSW options.
+- `FTS_SEARCH` includes the primary-key column in its result. Queries using
+  `SELECT *` therefore return an additional column; consumers that require a
+  fixed result shape should select columns explicitly (#478).
+
+### Compatibility
+
+- Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
+  Keep a backup created before upgrading if rollback to v0.8.15 is required;
+  reopening newly written segments with v0.8.15 fails with a decoding error
+  (#470).
+- Upgrading cannot recover column DEFAULT expressions that v0.8.15 and older
+  releases did not persist. Re-declare those defaults explicitly; the new
+  persistence behavior preserves defaults recorded by v0.8.16 (#472).
+
 ## [0.8.15] — 2026-09-24
 
 ### Fixed

@@ -39,7 +39,7 @@ pub use types::ResolvedType;
 
 use crate::ast::ddl::{
     AlterSequence, AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateSequence,
-    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, Truncate,
+    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, IndexOption, Truncate,
 };
 use crate::ast::dml::{
     CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
@@ -49,7 +49,9 @@ use crate::ast::dml::{
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
+use crate::storage::SqlValue;
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
+use alopex_core::vector::hnsw::MAX_HNSW_EF_SEARCH;
 use named_window::resolve_named_windows;
 use std::collections::{HashMap, HashSet};
 
@@ -70,6 +72,56 @@ struct WindowSelectStages {
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
+
+fn parse_knn_query_options(
+    options: &[IndexOption],
+) -> Result<logical_plan::KnnQueryOptions, PlannerError> {
+    let mut parsed = logical_plan::KnnQueryOptions::default();
+    for option in options {
+        match option.key.to_ascii_lowercase().as_str() {
+            "ef_search" => {
+                let value = option
+                    .value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (1..=MAX_HNSW_EF_SEARCH).contains(value))
+                    .ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "ef_search must be an integer between 1 and {MAX_HNSW_EF_SEARCH}"
+                        ))
+                    })?;
+                if parsed.ef_search.replace(value).is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "ef_search may be specified only once".to_string(),
+                    ));
+                }
+            }
+            "enable_hnsw" => {
+                let value = match option.value.to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(PlannerError::invalid_expression(
+                            "enable_hnsw must be true or false".to_string(),
+                        ));
+                    }
+                };
+                if parsed.enable_hnsw.replace(value).is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "enable_hnsw may be specified only once".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(PlannerError::invalid_expression(format!(
+                    "unknown kNN query option '{}'",
+                    option.key
+                )));
+            }
+        }
+    }
+    Ok(parsed)
+}
 
 fn metadata_schema(columns: &[(&str, ResolvedType)]) -> Vec<ColumnMetadata> {
     columns
@@ -705,6 +757,27 @@ pub fn plan_sql_for_routing<C: Catalog + ?Sized>(
     statements
         .iter()
         .map(|statement| plan_statement_for_routing(catalog, statement).map_err(SqlError::from))
+        .collect()
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) fn plan_sql_for_routing_with_copy_security<C: Catalog + ?Sized>(
+    catalog: &C,
+    sql: &str,
+    copy_security: &crate::executor::bulk::CopySecurityConfig,
+) -> Result<Vec<PlannedStatement>, SqlError> {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).map_err(SqlError::from)?;
+    statements
+        .iter()
+        .map(|statement| {
+            let planner = Planner::with_copy_security(catalog, copy_security.clone());
+            let plan = planner.plan(statement).map_err(SqlError::from)?;
+            let routing_input = routing_input_for_plan(statement, &plan).map_err(SqlError::from)?;
+            Ok(PlannedStatement {
+                plan,
+                routing_input,
+            })
+        })
         .collect()
 }
 
@@ -1426,6 +1499,7 @@ pub struct Planner<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
     name_resolver: NameResolver<'a, C>,
     type_checker: TypeChecker<'a, C>,
+    copy_security: Option<crate::executor::bulk::CopySecurityConfig>,
 }
 
 impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
@@ -1435,6 +1509,30 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             catalog,
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog),
+            copy_security: None,
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub(crate) fn with_copy_security(
+        catalog: &'a C,
+        copy_security: crate::executor::bulk::CopySecurityConfig,
+    ) -> Self {
+        Self {
+            catalog,
+            name_resolver: NameResolver::new(catalog),
+            type_checker: TypeChecker::new(catalog),
+            copy_security: Some(copy_security),
+        }
+    }
+
+    /// Create a planner that substitutes bound positional parameter values.
+    pub fn with_parameters(catalog: &'a C, parameters: &'a [SqlValue]) -> Self {
+        Self {
+            catalog,
+            name_resolver: NameResolver::new(catalog),
+            type_checker: TypeChecker::new(catalog).with_parameters(parameters),
+            copy_security: None,
         }
     }
 
@@ -2209,7 +2307,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             stmt.name.clone(),
             stmt.table.clone(),
             vec![stmt.column.clone()],
-        );
+        )
+        .with_unique(stmt.unique);
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);
@@ -2554,6 +2653,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.limit,
             &stmt.offset,
             stmt.limit_with_ties,
+            &[],
             outer_scope,
             &ctes,
         )
@@ -2662,6 +2762,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         limit_with_ties: bool,
+        knn_options: &[IndexOption],
         outer_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
@@ -2708,7 +2809,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by,
             };
         }
-        relation.plan = self.apply_pagination(relation.plan, limit, offset, limit_with_ties)?;
+        relation.plan =
+            self.apply_pagination(relation.plan, limit, offset, limit_with_ties, knn_options)?;
         Ok(relation)
     }
 
@@ -2739,6 +2841,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             left_select.limit = None;
             left_select.offset = None;
             left_select.limit_with_ties = false;
+            left_select.knn_options.clear();
             let relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
             return self.apply_set_operations_and_tail(
@@ -2748,6 +2851,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &stmt.limit,
                 &stmt.offset,
                 stmt.limit_with_ties,
+                &stmt.knn_options,
                 outer_scope,
                 &ctes,
             );
@@ -3143,7 +3247,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 };
             }
 
-            plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
+            plan = self.apply_pagination(
+                plan,
+                &stmt.limit,
+                &stmt.offset,
+                stmt.limit_with_ties,
+                &stmt.knn_options,
+            )?;
 
             return Ok(PlannedRelation {
                 plan,
@@ -3214,6 +3324,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.offset,
             stmt.limit_with_ties,
             distinct_on_tie_keys.as_deref(),
+            &stmt.knn_options,
         )?;
 
         let output_schema = projection_schema(&final_projection, &relation.schema);
@@ -3576,7 +3687,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by: projected_order_by,
             };
         }
-        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
+        plan = self.apply_pagination(
+            plan,
+            &stmt.limit,
+            &stmt.offset,
+            stmt.limit_with_ties,
+            &stmt.knn_options,
+        )?;
         if has_hidden_order_keys {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
@@ -3830,8 +3947,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         return Err(PlannerError::lateral_join_type_unsupported(kind, *span));
                     }
                 }
+                // A join executes against its own concatenated input row.
+                // Its parent's output offset belongs only to the returned
+                // name-resolution scope, not to this join's condition.
                 let left_relation =
-                    self.plan_from_item(left, start_index, outer_scope, lateral_scope, ctes)?;
+                    self.plan_from_item(left, 0, outer_scope, lateral_scope, ctes)?;
                 // A LATERAL right side is planned against the left row, which
                 // is the row the executor supplies as its outer row. An
                 // ordinary right side never reads this scope, so the rebase is
@@ -3839,14 +3959,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let right_lateral_scope = right_lateral.then(|| {
                     lateral_outer_scope(
                         &left_relation.scope,
-                        start_index,
+                        0,
                         left_relation.schema.len(),
                         outer_scope,
                     )
                 });
                 let right_relation = self.plan_from_item(
                     right,
-                    start_index + left_relation.schema.len(),
+                    left_relation.schema.len(),
                     outer_scope,
                     right_lateral_scope.as_deref().unwrap_or(lateral_scope),
                     ctes,
@@ -3887,7 +4007,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     )?
                 };
-                if right_lateral {
+                let mut relation = if right_lateral {
                     self.combine_lateral_join_relation(
                         left_relation,
                         right_relation,
@@ -3895,7 +4015,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         typed_condition,
                         using.as_deref(),
                         *span,
-                    )
+                    )?
                 } else {
                     self.combine_join_relation(
                         left_relation,
@@ -3904,8 +4024,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         typed_condition,
                         using,
                         *span,
-                    )
+                    )?
+                };
+                for table in &mut relation.scope {
+                    table.start_index += start_index;
+                    for partners in table.merged_column_partners.values_mut() {
+                        for index in partners {
+                            *index += start_index;
+                        }
+                    }
                 }
+                Ok(relation)
             }
             FromItem::Derived {
                 subquery,
@@ -4108,20 +4237,100 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     }
                     typed.push(value);
                 }
-                let schema = vec![
+                let table_name = match &typed[0].kind {
+                    TypedExprKind::Literal(Literal::String(table_name)) => table_name,
+                    _ => {
+                        return Err(PlannerError::invalid_expression(
+                            "FTS_SEARCH table name must be a string literal",
+                        ));
+                    }
+                };
+                let table = self
+                    .catalog
+                    .get_table(table_name)
+                    .ok_or_else(|| PlannerError::table_not_found(table_name, args[0].span))?;
+                let mut schema = vec![
                     ColumnMetadata::new("row_id", ResolvedType::BigInt),
                     ColumnMetadata::new("document", ResolvedType::Text),
                     ColumnMetadata::new("rank", ResolvedType::Double),
                     ColumnMetadata::new("headline", ResolvedType::Text),
                 ];
+                if let Some(primary_key) = &table.primary_key {
+                    for name in primary_key {
+                        let column = table.get_column(name).ok_or_else(|| {
+                            PlannerError::invalid_expression(format!(
+                                "FTS_SEARCH table '{table_name}' has unknown primary key column '{name}'"
+                            ))
+                        })?;
+                        schema.push(column.clone());
+                    }
+                }
                 (typed, schema)
+            }
+            TableFunctionKind::ReadParquet => {
+                if args.len() != 1 {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function READ_PARQUET takes exactly 1 argument, found {}",
+                        args.len()
+                    )));
+                }
+                let typed = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+                let TypedExprKind::Literal(Literal::String(path)) = &typed.kind else {
+                    return Err(PlannerError::invalid_expression(
+                        "READ_PARQUET requires a string literal path",
+                    ));
+                };
+                let schema = match &self.copy_security {
+                    Some(config) => {
+                        crate::executor::bulk::parquet_schema_with_security(path, config)
+                    }
+                    None => crate::executor::bulk::parquet_schema(path),
+                }
+                .map_err(|error| PlannerError::invalid_expression(error.to_string()))?
+                .fields
+                .into_iter()
+                .map(|field| {
+                    Ok(ColumnMetadata::new(
+                        field.name.ok_or_else(|| {
+                            PlannerError::invalid_expression("missing parquet field name")
+                        })?,
+                        field.data_type.ok_or_else(|| {
+                            PlannerError::invalid_expression("missing parquet field type")
+                        })?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+                (vec![typed], schema)
             }
         };
 
         let relation_name = alias
             .map(str::to_string)
             .unwrap_or_else(|| function.default_relation_name().to_string());
-        apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+        if function == TableFunctionKind::FtsSearch && columns.len() == 4 && schema.len() > 4 {
+            // FTS_SEARCH historically exposed four columns. Keep a legacy alias list
+            // positional while exposing appended primary keys by their table names.
+            apply_alias_columns(&relation_name, columns, &mut schema[..4], span)?;
+        } else {
+            apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+        }
+        if function == TableFunctionKind::FtsSearch && schema.len() > 4 {
+            let mut names = schema[..4]
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<HashSet<_>>();
+            for column in &mut schema[4..] {
+                if !names.insert(column.name.clone()) {
+                    let base = format!("pk_{}", column.name);
+                    let mut suffix = 2;
+                    column.name = base.clone();
+                    while !names.insert(column.name.clone()) {
+                        column.name = format!("{base}_{suffix}");
+                        suffix += 1;
+                    }
+                }
+            }
+        }
 
         Ok(PlannedRelation {
             plan: LogicalPlan::TableFunction {
@@ -4498,6 +4707,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         projection: &[SelectItem],
         ctes: &CtePlans,
     ) -> Result<TypedExpr, PlannerError> {
+        // GROUP BY resolves input columns before output aliases. Preserve an
+        // ambiguous input error rather than masking it with an output alias.
+        if matches!(expr.kind, ExprKind::ColumnRef { table: None, .. }) {
+            match self.infer_expr_with_scope(expr, scope, ctes) {
+                Ok(typed) => return Ok(typed),
+                Err(PlannerError::ColumnNotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let source = resolve_group_by_expression(expr, projection_aliases, projection)?;
         if expr_contains_window(&source) {
             return Err(PlannerError::invalid_expression(
@@ -5826,8 +6044,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         with_ties: bool,
+        knn_options: &[IndexOption],
     ) -> Result<LogicalPlan, PlannerError> {
-        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None)
+        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None, knn_options)
     }
 
     /// Apply the pagination tail with an explicit WITH TIES peer specification.
@@ -5844,9 +6063,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         offset: &Option<Expr>,
         with_ties: bool,
         tie_keys: Option<&[SortExpr]>,
+        raw_knn_options: &[IndexOption],
     ) -> Result<LogicalPlan, PlannerError> {
-        if limit.is_none() && offset.is_none() && !with_ties {
+        if limit.is_none() && offset.is_none() && !with_ties && raw_knn_options.is_empty() {
             return Ok(plan);
+        }
+        if !raw_knn_options.is_empty() && limit.is_none() {
+            return Err(PlannerError::invalid_expression(
+                "kNN query options require LIMIT".to_string(),
+            ));
         }
         let ties = if with_ties {
             let keys = match tie_keys {
@@ -5865,12 +6090,20 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         } else {
             None
         };
-        Ok(LogicalPlan::Limit {
+        let plan = LogicalPlan::Limit {
             input: Box::new(plan),
             limit: self.resolve_pagination_count(limit, "LIMIT")?,
             offset: self.resolve_pagination_count(offset, "OFFSET")?,
             ties,
-        })
+            knn_options: parse_knn_query_options(raw_knn_options)?,
+        };
+        if !raw_knn_options.is_empty() && knn_optimizer::detect_knn_pattern(&plan).is_none() {
+            return Err(PlannerError::invalid_expression(
+                "kNN query options require ORDER BY vector_distance/vector_similarity and LIMIT"
+                    .to_string(),
+            ));
+        }
+        Ok(plan)
     }
 
     /// Plan an INSERT statement.
@@ -6148,8 +6381,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         match (source, target) {
             // Integer can be assigned to BigInt, Float, Double
             (Integer, BigInt) | (Integer, Float) | (Integer, Double) => true,
-            // BigInt can be assigned to Float, Double
-            (BigInt, Float) | (BigInt, Double) => true,
+            // BigInt narrowing is checked by assignment evaluation, so a
+            // Parquet INT64 can flow into an INTEGER target.
+            (BigInt, Integer | Float | Double) => true,
             // Float can be assigned to Double
             (Float, Double) => true,
             // A decimal literal is typed DOUBLE, so a FLOAT column needs this
@@ -6854,7 +7088,15 @@ fn resolve_group_by_expression(
         literal: Literal::Number(number),
     } = &expr.kind
     else {
-        return Ok(substitute_projection_aliases(expr, projection_aliases));
+        // Output aliases are valid as standalone grouping items, not inside
+        // expressions whose names belong to the input scope.
+        return Ok(
+            if matches!(expr.kind, ExprKind::ColumnRef { table: None, .. }) {
+                substitute_projection_aliases(expr, projection_aliases)
+            } else {
+                expr.clone()
+            },
+        );
     };
     let position = number.parse::<usize>().map_err(|_| {
         PlannerError::invalid_expression("GROUP BY position must be a positive integer".to_string())

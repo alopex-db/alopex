@@ -77,34 +77,97 @@ use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
 use crate::storage::{
-    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, TxnBridge,
+    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, StorageError,
+    TxnBridge,
 };
 use crate::{ExplainFormat, ResolvedType};
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
+struct ExplainAnalysis<'a> {
+    knn_stats: Option<&'a query::KnnExecutionStats>,
+    elapsed_ns: u64,
+    rows: u64,
+}
+
 fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
-    analyze: bool,
+    btree_indexes: &[Option<String>],
     format: ExplainFormat,
-    elapsed_ns: Option<u64>,
-    rows: Option<u64>,
+    analysis: Option<ExplainAnalysis<'_>>,
 ) -> ExecutionResult {
+    let elapsed_ns = analysis.map(|analysis| analysis.elapsed_ns);
+    let rows = analysis.map(|analysis| analysis.rows);
+    let knn_stats = analysis.and_then(|analysis| analysis.knn_stats);
     let (column, value) = match format {
         ExplainFormat::Text => {
             let mut text = plan.explain_text(elapsed_ns, rows);
-            if let Some(path) = hnsw_path {
-                text = format!("{path}\n{text}");
+            if let Some(path) = hnsw_path.as_deref() {
+                text = if path.starts_with("HnswSearch") {
+                    explain_hnsw_text(plan, path, knn_stats, elapsed_ns, rows)
+                } else {
+                    format!("{path}\n{text}")
+                };
             }
+            if hnsw_path
+                .as_deref()
+                .is_none_or(|path| !path.starts_with("HnswSearch"))
+                && let Some(stats) = knn_stats
+            {
+                text.push('\n');
+                text.push_str(&explain_knn_stats_text(stats));
+            }
+            let mut indexes = btree_indexes.iter();
+            text = text
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.trim_start().starts_with("Scan table=")
+                        && let Some(Some(index_name)) = indexes.next()
+                    {
+                        return line.replacen(
+                            "Scan table=",
+                            &format!("IndexScan index={index_name} table="),
+                            1,
+                        );
+                    }
+                    line.to_owned()
+                })
+                .collect();
             ("QUERY PLAN", text)
         }
         ExplainFormat::Json => {
             let mut document: serde_json::Value =
-                serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
+                serde_json::from_str(&plan.explain_json(analysis.is_some(), elapsed_ns, rows))
                     .expect("logical plan must render valid JSON");
             if let Some(selected_path) = hnsw_path {
                 document["physical_plan"]["selected_path"] =
                     serde_json::Value::String(selected_path);
+            }
+            fn annotate_scans<'a>(
+                node: &mut serde_json::Value,
+                indexes: &mut impl Iterator<Item = &'a Option<String>>,
+            ) {
+                if node["node"] == "Scan"
+                    && let Some(Some(index_name)) = indexes.next()
+                {
+                    node["node"] = serde_json::json!("IndexScan");
+                    node["index"] = serde_json::json!(index_name);
+                }
+                if let Some(children) = node["children"].as_array_mut() {
+                    for child in children {
+                        annotate_scans(child, indexes);
+                    }
+                }
+            }
+            annotate_scans(
+                &mut document["physical_plan"]["root"],
+                &mut btree_indexes.iter(),
+            );
+            if let [Some(index_name)] = btree_indexes {
+                document["physical_plan"]["access_path"] = serde_json::json!({
+                    "node": "IndexScan", "index": index_name,
+                });
             }
             ("query_plan", document.to_string())
         }
@@ -113,6 +176,73 @@ fn explain_result(
         vec![ColumnInfo::new(column, ResolvedType::Text)],
         vec![vec![SqlValue::Text(value)]],
     ))
+}
+
+fn explain_hnsw_text(
+    plan: &LogicalPlan,
+    path: &str,
+    stats: Option<&query::KnnExecutionStats>,
+    elapsed_ns: Option<u64>,
+    rows: Option<u64>,
+) -> String {
+    let logical_text = plan.explain_text(elapsed_ns, rows);
+    let mut physical_text = String::new();
+    let mut omitted_sort = false;
+
+    for line in logical_text.lines() {
+        if line.starts_with("  Sort table=") {
+            omitted_sort = true;
+            continue;
+        }
+        if omitted_sort && let Some(line) = line.strip_prefix("  ") {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("Scan table=") {
+                let indent = &line[..line.len() - trimmed.len()];
+                physical_text.push_str(indent);
+                physical_text.push_str(path);
+                physical_text.push('\n');
+                if let Some(stats) = stats {
+                    physical_text.push_str(indent);
+                    physical_text.push_str("  ");
+                    physical_text.push_str(&explain_knn_stats_text(stats));
+                    physical_text.push('\n');
+                }
+                continue;
+            }
+            physical_text.push_str(line);
+            physical_text.push('\n');
+            continue;
+        }
+        physical_text.push_str(line);
+        physical_text.push('\n');
+    }
+    physical_text
+}
+
+fn explain_knn_stats_text(stats: &query::KnnExecutionStats) -> String {
+    let (nodes_visited, distance_computations, search_time_us) = stats
+        .hnsw_stats
+        .as_ref()
+        .map(|stats| {
+            (
+                stats.nodes_visited,
+                stats.distance_computations,
+                stats.search_time_us,
+            )
+        })
+        .unwrap_or_default();
+    let ef_search = stats
+        .ef_search
+        .map(|ef_search| ef_search.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let fallback = if stats.fallback {
+        "ExactKnnScan"
+    } else {
+        "none"
+    };
+    format!(
+        "nodes_visited={nodes_visited} distance_computations={distance_computations} search_time_us={search_time_us} ef_search={ef_search} fallback={fallback}"
+    )
 }
 
 fn result_rows(result: &ExecutionResult) -> u64 {
@@ -138,6 +268,25 @@ pub struct Executor<S: KVStore, C: Catalog> {
 
     /// Catalog for metadata operations.
     catalog: Arc<RwLock<C>>,
+}
+
+/// Executes plans inside an HNSW batch owned by [`Executor`].
+///
+/// Values of this type are only supplied to [`Executor::execute_hnsw_batch_in_txn`], which
+/// always flushes successful HNSW changes and abandons failed ones.
+pub struct HnswBatchExecutor<'a, S: KVStore> {
+    executor: &'a mut Executor<S, PersistentCatalog<S>>,
+}
+
+impl<S: KVStore> HnswBatchExecutor<'_, S> {
+    /// Execute one plan without ending the enclosing batch's HNSW changes.
+    pub fn execute<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.executor.execute_in_txn_without_hnsw_flush(plan, txn)
+    }
 }
 
 impl<S: KVStore, C: Catalog> Executor<S, C> {
@@ -249,23 +398,48 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let btree_index = {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::selected_btree_indexes(&input, &*catalog)
+                };
                 let hnsw_path = self.run_in_write_txn(|txn| {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     query::explain_knn_path(txn, &*catalog, &input)
                 })?;
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
-                let result = self.execute((*input).clone())?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = self.run_in_write_txn(|txn| {
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        query::execute_query_with_knn_stats(txn, &*catalog, &input)
+                    })?;
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute((*input).clone())?, None),
+                    }
+                } else {
+                    (self.execute((*input).clone())?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
+                    &btree_index,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
@@ -710,30 +884,109 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
+        let flush_hnsw = txn.mode() != TxnMode::ReadOnly;
+        self.execute_in_txn_with_hnsw_flush(plan, txn, flush_hnsw)
+    }
+
+    /// Execute a bounded batch and finalize its HNSW changes before returning.
+    ///
+    /// The callback may execute several plans against the same transaction, but it cannot leave
+    /// staged HNSW changes for its caller to finalize.
+    pub fn execute_hnsw_batch_in_txn<'a, 'b, 'c, E, F, M>(
+        &mut self,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        execute: F,
+        map_flush_error: M,
+    ) -> std::result::Result<Vec<ExecutionResult>, E>
+    where
+        F: FnOnce(
+            &mut HnswBatchExecutor<'_, S>,
+            &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        ) -> std::result::Result<Vec<ExecutionResult>, E>,
+        M: FnOnce(StorageError) -> E,
+    {
+        let result = {
+            let mut batch = HnswBatchExecutor { executor: self };
+            execute(&mut batch, txn)
+        };
+        let (mut sql_txn, _) = txn.split_parts();
+        match result {
+            Ok(results) => sql_txn
+                .flush_hnsw()
+                .map_err(map_flush_error)
+                .map(|_| results),
+            Err(error) => {
+                let _ = sql_txn.abandon_hnsw();
+                Err(error)
+            }
+        }
+    }
+
+    fn execute_in_txn_without_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.execute_in_txn_with_hnsw_flush(plan, txn, false)
+    }
+
+    fn execute_in_txn_with_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        flush_hnsw: bool,
+    ) -> Result<ExecutionResult> {
         let plan = match plan {
             LogicalPlan::Explain {
                 analyze,
                 format,
                 input,
             } => {
-                let hnsw_path = {
-                    let (mut sql_txn, _) = txn.split_parts();
+                let (btree_index, hnsw_path) = {
+                    let (mut sql_txn, overlay) = txn.split_parts();
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
-                    query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    (
+                        query::selected_btree_indexes(&input, &view),
+                        query::explain_knn_path(&mut sql_txn, &view, &input)?,
+                    )
                 };
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
-                let result = self.execute_in_txn((*input).clone(), txn)?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = {
+                        let (mut sql_txn, overlay) = txn.split_parts();
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        let view = TxnCatalogView::new(&*catalog, &*overlay);
+                        query::execute_query_with_knn_stats(&mut sql_txn, &view, &input)?
+                    };
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute_in_txn((*input).clone(), txn)?, None),
+                    }
+                } else {
+                    (self.execute_in_txn((*input).clone(), txn)?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
+                    &btree_index,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
@@ -1106,7 +1359,9 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         match result {
             Ok(value) => {
-                sql_txn.flush_hnsw()?;
+                if flush_hnsw {
+                    sql_txn.flush_hnsw()?;
+                }
                 Ok(value)
             }
             Err(err) => {
@@ -1152,31 +1407,14 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         table.storage_options = ddl::create_table::parse_storage_options(&with_options)?;
 
-        let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
-            let column_indices = pk_columns
-                .iter()
-                .map(|name| {
-                    table
-                        .get_column_index(name)
-                        .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let index_id = catalog.next_index_id();
-            let index_name = ddl::create_pk_index_name(&table.name);
-            let mut index = crate::catalog::IndexMetadata::new(
-                index_id,
-                index_name,
-                table.name.clone(),
-                pk_columns,
-            )
-            .with_column_indices(column_indices)
-            .with_unique(true);
-            index.catalog_name = table.catalog_name.clone();
-            index.namespace_name = table.namespace_name.clone();
-            Some(index)
-        } else {
-            None
-        };
+        let unique_indexes = ddl::create_table::constraint_indexes(catalog, &table)?;
+        let mut index_names = std::collections::HashSet::new();
+        for index in &unique_indexes {
+            if catalog.index_exists_in_txn(&index.name, overlay) || !index_names.insert(&index.name)
+            {
+                return Err(ExecutorError::IndexAlreadyExists(index.name.clone()));
+            }
+        }
 
         let table_id = catalog.next_table_id();
         table = table.with_table_id(table_id);
@@ -1202,7 +1440,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 )?;
             }
         }
-        if let Some(index) = &pk_index {
+        for index in &unique_indexes {
             catalog
                 .persist_create_index(txn.inner_mut(), index)
                 .map_err(Self::map_catalog_error)?;
@@ -1210,7 +1448,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         // オーバーレイに反映（ベースカタログはコミットまで不変）
         overlay.add_table(TableFqn::from(&table), table);
-        if let Some(index) = pk_index {
+        for index in unique_indexes {
             overlay.add_index(IndexFqn::from(&index), index);
         }
 

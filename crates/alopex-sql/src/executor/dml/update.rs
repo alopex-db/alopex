@@ -46,6 +46,7 @@ pub fn execute_update_with_returning<
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+    super::reject_columnar_dml(&table, "UPDATE")?;
     let mut rows_affected = 0u64;
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = 0u64;
@@ -300,20 +301,34 @@ fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError 
     }
 }
 
-fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
+fn map_index_error(index: &IndexMetadata, row: &[SqlValue], err: StorageError) -> ExecutorError {
     match err {
         StorageError::UniqueViolation { .. } => {
             if index.name.starts_with("__pk_") {
                 ConstraintViolation::PrimaryKey {
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             } else {
                 ConstraintViolation::Unique {
                     index_name: index.name.clone(),
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             }
@@ -357,12 +372,12 @@ fn update_indexes_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
             if !old_skip {
                 storage
                     .delete(old_row, *row_id)
-                    .map_err(|e| map_index_error(index, e))?;
+                    .map_err(|e| map_index_error(index, old_row, e))?;
             }
             if !new_skip {
                 storage
                     .insert(new_row, *row_id)
-                    .map_err(|e| map_index_error(index, e))?;
+                    .map_err(|e| map_index_error(index, new_row, e))?;
             }
         }
     }

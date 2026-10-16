@@ -705,9 +705,10 @@ fn check_vector_one(args: &[TypedExpr]) -> Result<(), PlannerError> {
     }
 }
 
-fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
+pub(crate) fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
     let first = match &args[0].resolved_type {
-        ResolvedType::Vector { dimension, .. } => *dimension,
+        ResolvedType::Vector { dimension, .. } => Some(*dimension),
+        ResolvedType::Null => None,
         ty => {
             return Err(PlannerError::type_mismatch(
                 "Vector",
@@ -717,7 +718,8 @@ fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
         }
     };
     let second = match &args[1].resolved_type {
-        ResolvedType::Vector { dimension, .. } => *dimension,
+        ResolvedType::Vector { dimension, .. } => Some(*dimension),
+        ResolvedType::Null => None,
         ty => {
             return Err(PlannerError::type_mismatch(
                 "Vector",
@@ -726,7 +728,9 @@ fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
             ));
         }
     };
-    if first != second {
+    if let (Some(first), Some(second)) = (first, second)
+        && first != second
+    {
         return Err(PlannerError::vector_dimension_mismatch(
             first,
             second,

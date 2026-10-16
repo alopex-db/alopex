@@ -317,9 +317,11 @@ impl HnswGraph {
             }
         }
 
-        let mut ef = ef_search;
-        if ef < k {
-            ef = k;
+        let active_count = usize::try_from(self.active_count).unwrap_or(usize::MAX);
+        let ef = ef_search.max(k).min(active_count);
+        #[cfg(test)]
+        {
+            stats.effective_ef_search = ef;
         }
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
@@ -500,8 +502,8 @@ impl HnswGraph {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
         // hashing and per-entry allocation on the search hot path.
         let mut visited = vec![false; self.nodes.len()];
-        let mut candidates = BinaryHeap::new();
-        let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::new();
+        let mut candidates = BinaryHeap::with_capacity(ef);
+        let mut best: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(ef);
 
         let mut scratch = SearchStats::default();
         let stats_ref: &mut SearchStats = match stats {
@@ -516,11 +518,13 @@ impl HnswGraph {
         };
         visited[entry_point as usize] = true;
         candidates.push(entry.clone());
-        best.push(Reverse(entry));
+        if self.node(entry_point).is_some_and(|node| !node.deleted) {
+            best.push(Reverse(entry));
+        }
 
         while let Some(candidate) = candidates.pop() {
             let worst_best = best.peek().map(|r| r.0.score).unwrap_or(f32::NEG_INFINITY);
-            if best.len() >= ef && candidate.score <= worst_best {
+            if best.len() >= ef && candidate.score < worst_best {
                 break;
             }
 
@@ -543,9 +547,13 @@ impl HnswGraph {
                                 score: s,
                             };
                             candidates.push(entry.clone());
-                            best.push(Reverse(entry));
-                            if best.len() > ef {
-                                best.pop();
+                            // Deleted nodes remain traversal bridges, but must not
+                            // consume ef slots reserved for live search results.
+                            if self.node(n).is_some_and(|node| !node.deleted) {
+                                best.push(Reverse(entry));
+                                if best.len() > ef {
+                                    best.pop();
+                                }
                             }
                         }
                     }

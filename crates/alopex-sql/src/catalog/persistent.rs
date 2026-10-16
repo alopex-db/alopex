@@ -4,13 +4,16 @@
 //! 永続化することができない。そこで、本モジュールでは永続化用 DTO を定義し、KV ストアへ
 //! bincode で保存する。
 //!
-//! 注意: 現状は `ColumnMetadata.default`（DEFAULT 式）を永続化しない。復元時は `None` となる。
+//! `ColumnMetadata.default`（DEFAULT 式）は、DTO のバイナリ互換性を維持するため、テーブル
+//! properties 内の JSON として永続化する。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
 use alopex_core::types::TxnMode;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -31,6 +34,7 @@ pub const INDEXES_PREFIX: &[u8] = b"__catalog__/indexes/";
 pub const META_KEY: &[u8] = b"__catalog__/meta";
 
 const CATALOG_VERSION: u32 = 2;
+const COLUMN_DEFAULTS_PROPERTY: &str = "alopex.column.defaults";
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -447,6 +451,31 @@ impl From<PersistedColumnMeta> for ColumnMetadata {
     }
 }
 
+// v0.8.4 persisted columns ended after `unique`.  The generated-sequence
+// fields added later cannot use serde defaults with bincode's positional layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedColumnMetaV2 {
+    name: String,
+    data_type: PersistedType,
+    not_null: bool,
+    primary_key: bool,
+    unique: bool,
+}
+
+impl From<PersistedColumnMetaV2> for PersistedColumnMeta {
+    fn from(value: PersistedColumnMetaV2) -> Self {
+        Self {
+            name: value.name,
+            data_type: value.data_type,
+            not_null: value.not_null,
+            primary_key: value.primary_key,
+            unique: value.unique,
+            generated_sequence: None,
+            generated_sequence_options: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedTableMeta {
     pub table_id: u32,
@@ -472,14 +501,68 @@ struct PersistedTableMetaV1 {
     storage_options: PersistedStorageOptions,
 }
 
+// v0.8.4 already used catalog-qualified table metadata, but its columns had
+// not yet gained generated-sequence fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedTableMetaV2 {
+    table_id: u32,
+    name: String,
+    catalog_name: String,
+    namespace_name: String,
+    table_type: TableType,
+    data_source_format: DataSourceFormat,
+    columns: Vec<PersistedColumnMetaV2>,
+    primary_key: Option<Vec<String>>,
+    storage_options: PersistedStorageOptions,
+    storage_location: Option<String>,
+    comment: Option<String>,
+    properties: HashMap<String, String>,
+}
+
+impl From<PersistedTableMetaV2> for PersistedTableMeta {
+    fn from(value: PersistedTableMetaV2) -> Self {
+        Self {
+            table_id: value.table_id,
+            name: value.name,
+            catalog_name: value.catalog_name,
+            namespace_name: value.namespace_name,
+            table_type: value.table_type,
+            data_source_format: value.data_source_format,
+            columns: value.columns.into_iter().map(Into::into).collect(),
+            primary_key: value.primary_key,
+            storage_options: value.storage_options,
+            storage_location: value.storage_location,
+            comment: value.comment,
+            properties: value.properties,
+        }
+    }
+}
+
 impl From<&TableMetadata> for PersistedTableMeta {
     fn from(value: &TableMetadata) -> Self {
         let mut properties = value.properties.clone();
+        properties.remove(COLUMN_DEFAULTS_PROPERTY);
         if !value.constraints.is_empty() {
             properties.insert(
                 crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
                 serde_json::to_string(&value.constraints)
                     .expect("relational constraints must serialize"),
+            );
+        }
+        let defaults: HashMap<_, _> = value
+            .columns
+            .iter()
+            .filter_map(|column| {
+                column
+                    .default
+                    .as_ref()
+                    .map(|default| (column.name.clone(), default))
+            })
+            .collect();
+        if !defaults.is_empty() {
+            properties.insert(
+                COLUMN_DEFAULTS_PROPERTY.to_string(),
+                serde_json::to_string(&defaults).expect("column defaults must serialize"),
             );
         }
         Self {
@@ -505,6 +588,11 @@ impl From<&TableMetadata> for PersistedTableMeta {
 
 impl From<PersistedTableMeta> for TableMetadata {
     fn from(value: PersistedTableMeta) -> Self {
+        let defaults: HashMap<String, crate::ast::expr::Expr> = value
+            .properties
+            .get(COLUMN_DEFAULTS_PROPERTY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
         let mut table = TableMetadata::new(
             value.name,
             value
@@ -528,6 +616,11 @@ impl From<PersistedTableMeta> for TableMetadata {
             .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
+        for column in &mut table.columns {
+            if let Some(default) = defaults.get(&column.name) {
+                column.default = Some(default.clone());
+            }
+        }
         table
     }
 }
@@ -593,18 +686,21 @@ impl From<PersistedIndexMeta> for IndexMetadata {
 }
 
 fn deserialize_table_meta(bytes: &[u8]) -> Result<PersistedTableMeta, CatalogError> {
-    match bincode::deserialize::<PersistedTableMeta>(bytes) {
+    match bincode_config().deserialize::<PersistedTableMeta>(bytes) {
         Ok(meta) => Ok(meta),
-        Err(err) => {
+        Err(current_error) => {
+            if let Ok(legacy) = bincode_config().deserialize::<PersistedTableMetaV2>(bytes) {
+                return Ok(legacy.into());
+            }
             let is_legacy = matches!(
-                err.as_ref(),
+                current_error.as_ref(),
                 bincode::ErrorKind::Io(io)
                     if io.kind() == std::io::ErrorKind::UnexpectedEof
             );
             if !is_legacy {
-                return Err(err.into());
+                return Err(current_error.into());
             }
-            let legacy: PersistedTableMetaV1 = bincode::deserialize(bytes)?;
+            let legacy: PersistedTableMetaV1 = bincode_config().deserialize(bytes)?;
             Ok(PersistedTableMeta {
                 table_id: legacy.table_id,
                 name: legacy.name,
@@ -2326,6 +2422,59 @@ mod tests {
         let catalog = PersistentCatalog::load(store).unwrap();
         assert_eq!(catalog.inner.table_count(), 0);
         assert_eq!(catalog.inner.index_count(), 0);
+    }
+
+    #[test]
+    fn deserializes_v084_table_meta_without_generated_sequence() {
+        let legacy = PersistedTableMetaV2 {
+            table_id: 7,
+            name: "users".to_string(),
+            catalog_name: "default".to_string(),
+            namespace_name: "default".to_string(),
+            table_type: TableType::Managed,
+            data_source_format: DataSourceFormat::Alopex,
+            columns: vec![
+                PersistedColumnMetaV2 {
+                    name: "id".to_string(),
+                    data_type: PersistedType::Integer,
+                    not_null: true,
+                    primary_key: true,
+                    unique: true,
+                },
+                PersistedColumnMetaV2 {
+                    name: "title".to_string(),
+                    data_type: PersistedType::Text,
+                    not_null: false,
+                    primary_key: false,
+                    unique: false,
+                },
+            ],
+            primary_key: Some(vec!["id".to_string()]),
+            storage_options: PersistedStorageOptions {
+                storage_type: PersistedStorageType::Row,
+                compression: PersistedCompression::None,
+                row_group_size: 1024,
+                row_id_mode: PersistedRowIdMode::Direct,
+            },
+            storage_location: None,
+            comment: None,
+            properties: HashMap::new(),
+        };
+
+        let bytes = bincode::serialize(&legacy).unwrap();
+        let decoded = deserialize_table_meta(&bytes).unwrap();
+
+        assert_eq!(decoded.columns.len(), 2);
+        assert_eq!(decoded.columns[0].name, "id");
+        assert!(decoded.columns[0].generated_sequence.is_none());
+        assert!(decoded.columns[0].generated_sequence_options.is_none());
+        assert_eq!(decoded.columns[1].name, "title");
+        assert!(decoded.columns[1].generated_sequence.is_none());
+        assert!(decoded.columns[1].generated_sequence_options.is_none());
+
+        let mut corrupt = bytes;
+        corrupt.push(0);
+        assert!(deserialize_table_meta(&corrupt).is_err());
     }
 
     #[test]

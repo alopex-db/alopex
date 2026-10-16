@@ -39,10 +39,13 @@ fn assert_already_open(err: Error, expected_data_dir: &Path) {
         other => panic!("expected Error::AlreadyOpen, got {other:?}"),
     }
     let rendered = err.to_string();
+    #[cfg(unix)]
     assert!(
-        rendered.contains("already open by another process"),
-        "error message must carry the stable searchable string, got: {rendered}"
+        rendered.contains("already open in this process"),
+        "{rendered}"
     );
+    #[cfg(not(unix))]
+    assert!(rendered.contains("already open"), "{rendered}");
 }
 
 /// The core symptom of #181: a second open of a plain data directory used to

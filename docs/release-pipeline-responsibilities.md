@@ -56,6 +56,7 @@ job's owner.
 | `ci.yml:fmt` | Development CI | exact-SHA formatting result |
 | `ci.yml:formal` | Development CI | exact-SHA bounded model result |
 | `ci.yml:clippy` | Development CI | exact-SHA lint result |
+| `ci.yml:clippy-beta` | Development CI | exact-SHA Rust beta lint result |
 | `ci.yml:test` | Development CI | exact-SHA behavior result |
 | `ci.yml:coverage` | Development CI | exact-SHA coverage result |
 | `ci.yml:security-audit` | Development CI | exact-SHA dependency policy result |
@@ -78,6 +79,8 @@ job's owner.
 | `public-release-verification.yml:notify-publication-failure` | Stable Delivery | report-publication failure notification |
 | `public-release-verification.yml:notify-scheduled-failure` | Stable Delivery | scheduled reachability notification |
 | `release-process.yml:contract` | Development CI | workflow contract tests |
+| `release-process.yml:parser-host` | Development CI | four native hosts: parser regression tests, real shared/static archives, strict target verification and native load smoke |
+| `release-process.yml:parser-manifest` | Development CI | complete four-target manifest and downloadable development assets tied to the workflow source SHA and run; not release qualification |
 | `release-process.yml:state-model` | Development CI | legal transition model result |
 | `release.yml:ci-gate` | Stable Delivery | immutable tag and exact-SHA CI identity check |
 | `release.yml:build-release` | RC Qualification | qualified CLI and parser assets |

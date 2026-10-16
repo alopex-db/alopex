@@ -12,7 +12,8 @@ use crate::ast::ddl::{
     DropIndex, DropTable, IndexMethod,
 };
 use crate::ast::dml::{
-    Assignment, Delete, FromItem, Insert, InsertSource, OrderByExpr, Select, SelectItem, Update,
+    Assignment, Delete, FromItem, Insert, InsertSource, Merge, MergeAction, MergeClause,
+    OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
@@ -90,6 +91,7 @@ fn continuous_aggregate_statement() -> Statement {
                 limit: None,
                 offset: None,
                 limit_with_ties: false,
+                knn_options: Vec::new(),
                 span: span(),
             },
             options: vec![],
@@ -244,6 +246,44 @@ fn binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
         },
         span: span(),
     }
+}
+
+#[test]
+fn test_plan_merge_rejects_non_boolean_clause_condition() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let merge = Merge {
+        target: FromItem::Table {
+            name: "users".to_string(),
+            alias: None,
+            columns: vec![],
+            span: span(),
+        },
+        source: FromItem::Table {
+            name: "products".to_string(),
+            alias: None,
+            columns: vec![],
+            span: span(),
+        },
+        on: binary_op(
+            col_ref(Some("users"), "id"),
+            BinaryOp::Eq,
+            col_ref(Some("products"), "id"),
+        ),
+        clauses: vec![MergeClause {
+            matched: true,
+            condition: Some(int_lit(1)),
+            action: MergeAction::DoNothing,
+            span: span(),
+        }],
+        returning: vec![],
+        span: span(),
+    };
+
+    assert!(matches!(
+        planner.plan(&stmt(StatementKind::Merge(merge))),
+        Err(PlannerError::TypeMismatch { .. })
+    ));
 }
 
 // ============================================================
@@ -433,6 +473,7 @@ fn test_plan_create_index() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: true,
         name: "idx_users_name".to_string(),
         table: "users".to_string(),
         column: "name".to_string(),
@@ -453,6 +494,7 @@ fn test_plan_create_index() {
         assert_eq!(index.table, "users");
         assert_eq!(index.first_column(), Some("name"));
         assert_eq!(index.method, Some(IndexMethod::BTree));
+        assert!(index.unique);
         assert!(!if_not_exists);
     } else {
         panic!("Expected CreateIndex plan");
@@ -466,6 +508,7 @@ fn test_plan_create_index_column_not_found() {
 
     let create = CreateIndex {
         if_not_exists: false,
+        unique: false,
         name: "idx_users_foo".to_string(),
         table: "users".to_string(),
         column: "nonexistent".to_string(),
@@ -591,6 +634,7 @@ fn test_plan_select_wildcard() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -646,6 +690,7 @@ fn test_plan_select_columns() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -691,6 +736,7 @@ fn test_plan_select_with_where() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -744,6 +790,7 @@ fn test_plan_select_with_order_by() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -788,6 +835,7 @@ fn test_plan_select_with_limit() {
         limit: Some(int_lit(10)),
         offset: Some(int_lit(5)),
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -799,6 +847,7 @@ fn test_plan_select_with_limit() {
         limit,
         offset,
         ties,
+        ..
     } = result.unwrap()
     {
         assert!(matches!(*input, LogicalPlan::Scan { .. }));
@@ -842,6 +891,7 @@ fn test_plan_select_combined() {
         limit: Some(int_lit(10)),
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -891,6 +941,7 @@ fn test_plan_select_table_not_found() {
         limit: None,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     };
 
@@ -1322,6 +1373,7 @@ fn distinct_on_select(
         limit,
         offset: None,
         limit_with_ties: false,
+        knn_options: Vec::new(),
         span: span(),
     }))
 }
