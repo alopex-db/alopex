@@ -196,10 +196,83 @@ pub(super) fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
 
 pub(super) struct FooterReservation {
     pub(super) start: u64,
-    pub(super) size: u64,
     pub(super) retained_metadata_bytes: u64,
     pub(super) has_arrow_schema: bool,
     pub(super) row_groups: Option<std::ops::Range<u64>>,
+}
+
+pub(super) struct SchemaFooter {
+    pub(super) start: u64,
+    pub(super) size: u64,
+    pub(super) row_groups: std::ops::Range<u64>,
+}
+
+// Locate wire ranges without materializing row groups; the projected schema is budgeted next.
+pub(super) fn schema_footer(file: &mut File, limit: u64) -> Result<SchemaFooter> {
+    let length = file.metadata().map_err(parquet_io_error)?.len();
+    let trailer_start = length.checked_sub(8).ok_or_else(invalid_page)?;
+    file.seek(SeekFrom::Start(trailer_start))
+        .map_err(parquet_io_error)?;
+    let mut trailer = [0; 8];
+    file.read_exact(&mut trailer).map_err(parquet_io_error)?;
+    if &trailer[4..] != b"PAR1" {
+        return Err(invalid_page());
+    }
+    let size = u64::from(u32::from_le_bytes(trailer[..4].try_into().unwrap()));
+    let start = trailer_start
+        .checked_sub(size)
+        .filter(|start| *start >= 4)
+        .ok_or_else(invalid_page)?;
+    check_declared_bytes(1, limit)?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(parquet_io_error)?;
+    let mut footer = CompactHeader {
+        input: BufReader::with_capacity(
+            size.min(limit).min(4096) as usize,
+            (&mut *file).take(size),
+        ),
+        maximum: u64::MAX,
+        decoded_bytes: 0,
+        retained_key_values: 0,
+        retained_other_metadata: 0,
+        schema_path: Vec::new(),
+        schema_root_seen: false,
+        schema_leaves: 0,
+        has_arrow_schema: false,
+        arrow_schema: None,
+        file_key_values: 0,
+    };
+    let mut id = 0_i16;
+    let mut row_groups = None;
+    loop {
+        let field = footer.byte()?;
+        if field == 0 {
+            break;
+        }
+        id = footer.field_id(field, id)?;
+        let begin = size - footer.remaining();
+        if id == 4 && field & 15 != 9 {
+            return Err(invalid_page());
+        }
+        if field & 15 != 1 && field & 15 != 2 {
+            footer.skip(field & 15, 0)?;
+        }
+        if id == 4
+            && row_groups
+                .replace(start + begin..start + size - footer.remaining())
+                .is_some()
+        {
+            return Err(invalid_page());
+        }
+    }
+    let row_groups = row_groups.ok_or_else(invalid_page)?;
+    drop(footer);
+    file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
+    Ok(SchemaFooter {
+        start,
+        size,
+        row_groups,
+    })
 }
 
 pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservation> {
@@ -297,7 +370,6 @@ fn check_metadata<R: Read>(
     drop(footer);
     Ok(FooterReservation {
         start: 0,
-        size,
         retained_metadata_bytes,
         has_arrow_schema,
         row_groups: row_groups.map(|(begin, end)| size - begin..size - end),

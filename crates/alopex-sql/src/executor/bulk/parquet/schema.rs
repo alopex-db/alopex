@@ -6,14 +6,15 @@ use arrow_schema::Schema;
 use parquet::file::metadata::ParquetMetaDataReader;
 
 use super::parquet_io_error;
-use super::preflight::{FooterReservation, check_declared_bytes, check_schema_projection};
+use super::preflight::{check_declared_bytes, check_schema_projection, schema_footer};
 use crate::executor::{ExecutorError, Result};
 
-/// Extract the planning schema after the full footer has passed its shared budget check.
+/// Budget only metadata retained by schema planning before owned decoding.
 /// The data reader retains responsibility for decoding and validating row groups.
-pub(super) fn read(file: &mut File, footer: &FooterReservation, limit: u64) -> Result<Arc<Schema>> {
+pub(super) fn read(file: &mut File, limit: u64) -> Result<Arc<Schema>> {
+    let footer = schema_footer(file, limit)?;
     let invalid = || ExecutorError::BulkLoad("invalid parquet schema projection".into());
-    let groups = footer.row_groups.as_ref().ok_or_else(invalid)?;
+    let groups = &footer.row_groups;
     let end = footer.start.checked_add(footer.size).ok_or_else(invalid)?;
     if groups.start < footer.start || groups.start >= groups.end || groups.end > end {
         return Err(invalid());

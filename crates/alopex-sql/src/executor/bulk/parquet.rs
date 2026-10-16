@@ -229,25 +229,12 @@ pub(crate) fn parquet_schema_with_read_options(
         None => File::open(path)
             .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
     };
-    // Unbounded planning may fall back to the legacy decoder's broader metadata grammar.
-    let footer = match limit {
-        Some(limit) => Some(check_footer(&mut file, limit)?),
-        None => check_footer(&mut file, u64::MAX).ok(),
-    };
-    let options = ArrowReaderOptions::new().with_skip_arrow_metadata(
-        limit.is_some()
-            && footer
-                .as_ref()
-                .is_some_and(|footer| !footer.has_arrow_schema),
-    );
-    let projected = footer
-        .as_ref()
-        .filter(|footer| footer.row_groups.is_some())
-        .map(|footer| schema::read(&mut file, footer, limit.unwrap_or(u64::MAX)));
-    let schema = match (limit, projected) {
-        (Some(_), Some(schema)) => schema?,
-        (None, Some(Ok(schema))) => schema,
-        _ => ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
+    // The reader checks all metadata before decoding; planning retains only the schema.
+    let schema = match schema::read(&mut file, limit.unwrap_or(u64::MAX)) {
+        Ok(schema) => schema,
+        Err(error) if limit.is_some() => return Err(error),
+        // Preserve the legacy decoder's broader grammar for unbounded planning.
+        Err(_) => ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|error| {
                 ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
             })?

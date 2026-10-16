@@ -1300,6 +1300,12 @@ fn issue577_unbounded_routing_schema_avoids_row_group_materialization() {
 }
 
 #[cfg(feature = "tokio")]
+#[test]
+fn issue577_routing_schema_budget_excludes_unmaterialized_row_groups() {
+    routing_schema_avoids_row_group_materialization(Some(LIMIT as u64));
+}
+
+#[cfg(feature = "tokio")]
 fn routing_schema_avoids_row_group_materialization(limit: Option<u64>) {
     use alopex_core::kv::AsyncKVStore;
     use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
@@ -1358,9 +1364,13 @@ fn routing_schema_avoids_row_group_materialization(limit: Option<u64>) {
             MemoryPolicy::new(Some(limit), SpillPolicy::FailFast)
         }));
         let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
-        MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
+        begin_async_observation();
         let result = bridge.async_plan_for_routing(&sql).await;
-        let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+        let (peak, maximum, exhausted) = end_async_observation();
+        assert!(!exhausted);
+        if let Some(limit) = limit {
+            assert!(peak as u64 <= limit, "schema planning exceeded its budget");
+        }
         let plans = result.unwrap();
         assert_eq!(plans.len(), 1);
         let mut plan = &plans[0].plan;
@@ -1384,12 +1394,29 @@ fn routing_schema_avoids_row_group_materialization(limit: Option<u64>) {
         let group_backing =
             GROUPS * std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>();
         println!(
-            "routing_schema limit={limit:?} groups={GROUPS} columns={COLUMNS} maximum_request={maximum} row_group_backing={group_backing}"
+            "routing_schema limit={limit:?} groups={GROUPS} columns={COLUMNS} rust_live_peak_bytes={peak} maximum_request={maximum} row_group_backing={group_backing}"
         );
         assert!(
             maximum < group_backing,
             "schema planning materialized row-group-sized metadata"
         );
+        if limit == Some(LIMIT as u64) {
+            tokio::task::spawn_blocking(begin_async_observation)
+                .await
+                .unwrap();
+            let result = bridge.async_execute(&sql).await;
+            let (peak, maximum, exhausted) = tokio::task::spawn_blocking(end_async_observation)
+                .await
+                .unwrap();
+            println!(
+                "schema_reader_boundary limit={LIMIT} rust_live_peak_bytes={peak} maximum_request={maximum} rejected={}",
+                result.is_err()
+            );
+            assert!(!exhausted);
+            assert!(peak <= LIMIT, "reader metadata exceeded its budget");
+            assert!(maximum < group_backing, "reader allocated row-group metadata before rejection");
+            assert!(matches!(result, Err(ExecutorError::ResourceExhausted { .. })));
+        }
     });
 }
 
