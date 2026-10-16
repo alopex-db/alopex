@@ -182,7 +182,47 @@ fn collect_page(scan: &mut dyn OwnedKVScan, options: &KeyScanOptions) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Arc;
+
+    proptest! {
+        #[test]
+        fn full_page_accepts_exact_response_budget(
+            suffix in proptest::collection::vec(any::<u8>(), 0..32),
+            value in proptest::collection::vec(any::<u8>(), 0..64),
+        ) {
+            let db = Arc::new(crate::Database::new());
+            let mut txn = db
+                .begin_owned_embedded_transaction(crate::TxnMode::ReadWrite)
+                .unwrap();
+            let mut key = b"user:".to_vec();
+            key.extend(suffix);
+            txn.put(&key, &value).unwrap();
+            // A full page returns the key twice: in its entry and as the cursor.
+            let exact_bytes = key.len() * 2 + value.len();
+            let mut options = KeyScanOptions {
+                limit: 1,
+                max_bytes: exact_bytes,
+                ..Default::default()
+            };
+            let page = txn.scan_prefix_page(b"user:", &options).unwrap();
+            prop_assert_eq!(page.entries.len(), 1);
+            prop_assert_eq!(&page.entries[0].key, &key);
+            prop_assert_eq!(&page.entries[0].value, &value);
+            prop_assert_eq!(page.next_cursor.as_ref(), Some(&key));
+            prop_assert_eq!(page.scanned, 1);
+
+            options.max_bytes -= 1;
+            let error = txn.scan_prefix_page(b"user:", &options).unwrap_err();
+            match error {
+                crate::Error::Core(Error::SearchResponseTooLarge { limit, requested }) => {
+                    prop_assert_eq!(limit, exact_bytes - 1);
+                    prop_assert_eq!(requested, exact_bytes);
+                }
+                other => prop_assert!(false, "unexpected error: {other}"),
+            }
+        }
+    }
 
     #[test]
     fn visibility_uses_owned_namespaces_without_broad_text_blacklists() {
