@@ -21,6 +21,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from scripts.release.tests.host_tools import git_bash
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
 BUILD_SCRIPT = REPOSITORY_ROOT / "scripts/build-nim-parser.sh"
@@ -31,13 +33,7 @@ NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-dual-library-v2"
 # Git's bin/bash.exe launcher prepends system tools to PATH when given a script,
 # bypassing the injected rm fixture. Use the actual shell for failure injection.
-BASH = (
-    subprocess.check_output(
-        ["bash", "-c", "cygpath -w /usr/bin/bash.exe"], text=True
-    ).strip()
-    if platform.system() == "Windows"
-    else "bash"
-)
+BASH = git_bash()
 TARGET_LIBRARIES = {
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
