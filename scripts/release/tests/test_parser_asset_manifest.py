@@ -909,6 +909,25 @@ print(matches[0])
         self.assertNotIn('${npeg_resolved}/src', text)
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
+    @unittest.skipUnless(os.name == "nt", "requires native Windows path aliases")
+    def test_native_compiler_path_expands_windows_short_alias(self) -> None:
+        bash = Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe"
+        self.assertTrue(bash.is_file(), "Git Bash is required for the Windows builder")
+        directory = self.root / "long compiler cache directory"
+        directory.mkdir()
+        source = BUILD_SCRIPT.read_text(encoding="utf-8")
+        function = source.split("to_native_path() {", 1)[1].split("\n}\n", 1)[0]
+        script = "to_native_path() {" + function + "\n}\n" + (
+            'set -euo pipefail\nRUNNER_IS_WINDOWS=1\n'
+            'short="$(cygpath -w -s "$1")"\n'
+            'to_native_path "$short"\n'
+        )
+        result = subprocess.run(
+            [str(bash), "-c", script, "compiler-path-test", str(directory)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip().lower(), str(directory.resolve()).lower())
+
     def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
         target = self.native_target()
         build_root = Path(

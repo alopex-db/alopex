@@ -142,7 +142,9 @@ to_posix_path() {
 to_native_path() {
   local candidate="$1"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
-    candidate="$(cygpath -w "${candidate}")"
+    # MSVC relativizes source paths against its long working directory.
+    # Expand existing 8.3 aliases before handing paths to native compilers.
+    candidate="$(cygpath -w -l "${candidate}")"
   fi
   printf '%s\n' "${candidate}"
 }
@@ -403,7 +405,9 @@ build_host() (
   home_owned="${build_root}/home"
   xdg_cache_owned="${build_root}/xdg-cache"
   tmp_owned="${build_root}/tmp"
+  # Long-name expansion requires both compiler cache directories to exist.
   mkdir -p "${nimble_dir_owned}/pkgs2" "${build_root}/nimcache" \
+    "${build_root}/nimcache-static" \
     "${home_owned}" "${xdg_cache_owned}" "${tmp_owned}"
 
   find_seeded_package() {
