@@ -10,6 +10,7 @@ import io
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,15 @@ RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release.yml"
 PY_RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/alopex-py-release.yml"
 NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-dual-library-v2"
+# Git's bin/bash.exe launcher prepends system tools to PATH when given a script,
+# bypassing the injected rm fixture. Use the actual shell for failure injection.
+BASH = (
+    subprocess.check_output(
+        ["bash", "-c", "cygpath -w /usr/bin/bash.exe"], text=True
+    ).strip()
+    if platform.system() == "Windows"
+    else "bash"
+)
 TARGET_LIBRARIES = {
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
@@ -60,10 +70,25 @@ def sha256(path: Path) -> str:
 
 
 def canonical_json(path: Path, value: object) -> None:
-    path.write_text(
-        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    path.write_bytes(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     )
+
+
+def python_executable(path: Path, source: str) -> None:
+    """Run fixtures through Git Bash even when MSYS path conversion is disabled."""
+    script = path.with_name(path.name + ".py")
+    script.write_bytes(source.encode("utf-8"))
+    path.write_bytes(
+        (
+            "#!/bin/sh\nexec "
+            + shlex.quote(Path(sys.executable).as_posix())
+            + " "
+            + shlex.quote(script.as_posix())
+            + ' "$@"\n'
+        ).encode("utf-8")
+    )
+    path.chmod(0o755)
 
 
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
@@ -104,6 +129,19 @@ class ParserAssetManifestTests(unittest.TestCase):
         if target is None:
             self.skipTest(f"unsupported parser builder host: {host} {machine}")
         return target
+
+    def native_build_root(self) -> Path:
+        temporary_root = Path("/tmp")
+        if platform.system() == "Windows":
+            temporary_root = Path(
+                subprocess.check_output(
+                    [BASH, "-c", "cygpath -w /tmp"], text=True
+                ).strip()
+            )
+        return temporary_root / (
+            f"alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
+            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{self.native_target()}"
+        )
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="alopex-parser-manifest-")
@@ -321,8 +359,9 @@ class ParserAssetManifestTests(unittest.TestCase):
             shutil.copy2(path, seed / name)
 
         fake_nim = self.root / "fake-nim"
-        fake_nim.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_nim,
+            """
 import pathlib
 import sys
 
@@ -338,13 +377,12 @@ dependency_paths = sorted(
 )
 pathlib.Path(output).write_text("\\n".join(dependency_paths), encoding="utf-8")
 """,
-            encoding="utf-8",
         )
-        fake_nim.chmod(0o755)
 
         fake_nimble = self.root / "fake-nimble"
-        fake_nimble.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_nimble,
+            f"""
 import pathlib
 import sys
 
@@ -368,9 +406,7 @@ if len(matches) != 1:
     raise SystemExit(2)
 print(matches[0])
 """,
-            encoding="utf-8",
         )
-        fake_nimble.chmod(0o755)
 
         environment = os.environ.copy()
         environment.update(
@@ -390,7 +426,7 @@ print(matches[0])
         isolated_output.parent.mkdir(exist_ok=True)
         return subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "host",
@@ -640,18 +676,22 @@ print(matches[0])
         self.assertFalse(record.exists())
         self.assertFalse(archive.exists())
 
-    def test_pack_rejects_contract_drift_and_symlinked_source(self) -> None:
+    def test_pack_rejects_contract_drift(self) -> None:
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
             "0.3.0\n", encoding="utf-8"
         )
         self.pack(expected=2)
-        (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.27.0\n", encoding="utf-8"
-        )
-        os.symlink(
-            self.source / "src/alopex_sql_parser.nim",
-            self.source / "src/linked.nim",
-        )
+
+    def test_pack_rejects_symlinked_source(self) -> None:
+        try:
+            os.symlink(
+                self.source / "src/alopex_sql_parser.nim",
+                self.source / "src/linked.nim",
+            )
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows user lacks symbolic-link creation privilege")
+            raise
         self.pack(expected=2)
 
     def test_verify_rejects_outer_internal_and_unsafe_archive_changes(self) -> None:
@@ -909,11 +949,7 @@ print(matches[0])
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
     def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
-        target = self.native_target()
-        build_root = Path(
-            f"/tmp/alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
-            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{target}"
-        )
+        build_root = self.native_build_root()
         marker = self.root / "cleanup-failed-once"
         fake_bin = self.root / "fake-cleanup-bin"
         fake_bin.mkdir()
@@ -921,8 +957,9 @@ print(matches[0])
         real_rm = shutil.which("rm", path=environment["PATH"])
         self.assertIsNotNone(real_rm, "host rm is required by the build script")
         fake_rm = fake_bin / "rm"
-        fake_rm.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_rm,
+            f"""
 from pathlib import Path
 import subprocess
 import sys
@@ -934,9 +971,7 @@ if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
     raise SystemExit(1)
 raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
 """,
-            encoding="utf-8",
         )
-        fake_rm.chmod(0o755)
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
 
         result = self.run_build_script(environment, self.root / "cleanup-retry")
@@ -946,6 +981,7 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
         self.assertTrue(marker.exists(), "cleanup failure was not exercised")
         self.assertNotIn("failed to remove invocation-owned build root", result.stderr)
         self.assertNotIn("failed to remove invocation-owned build lock", result.stderr)
+        self.assertFalse(build_root.exists(), "failed build left its root behind")
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
         library_name = TARGET_LIBRARIES[self.native_target()]
@@ -997,19 +1033,18 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
                 incompatible_checksum.chmod(0o755)
 
         selected_python = self.root / "selected-python"
-        selected_python.write_text(
-            f"#!{sys.executable}\n"
+        python_executable(
+            selected_python,
+            "import json\n"
             "import os\n"
             "import sys\n"
             "from pathlib import Path\n"
             "with Path(os.environ['ALOPEX_SELECTED_PYTHON_LOG']).open('a', encoding='utf-8') as log:\n"
-            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if len(sys.argv) > 2 and sys.argv[2] == 'verify-inputs':\n"
             "    raise SystemExit(0)\n"
             "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
-            encoding="utf-8",
         )
-        selected_python.chmod(0o755)
         invocation_log = self.root / "selected-python.log"
 
         host = platform.system()
@@ -1034,16 +1069,14 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
             }
         )
 
-        build_root = Path(
-            f"/tmp/alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
-            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{target}"
-        )
+        build_root = self.native_build_root()
         cleanup_marker = self.root / "success-cleanup-failed-once"
         real_rm = shutil.which("rm", path=environment["PATH"])
         self.assertIsNotNone(real_rm, "host rm is required by the build script")
         fake_rm = fake_bin / "rm"
-        fake_rm.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_rm,
+            f"""
 from pathlib import Path
 import subprocess
 import sys
@@ -1055,16 +1088,14 @@ if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
     raise SystemExit(1)
 raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
 """,
-            encoding="utf-8",
         )
-        fake_rm.chmod(0o755)
 
         output_dir = self.root / "explicit-python-output"
         output_dir.mkdir()
         output = output_dir / TARGET_LIBRARIES[target]
         result = subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "host",
@@ -1093,9 +1124,16 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
             (output_dir / "CONTRACT_VERSION").read_bytes(),
             b"0.27.0\n",
         )
-        invocations = invocation_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(invocations[0], f"- {REPOSITORY_ROOT / 'Cargo.toml'}")
-        self.assertTrue(invocations[1].startswith(f"{MANIFEST_TOOL} verify-inputs "))
+        invocations = [
+            json.loads(line)
+            for line in invocation_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(invocations[0][0], "-")
+        self.assertEqual(
+            Path(invocations[0][1]).resolve(), (REPOSITORY_ROOT / "Cargo.toml").resolve()
+        )
+        self.assertEqual(Path(invocations[1][0]).resolve(), MANIFEST_TOOL.resolve())
+        self.assertEqual(invocations[1][1], "verify-inputs")
         self.assertEqual(len(invocations), 2)
         self.assertFalse(checksum_marker.exists(), "incompatible checksum tool was invoked")
 
@@ -1177,7 +1215,7 @@ raise SystemExit(43)
         environment["ALOPEX_DOCKER_CAPTURE"] = str(capture)
         environment["ALOPEX_DOCKER_SECURITY_OPTIONS"] = ""
         command = [
-            "bash",
+            BASH,
             str(BUILD_SCRIPT),
             "--backend",
             "docker",
@@ -1251,7 +1289,7 @@ raise SystemExit(43)
 
         result = subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "docker",
@@ -1276,7 +1314,7 @@ raise SystemExit(43)
     def test_build_script_rejects_archive_on_non_host_backend(self) -> None:
         result = subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "docker",

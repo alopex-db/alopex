@@ -5,11 +5,13 @@ on:
     paths:
       - '.github/workflows/**'
       - 'scripts/release/**'
+      - 'scripts/build-nim-parser.sh'
       - 'formal/release-report/**'
   pull_request:
     paths:
       - '.github/workflows/**'
       - 'scripts/release/**'
+      - 'scripts/build-nim-parser.sh'
       - 'formal/release-report/**'
 
 jobs:
@@ -25,6 +27,22 @@ jobs:
           bash scripts/release/tests/test_prepare_python_release.sh
           bash scripts/release/tests/test_verify_release_reporting.sh
           bash scripts/release/tests/test_verify_release_join.sh
+
+  parser-host:
+    name: Parser asset host contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify native parser archive and cleanup behavior
+        shell: bash
+        run: python -m unittest scripts.release.tests.test_parser_asset_manifest
 
   state-model:
     name: Release report state model
