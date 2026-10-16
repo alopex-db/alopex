@@ -42,6 +42,69 @@ fn last_query(sql: &str) -> alopex_sql::executor::QueryResult {
         .expect("query result")
 }
 
+#[test]
+fn comma_natural_join_keeps_join_precedence_and_rows() {
+    let query = last_query(
+        "CREATE TABLE a (k INT); CREATE TABLE b (k INT); CREATE TABLE c (k INT); \
+         INSERT INTO a VALUES (99), (100); INSERT INTO b VALUES (1), (2); \
+         INSERT INTO c VALUES (2), (3); \
+         SELECT a.k, b.k FROM a, b NATURAL JOIN c ORDER BY a.k",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(99), SqlValue::Integer(2)],
+            vec![SqlValue::Integer(100), SqlValue::Integer(2)],
+        ]
+    );
+}
+
+#[test]
+fn comma_natural_join_count_keeps_right_hand_precedence() {
+    let query = last_query(
+        "CREATE TABLE a (k INT); CREATE TABLE b (k INT); CREATE TABLE c (k INT); \
+         INSERT INTO a VALUES (99), (100); INSERT INTO b VALUES (1), (2); \
+         INSERT INTO c VALUES (2), (3); \
+         SELECT COUNT(*) FROM a, b NATURAL JOIN c",
+    );
+    assert_eq!(query.rows, vec![vec![SqlValue::BigInt(2)]]);
+}
+
+#[test]
+fn comma_join_rebases_on_using_and_natural_merged_columns() {
+    for joined in [
+        "b JOIN c ON b.k = c.k",
+        "b JOIN c USING (k)",
+        "b NATURAL JOIN c",
+    ] {
+        let query = last_query(&format!(
+            "CREATE TABLE a (id INT); CREATE TABLE b (k INT); CREATE TABLE c (k INT); \
+             INSERT INTO a VALUES (99); INSERT INTO b VALUES (1), (2); \
+             INSERT INTO c VALUES (2), (3); SELECT a.id,b.k,c.k FROM a, {joined}"
+        ));
+        assert_eq!(
+            query.rows,
+            vec![vec![
+                SqlValue::Integer(99),
+                SqlValue::Integer(2),
+                SqlValue::Integer(2)
+            ]]
+        );
+    }
+    let query = last_query(
+        "CREATE TABLE a (id INT); CREATE TABLE b (k INT); CREATE TABLE c (k INT); \
+         INSERT INTO a VALUES (99); INSERT INTO b VALUES (1); INSERT INTO c VALUES (2); \
+         SELECT a.id,k FROM a, b NATURAL FULL JOIN c ORDER BY k",
+    );
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(99), SqlValue::Integer(1)],
+            vec![SqlValue::Integer(99), SqlValue::Integer(2)],
+        ]
+    );
+}
+
 fn setup_sql(select: &str) -> String {
     format!(
         r#"

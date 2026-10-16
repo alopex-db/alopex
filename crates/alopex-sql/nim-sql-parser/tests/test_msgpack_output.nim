@@ -129,6 +129,24 @@ suite "MessagePack output - roundtrip":
 
 suite "MessagePack output - contract shape":
 
+  test "public payload matches the versioned consumer golden":
+    const fixtureJson = staticRead("../../tests/fixtures/parser_wire_v027.json")
+    let fixture = parseJson(fixtureJson)
+    check fixture["contract"].getStr() == $alopex_parser_version()
+    for item in fixture["cases"]:
+      let expected = toJsonNode(parseHexStr(item["payload_hex"].getStr()))
+      check payloadJson(item["sql"].getStr()) == expected
+
+  test "NATURAL flag belongs to the emitted JOIN node":
+    let natural = selectKind("SELECT * FROM a NATURAL JOIN b")["from"][0]
+    check natural.hasKey("natural")
+    if natural.hasKey("natural"):
+      check natural["natural"].getBool()
+    let ordinary = selectKind("SELECT * FROM a JOIN b USING (k)")["from"][0]
+    check ordinary.hasKey("natural")
+    if ordinary.hasKey("natural"):
+      check not ordinary["natural"].getBool()
+
   test "standard predicates preserve dedicated expression variants":
     let kind = selectKind(
       "SELECT flag IS NOT UNKNOWN, (a, b) IS DISTINCT FROM (c, d) FROM pairs")
@@ -506,6 +524,42 @@ suite "MessagePack output - stability":
     check options[0]["span"]["start"]["column"].getInt() > 0
     check options[1]["key"].getStr() == "enable_hnsw"
     check options[1]["value"].getStr() == "false"
+
+suite "MessagePack output - staged nested JOIN compatibility":
+
+  proc nestedJoinNodes(node: JsonNode): seq[JsonNode] =
+    case node.kind
+    of JObject:
+      if node.hasKey("variant") and node["variant"].kind == JString and
+          node["variant"].getStr() == "Join":
+        result.add(node)
+      for _, child in node.pairs:
+        result.add(nestedJoinNodes(child))
+    of JArray:
+      for child in node.items:
+        result.add(nestedJoinNodes(child))
+    else:
+      discard
+
+  const oldFixture = staticRead("../../tests/fixtures/parser_staged_nested_v026_120f.json")
+  let oldCases = parseJson(oldFixture)["cases"]
+  for item in oldCases:
+    test "old bytes remain exact: " & item["name"].getStr():
+      let payload = encodeContinuousAggregateV040ToMsgPack(
+        parseSql(item["sql"].getStr())
+      )
+      let expected = parseHexStr(item["payload_hex"].getStr())
+      let matchesOldBytes = payload == expected
+      check payload.len == expected.len
+      check matchesOldBytes
+
+    test "public JOIN retains natural false: " & item["name"].getStr():
+      let joins = nestedJoinNodes(payloadJson(item["public_sql"].getStr()))
+      check joins.len == 1
+      for join in joins:
+        check join.hasKey("natural")
+        if join.hasKey("natural"):
+          check join["natural"].getBool() == false
 
 suite "MessagePack output - staged continuous aggregate contract":
 

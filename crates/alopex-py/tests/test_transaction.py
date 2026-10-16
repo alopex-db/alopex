@@ -1,6 +1,34 @@
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
+
+
+@pytest.mark.parametrize("finish", ["commit", "rollback"])
+def test_issue582_prepared_and_kv_enumeration_share_transaction_owner(db, finish):
+    db.execute_sql("CREATE TABLE shared_owner (id INTEGER PRIMARY KEY)")
+    txn = db.begin(TxnMode.READ_WRITE)
+    statement = txn.prepare("INSERT INTO shared_owner VALUES (?)")
+    txn.put(b"owner:1", b"first")
+    statement.bind(1, 1)
+    assert statement.execute() == 1
+    assert list(txn.scan_prefix(b"owner:", limit=1)) == [(b"owner:1", b"first")]
+    assert statement.execute_many([[2]]) == [1]
+    txn.put(b"owner:2", b"second")
+    expected = [(b"owner:1", b"first"), (b"owner:2", b"second")]
+    assert list(txn.scan_range(b"owner:", b"owner;", cursor=b"owner:1")) == expected[1:]
+    assert txn.search_keys(b"owner:*")["entries"] == expected
+    assert txn.execute_many("INSERT INTO shared_owner VALUES (?)", [[3]]) == [1]
+    statement.finalize()
+    assert txn.execute_sql("SELECT id FROM shared_owner ORDER BY id") == [
+        {"id": value} for value in (1, 2, 3)
+    ]
+    getattr(txn, finish)()
+    assert db.execute_sql("SELECT id FROM shared_owner ORDER BY id") == (
+        [{"id": value} for value in (1, 2, 3)] if finish == "commit" else []
+    )
+    with db.begin(TxnMode.READ_ONLY) as reader:
+        assert list(reader.scan_prefix(b"owner:")) == (
+            expected if finish == "commit" else []
+        )
 
 
 def test_issue582_transaction_prepared_typed_rebind(db):

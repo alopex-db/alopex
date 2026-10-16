@@ -6,7 +6,10 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.26.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.27.0`, returned by `alopex_parser_version()`.
+- Contract `0.27.0` carries node-local `Join.natural`, `CreateIndex.unique`,
+  and `CreateTable.query`. The parser retains the unit in `INTERVAL '1' DAY`.
+  Producers and consumers from `0.26.0` must not be mixed with this contract.
 - Contract `0.26.0` adds query-level HNSW options to `Select`. Contract
   `0.25.0` adds relational constraints, advanced DML, COPY, sequences,
   identity columns, and SERIAL types. Contract `0.24.0` added `CreateView`,
@@ -27,7 +30,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.26.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.27.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -46,13 +49,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.26.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.27.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.26.0` surface and does not retroactively change them.
+describes the current `0.27.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -113,9 +116,9 @@ from invalid user SQL.
 | `ReleaseSavepoint` | `name: string` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
-| `CreateTable` | `if_not_exists: bool`, `name: string`, `columns: [ColumnDef]`, `constraints: [TableConstraint]`, `with_options: [IndexOption]`, `span: Span` |
+| `CreateTable` | `if_not_exists: bool`, `temporary: bool`, `name: string`, `columns: [ColumnDef]`, `constraints: [TableConstraint]`, `with_options: [IndexOption]`, `query: Select?`, `span: Span` |
 | `DropTable` | `if_exists: bool`, `name: string`, `span: Span` |
-| `CreateIndex` | `if_not_exists: bool`, `name: string`, `table: string`, `column: string`, `method: IndexMethod?`, `options: [IndexOption]`, `span: Span` |
+| `CreateIndex` | `if_not_exists: bool`, `unique: bool`, `name: string`, `table: string`, `column: string`, `method: IndexMethod?`, `options: [IndexOption]`, `span: Span` |
 | `DropIndex` | `if_exists: bool`, `name: string`, `span: Span` |
 | `CreateContinuousAggregate` | `name: string`, `name_span: Span`, `query: Select`, `options: [ContinuousAggregateOption]`, `span: Span` |
 
@@ -190,11 +193,18 @@ the Alopex v0.8.8 release rather than on a separate parser release lane.
 | Variant | Fields |
 | --- | --- |
 | `Table` | `name: string`, `alias: string?`, `columns: [string]`, `span: Span` |
-| `Join` | `left: FromItem`, `right: FromItem`, `join_type: JoinType`, `condition: Expr?`, `using: [string]?`, `span: Span` |
+| `Join` | `left: FromItem`, `right: FromItem`, `join_type: JoinType`, `condition: Expr?`, `using: [string]?`, `natural: bool`, `span: Span` |
 | `Derived` | `subquery: QueryBody`, `alias: string?`, `columns: [string]`, `lateral: bool`, `span: Span` |
 | `Function` | `name: string`, `args: [Expr]`, `alias: string?`, `columns: [string]`, `lateral: bool`, `with_ordinality: bool`, `span: Span` |
 
 `JoinType` is a string: `Inner`, `Left`, `Right`, `Full`, or `Cross`.
+
+The public encoder writes `natural` on every JOIN. The decoder must not infer
+it from SQL token order: expression argument and LIMIT/OFFSET ordering can
+differ from source order. Explicit JOIN binds more tightly than comma FROM.
+NATURAL CROSS JOIN and NATURAL JOIN with ON/USING are rejected by the parser.
+The historical staged continuous-aggregate encoder retains its seven-field
+JOIN representation; this public wire cutover does not relabel its payloads.
 
 `columns` is the relation alias column-name list (`AS t(c1, c2)`); it is always
 written and empty when the clause is absent. `lateral` records an explicit

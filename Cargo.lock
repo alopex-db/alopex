@@ -308,6 +308,7 @@ dependencies = [
  "criterion",
  "futures",
  "object_store",
+ "proptest",
  "rand 0.8.7",
  "serde",
  "serde_json",
