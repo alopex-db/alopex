@@ -287,6 +287,7 @@ fn test_plan_create_table() {
         ],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 
@@ -328,6 +329,7 @@ fn test_plan_create_table_already_exists() {
         columns: vec![],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 
@@ -350,6 +352,7 @@ fn test_plan_create_table_if_not_exists() {
         columns: vec![],
         constraints: vec![],
         with_options: vec![],
+        query: None,
         span: span(),
     };
 

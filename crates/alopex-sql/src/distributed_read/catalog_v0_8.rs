@@ -148,6 +148,7 @@ pub const REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS: &[&str] = &[
     "current_timestamp",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "make_date",
@@ -179,6 +180,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "currval",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "json",
@@ -730,6 +732,7 @@ fn validate_plan(
             "DML is outside the read-only remote-read catalog",
         )),
         LogicalPlan::CreateTable { .. }
+        | LogicalPlan::CreateTableAs { .. }
         | LogicalPlan::DropTable { .. }
         | LogicalPlan::CreateView { .. }
         | LogicalPlan::DropView { .. }
@@ -1198,7 +1201,13 @@ mod tests {
 
     #[test]
     fn explicitly_excluded_scalar_and_vector_expressions_remain_local_only() {
-        for name in ["random", "json_valid", "date_add", "array_length"] {
+        for name in [
+            "random",
+            "json_valid",
+            "date_add",
+            "date_diff",
+            "array_length",
+        ] {
             let expression = TypedExpr::function_call(
                 name.to_string(),
                 vec![],

@@ -87,6 +87,7 @@ fn plan_statement_for_routing_marks_create_table_access() {
             }],
             constraints: Vec::new(),
             with_options: Vec::new(),
+            query: None,
             span: Span::empty(),
         }),
         span: Span::empty(),

@@ -1642,6 +1642,7 @@ proc writeCreateTableKind(s: Stream; node: SqlNode) =
   var columns: seq[SqlNode] = @[]
   var constraints: seq[SqlNode] = @[]
   var optionsNode: SqlNode = nil
+  var queryNode: SqlNode = nil
 
   for child in node.children:
     case child.kind
@@ -1658,10 +1659,12 @@ proc writeCreateTableKind(s: Stream; node: SqlNode) =
       constraints.add(child)
     of nkWithOptions:
       optionsNode = child
+    of nkSelect:
+      queryNode = child
     else:
       discard
 
-  s.pack_map(8)
+  s.pack_map(9)
   s.writeKey("variant")
   s.pack_type("CreateTable")
   s.writeKey("if_not_exists")
@@ -1680,6 +1683,11 @@ proc writeCreateTableKind(s: Stream; node: SqlNode) =
     s.writeTableConstraint(constraintNode)
   s.writeKey("with_options")
   s.writeIndexOptions(optionsNode)
+  s.writeKey("query")
+  if queryNode == nil:
+    s.writeNil()
+  else:
+    s.writeSelectKind(queryNode)
   s.writeKey("span")
   s.writeSpan(node.span)
 

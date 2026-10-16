@@ -1,12 +1,7 @@
-//! Projection alias visibility in ORDER BY / HAVING (issue #122).
+//! Projection alias visibility in GROUP BY, ORDER BY, and HAVING (issue #122).
 //!
-//! SQL standard: aliases introduced by the SELECT list are visible to
-//! ORDER BY and HAVING, but NOT to WHERE / GROUP BY (which are logically
-//! evaluated before the projection).
-//!
-//! The planner currently builds a single `expr_scope` from the FROM-derived
-//! base relations only, and reuses it for every clause, so alias references
-//! fail with `error[ALOPEX-C003]: column '...' not found`.
+//! Projection aliases never apply to WHERE. GROUP BY, ORDER BY, and HAVING
+//! resolve an unqualified alias to its SELECT expression.
 
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
@@ -255,7 +250,7 @@ fn having_aggregate_expression_without_alias_still_works() {
 }
 
 // ---------------------------------------------------------------------------
-// Aliases MUST NOT leak into WHERE / GROUP BY
+// Aliases MUST NOT leak into WHERE
 // ---------------------------------------------------------------------------
 
 /// WHERE is logically evaluated before the projection, so a projection alias
@@ -272,16 +267,16 @@ fn where_does_not_see_projection_alias() {
     );
 }
 
-/// GROUP BY is likewise evaluated before the projection; an alias reference
-/// there must remain an ALOPEX-C003 error.
+/// GROUP BY resolves a projection alias to the SELECT expression.
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn group_by_does_not_see_projection_alias() {
+fn group_by_resolves_projection_alias() {
     let mut h = Harness::new();
-    let err = h.run_err("SELECT id AS ident, SUM(val) FROM t GROUP BY ident");
-
-    assert!(
-        err.contains("ALOPEX-C003") && err.contains("'ident'"),
-        "expected column-not-found for alias in GROUP BY, got: {err}"
+    let result = query(
+        &mut h,
+        "SELECT id AS ident, SUM(val) AS total FROM t GROUP BY ident ORDER BY ident",
     );
+
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3]);
+    assert_eq!(int_column(&result, 1), vec![20, 7, 40]);
 }
