@@ -8,6 +8,124 @@ use alopex_sql::ast::expr::{BinaryOp, Literal};
 use alopex_sql::storage::{KeyEncoder, SqlValue};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn btree_retained_rows_respect_default_and_large_policy_ceiling() {
+    const PAYLOAD_BYTES: usize = 20 * 1024;
+    const INDEX_BYTE_CEILING: usize = 8 * 1024 * 1024;
+    let store = Arc::new(CountingKV::default());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::clone(&store), Arc::clone(&catalog));
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table: TableMetadata::new(
+                "wide_items",
+                vec![
+                    ColumnMetadata::new("score", ResolvedType::Integer),
+                    ColumnMetadata::new("payload", ResolvedType::Text),
+                ],
+            ),
+            if_not_exists: false,
+            with_options: vec![],
+        })
+        .unwrap();
+    let number = |value: i32| {
+        literal(
+            TypedExprKind::Literal(Literal::Number(value.to_string())),
+            ResolvedType::Integer,
+        )
+    };
+    let payload = "x".repeat(PAYLOAD_BYTES);
+    executor
+        .execute(LogicalPlan::Insert {
+            table: "wide_items".into(),
+            columns: vec!["score".into(), "payload".into()],
+            values: (0..512)
+                .map(|row| {
+                    vec![
+                        number(row / 256 + 1),
+                        literal(
+                            TypedExprKind::Literal(Literal::String(payload.clone())),
+                            ResolvedType::Text,
+                        ),
+                    ]
+                })
+                .collect(),
+            conflict: None,
+            returning: None,
+        })
+        .unwrap();
+    executor
+        .execute(LogicalPlan::CreateIndex {
+            index: alopex_sql::catalog::IndexMetadata::new(
+                0,
+                "idx_wide_items_score",
+                "wide_items",
+                vec!["score".into()],
+            ),
+            if_not_exists: false,
+        })
+        .unwrap();
+    let bridge = alopex_sql::storage::TxnBridge::new(Arc::clone(&store));
+    let mut read = bridge.begin_read().unwrap();
+    for limit in [None, Some(16 * 1024 * 1024)] {
+        let policy = limit.map(|bytes| {
+            alopex_sql::executor::MemoryPolicy::new(
+                Some(bytes),
+                alopex_sql::executor::SpillPolicy::FailFast,
+            )
+        });
+        // Both matches are below the 1,024-ID cap. The equality retains about
+        // 5 MiB; the range would retain over 10 MiB unless the byte cap applies.
+        for (op, expected_rows) in [(BinaryOp::Eq, 256), (BinaryOp::GtEq, 512)] {
+            let plan = LogicalPlan::filter(
+                LogicalPlan::scan(
+                    "wide_items".into(),
+                    Projection::All(vec!["score".into(), "payload".into()]),
+                ),
+                literal(
+                    TypedExprKind::BinaryOp {
+                        left: Box::new(literal(
+                            TypedExprKind::ColumnRef {
+                                table: "wide_items".into(),
+                                column: "score".into(),
+                                column_index: 0,
+                            },
+                            ResolvedType::Integer,
+                        )),
+                        op,
+                        right: Box::new(number(1)),
+                    },
+                    ResolvedType::Boolean,
+                ),
+            );
+            store.reads.reset();
+            let mut result = alopex_sql::executor::query::execute_query_streaming_with_policy(
+                &mut read,
+                &*catalog.read().unwrap(),
+                plan,
+                policy.as_ref(),
+            )
+            .unwrap();
+            let mut count = 0;
+            while let Some(row) = result.next_row().unwrap() {
+                assert_eq!(row[0], SqlValue::Integer(count / 256 + 1));
+                assert!(matches!(&row[1], SqlValue::Text(text) if text == &payload));
+                count += 1;
+            }
+            assert_eq!(count, expected_rows, "limit={limit:?}, op={op:?}");
+            let (gets, scans) = store.reads.snapshot();
+            if op == BinaryOp::Eq {
+                assert_eq!((gets, scans), (256, 0), "limit={limit:?}");
+            } else {
+                // Include at most one fetched row that crosses the byte cap.
+                assert!((1..=INDEX_BYTE_CEILING / PAYLOAD_BYTES + 1).contains(&gets));
+                assert_eq!(scans, 512, "limit={limit:?}: must stream the table");
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct RowReads {
     gets: AtomicUsize,
