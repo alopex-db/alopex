@@ -557,6 +557,15 @@ pub(crate) fn parse_interval(value: &str) -> Result<SqlValue> {
                 (1_i64, raw.strip_prefix('+').unwrap_or(raw))
             };
             let total = if let Some((years, remainder)) = unsigned.split_once('-') {
+                if !years.bytes().all(|byte| byte.is_ascii_digit())
+                    || !remainder.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return cast_failure(
+                        "Text",
+                        &ResolvedType::Interval,
+                        "invalid year-month interval",
+                    );
+                }
                 let years = years.parse::<i64>().map_err(|_| {
                     cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
                 })?;
@@ -574,6 +583,13 @@ pub(crate) fn parse_interval(value: &str) -> Result<SqlValue> {
                     .checked_mul(12)
                     .and_then(|value| value.checked_add(remainder))
             } else {
+                if !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return cast_failure(
+                        "Text",
+                        &ResolvedType::Interval,
+                        "invalid year-month interval",
+                    );
+                }
                 let years = unsigned.parse::<i64>().map_err(|_| {
                     cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
                 })?;
@@ -715,7 +731,8 @@ fn parse_fractional_interval_piece(value: &str, unit: &str) -> Result<(i32, i32,
         (1_i128, value.strip_prefix('+').unwrap_or(value))
     };
     let (whole, fraction) = unsigned.split_once('.').ok_or_else(invalid)?;
-    if fraction.is_empty()
+    if !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_empty()
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
         || fraction.len() > 18
     {

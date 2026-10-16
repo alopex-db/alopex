@@ -244,6 +244,81 @@ fn interval_qualifier_boundaries_and_malformed_values() {
     }
 }
 
+#[test]
+fn interval_rejects_repeated_or_component_signs() {
+    let mut harness = Harness::new();
+    let mut accepted = Vec::new();
+    for (value, qualifier) in [
+        ("--1.5", "DAY"),
+        ("-+1.5", "DAY"),
+        ("++1.5", "DAY"),
+        ("+-1.5", "DAY"),
+        ("++1-2", "YEAR TO MONTH"),
+        ("-+1-2", "YEAR TO MONTH"),
+        ("1-+2", "YEAR TO MONTH"),
+        ("1--0", "YEAR TO MONTH"),
+        ("++1", "YEAR TO MONTH"),
+        ("-+1", "YEAR TO MONTH"),
+    ] {
+        let sql = format!("SELECT INTERVAL '{value}' {qualifier}");
+        let statement = Parser::parse_sql(&AlopexDialect, &sql)
+            .expect("parse interval literal")
+            .pop()
+            .expect("one statement");
+        let plan = Planner::new(&*harness.catalog.read().expect("catalog read"))
+            .plan(&statement)
+            .expect("plan interval literal");
+        if harness.executor.execute(plan).is_ok() {
+            accepted.push(sql);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "malformed intervals accepted: {accepted:?}"
+    );
+}
+
+#[test]
+fn interval_accepts_one_leading_sign_and_negative_month_limit() {
+    let mut harness = Harness::new();
+    assert_eq!(
+        harness
+            .query(
+                "SELECT INTERVAL '+1.5' DAY, INTERVAL '-1.5' DAY, \
+             INTERVAL '+1-2' YEAR TO MONTH, INTERVAL '-1-2' YEAR TO MONTH, \
+             INTERVAL '-178956970-8' YEAR TO MONTH"
+            )
+            .rows,
+        vec![vec![
+            SqlValue::Interval {
+                months: 0,
+                days: 1,
+                micros: 43_200_000_000
+            },
+            SqlValue::Interval {
+                months: 0,
+                days: -1,
+                micros: -43_200_000_000
+            },
+            SqlValue::Interval {
+                months: 14,
+                days: 0,
+                micros: 0
+            },
+            SqlValue::Interval {
+                months: -14,
+                days: 0,
+                micros: 0
+            },
+            SqlValue::Interval {
+                months: i32::MIN,
+                days: 0,
+                micros: 0
+            },
+        ]]
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
