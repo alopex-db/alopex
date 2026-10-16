@@ -498,6 +498,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     Err(ExecutorError::TableAlreadyExists(table_name))
                 };
             }
+            ddl::create_table::validate_ctas_storage(&with_options)?;
             let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
             else {
                 return Err(ExecutorError::InvalidOperation {
@@ -799,6 +800,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                         Err(ExecutorError::TableAlreadyExists(table_name))
                     };
                 }
+                ddl::create_table::validate_ctas_storage(&with_options)?;
                 let result = {
                     let view = TxnCatalogView::new(&*catalog, &*overlay);
                     let ExecutionResult::Query(result) =

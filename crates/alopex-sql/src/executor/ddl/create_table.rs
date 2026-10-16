@@ -12,6 +12,16 @@ use super::create_index::ensure_indexable_columns;
 use super::create_pk_index_name;
 use super::persistence::{persist_index, persist_table};
 
+/// Reject unsupported CTAS storage before evaluating the source or creating metadata.
+pub(crate) fn validate_ctas_storage(with_options: &[(String, String)]) -> Result<()> {
+    if parse_storage_options(with_options)?.storage_type == StorageType::Columnar {
+        return Err(ExecutorError::UnsupportedOperation(
+            "CREATE TABLE AS is not supported for columnar tables; use COPY to load data".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Execute CREATE TABLE.
 pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
