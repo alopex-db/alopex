@@ -301,7 +301,10 @@ impl OwnedEmbeddedTransaction {
         if self.failed {
             return Err(Error::TxnFailed);
         }
-        self.stage_hnsw_changes()?;
+        if let Err(error) = self.stage_hnsw_changes() {
+            self.failed = true;
+            return Err(error);
+        }
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -324,14 +327,17 @@ impl OwnedEmbeddedTransaction {
         self.session
             .rollback_to_savepoint(savepoint.core_id)
             .map_err(Error::Core)?;
+        // KV has moved back. The graph must be restored before this transaction can run again.
+        self.failed = true;
         self.overlay = savepoint.overlay.clone();
         self.catalog_modified = savepoint.catalog_modified;
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
         self.vector_index = savepoint.vector_index.clone();
         self.vector_index_dirty = savepoint.vector_index_dirty;
+        // Core already discarded descendants, even if restoring the graph fails.
+        self.savepoints.truncate(position + 1);
         self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
         self.failed = false;
-        self.savepoints.truncate(position + 1);
         Ok(())
     }
 
@@ -395,6 +401,8 @@ impl OwnedEmbeddedTransaction {
 
     /// Restore direct HNSW state to the set present when the savepoint was created.
     fn rollback_hnsw_to_savepoint(&mut self, retained: &HashSet<String>) -> Result<()> {
+        // Drop stale graphs before loading, including when loading fails midway.
+        self.hnsw_indices.clear();
         // A newer savepoint stages HNSW changes and clears their undo snapshot.
         // The core transaction has already rolled back to the requested point;
         // reload that version instead of using the latest graph's undo state.
@@ -531,6 +539,118 @@ mod tests {
     use alopex_core::TxnMode;
     use alopex_core::{HnswConfig, Metric};
     use std::sync::Arc;
+
+    #[test]
+    fn savepoint_restores_hnsw_graph_after_nested_staging() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("first").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("second").unwrap();
+        transaction.rollback_to_savepoint("first").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard_again", &[2.0, 0.0], b"")
+            .unwrap();
+        // A rollback retains its target savepoint for another recovery.
+        transaction.rollback_to_savepoint("first").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+    }
+
+    #[test]
+    fn sql_after_direct_hnsw_change_can_drop_the_index() {
+        let database = Arc::new(Database::new());
+        database
+            .execute_sql(
+                "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2)); \
+                 CREATE INDEX vec_idx ON items (embedding) USING HNSW; \
+                 INSERT INTO items VALUES (1, [0.0, 0.0]);",
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", &2u64.to_be_bytes(), &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.execute_sql("DROP INDEX vec_idx").unwrap();
+        transaction.commit().unwrap();
+        assert!(database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .is_err());
+    }
+
+    #[test]
+    fn failed_hnsw_restore_blocks_commit_until_earlier_savepoint_recovers() {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index(
+                "vec_idx",
+                HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(Metric::L2),
+            )
+            .unwrap();
+        let mut transaction = Arc::clone(&database)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"keep", &[0.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("clean").unwrap();
+        transaction.put(b"hnsw:node:vec_idx:0", b"invalid").unwrap();
+        transaction.create_savepoint("unreadable").unwrap();
+        transaction
+            .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
+            .unwrap();
+        transaction.create_savepoint("discarded_child").unwrap();
+
+        assert!(matches!(
+            transaction.rollback_to_savepoint("unreadable"),
+            Err(Error::Core(alopex_core::Error::InvalidFormat(_)))
+        ));
+        assert!(
+            transaction.hnsw_indices.is_empty(),
+            "failed restore must not retain graphs from rolled-back KV state"
+        );
+        assert!(matches!(
+            transaction.rollback_to_savepoint("discarded_child"),
+            Err(Error::SavepointNotFound(_))
+        ));
+        assert!(matches!(transaction.commit(), Err(Error::TxnFailed)));
+        assert!(matches!(
+            transaction.execute_sql("SELECT 1"),
+            Err(Error::TxnFailed)
+        ));
+        transaction.rollback_to_savepoint("clean").unwrap();
+        transaction.commit().unwrap();
+
+        let (results, _) = database
+            .search_hnsw("vec_idx", &[0.0, 0.0], 10, Some(10))
+            .unwrap();
+        let keys: Vec<_> = results.into_iter().map(|result| result.key).collect();
+        assert_eq!(keys, vec![b"keep".to_vec()]);
+    }
 
     #[test]
     fn owned_prepared_many_after_direct_hnsw_noop_uses_latest_vector() {
