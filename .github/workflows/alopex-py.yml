@@ -485,7 +485,7 @@ jobs:
 
   ci-success:
     name: ci-success
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs: [rust-check, test, polars-test, server-e2e, typecheck]
     runs-on: ubuntu-latest
     steps:

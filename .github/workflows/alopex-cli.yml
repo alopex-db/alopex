@@ -411,7 +411,7 @@ jobs:
     name: CLI Tests Success
     needs: [cli-check, functional-tests, streaming-fallback-test, signal-handling-test, s3-compatibility-test]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |

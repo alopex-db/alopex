@@ -595,7 +595,7 @@ jobs:
     name: CI Success
     needs: [scope, fmt, formal, clippy, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |
