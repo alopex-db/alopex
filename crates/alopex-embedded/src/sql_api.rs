@@ -193,9 +193,13 @@ fn plan_stmt<'a, S: KVStore>(
     catalog: &'a alopex_sql::catalog::PersistentCatalog<S>,
     overlay: &'a CatalogOverlay,
     stmt: &Statement,
+    parameters: Option<&[SqlValue]>,
 ) -> Result<alopex_sql::LogicalPlan> {
     let view = TxnCatalogView::new(catalog, overlay);
-    let planner = Planner::new(&view);
+    let planner = match parameters {
+        Some(parameters) => Planner::with_parameters(&view, parameters),
+        None => Planner::new(&view),
+    };
     planner
         .plan(stmt)
         .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
@@ -218,6 +222,115 @@ pub(crate) fn execute_sql_owned(
             return Err(error);
         }
     };
+    execute_statements_owned(transaction, &statements, None)
+}
+
+pub(crate) fn execute_prepared_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statement: &Statement,
+    parameters: &[SqlValue],
+) -> Result<SqlResult> {
+    execute_statements_owned(
+        transaction,
+        std::slice::from_ref(statement),
+        Some(parameters),
+    )
+}
+
+pub(crate) fn execute_prepared_many_owned<I, V, F>(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statement: &Statement,
+    rows: I,
+    mut validate: F,
+) -> Result<Vec<SqlResult>>
+where
+    I: IntoIterator<Item = V>,
+    V: AsRef<[SqlValue]>,
+    F: FnMut(&[SqlValue]) -> Result<()>,
+{
+    if statement.kind.requires_write() {
+        let mut cache = transaction
+            .db
+            .hnsw_cache
+            .write()
+            .expect("hnsw cache lock poisoned");
+        cache.clear();
+        let mut vector_cache = transaction
+            .db
+            .vector_cache
+            .write()
+            .expect("vector cache lock poisoned");
+        *vector_cache = None;
+    }
+
+    let db = Arc::clone(&transaction.db);
+    let session = transaction.session.clone();
+    let overlay = &mut transaction.overlay;
+    let catalog_modified = &mut transaction.catalog_modified;
+    let mut outcome: Result<Vec<SqlResult>> = Ok(Vec::new());
+
+    let session_result = session
+        .with_transaction(|owned| {
+            outcome = (|| {
+                let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
+                let mode = raw.mode();
+                let mut borrowed =
+                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let mut executor: Executor<_, _> =
+                    Executor::new(db.store.clone(), db.sql_catalog.clone());
+                let results = executor.execute_hnsw_batch_in_txn(
+                    &mut borrowed,
+                    |batch, borrowed| {
+                        let mut results = Vec::new();
+                        for row in rows {
+                            let parameters = row.as_ref();
+                            validate(parameters)?;
+                            let plan = {
+                                let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                                let (_, overlay) = borrowed.split_parts();
+                                plan_stmt(&*catalog, &*overlay, statement, Some(parameters))?
+                            };
+
+                            {
+                                let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                                let (_, overlay) = borrowed.split_parts();
+                                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                                db.record_routing(&view, statement, 0);
+                            }
+
+                            results.push(
+                                batch.execute(plan, borrowed).map_err(|error| {
+                                    Error::Sql(alopex_sql::SqlError::from(error))
+                                })?,
+                            );
+                        }
+                        Ok(results)
+                    },
+                    |error| Error::Sql(alopex_sql::SqlError::from(error)),
+                )?;
+                if stmt_changes_catalog(statement) {
+                    *catalog_modified = true;
+                }
+                Ok(results)
+            })();
+            Ok(())
+        })
+        .map_err(Error::Core);
+    if let Err(error) = session_result {
+        transaction.failed = true;
+        return Err(error);
+    }
+    if outcome.is_err() {
+        transaction.failed = true;
+    }
+    outcome
+}
+
+fn execute_statements_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statements: &[Statement],
+    parameters: Option<&[SqlValue]>,
+) -> Result<SqlResult> {
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
@@ -258,7 +371,7 @@ pub(crate) fn execute_sql_owned(
                     let plan = {
                         let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
                         let (_, overlay) = borrowed.split_parts();
-                        plan_stmt(&*catalog, &*overlay, stmt)?
+                        plan_stmt(&*catalog, &*overlay, stmt, parameters)?
                     };
 
                     {
@@ -432,6 +545,24 @@ impl Database {
     /// ```
     pub fn execute_sql_multi(&self, sql: &str) -> Result<Vec<SqlResult>> {
         let stmts = parse_sql(sql)?;
+        self.execute_statements(&stmts, None)
+    }
+
+    pub(crate) fn execute_prepared_statement(
+        &self,
+        statement: &Statement,
+        parameters: &[SqlValue],
+    ) -> Result<SqlResult> {
+        self.execute_statements(std::slice::from_ref(statement), Some(parameters))?
+            .pop()
+            .ok_or(Error::SqlSessionRequiresSingleStatement)
+    }
+
+    fn execute_statements(
+        &self,
+        stmts: &[Statement],
+        parameters: Option<&[SqlValue]>,
+    ) -> Result<Vec<SqlResult>> {
         if stmts.is_empty() {
             return Ok(Vec::new());
         }
@@ -444,7 +575,7 @@ impl Database {
             let overlay = CatalogOverlay::new();
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                plan_stmt(&*catalog, &overlay, &stmts[0])?
+                plan_stmt(&*catalog, &overlay, &stmts[0], parameters)?
             };
             if matches!(stmts[0].kind, StatementKind::Pragma { .. })
                 || alopex_sql::executor::is_store_direct_plan(&plan)
@@ -491,7 +622,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, parameters)?
             };
 
             {
@@ -593,7 +724,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay_ref) = borrowed.split_parts();
-                plan_stmt(&*catalog, overlay_ref, stmt)?
+                plan_stmt(&*catalog, overlay_ref, stmt, None)?
             };
 
             if alopex_sql::executor::is_store_direct_plan(&plan) {
@@ -740,7 +871,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             let (mut sql_txn, _overlay) = borrowed.split_parts();
@@ -843,7 +974,7 @@ impl<'a> Transaction<'a> {
             let plan = {
                 let catalog = sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             {

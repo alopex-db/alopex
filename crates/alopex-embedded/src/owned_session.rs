@@ -180,6 +180,32 @@ impl OwnedEmbeddedTransaction {
         crate::sql_api::execute_sql_owned(self, sql)
     }
 
+    /// Execute one parsed SQL statement with native bound values without committing.
+    ///
+    /// Callers that own an embedded transaction can preserve typed parameter values
+    /// instead of rendering them into SQL text before execution.
+    pub fn execute_prepared_statement(
+        &mut self,
+        statement: &alopex_sql::Statement,
+        parameters: &[alopex_sql::SqlValue],
+    ) -> Result<crate::SqlResult> {
+        crate::sql_api::execute_prepared_owned(self, statement, parameters)
+    }
+
+    pub(crate) fn execute_prepared_many<I, V, F>(
+        &mut self,
+        statement: &alopex_sql::Statement,
+        rows: I,
+        validate: F,
+    ) -> Result<Vec<crate::SqlResult>>
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<[alopex_sql::SqlValue]>,
+        F: FnMut(&[alopex_sql::SqlValue]) -> Result<()>,
+    {
+        crate::sql_api::execute_prepared_many_owned(self, statement, rows, validate)
+    }
+
     /// Create a named SQL savepoint.
     pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;

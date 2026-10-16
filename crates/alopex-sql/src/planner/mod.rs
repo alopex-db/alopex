@@ -49,6 +49,7 @@ use crate::ast::dml::{
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
+use crate::storage::SqlValue;
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
 use named_window::resolve_named_windows;
 use std::collections::{HashMap, HashSet};
@@ -1420,6 +1421,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             catalog,
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog),
+        }
+    }
+
+    /// Create a planner that substitutes bound positional parameter values.
+    pub fn with_parameters(catalog: &'a C, parameters: &'a [SqlValue]) -> Self {
+        Self {
+            catalog,
+            name_resolver: NameResolver::new(catalog),
+            type_checker: TypeChecker::new(catalog).with_parameters(parameters),
         }
     }
 
@@ -6334,7 +6344,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         let mut clauses = Vec::with_capacity(stmt.clauses.len());
         for clause in &stmt.clauses {
-            let condition = clause.condition.as_ref().map(&infer).transpose()?;
+            let condition = clause.condition.as_ref().map(infer).transpose()?;
             if let (Some(expression), Some(typed)) = (&clause.condition, &condition)
                 && typed.resolved_type != ResolvedType::Boolean
             {

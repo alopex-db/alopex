@@ -537,6 +537,13 @@ class PreparedStatement:
     def reset(self) -> None: ...
     def finalize(self) -> None: ...
     def execute(self) -> Union[List[Dict[str, Any]], int, None]: ...
+    def execute_many(
+        self,
+        rows: Union[
+            List[Union[List[Any], Tuple[Any, ...]]],
+            Tuple[Union[List[Any], Tuple[Any, ...]], ...],
+        ],
+    ) -> List[Union[List[Dict[str, Any]], int, None]]: ...
 
 
 class Database:
