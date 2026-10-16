@@ -3,7 +3,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts.reference_tests import hnsw_public_inventory
 from scripts.validate_v0811_ledgers import (
     LEDGERS,
     PERFORMANCE_CONTRACTS,
@@ -239,6 +241,47 @@ class LedgerContractTests(unittest.TestCase):
             {surface for surface, status in path_control.items() if status == "not_applicable"},
             {"Rust", "embedded", "Python"},
         )
+
+    def test_hnsw_capability_rejects_changed_search_signatures(self):
+        cases = [
+            ("Rust", "crates/alopex-core/src/vector/hnsw/mod.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("Rust", "crates/alopex-core/src/vector/hnsw/mod.rs",
+             "Result<(Vec<HnswSearchResult>, SearchStats)>", "Result<Vec<HnswSearchResult>>"),
+            ("embedded", "crates/alopex-embedded/src/lib.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("embedded", "crates/alopex-embedded/src/lib.rs",
+             "Result<(Vec<HnswSearchResult>, HnswSearchStats)>", "Result<Vec<HnswSearchResult>>"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "PyResult<(Vec<PySearchResult>, PySearchStats)>", "PyResult<Vec<PySearchResult>>"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "#[pyo3(signature = (name, query, k, ef_search = None))]",
+             "#[pyo3(signature = (name, query, k, ef_search))]"),
+            ("Python stub", "crates/alopex-py/python/alopex/_alopex.pyi",
+             "ef_search: Optional[int] = None", "ef_search: int = 0"),
+            ("Python stub", "crates/alopex-py/python/alopex/_alopex.pyi",
+             "Tuple[List[SearchResult], SearchStats]", "List[SearchResult]"),
+        ]
+        read_text = Path.read_text
+        for surface, relative, before, after in cases:
+            with self.subTest(surface=surface, signature=before):
+                target = hnsw_public_inventory.ROOT / relative
+                original = read_text(target, encoding="utf-8")
+                self.assertIn(before, original)
+                # A stale comment elsewhere must not stand in for the real API.
+                comment = "#" if target.suffix == ".pyi" else "//"
+                changed = original.replace(before, after) + f"\n{comment} {before}\n"
+
+                def read_source(path, *args, target=target, changed=changed, **kwargs):
+                    return changed if path == target else read_text(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "read_text", read_source),
+                    self.assertRaisesRegex(RuntimeError, f"from {surface}"),
+                ):
+                    hnsw_public_inventory.capability_matrix()
 
     def test_sql_public_inventory_rejects_missing_and_unknown_claims(self):
         sql = next(path for path in LEDGERS if path.name.startswith("sql-"))

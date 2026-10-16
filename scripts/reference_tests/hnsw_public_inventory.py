@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 from pathlib import Path
@@ -152,16 +153,57 @@ def capability_matrix() -> list[dict[str, object]]:
         "SQL executor": (ROOT / "crates/alopex-sql/src/executor/mod.rs").read_text(encoding="utf-8"),
         "SQL kNN": (ROOT / "crates/alopex-sql/src/executor/query/knn.rs").read_text(encoding="utf-8"),
     }
-    required = {
-        "Rust": ("ef_search: Option<usize>", "Result<(Vec<HnswSearchResult>, SearchStats)>"),
-        "embedded": ("ef_search: Option<usize>", "Result<(Vec<HnswSearchResult>, HnswSearchStats)>"),
-        "Python": ("#[pyo3(signature = (name, query, k, ef_search = None))]", "PyResult<(Vec<PySearchResult>, PySearchStats)>"),
-        "Python stub": ("ef_search: Optional[int] = None",),
+    # Scope declaration checks to the search method: a comment or another API
+    # elsewhere in the file cannot establish this method's capabilities.
+    declarations = {
+        "Rust": ("pub fn search", "Result<(Vec<HnswSearchResult>, SearchStats)>"),
+        "embedded": ("pub fn search_hnsw", "Result<(Vec<HnswSearchResult>, HnswSearchStats)>"),
+        "Python": ("fn search_hnsw", "PyResult<(Vec<PySearchResult>, PySearchStats)>"),
+    }
+    for surface, (method, result) in declarations.items():
+        matches = re.findall(
+            rf"(?:^    #\[[^\n]*\]\n)*^    {re.escape(method)}\s*\([^{{]+\{{",
+            sources[surface], re.MULTILINE,
+        )
+        if len(matches) != 1:
+            raise RuntimeError(f"HNSW capability disappeared from {surface}: {method}")
+        signature = re.sub(r"\s+", "", matches[0])
+        required = ["ef_search:Option<usize>", "->" + re.sub(r"\s+", "", result) + "{"]
+        if surface == "Python":
+            required.append("#[pyo3(signature=(name,query,k,ef_search=None))]")
+        for marker in required:
+            if marker not in signature:
+                raise RuntimeError(f"HNSW capability disappeared from {surface}: {method} {marker}")
+
+    stub = ast.parse(sources["Python stub"])
+    methods = [
+        method for owner in stub.body
+        if isinstance(owner, ast.ClassDef) and owner.name == "Database"
+        for method in owner.body
+        if isinstance(method, ast.FunctionDef) and method.name == "search_hnsw"
+    ]
+    if len(methods) != 1:
+        raise RuntimeError("HNSW capability disappeared from Python stub: Database.search_hnsw")
+    method = methods[0]
+    defaults = dict(zip(
+        [arg.arg for arg in method.args.args][len(method.args.args) - len(method.args.defaults):],
+        method.args.defaults,
+    ))
+    ef_args = [arg for arg in method.args.args if arg.arg == "ef_search"]
+    default = defaults.get("ef_search")
+    if (len(ef_args) != 1 or ef_args[0].annotation is None
+            or ast.unparse(ef_args[0].annotation) != "Optional[int]"
+            or not isinstance(default, ast.Constant) or default.value is not None):
+        raise RuntimeError("HNSW capability disappeared from Python stub: search_hnsw ef_search")
+    if method.returns is None or ast.unparse(method.returns) != "Tuple[List[SearchResult], SearchStats]":
+        raise RuntimeError("HNSW capability disappeared from Python stub: search_hnsw SearchStats")
+
+    required_sql = {
         "SQL planner": ('"ef_search"',),
         "SQL executor": ("explain_knn_stats_text",),
         "SQL kNN": ("pattern.options.enable_hnsw == Some(false)",),
     }
-    for surface, markers in required.items():
+    for surface, markers in required_sql.items():
         for marker in markers:
             if marker not in sources[surface]:
                 raise RuntimeError(f"HNSW capability disappeared from {surface}: {marker}")
