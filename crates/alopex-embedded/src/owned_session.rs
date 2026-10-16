@@ -478,14 +478,26 @@ impl OwnedEmbeddedTransaction {
         preparation?;
 
         let overlay = std::mem::take(&mut self.overlay);
+        let catalog_deleted = overlay.has_deletions();
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-        self.db.commit_with_hnsw_cache_update(
-            || self.session.commit().map_err(Error::Core),
+        self.db.commit_with_hnsw_cache_changes(
+            || {
+                self.session
+                    .commit_with_observer(|transaction| {
+                        if catalog_deleted {
+                            return None;
+                        }
+                        self.db.hnsw_cache_changes(|visitor| {
+                            transaction.visit_pending_write_keys(visitor)
+                        })
+                    })
+                    .map_err(Error::Core)
+            },
             || {
                 let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
                 catalog.apply_overlay(overlay);
                 drop(catalog);
-                if !hnsw_indices.is_empty() {
+                if !catalog_deleted && !hnsw_indices.is_empty() {
                     let mut cache = self
                         .db
                         .hnsw_cache

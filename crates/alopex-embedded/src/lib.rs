@@ -71,6 +71,9 @@ use std::result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+const DEFAULT_HNSW_CACHE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+const HNSW_CACHE_MAX_ENTRIES: usize = 128;
+
 /// A convenience `Result` type for database operations.
 pub type Result<T> = result::Result<T, Error>;
 
@@ -211,8 +214,12 @@ pub struct Database {
     pub(crate) store: Arc<AnyKV>,
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
+    hnsw_cache_limit_bytes: AtomicU64,
     pub(crate) hnsw_cache_epoch: AtomicU64,
     pub(crate) hnsw_cache_gate: RwLock<()>,
+    #[cfg(test)]
+    pub(crate) hnsw_cache_publication_progress:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     #[cfg(test)]
     pub(crate) hnsw_cache_after_executor_barrier: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
     #[cfg(test)]
@@ -442,8 +449,11 @@ impl Database {
             store,
             sql_catalog,
             hnsw_cache: RwLock::new(HashMap::new()),
+            hnsw_cache_limit_bytes: AtomicU64::new(DEFAULT_HNSW_CACHE_LIMIT_BYTES),
             hnsw_cache_epoch: AtomicU64::new(0),
             hnsw_cache_gate: RwLock::new(()),
+            #[cfg(test)]
+            hnsw_cache_publication_progress: std::sync::Mutex::new(None),
             #[cfg(test)]
             hnsw_cache_after_executor_barrier: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -527,8 +537,81 @@ impl Database {
     fn hnsw_cache_insert(&self, name: &str, index: HnswIndex) -> Arc<HnswIndex> {
         let index = Arc::new(index);
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-        cache.insert(name.to_string(), Arc::clone(&index));
+        Self::hnsw_cache_insert_bounded(
+            &mut cache,
+            name.to_string(),
+            Arc::clone(&index),
+            self.hnsw_cache_limit_bytes.load(Ordering::Acquire),
+        );
         index
+    }
+
+    fn hnsw_cache_insert_bounded(
+        cache: &mut HashMap<String, Arc<HnswIndex>>,
+        name: String,
+        index: Arc<HnswIndex>,
+        limit_bytes: u64,
+    ) {
+        let bytes = index.stats().memory_bytes;
+        if bytes > limit_bytes || limit_bytes == 0 {
+            cache.remove(&name);
+            return;
+        }
+        cache.insert(name.clone(), index);
+        Self::trim_hnsw_cache(cache, limit_bytes, Some(&name));
+    }
+
+    fn trim_hnsw_cache(
+        cache: &mut HashMap<String, Arc<HnswIndex>>,
+        limit_bytes: u64,
+        preserve: Option<&str>,
+    ) {
+        if limit_bytes == 0 {
+            cache.clear();
+            return;
+        }
+        while cache.len() > HNSW_CACHE_MAX_ENTRIES
+            || cache.values().fold(0_u64, |sum, index| {
+                sum.saturating_add(index.stats().memory_bytes)
+            }) > limit_bytes
+        {
+            let victim = cache
+                .iter()
+                .filter(|(name, _)| Some(name.as_str()) != preserve)
+                .max_by(|(left_name, left), (right_name, right)| {
+                    left.stats()
+                        .memory_bytes
+                        .cmp(&right.stats().memory_bytes)
+                        .then_with(|| left_name.cmp(right_name))
+                })
+                .map(|(name, _)| name.clone());
+            match victim {
+                Some(name) => {
+                    cache.remove(&name);
+                }
+                None => {
+                    if let Some(name) = preserve {
+                        cache.remove(name);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Sets the maximum estimated graph bytes retained by this database's HNSW cache.
+    ///
+    /// The default is 256 MiB, with at most 128 cached indexes.
+    /// A zero limit disables caching. Evicted graphs remain usable by active readers.
+    /// This bounds cache ownership, not temporary graph loads or active read handles.
+    pub fn set_hnsw_cache_limit(&self, bytes: u64) {
+        let _gate = self
+            .hnsw_cache_gate
+            .write()
+            .expect("hnsw cache gate lock poisoned");
+        self.hnsw_cache_limit_bytes.store(bytes, Ordering::Release);
+        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        Self::trim_hnsw_cache(&mut cache, bytes, None);
     }
 
     pub(crate) fn hnsw_cache_snapshot(&self) -> (u64, Vec<(String, HnswIndex)>) {
@@ -546,15 +629,48 @@ impl Database {
         epoch: u64,
         entries: Vec<(String, HnswIndex)>,
     ) {
+        #[cfg(test)]
+        let publication_progress = self
+            .hnsw_cache_publication_progress
+            .lock()
+            .expect("publication progress lock poisoned")
+            .clone();
         if entries.is_empty() || self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
             return;
         }
+        #[cfg(test)]
+        if matches!(
+            self.hnsw_cache_gate.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            if let Some(sender) = &publication_progress {
+                let _ = sender.send(());
+            }
+        }
+        // Publication must not enter between a writer's key classification and
+        // selective invalidation, even when the cache was empty at classification.
+        let _gate = self
+            .hnsw_cache_gate
+            .read()
+            .expect("hnsw cache gate lock poisoned");
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
         if self.hnsw_cache_epoch.load(Ordering::Acquire) != epoch {
             return;
         }
         for (name, index) in entries {
-            cache.entry(name).or_insert_with(|| Arc::new(index));
+            if !cache.contains_key(&name) {
+                Self::hnsw_cache_insert_bounded(
+                    &mut cache,
+                    name,
+                    Arc::new(index),
+                    self.hnsw_cache_limit_bytes.load(Ordering::Acquire),
+                );
+            }
+        }
+        drop(cache);
+        #[cfg(test)]
+        if let Some(sender) = publication_progress {
+            let _ = sender.send(());
         }
     }
 
@@ -568,6 +684,14 @@ impl Database {
     pub(crate) fn commit_with_hnsw_cache_update<T, E>(
         &self,
         commit: impl FnOnce() -> std::result::Result<T, E>,
+        update: impl FnOnce(),
+    ) -> std::result::Result<T, E> {
+        self.commit_with_hnsw_cache_changes(|| commit().map(|value| (value, None)), update)
+    }
+
+    fn commit_with_hnsw_cache_changes<T, E>(
+        &self,
+        commit: impl FnOnce() -> std::result::Result<(T, Option<HashSet<String>>), E>,
         update: impl FnOnce(),
     ) -> std::result::Result<T, E> {
         #[cfg(test)]
@@ -623,18 +747,63 @@ impl Database {
                 .send(())
                 .expect("hnsw cache write gate acquired receiver dropped");
         }
-        let result = commit();
-        if result.is_ok() {
-            self.invalidate_hnsw_cache_while_write_locked();
-            update();
+        let (value, changed) = commit()?;
+        self.hnsw_cache_epoch.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+            match changed {
+                Some(names) => cache.retain(|name, _| !names.contains(name)),
+                None => cache.clear(),
+            }
         }
-        result
+        update();
+        Ok(value)
     }
 
-    fn invalidate_hnsw_cache_while_write_locked(&self) {
-        self.hnsw_cache_epoch.fetch_add(1, Ordering::AcqRel);
-        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-        cache.clear();
+    // Called under the commit write gate, using the final backend write set.
+    fn hnsw_cache_changes(
+        &self,
+        visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
+    ) -> Option<HashSet<String>> {
+        let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
+        if cache.is_empty() {
+            return Some(HashSet::new());
+        }
+        let mut changed = HashSet::new();
+        let mut unknown = false;
+        let complete = visit(&mut |key| {
+            if !key.starts_with(b"hnsw:") {
+                return;
+            }
+            // A valid namespace need not belong to an already-cached index.
+            // Node/key suffixes retain their separator: names may contain colons,
+            // and application keys are arbitrary bytes (including empty keys).
+            let recognized = key.starts_with(b"hnsw:meta:")
+                || [b"hnsw:node:".as_slice(), b"hnsw:key:".as_slice()]
+                    .iter()
+                    .any(|prefix| {
+                        key.strip_prefix(*prefix)
+                            .is_some_and(|suffix| suffix.contains(&b':'))
+                    });
+            for name in cache.keys() {
+                let matches = key
+                    .strip_prefix(b"hnsw:meta:")
+                    .is_some_and(|suffix| suffix == name.as_bytes())
+                    || [b"hnsw:node:".as_slice(), b"hnsw:key:".as_slice()]
+                        .iter()
+                        .any(|prefix| {
+                            key.strip_prefix(*prefix)
+                                .and_then(|suffix| suffix.strip_prefix(name.as_bytes()))
+                                .is_some_and(|suffix| suffix.starts_with(b":"))
+                        });
+                if matches && !changed.contains(name) {
+                    changed.insert(name.clone());
+                }
+            }
+            // Unknown namespaces or missing separators require the fallback.
+            unknown |= !recognized;
+        });
+        (complete && !unknown).then_some(changed)
     }
 
     /// Returns the current table info cache epoch.
@@ -863,8 +1032,14 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::create(name, config).map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 self.hnsw_cache_insert(name, index);
             },
@@ -877,7 +1052,16 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_invalidation(|| txn.commit_self().map_err(Error::Core))?;
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
+            || {},
+        )?;
         Ok(())
     }
 
@@ -908,8 +1092,14 @@ impl Database {
         let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.commit_with_hnsw_cache_changes(
+            || {
+                let changed =
+                    self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor));
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 self.hnsw_cache_insert(name, index);
             },
@@ -1655,22 +1845,29 @@ impl<'a> Transaction<'a> {
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
         let overlay = std::mem::take(&mut self.overlay);
+        let catalog_deleted = overlay.has_deletions();
         let catalog_modified = self.catalog_modified;
-        self.db.commit_with_hnsw_cache_update(
-            || txn.commit_self().map_err(Error::Core),
+        self.db.commit_with_hnsw_cache_changes(
+            || {
+                // ponytail: deletions clear all graphs; track affected names if DDL cost matters.
+                let changed = if catalog_deleted {
+                    None
+                } else {
+                    self.db
+                        .hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor))
+                };
+                txn.commit_self()
+                    .map(|()| ((), changed))
+                    .map_err(Error::Core)
+            },
             || {
                 // KV commit 成功後のみ、カタログと対応するHNSW cacheを公開する。
                 let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
                 catalog.apply_overlay(overlay);
                 drop(catalog);
-                if !hnsw_indices.is_empty() {
-                    let mut cache = self
-                        .db
-                        .hnsw_cache
-                        .write()
-                        .expect("hnsw cache lock poisoned");
+                if !catalog_deleted && !hnsw_indices.is_empty() {
                     for (name, (index, _state)) in hnsw_indices {
-                        cache.insert(name, Arc::new(index));
+                        self.db.hnsw_cache_insert(&name, index);
                     }
                 }
             },
@@ -2343,6 +2540,93 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;
+
+    fn cached_test_index(name: &str, dimension: usize) -> HnswIndex {
+        let mut index = HnswIndex::create(
+            name,
+            HnswConfig::default()
+                .with_dimension(dimension)
+                .with_metric(Metric::L2),
+        )
+        .unwrap();
+        index.upsert(b"row", &vec![1.0; dimension], b"").unwrap();
+        index
+    }
+
+    #[test]
+    fn hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget() {
+        let db = Database::new();
+        let first = cached_test_index("first", 2);
+        let bytes = first.stats().memory_bytes;
+        assert!(bytes > 0);
+        db.set_hnsw_cache_limit(bytes);
+        db.hnsw_cache_insert("first", first);
+        db.hnsw_cache_insert("second", cached_test_index("second", 2));
+        {
+            let cache = db.hnsw_cache.read().unwrap();
+            assert_eq!(cache.len(), 1);
+            assert!(cache.contains_key("second"));
+        }
+
+        db.hnsw_cache_insert("oversized", cached_test_index("oversized", 1024));
+        {
+            let cache = db.hnsw_cache.read().unwrap();
+            assert_eq!(cache.len(), 1);
+            assert!(cache.contains_key("second"));
+        }
+
+        db.set_hnsw_cache_limit(0);
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+        let epoch = db.hnsw_cache_epoch.load(Ordering::Acquire);
+        db.hnsw_cache_insert_if_current(
+            epoch,
+            vec![("first".to_string(), cached_test_index("first", 2))],
+        );
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+
+        db.set_hnsw_cache_limit(bytes);
+        db.hnsw_cache_insert_if_current(
+            epoch,
+            vec![
+                ("first".to_string(), cached_test_index("first", 2)),
+                ("second".to_string(), cached_test_index("second", 2)),
+            ],
+        );
+        let cache = db.hnsw_cache.read().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key("second"));
+    }
+
+    #[test]
+    fn hnsw_cache_bounds_empty_index_metadata_entries() {
+        let db = Database::new();
+        for id in 0..=HNSW_CACHE_MAX_ENTRIES {
+            let name = format!("empty_{id}");
+            let index = HnswIndex::create(&name, HnswConfig::default().with_dimension(2)).unwrap();
+            db.hnsw_cache_insert(&name, index);
+        }
+        let cache = db.hnsw_cache.read().unwrap();
+        assert_eq!(cache.len(), HNSW_CACHE_MAX_ENTRIES);
+        assert!(cache.contains_key(&format!("empty_{HNSW_CACHE_MAX_ENTRIES}")));
+    }
+
+    #[test]
+    fn disabled_hnsw_cache_keeps_sql_index_writes_and_reads_functional() {
+        let db = Database::new();
+        db.set_hnsw_cache_limit(0);
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));
+             CREATE INDEX items_embedding ON items (embedding) USING HNSW;
+             INSERT INTO items VALUES (1, [0,0]);",
+        )
+        .unwrap();
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+        let (results, _) = db
+            .search_hnsw("items_embedding", &[0.0, 0.0], 1, Some(16))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+    }
 
     #[test]
     fn vector_key_index_deduplicates_and_preserves_order() {

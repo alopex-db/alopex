@@ -9,6 +9,9 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -25,6 +28,9 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -216,6 +222,9 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
+      - name: Run HNSW management and commit GIL regressions
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        run: cargo test -p alopex-py --lib releases_gil -- --nocapture
       - name: Verify macOS release wheel LINKEDIT and SQL API
         if: ${{ !env.ACT && matrix.os == 'macos-latest' && matrix.numpy_runtime == 'with-numpy' }}
         run: |
@@ -234,7 +243,9 @@ jobs:
           "$smoke_venv/bin/python" -m pytest -q crates/alopex-py/tests/test_sql.py
       - name: Verify HNSW runtime and source inventory
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
-        run: python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
+        run: |
+          python -m unittest scripts.reference_tests.test_hnsw_public_inventory
+          python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
       - name: Verify vector APIs remain exported without NumPy installed
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'without-numpy' }}
         run: |

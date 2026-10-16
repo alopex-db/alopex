@@ -24,6 +24,8 @@ use crate::vector::SliceOrOwned;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, Sender};
 
 #[pyclass(name = "Database")]
 pub struct PyDatabase {
@@ -35,6 +37,8 @@ pub struct PyDatabase {
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
     #[cfg(test)]
     rollback_fail_count: AtomicUsize,
+    #[cfg(test)]
+    hnsw_detach_hook: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 #[pyclass(name = "PreparedStatement")]
@@ -337,6 +341,11 @@ impl PyDatabase {
         }
     }
 
+    #[cfg(test)]
+    fn take_hnsw_detach_hook(&self) -> Option<(Sender<()>, Receiver<()>)> {
+        self.hnsw_detach_hook.lock().unwrap().take()
+    }
+
     fn from_db(
         db: alopex_embedded::Database,
         mode: alopex_embedded::StorageMode,
@@ -351,6 +360,8 @@ impl PyDatabase {
             txns: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             rollback_fail_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            hnsw_detach_hook: Mutex::new(None),
         }
     }
 
@@ -783,10 +794,21 @@ impl PyDatabase {
         Ok(())
     }
 
-    fn create_hnsw_index(&self, name: &str, config: PyHnswConfig) -> PyResult<()> {
+    fn create_hnsw_index(&self, py: Python<'_>, name: &str, config: PyHnswConfig) -> PyResult<()> {
         let db = self.ensure_open()?;
-        db.create_hnsw_index(name, config.into())
-            .map_err(error::embedded_err)
+        let name = name.to_string();
+        let config = config.into();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.create_hnsw_index(&name, config)
+        })
+        .map_err(error::embedded_err)
     }
 
     #[pyo3(signature = (name, query, k, ef_search = None))]
@@ -824,16 +846,37 @@ impl PyDatabase {
         })
     }
 
-    fn drop_hnsw_index(&self, name: &str) -> PyResult<()> {
+    fn drop_hnsw_index(&self, py: Python<'_>, name: &str) -> PyResult<()> {
         let db = self.ensure_open()?;
-        db.drop_hnsw_index(name).map_err(error::embedded_err)
+        let name = name.to_string();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.drop_hnsw_index(&name)
+        })
+        .map_err(error::embedded_err)
     }
 
-    fn get_hnsw_stats(&self, name: &str) -> PyResult<PyHnswStats> {
+    fn get_hnsw_stats(&self, py: Python<'_>, name: &str) -> PyResult<PyHnswStats> {
         let db = self.ensure_open()?;
-        db.get_hnsw_stats(name)
-            .map(PyHnswStats::from)
-            .map_err(error::embedded_err)
+        let name = name.to_string();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.get_hnsw_stats(&name)
+        })
+        .map(PyHnswStats::from)
+        .map_err(error::embedded_err)
     }
 
     /// Stream CSV bytes from a Python binary reader into a table.
@@ -921,6 +964,68 @@ mod tests {
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
         Python::attach(f);
+    }
+
+    #[test]
+    fn hnsw_management_releases_gil_during_native_waits() {
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        Python::initialize();
+        let db = Arc::new(PyDatabase::new(Some("multi")).unwrap());
+        Python::attach(|py| {
+            db.create_hnsw_index(
+                py,
+                "existing",
+                crate::types::PyHnswConfig {
+                    dim: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+
+        for operation in ["create", "stats", "drop"] {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            *db.hnsw_detach_hook.lock().unwrap() = Some((started_tx, release_rx));
+            let worker_db = Arc::clone(&db);
+            let worker = thread::spawn(move || {
+                Python::attach(|py| {
+                    let result = match operation {
+                        "create" => worker_db.create_hnsw_index(
+                            py,
+                            "created",
+                            crate::types::PyHnswConfig {
+                                dim: 2,
+                                ..Default::default()
+                            },
+                        ),
+                        "stats" => worker_db.get_hnsw_stats(py, "existing").map(|_| ()),
+                        "drop" => worker_db.drop_hnsw_index(py, "existing"),
+                        _ => unreachable!(),
+                    };
+                    result.map_err(|error| error.to_string())
+                })
+            });
+            let started = started_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            let (progress_tx, progress_rx) = mpsc::channel();
+            let observer = thread::spawn(move || {
+                Python::attach(|_| {
+                    let _ = progress_tx.send(());
+                });
+            });
+            let gil_progress = started && progress_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            // Release the worker before asserting so a failed GIL check cannot strand it.
+            let _ = release_tx.send(());
+            let result = worker.join().unwrap();
+            observer.join().unwrap();
+            assert!(
+                gil_progress && result.is_ok(),
+                "operation={operation}, GIL_progress={gil_progress}, result={result:?}"
+            );
+        }
     }
 
     #[test]

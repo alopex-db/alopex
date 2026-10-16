@@ -698,28 +698,31 @@ impl Database {
         if name == "default" {
             return Err(Error::CannotDeleteDefault("catalog".to_string()));
         }
-        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
-        ensure_catalog_exists(&*catalog, name)?;
+        self.commit_with_hnsw_cache_invalidation(|| {
+            let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+            ensure_catalog_exists(&*catalog, name)?;
 
-        if !force {
-            let namespaces = catalog.list_namespaces(name);
-            let has_non_default = namespaces.iter().any(|ns| ns.name != "default");
-            let has_tables = namespaces.iter().any(|ns| {
-                let overlay = CatalogOverlay::new();
-                !catalog
-                    .list_tables_in_txn(name, &ns.name, &overlay)
-                    .is_empty()
-            });
-            if has_non_default || has_tables {
-                return Err(Error::CatalogNotEmpty(name.to_string()));
+            if !force {
+                let namespaces = catalog.list_namespaces(name);
+                let has_non_default = namespaces.iter().any(|ns| ns.name != "default");
+                let has_tables = namespaces.iter().any(|ns| {
+                    let overlay = CatalogOverlay::new();
+                    !catalog
+                        .list_tables_in_txn(name, &ns.name, &overlay)
+                        .is_empty()
+                });
+                if has_non_default || has_tables {
+                    return Err(Error::CatalogNotEmpty(name.to_string()));
+                }
             }
-        }
 
-        catalog
-            .delete_catalog(name)
-            .map_err(|err| Error::Sql(err.into()))?;
-        self.invalidate_table_info_cache();
-        Ok(())
+            catalog
+                .delete_catalog(name)
+                .map_err(|err| Error::Sql(err.into()))?;
+            drop(catalog);
+            self.invalidate_table_info_cache();
+            Ok(())
+        })
     }
 
     /// Namespace を作成する。
@@ -779,40 +782,34 @@ impl Database {
         if namespace_name == "default" {
             return Err(Error::CannotDeleteDefault("namespace".to_string()));
         }
-        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
-        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
-
-        let overlay = CatalogOverlay::new();
-        let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
-        if !force && !tables.is_empty() {
-            return Err(Error::NamespaceNotEmpty(
-                catalog_name.to_string(),
-                namespace_name.to_string(),
-            ));
-        }
-
-        if force {
-            let store = catalog.store().clone();
-            let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
-            for table in &tables {
-                catalog
-                    .persist_drop_table(&mut txn, &TableFqn::from(table))
-                    .map_err(|err| Error::Sql(err.into()))?;
-            }
-            txn.commit_self().map_err(Error::Core)?;
+        self.commit_with_hnsw_cache_invalidation(|| {
+            let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+            ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
 
             let mut overlay = CatalogOverlay::new();
+            let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
+            if !force && !tables.is_empty() {
+                return Err(Error::NamespaceNotEmpty(
+                    catalog_name.to_string(),
+                    namespace_name.to_string(),
+                ));
+            }
             for table in tables {
                 overlay.drop_table(&TableFqn::from(&table));
             }
-            catalog.apply_overlay(overlay);
-        }
+            overlay.drop_namespace(catalog_name, namespace_name);
 
-        catalog
-            .delete_namespace(catalog_name, namespace_name)
-            .map_err(|err| Error::Sql(err.into()))?;
-        self.invalidate_table_info_cache();
-        Ok(())
+            let store = catalog.store().clone();
+            let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+            catalog
+                .persist_overlay(&mut txn, &overlay)
+                .map_err(|err| Error::Sql(err.into()))?;
+            txn.commit_self().map_err(Error::Core)?;
+            catalog.apply_overlay(overlay);
+            drop(catalog);
+            self.invalidate_table_info_cache();
+            Ok(())
+        })
     }
 
     /// テーブルを作成する。
@@ -917,26 +914,28 @@ impl Database {
         namespace_name: &str,
         table_name: &str,
     ) -> Result<()> {
-        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
-        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
-        let table = find_table_metadata(&*catalog, catalog_name, namespace_name, table_name)?
-            .ok_or_else(|| {
+        self.commit_with_hnsw_cache_invalidation(|| {
+            let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+            ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+            let table = find_table_metadata(&*catalog, catalog_name, namespace_name, table_name)?
+                .ok_or_else(|| {
                 Error::TableNotFound(table_full_name(catalog_name, namespace_name, table_name))
             })?;
 
-        let store = catalog.store().clone();
-        let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
-        catalog
-            .persist_drop_table(&mut txn, &TableFqn::from(&table))
-            .map_err(|err| Error::Sql(err.into()))?;
-        txn.commit_self().map_err(Error::Core)?;
+            let store = catalog.store().clone();
+            let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+            catalog
+                .persist_drop_table(&mut txn, &TableFqn::from(&table))
+                .map_err(|err| Error::Sql(err.into()))?;
+            txn.commit_self().map_err(Error::Core)?;
 
-        let mut overlay = CatalogOverlay::new();
-        overlay.drop_table(&TableFqn::from(&table));
-        catalog.apply_overlay(overlay);
-        drop(catalog); // Release lock before invalidating cache
-        self.invalidate_table_info_cache();
-        Ok(())
+            let mut overlay = CatalogOverlay::new();
+            overlay.drop_table(&TableFqn::from(&table));
+            catalog.apply_overlay(overlay);
+            drop(catalog); // Release lock before invalidating cache
+            self.invalidate_table_info_cache();
+            Ok(())
+        })
     }
 
     /// デフォルト catalog/namespace のテーブルを削除する。
@@ -2868,6 +2867,496 @@ mod tests {
 
         db.delete_table_simple("users").unwrap();
         assert!(db.list_tables_simple().unwrap().is_empty());
+    }
+
+    fn warmed_catalog_hnsw_fixture(catalog_name: &str) -> std::sync::Arc<Database> {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        ensure_default_catalog_and_namespace(&db);
+        if catalog_name != "default" {
+            db.create_catalog(CreateCatalogRequest::new(catalog_name))
+                .unwrap();
+        }
+        db.create_namespace(CreateNamespaceRequest::new(catalog_name, "analytics"))
+            .unwrap();
+        db.create_table(
+            CreateTableRequest::new("items")
+                .with_catalog_name(catalog_name)
+                .with_namespace_name("analytics")
+                .with_schema(vec![
+                    ColumnDefinition::new("id", DataType::Integer),
+                    ColumnDefinition::new(
+                        "embedding",
+                        DataType::Vector {
+                            dimension: 2,
+                            metric: Some(alopex_sql::ast::VectorMetric::L2),
+                        },
+                    ),
+                ]),
+        )
+        .unwrap();
+        // Exercise the catalog API's namespace contract independently of SQL's
+        // default-namespace name resolution, with real persisted index metadata.
+        {
+            let mut catalog = db.sql_catalog.write().unwrap();
+            let mut index = IndexMetadata::new(
+                1,
+                "idx_catalog_embedding",
+                "items",
+                vec!["embedding".to_string()],
+            )
+            .with_column_indices(vec![1])
+            .with_method(IndexMethod::Hnsw);
+            index.catalog_name = catalog_name.to_string();
+            index.namespace_name = "analytics".to_string();
+            let mut overlay = CatalogOverlay::new();
+            overlay.add_index(
+                IndexFqn::new(catalog_name, "analytics", "items", "idx_catalog_embedding"),
+                index,
+            );
+            let mut txn = db.store.begin(TxnMode::ReadWrite).unwrap();
+            catalog.persist_overlay(&mut txn, &overlay).unwrap();
+            txn.commit_self().unwrap();
+            catalog.apply_overlay(overlay);
+        }
+        db.create_hnsw_index(
+            "idx_catalog_embedding",
+            alopex_core::HnswConfig::default()
+                .with_dimension(2)
+                .with_metric(alopex_core::Metric::L2),
+        )
+        .unwrap();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw("idx_catalog_embedding", b"key", &[0.0, 0.0], b"")
+            .unwrap();
+        txn.commit().unwrap();
+        let (rows, _) = db
+            .search_hnsw("idx_catalog_embedding", &[0.0, 0.0], 1, Some(8))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].distance, 0.0);
+        assert!(db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .contains_key("idx_catalog_embedding"));
+        db
+    }
+
+    fn assert_persisted_catalog_items(db: &Database, present: bool, namespace_present: bool) {
+        let catalog = alopex_sql::catalog::PersistentCatalog::load(db.store.clone()).unwrap();
+        let overlay = CatalogOverlay::new();
+        assert_eq!(
+            catalog
+                .list_tables_in_txn("default", "analytics", &overlay)
+                .len(),
+            usize::from(present)
+        );
+        assert_eq!(
+            catalog
+                .list_indexes_in_txn(&TableFqn::new("default", "analytics", "items"), &overlay,)
+                .len(),
+            usize::from(present)
+        );
+        assert_eq!(
+            catalog.get_namespace("default", "analytics").is_some(),
+            namespace_present
+        );
+        assert!(catalog.get_namespace("default", "default").is_some());
+    }
+
+    #[test]
+    fn delete_table_publishes_hnsw_cache_invalidation() {
+        let db = warmed_catalog_hnsw_fixture("default");
+        assert_persisted_catalog_items(&db, true, true);
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        db.delete_table("default", "analytics", "items").unwrap();
+        assert!(db.get_table_info("default", "analytics", "items").is_err());
+        assert_persisted_catalog_items(&db, false, true);
+        let cached = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .contains_key("idx_catalog_embedding");
+        let after = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        eprintln!(
+            "table deleted: cached={cached}, epoch_delta={}",
+            after - epoch
+        );
+        assert_eq!((cached, after - epoch), (false, 1));
+    }
+
+    #[test]
+    fn force_namespace_delete_publishes_hnsw_cache_invalidation() {
+        let db = warmed_catalog_hnsw_fixture("default");
+        assert_persisted_catalog_items(&db, true, true);
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        db.delete_namespace("default", "analytics", true).unwrap();
+        assert!(db.get_namespace("default", "analytics").is_err());
+        assert!(db.get_table_info("default", "analytics", "items").is_err());
+        assert_persisted_catalog_items(&db, false, false);
+        let cached = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .contains_key("idx_catalog_embedding");
+        let after = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        eprintln!(
+            "namespace deleted: cached={cached}, epoch_delta={}",
+            after - epoch
+        );
+        assert_eq!((cached, after - epoch), (false, 1));
+    }
+
+    #[test]
+    fn catalog_deletion_waits_before_locking_catalog() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut observations = Vec::new();
+        for owner in ["table", "namespace", "catalog"] {
+            let catalog_name = if owner == "catalog" {
+                "archive"
+            } else {
+                "default"
+            };
+            let db = warmed_catalog_hnsw_fixture(catalog_name);
+            let gate = db.hnsw_cache_gate.read().unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            *db.hnsw_cache_write_gate_wait_started.lock().unwrap() = Some(started_tx);
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let worker_db = std::sync::Arc::clone(&db);
+            let worker = std::thread::spawn(move || {
+                let result = match owner {
+                    "catalog" => worker_db.delete_catalog(catalog_name, true),
+                    "namespace" => worker_db.delete_namespace(catalog_name, "analytics", true),
+                    _ => worker_db.delete_table(catalog_name, "analytics", "items"),
+                };
+                finished_tx.send(result).unwrap();
+            });
+            // A positive acquisition-attempt notification is required. A timeout
+            // diagnoses the old bypass; it is never evidence of correct waiting.
+            let attempted = started_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            let catalog_available = db.sql_catalog.try_read().is_ok();
+            let premature = finished_rx.try_recv();
+            let waiting = matches!(&premature, Err(mpsc::TryRecvError::Empty));
+            drop(gate);
+            let result = match premature {
+                Ok(result) => Ok(result),
+                Err(_) => finished_rx.recv_timeout(Duration::from_secs(5)),
+            };
+            worker.join().unwrap();
+            result.unwrap().unwrap();
+            eprintln!("catalog deletion owner={owner}: attempted={attempted}, catalog_available={catalog_available}, waiting={waiting}");
+            observations.push((attempted, catalog_available, waiting));
+            assert!(db
+                .get_table_info(catalog_name, "analytics", "items")
+                .is_err());
+        }
+        assert_eq!(observations, vec![(true, true, true); 3]);
+    }
+
+    #[test]
+    fn rejected_catalog_deletion_preserves_hnsw_cache() {
+        let db = warmed_catalog_hnsw_fixture("default");
+        let before = db.hnsw_cache.read().unwrap()["idx_catalog_embedding"].clone();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(matches!(
+            db.delete_namespace("default", "analytics", false),
+            Err(Error::NamespaceNotEmpty(_, _))
+        ));
+        assert!(matches!(
+            db.delete_table("default", "analytics", "missing"),
+            Err(Error::TableNotFound(_))
+        ));
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &before,
+            &db.hnsw_cache.read().unwrap()["idx_catalog_embedding"]
+        ));
+        assert!(db.get_table_info("default", "analytics", "items").is_ok());
+    }
+
+    #[test]
+    fn delete_catalog_publishes_hnsw_cache_invalidation() {
+        let db = warmed_catalog_hnsw_fixture("archive");
+        let before = db.hnsw_cache.read().unwrap()["idx_catalog_embedding"].clone();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(matches!(
+            db.delete_catalog("archive", false),
+            Err(Error::CatalogNotEmpty(_))
+        ));
+        assert!(matches!(
+            db.delete_catalog("missing", true),
+            Err(Error::CatalogNotFound(_))
+        ));
+        assert!(matches!(
+            db.delete_catalog("default", true),
+            Err(Error::CannotDeleteDefault(_))
+        ));
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &before,
+            &db.hnsw_cache.read().unwrap()["idx_catalog_embedding"]
+        ));
+        for present in [true, false] {
+            if !present {
+                db.delete_catalog("archive", true).unwrap();
+                assert!(db.get_catalog("archive").is_err());
+                assert!(db.get_table_info("archive", "analytics", "items").is_err());
+            }
+            let catalog = alopex_sql::catalog::PersistentCatalog::load(db.store.clone()).unwrap();
+            let overlay = CatalogOverlay::new();
+            assert_eq!(catalog.get_catalog("archive").is_some(), present);
+            assert_eq!(
+                catalog.get_namespace("archive", "analytics").is_some(),
+                present
+            );
+            assert_eq!(
+                catalog
+                    .list_tables_in_txn("archive", "analytics", &overlay)
+                    .len(),
+                usize::from(present)
+            );
+            assert_eq!(
+                catalog
+                    .list_indexes_in_txn(&TableFqn::new("archive", "analytics", "items"), &overlay)
+                    .len(),
+                usize::from(present)
+            );
+            assert!(catalog.get_namespace("default", "default").is_some());
+        }
+        let cached = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .contains_key("idx_catalog_embedding");
+        let delta = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            - epoch;
+        eprintln!("catalog deleted: cached={cached}, epoch_delta={delta}");
+        assert_eq!((cached, delta), (false, 1));
+    }
+
+    #[test]
+    fn transaction_catalog_deletions_publish_once() {
+        let mut observations = Vec::new();
+        let mut expected = Vec::new();
+        for owned in [false, true] {
+            for owner in ["table", "namespace", "catalog"] {
+                for staged in [false, true] {
+                    for commit in [false, true] {
+                        let db = warmed_catalog_hnsw_fixture("archive");
+                        db.create_table_simple(
+                            "survivor",
+                            vec![ColumnDefinition::new("id", DataType::Integer)],
+                        )
+                        .unwrap();
+                        let before = db.hnsw_cache.read().unwrap()["idx_catalog_embedding"].clone();
+                        let epoch = db
+                            .hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if owned {
+                            let mut txn = db
+                                .clone()
+                                .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                                .unwrap();
+                            if staged {
+                                txn.upsert_to_hnsw(
+                                    "idx_catalog_embedding",
+                                    b"new",
+                                    &[1.0, 0.0],
+                                    b"",
+                                )
+                                .unwrap();
+                            }
+                            // The owned commit API consumes the same real overlay as SQL.
+                            match owner {
+                                "catalog" => txn.overlay.drop_cascade_catalog("archive"),
+                                "namespace" => {
+                                    txn.overlay.drop_cascade_namespace("archive", "analytics")
+                                }
+                                _ => txn.overlay.drop_table(&TableFqn::new(
+                                    "archive",
+                                    "analytics",
+                                    "items",
+                                )),
+                            }
+                            txn.catalog_modified = true;
+                            if commit {
+                                txn.commit().unwrap();
+                            } else {
+                                txn.rollback().unwrap();
+                            }
+                        } else {
+                            let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                            if staged {
+                                txn.upsert_to_hnsw(
+                                    "idx_catalog_embedding",
+                                    b"new",
+                                    &[1.0, 0.0],
+                                    b"",
+                                )
+                                .unwrap();
+                            }
+                            match owner {
+                                "catalog" => txn.delete_catalog("archive", true).unwrap(),
+                                "namespace" => {
+                                    txn.delete_namespace("archive", "analytics", true).unwrap()
+                                }
+                                _ => txn.delete_table("archive", "analytics", "items").unwrap(),
+                            }
+                            if commit {
+                                txn.commit().unwrap();
+                            } else {
+                                txn.rollback().unwrap();
+                            }
+                        }
+                        let cache = db.hnsw_cache.read().unwrap();
+                        let cached = cache.get("idx_catalog_embedding");
+                        let same =
+                            cached.is_some_and(|entry| std::sync::Arc::ptr_eq(entry, &before));
+                        let state = (
+                            cached.is_some(),
+                            same,
+                            db.hnsw_cache_epoch
+                                .load(std::sync::atomic::Ordering::Acquire)
+                                - epoch,
+                        );
+                        drop(cache);
+                        let empty = CatalogOverlay::new();
+                        let fqn = TableFqn::new("archive", "analytics", "items");
+                        let persisted =
+                            alopex_sql::catalog::PersistentCatalog::load(db.store.clone()).unwrap();
+                        let memory = db.sql_catalog.read().unwrap();
+                        assert_eq!(
+                            memory
+                                .list_tables_in_txn("default", "default", &empty)
+                                .len(),
+                            1
+                        );
+                        assert_eq!(
+                            persisted
+                                .list_tables_in_txn("default", "default", &empty)
+                                .len(),
+                            1
+                        );
+                        let counts = (
+                            memory
+                                .list_tables_in_txn("archive", "analytics", &empty)
+                                .len(),
+                            memory.list_indexes_in_txn(&fqn, &empty).len(),
+                            persisted
+                                .list_tables_in_txn("archive", "analytics", &empty)
+                                .len(),
+                            persisted.list_indexes_in_txn(&fqn, &empty).len(),
+                        );
+                        eprintln!("owned={owned} owner={owner} staged={staged} commit={commit}: cache={state:?} metadata={counts:?}");
+                        observations.push((state, counts));
+                        let remaining = usize::from(!commit);
+                        expected.push((
+                            (!commit, !commit, u64::from(commit)),
+                            (remaining, remaining, remaining, remaining),
+                        ));
+                    }
+                }
+            }
+        }
+        assert_eq!(observations, expected);
+    }
+
+    #[test]
+    fn create_only_transactions_preserve_warmed_hnsw_cache() {
+        for owned in [false, true] {
+            let db = warmed_catalog_hnsw_fixture("default");
+            let before = db.hnsw_cache.read().unwrap()["idx_catalog_embedding"].clone();
+            if owned {
+                let mut txn = db
+                    .clone()
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.execute_sql("CREATE TABLE other (id INTEGER)").unwrap();
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.create_table(
+                    CreateTableRequest::new("other")
+                        .with_schema(vec![ColumnDefinition::new("id", DataType::Integer)]),
+                )
+                .unwrap();
+                txn.commit().unwrap();
+            }
+            assert!(db.get_table_info("default", "default", "other").is_ok());
+            assert!(std::sync::Arc::ptr_eq(
+                &before,
+                &db.hnsw_cache.read().unwrap()["idx_catalog_embedding"]
+            ));
+        }
+    }
+
+    #[test]
+    fn catalog_deletion_preserves_other_staged_graph_data() {
+        for owned in [false, true] {
+            let db = warmed_catalog_hnsw_fixture("archive");
+            db.create_hnsw_index(
+                "independent",
+                alopex_core::HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(alopex_core::Metric::L2),
+            )
+            .unwrap();
+            db.search_hnsw("idx_catalog_embedding", &[0.0, 0.0], 1, Some(8))
+                .unwrap();
+            if owned {
+                let mut txn = db
+                    .clone()
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.upsert_to_hnsw("independent", b"new", &[1.0, 0.0], b"")
+                    .unwrap();
+                txn.overlay
+                    .drop_table(&TableFqn::new("archive", "analytics", "items"));
+                txn.catalog_modified = true;
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.upsert_to_hnsw("independent", b"new", &[1.0, 0.0], b"")
+                    .unwrap();
+                txn.delete_table("archive", "analytics", "items").unwrap();
+                txn.commit().unwrap();
+            }
+            assert!(!db
+                .hnsw_cache
+                .read()
+                .unwrap()
+                .contains_key("idx_catalog_embedding"));
+            assert!(!db.hnsw_cache.read().unwrap().contains_key("independent"));
+            let (rows, _) = db
+                .search_hnsw("independent", &[1.0, 0.0], 1, Some(8))
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].distance, 0.0);
+        }
     }
 
     #[test]
