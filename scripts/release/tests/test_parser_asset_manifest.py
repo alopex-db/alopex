@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Behavior tests for deterministic Nim parser target archives."""
 
 from __future__ import annotations
@@ -110,23 +109,21 @@ def retrying_rm_executable(
 
 
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
-    with path.open("wb") as raw:
-        with gzip.GzipFile(
-            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-        ) as compressed:
-            with tarfile.open(
-                fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
-            ) as archive:
-                for name, content in members:
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(content)
-                    info.mode = 0o644
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(content))
+    with path.open("wb") as raw, gzip.GzipFile(
+        filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+    ) as compressed, tarfile.open(
+        fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
+    ) as archive:
+        for name, content in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
 
 
 class ParserAssetManifestTests(unittest.TestCase):
@@ -786,11 +783,10 @@ print(matches[0])
             self.verify_target(record_path)
 
         oversized_tar = b"\0" * (16 * 1024 * 1024 + 1)
-        with archive_path.open("wb") as raw:
-            with gzip.GzipFile(
-                filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-            ) as compressed:
-                compressed.write(oversized_tar)
+        with archive_path.open("wb") as raw, gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+        ) as compressed:
+            compressed.write(oversized_tar)
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["archive"]["size"] = archive_path.stat().st_size
         record["archive"]["sha256"] = sha256(archive_path)

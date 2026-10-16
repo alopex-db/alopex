@@ -10,10 +10,8 @@
 
 import datetime as dt
 import json
-import os
 
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -220,9 +218,8 @@ def test_prepared_active_handle_guides_reopen_error(tmp_path):
     try:
         with pytest.raises(AlopexError, match="already open") as error:
             Database.open(path)
-        # Windows can lock the holder file against diagnostic reads.
-        if os.name != "nt":
-            assert "PreparedStatement" in str(error.value)
+        assert "already open in this process" in str(error.value)
+        assert "PreparedStatement" in str(error.value)
     finally:
         statement.finalize()
     reopened = Database.open(path)
