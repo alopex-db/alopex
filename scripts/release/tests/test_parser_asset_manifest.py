@@ -9,7 +9,6 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -17,8 +16,8 @@ import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
@@ -890,6 +889,45 @@ print(matches[0])
         )
         self.assertNotIn('${npeg_resolved}/src', text)
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
+
+    def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
+        target = "x86_64-unknown-linux-gnu"
+        build_root = Path(
+            f"/tmp/alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
+            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{target}"
+        )
+        marker = self.root / "cleanup-failed-once"
+        fake_bin = self.root / "fake-cleanup-bin"
+        fake_bin.mkdir()
+        real_rm = shutil.which("rm")
+        self.assertIsNotNone(real_rm)
+        fake_rm = fake_bin / "rm"
+        fake_rm.write_text(
+            f"""#!{sys.executable}
+from pathlib import Path
+import subprocess
+import sys
+
+marker = Path({str(marker)!r})
+if sys.argv[-1] == {str(build_root)!r} and not marker.exists():
+    marker.touch()
+    print("rm: Directory not empty", file=sys.stderr)
+    raise SystemExit(1)
+raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
+""",
+            encoding="utf-8",
+        )
+        fake_rm.chmod(0o755)
+        environment = self.build_script_fixture()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+        result = self.run_build_script(environment, self.root / "cleanup-retry")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("package content does not match the locked identity", result.stderr)
+        self.assertTrue(marker.exists(), "cleanup failure was not exercised")
+        self.assertFalse(build_root.exists())
+        self.assertFalse(Path(f"{build_root}.lock").exists())
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
         repo_outputs = [
