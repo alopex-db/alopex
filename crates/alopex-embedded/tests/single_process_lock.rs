@@ -15,10 +15,7 @@ const CHILD_DIR_ENV: &str = "ALOPEX_LOCK_CHILD_DIR";
 /// Stable substring for other-process or unknown lock holders.
 const LOCK_MESSAGE: &str = "already open by another process";
 
-#[cfg(unix)]
 const SAME_PROCESS_MESSAGE: &str = "already open in this process";
-#[cfg(not(unix))]
-const SAME_PROCESS_MESSAGE: &str = "already open";
 
 /// Re-run this test binary as a genuinely separate process.
 fn respawn(test_name: &str, db_path: &Path) -> Command {
