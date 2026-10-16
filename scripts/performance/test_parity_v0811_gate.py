@@ -1,5 +1,4 @@
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -9,13 +8,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.performance.parity_v0811_gate import evaluate, percentile, validate_document
+from scripts.performance.parity_v0811_gate import (
+    evaluate,
+    percentile,
+    validate_document,
+)
 from scripts.performance.parity_v0811_measure import (
-    _environment,
     MEMORY_PROFILE_QUANTUM_BYTES,
+    _environment,
     _streaming,
-    normalize_memory_profile_bytes,
     normalize_hnsw,
+    normalize_memory_profile_bytes,
     summarize_latencies,
 )
 
@@ -84,9 +87,11 @@ class PerformanceParityGateTests(unittest.TestCase):
             def git_run(command, **_kwargs):
                 if command[1:3] == ["rev-parse", "HEAD"]:
                     return subprocess.CompletedProcess(command, 0, stdout="revision\n")
-                return subprocess.CompletedProcess(
-                    command, 0, stdout=b"source.py\0.venv\0"
-                )
+                if command[1:2] == ["ls-files"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=b"source.py\0.venv\0"
+                    )
+                raise AssertionError(f"unexpected subprocess: {command!r}")
 
             try:
                 os.chdir(root)
@@ -94,6 +99,10 @@ class PerformanceParityGateTests(unittest.TestCase):
                     patch(
                         "scripts.performance.parity_v0811_measure.subprocess.run",
                         side_effect=git_run,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.processor",
+                        return_value="test cpu",
                     ),
                     patch(
                         "scripts.performance.parity_v0811_measure.importlib.metadata.version",
@@ -344,6 +353,37 @@ class PerformanceParityGateTests(unittest.TestCase):
         errors = validate_document(contracts, measurements, "curated")
 
         self.assertEqual(errors, ["environment: cpu_model does not match the runner profile"])
+
+    def test_gate_tolerates_minor_memtotal_drift_but_rejects_different_capacity(self):
+        memory_bytes = 54_746_497_024
+        profile = {
+            "os": "ubuntu-24.04",
+            "cpu_model": "fixed-cpu",
+            "logical_cpu_count": 8,
+            "cpu_affinity": [0],
+            "memory_bytes": memory_bytes,
+            "build_profile": "release",
+            "thread_count": 1,
+        }
+        environment = {
+            **profile,
+            "memory_bytes": memory_bytes - 716_800,
+            "alopex_version": "0.8.15",
+            "alopex_revision": "a" * 40,
+            "alopex_tree_sha256": "b" * 64,
+            "kernel": "6.0",
+            "python_version": "3.11.11",
+        }
+        contracts = {"runner_profile": profile, "contracts": {}}
+        measurements = {"environment": environment, "results": []}
+
+        self.assertEqual(validate_document(contracts, measurements, "curated"), [])
+
+        environment["memory_bytes"] = memory_bytes - 16 * 1024 * 1024 - 1
+        self.assertEqual(
+            validate_document(contracts, measurements, "curated"),
+            ["environment: memory_bytes does not match the runner profile"],
+        )
 
     def test_gate_uses_metric_specific_latency_budget(self):
         contract = {

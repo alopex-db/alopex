@@ -88,16 +88,37 @@ fn staged_batch_publishes_stats_only_after_commit() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn public_search_rejects_ef_search_above_the_safety_limit() {
-    let index = HnswIndex::create("test_index", base_config()).unwrap();
+fn read_clone_searches_shared_graph_without_inheriting_callbacks() {
+    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+    index.upsert(b"a", &[0.0, 0.0], b"").unwrap();
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let callback_count_for_index = Arc::clone(&callback_count);
+    index.on_search(move |_| {
+        callback_count_for_index.fetch_add(1, Ordering::SeqCst);
+    });
 
-    let error = index
-        .search(&[0.0, 0.0], 1, Some(MAX_HNSW_EF_SEARCH + 1))
-        .expect_err("public HNSW search must reject an unsafe ef_search");
-    assert!(matches!(
-        error,
-        Error::InvalidParameter { ref param, .. } if param == "ef_search"
-    ));
+    let read_clone = index.clone_for_read();
+    let (hits, _) = read_clone.search(&[0.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(hits[0].key, b"a");
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+
+    index.search(&[0.0, 0.0], 1, Some(8)).unwrap();
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn public_search_rejects_ef_search_outside_the_safety_limits() {
+    let index = HnswIndex::create("test_index", base_config()).unwrap();
+    for ef_search in [0, MAX_HNSW_EF_SEARCH + 1] {
+        let error = index
+            .search(&[0.0, 0.0], 1, Some(ef_search))
+            .expect_err("public HNSW search must reject an unsafe ef_search");
+        assert!(matches!(
+            error,
+            Error::InvalidParameter { ref param, .. } if param == "ef_search"
+        ));
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

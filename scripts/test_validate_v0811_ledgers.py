@@ -3,7 +3,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts.reference_tests import hnsw_public_inventory
 from scripts.validate_v0811_ledgers import (
     LEDGERS,
     PERFORMANCE_CONTRACTS,
@@ -190,6 +192,68 @@ class LedgerContractTests(unittest.TestCase):
         )
         self.assertEqual(validate(hnsw), [])
 
+    def test_hnsw_ledger_has_generated_capability_matrix(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        matrix = {row["capability"]: row["surfaces"] for row in payload["capability_matrix"]}
+
+        self.assertEqual(set(matrix), {"query_ef_search", "query_path_control", "search_statistics"})
+        self.assertEqual(
+            {row["surface"] for row in matrix["query_ef_search"]},
+            {"Rust", "embedded", "Python", "SQL"},
+        )
+        self.assertEqual(
+            {row["surface"] for row in matrix["search_statistics"]},
+            {"Rust", "embedded", "Python", "SQL"},
+        )
+        path_control = {row["surface"]: row["status"] for row in matrix["query_path_control"]}
+        self.assertEqual(path_control["SQL"], "supported")
+        self.assertEqual(
+            {surface for surface, status in path_control.items() if status == "not_applicable"},
+            {"Rust", "embedded", "Python"},
+        )
+
+    def test_hnsw_capability_rejects_changed_search_signatures(self):
+        cases = [
+            ("Rust", "crates/alopex-core/src/vector/hnsw/mod.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("Rust", "crates/alopex-core/src/vector/hnsw/mod.rs",
+             "Result<(Vec<HnswSearchResult>, SearchStats)>", "Result<Vec<HnswSearchResult>>"),
+            ("embedded", "crates/alopex-embedded/src/lib.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("embedded", "crates/alopex-embedded/src/lib.rs",
+             "Result<(Vec<HnswSearchResult>, HnswSearchStats)>", "Result<Vec<HnswSearchResult>>"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "ef_search: Option<usize>", "ef_search: usize"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "PyResult<(Vec<PySearchResult>, PySearchStats)>", "PyResult<Vec<PySearchResult>>"),
+            ("Python", "crates/alopex-py/src/embedded/database.rs",
+             "#[pyo3(signature = (name, query, k, ef_search = None))]",
+             "#[pyo3(signature = (name, query, k, ef_search))]"),
+            ("Python stub", "crates/alopex-py/python/alopex/_alopex.pyi",
+             "ef_search: Optional[int] = None", "ef_search: int = 0"),
+            ("Python stub", "crates/alopex-py/python/alopex/_alopex.pyi",
+             "Tuple[List[SearchResult], SearchStats]", "List[SearchResult]"),
+        ]
+        read_text = Path.read_text
+        for surface, relative, before, after in cases:
+            with self.subTest(surface=surface, signature=before):
+                target = hnsw_public_inventory.ROOT / relative
+                original = read_text(target, encoding="utf-8")
+                self.assertIn(before, original)
+                # A stale comment elsewhere must not stand in for the real API.
+                comment = "#" if target.suffix == ".pyi" else "//"
+                changed = original.replace(before, after) + f"\n{comment} {before}\n"
+
+                def read_source(path, *args, target=target, changed=changed, **kwargs):
+                    return changed if path == target else read_text(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "read_text", read_source),
+                    self.assertRaisesRegex(RuntimeError, f"from {surface}"),
+                ):
+                    hnsw_public_inventory.capability_matrix()
+
     def test_sql_public_inventory_rejects_missing_and_unknown_claims(self):
         sql = next(path for path in LEDGERS if path.name.startswith("sql-"))
         payload = json.loads(sql.read_text(encoding="utf-8"))
@@ -236,6 +300,19 @@ class LedgerContractTests(unittest.TestCase):
             ledger.write_text(json.dumps(source_only), encoding="utf-8")
             self.assertTrue(
                 any("source-only HNSW evidence" in error for error in validate(ledger))
+            )
+
+    def test_hnsw_capability_matrix_rejects_stale_cells(self):
+        hnsw = next(path for path in LEDGERS if path.name.startswith("hnsw-"))
+        payload = json.loads(hnsw.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "hnsw.json"
+            stale = copy.deepcopy(payload)
+            stale["capability_matrix"][0]["surfaces"][0]["status"] = "not_applicable"
+            ledger.write_text(json.dumps(stale), encoding="utf-8")
+
+            self.assertTrue(
+                any("HNSW capability matrix does not match source" in error for error in validate(ledger))
             )
 
     def test_materialized_public_rows_require_test_selectors(self):
