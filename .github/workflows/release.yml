@@ -111,6 +111,10 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Verify parser producer source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.90.0
         with:
@@ -354,6 +358,20 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/alopex-crate-assets"
           echo "RELEASE_STAGE=${stage}" >> "$GITHUB_ENV"
           echo "CRATE_ASSETS=${RUNNER_TEMP}/alopex-crate-assets" >> "$GITHUB_ENV"
+      - name: Build and smoke staged parser through strict default path
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/alopex-release-strict-target
+        run: |
+          set -euo pipefail
+          unset ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD NIM_SQL_PARSER_LIB_DIR
+          cd "${RELEASE_STAGE}"
+          cargo build --locked --release -p alopex-sql
+          export LD_LIBRARY_PATH="${PWD}/crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          cargo test --locked --release -p alopex-sql --test nim_bridge_test \
+            exposes_the_nim_wire_contract_version -- --exact
+          cargo test --locked --release -p alopex-sql --test nim_bridge_test \
+            distinct_on_crosses_the_nim_messagepack_boundary -- --exact
       - name: Package and bind every published crate once
         shell: bash
         run: |
