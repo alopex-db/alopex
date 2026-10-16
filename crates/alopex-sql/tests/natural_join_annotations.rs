@@ -1,6 +1,85 @@
 use alopex_sql::ast::dml::{InsertSource, OnConflictAction, QueryBody, SelectItem};
 use alopex_sql::{AlopexDialect, ExprKind, FromItem, Parser, StatementKind};
 
+#[test]
+fn natural_wire_flags_follow_relations_across_expression_reordering() {
+    for sql in [
+        "SELECT POSITION((SELECT CAST(COUNT(*) AS TEXT) FROM a NATURAL JOIN b) IN (SELECT CAST(COUNT(*) AS TEXT) FROM c JOIN d ON c.k = d.k))",
+        "SELECT 1 OFFSET (SELECT COUNT(*) FROM a NATURAL JOIN b) LIMIT (SELECT COUNT(*) FROM c JOIN d ON c.k = d.k)",
+        "SELECT 1 LIMIT (SELECT COUNT(*) FROM c JOIN d ON c.k = d.k) OFFSET (SELECT COUNT(*) FROM a NATURAL JOIN b)",
+    ] {
+        let parsed = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let ast = serde_json::to_value(parsed).unwrap();
+        fn check(value: &serde_json::Value, seen: &mut usize) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if fields.get("variant").and_then(|v| v.as_str()) == Some("Join") {
+                        let name = fields["left"]["name"].as_str().unwrap();
+                        assert_eq!(fields["natural"].as_bool(), Some(name == "a"), "{name}");
+                        *seen += 1;
+                    }
+                    for value in fields.values() {
+                        check(value, seen);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        check(value, seen);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = 0;
+        check(&ast, &mut seen);
+        assert_eq!(seen, 2, "{sql}");
+    }
+}
+
+#[test]
+fn natural_wire_comma_has_lower_precedence_than_explicit_join() {
+    let parsed = Parser::parse_sql(&AlopexDialect, "SELECT * FROM a, b NATURAL JOIN c").unwrap();
+    let StatementKind::Select(select) = &parsed[0].kind else {
+        panic!("SELECT");
+    };
+    let FromItem::Join {
+        left,
+        right,
+        join_type,
+        natural,
+        ..
+    } = &select.from[0]
+    else {
+        panic!("comma");
+    };
+    assert_eq!(*join_type, alopex_sql::JoinType::Cross);
+    assert!(!natural);
+    assert!(matches!(left.as_ref(), FromItem::Table { name, .. } if name == "a"));
+    let FromItem::Join {
+        left,
+        right,
+        natural,
+        ..
+    } = right.as_ref()
+    else {
+        panic!("explicit JOIN");
+    };
+    assert!(*natural);
+    assert!(matches!(left.as_ref(), FromItem::Table { name, .. } if name == "b"));
+    assert!(matches!(right.as_ref(), FromItem::Table { name, .. } if name == "c"));
+}
+
+#[test]
+fn natural_wire_invalid_combinations_are_rejected() {
+    for sql in [
+        "SELECT * FROM a NATURAL CROSS JOIN b",
+        "SELECT * FROM a NATURAL JOIN b ON a.k = b.k",
+        "SELECT * FROM a NATURAL JOIN b USING (k)",
+    ] {
+        assert!(Parser::parse_sql(&AlopexDialect, sql).is_err(), "{sql}");
+    }
+}
+
 fn assert_join_natural(from: &FromItem, expected: bool) {
     let FromItem::Join { natural, .. } = from else {
         panic!("expected JOIN");

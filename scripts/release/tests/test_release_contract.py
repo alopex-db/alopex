@@ -296,6 +296,40 @@ class ReleaseContractTests(unittest.TestCase):
 
         compile(textwrap.dedent(script), "release parser staging", "exec")
 
+    def test_release_staging_builds_and_smokes_the_manifest_bound_parser(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        producer = release.split("  build-release:", maxsplit=1)[1].split(
+            "  create-release:", maxsplit=1
+        )[0]
+        self.assertIn('test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"', producer)
+
+        package = release.split("  package-crates:", maxsplit=1)[1].split(
+            "  qualify-python:", maxsplit=1
+        )[0]
+        staged = package.index("Create exact source staging with candidate parser assets")
+        strict = package.index("Build and smoke staged parser through strict default path")
+        packaged = package.index("Package and bind every published crate once")
+        self.assertLess(staged, strict)
+        self.assertLess(strict, packaged)
+        strict_step = package[strict:packaged]
+        self.assertIn(
+            "unset ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD NIM_SQL_PARSER_LIB_DIR",
+            strict_step,
+        )
+        self.assertIn('cd "${RELEASE_STAGE}"', strict_step)
+        self.assertIn("cargo build --locked --release -p alopex-sql", strict_step)
+        self.assertIn(
+            "cargo test --locked --release -p alopex-sql --test nim_bridge_test",
+            strict_step,
+        )
+        self.assertIn("exposes_the_nim_wire_contract_version -- --exact", strict_step)
+        self.assertIn(
+            "distinct_on_crosses_the_nim_messagepack_boundary -- --exact",
+            strict_step,
+        )
+
     def test_release_has_no_repair_forward_path(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
