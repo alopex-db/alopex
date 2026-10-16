@@ -458,7 +458,8 @@ EOF
   export SOURCE_DATE_EPOCH=0
   export TZ=UTC
   export ZERO_AR_DATE=1
-  export PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  export PATH
   unset NIMBLE_DIR
   export ALOPEX_NIM_BIN="${nim_bin_arg}"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
@@ -535,14 +536,14 @@ EOF
         static_flags+=(--passL:-s)
         ;;
       x86_64-apple-darwin|aarch64-apple-darwin)
-        static_flags+=(--passL:-Wl,-x)
+        static_flags+=("--passL:-Wl,-x")
         ;;
       x86_64-pc-windows-msvc)
         static_flags+=(
           --passL:-static
           --passL:-static-libgcc
           --passL:-s
-          --passL:-Wl,--no-insert-timestamp
+          "--passL:-Wl,--no-insert-timestamp"
         )
         # MSVC has no -fPIC (all code is position independent there) and
         # rejects the flag, so the Windows branch replaces it outright.
