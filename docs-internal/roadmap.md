@@ -71,6 +71,9 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 
 ## Graph／Lake-Link track（v1.x）
 
+共通実行基盤 [#636](https://github.com/alopex-db/alopex/issues/636) との接続は[共通Query IRとGraph trackの接続契約](../docs/query-graph-ir-contract.md)に従います。G1でIR/context契約、G2でadjacency provider、G3でGraph lowering、G4でatomic publish、G5でHNSW seedとincremental capability、G6で分散fenceを接続します。G1〜G6の順序と既存SQL／ストレージ計画を保持し、必要なIR境界を各段階で実装します。
+
+
 Graph は独立したグラフストアを追加するのではなく、通常のリレーショナルテーブルを正本として、Property Graph カタログとトランザクショナルな隣接インデックスを重ねます。Rust の型付き API を中核に据え、SQL、Python、HTTP/gRPC、CLI は同じカタログ、プランナー、実行器、ジョブ状態を共有します。IVF は別系統の将来インデックスであり、Graph 実装の依存条件にはしません。
 
 | 段階 | 実装ゴール | 主な受け入れ条件 |
