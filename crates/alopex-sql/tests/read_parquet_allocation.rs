@@ -1290,6 +1290,17 @@ fn issue577_async_routing_planning_metadata_budget() {
 #[cfg(feature = "tokio")]
 #[test]
 fn issue577_bounded_routing_schema_avoids_row_group_materialization() {
+    routing_schema_avoids_row_group_materialization(Some(268_435_456));
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn issue577_unbounded_routing_schema_avoids_row_group_materialization() {
+    routing_schema_avoids_row_group_materialization(None);
+}
+
+#[cfg(feature = "tokio")]
+fn routing_schema_avoids_row_group_materialization(limit: Option<u64>) {
     use alopex_core::kv::AsyncKVStore;
     use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
     use alopex_core::types::TxnMode;
@@ -1343,10 +1354,9 @@ fn issue577_bounded_routing_schema_avoids_row_group_materialization() {
             Arc::new(RwLock::new(MemoryCatalog::new()));
         let mut bridge = AsyncTxnBridge::with_catalog(transaction, TxnMode::ReadWrite, catalog);
         bridge.async_execute("SELECT 1").await.unwrap();
-        bridge.set_memory_policy(Some(MemoryPolicy::new(
-            Some(268_435_456),
-            SpillPolicy::FailFast,
-        )));
+        bridge.set_memory_policy(limit.map(|limit| {
+            MemoryPolicy::new(Some(limit), SpillPolicy::FailFast)
+        }));
         let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
         MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
         let result = bridge.async_plan_for_routing(&sql).await;
@@ -1374,7 +1384,7 @@ fn issue577_bounded_routing_schema_avoids_row_group_materialization() {
         let group_backing =
             GROUPS * std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>();
         println!(
-            "routing_schema groups={GROUPS} columns={COLUMNS} maximum_request={maximum} row_group_backing={group_backing}"
+            "routing_schema limit={limit:?} groups={GROUPS} columns={COLUMNS} maximum_request={maximum} row_group_backing={group_backing}"
         );
         assert!(
             maximum < group_backing,
@@ -1385,14 +1395,38 @@ fn issue577_bounded_routing_schema_avoids_row_group_materialization() {
 
 #[test]
 fn issue577_schema_projection_keeps_row_group_decode_validation() {
-    let file = fixture(false);
-    let (result, _) = execute_observed_after_planning(&file, || {
-        let footer = rewritten_metadata_footer(&file, |footer| {
-            footer.row_groups[0].columns.clear();
+    for limit in [None, Some(LIMIT)] {
+        let file = fixture(false);
+        let (result, _) = execute_observed_with_alias(&file, "", limit, || {
+            let footer = rewritten_metadata_footer(&file, |footer| {
+                footer.row_groups[0].columns.clear();
+            });
+            replace_footer(&file, &footer);
         });
-        replace_footer(&file, &footer);
-    });
-    assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+        assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+    }
+}
+
+#[test]
+fn issue577_unbounded_schema_keeps_deep_unknown_metadata() {
+    let file = fixture(false);
+    let mut footer = rewritten_metadata_footer(&file, |_| {});
+    assert_eq!(footer.pop(), Some(0));
+    // Unknown struct field 100 exceeds preflight's depth while fitting Thrift's skip limit.
+    footer.extend_from_slice(&[0x0c, 0xc8, 0x01]);
+    footer.resize(footer.len() + 40, 0x1c);
+    footer.resize(footer.len() + 42, 0);
+    replace_footer(&file, &footer);
+
+    let (schema, rows) =
+        alopex_sql::executor::bulk::read_parquet(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(schema.fields.len(), 1);
+    assert_eq!(schema.fields[0].name.as_deref(), Some("id"));
+    assert_eq!(
+        schema.fields[0].data_type,
+        Some(alopex_sql::planner::ResolvedType::BigInt)
+    );
+    assert_eq!(rows, vec![vec![SqlValue::BigInt(7)]]);
 }
 
 #[test]
