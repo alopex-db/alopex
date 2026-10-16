@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 
-from . import AlopexError, Database, LocalScan, ThreadMode, Transaction, TxnMode
+from . import AlopexError, Database, LocalScan, ThreadMode, TxnMode
 
 
 def _stream_error(code: str, message: str) -> AlopexError:
