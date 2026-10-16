@@ -174,16 +174,14 @@ pub(crate) fn evaluate_expr_with_subqueries<
             .map(SqlValue::Boolean)
         }
         TypedExprKind::UnaryOp { op, operand } if contains_subquery(expr) => {
-            let value =
-                evaluate_expr_with_subqueries_with_context(txn, catalog, operand, row, context)?;
+            let value = evaluate_expr_with_subqueries(txn, catalog, operand, row)?;
             crate::executor::evaluator::unary_op::eval_unary_value(op, value)
         }
         TypedExprKind::IsNull {
             expr: inner,
             negated,
         } if contains_subquery(expr) => {
-            let value =
-                evaluate_expr_with_subqueries_with_context(txn, catalog, inner, row, context)?;
+            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row)?;
             Ok(SqlValue::Boolean(value.is_null() != *negated))
         }
         TypedExprKind::FunctionCall { name, args, .. }
@@ -192,8 +190,7 @@ pub(crate) fn evaluate_expr_with_subqueries<
                     || name.eq_ignore_ascii_case("ifnull")) =>
         {
             for arg in args {
-                let value =
-                    evaluate_expr_with_subqueries_with_context(txn, catalog, arg, row, context)?;
+                let value = evaluate_expr_with_subqueries(txn, catalog, arg, row)?;
                 if !value.is_null() {
                     return Ok(value);
                 }
