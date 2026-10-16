@@ -141,3 +141,22 @@ def test_async_transaction_uses_native_sql_stream_and_preserves_commitability():
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_async_transaction_savepoint_rolls_back_sql_work():
+    async def scenario() -> None:
+        db = await AsyncDatabase.new()
+        try:
+            await db.execute_sql("CREATE TABLE async_savepoint (id INTEGER PRIMARY KEY)")
+            transaction = await db.begin(TxnMode.READ_WRITE)
+            await transaction.execute_sql("INSERT INTO async_savepoint (id) VALUES (1)")
+            await transaction.savepoint("optional_item")
+            await transaction.execute_sql("INSERT INTO async_savepoint (id) VALUES (2)")
+            await transaction.rollback_to("optional_item")
+            await transaction.release("optional_item")
+            await transaction.commit()
+            assert await db.execute_sql("SELECT id FROM async_savepoint") == [{"id": 1}]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())

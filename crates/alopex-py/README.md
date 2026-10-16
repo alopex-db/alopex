@@ -54,6 +54,18 @@ with db.begin(TxnMode.READ_ONLY) as txn:
 db.close()
 ```
 
+組み込み `Database.execute_sql()` は auto-commit です。SQL の `BEGIN` や `SAVEPOINT` を渡す代わりに、明示トランザクションのメソッドを使います。保存点メソッドは組み込み `Transaction` と `AsyncTransaction` で利用できます。
+
+```python
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.execute_sql("INSERT INTO orders (id) VALUES (1)")
+    txn.savepoint("before_optional_item")
+    txn.execute_sql("INSERT INTO orders (id) VALUES (2)")
+    txn.rollback_to("before_optional_item")
+    txn.release("before_optional_item")
+    txn.commit()
+```
+
 ## サーバー接続（v0.8.8）
 
 `alopex.connect(target)` は接続先の指定だけで組み込み↔サーバーを切り替えます。

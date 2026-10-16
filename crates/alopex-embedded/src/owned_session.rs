@@ -182,6 +182,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Create a named SQL savepoint.
     pub fn create_savepoint(&mut self, name: &str) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -214,6 +217,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Release the most recent matching named SQL savepoint and nested savepoints.
     pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        if self.failed {
+            return Err(Error::TxnFailed);
+        }
         let position = self.savepoint_position(name)?;
         self.session
             .release_savepoint(self.savepoints[position].core_id)

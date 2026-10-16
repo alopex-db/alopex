@@ -494,6 +494,11 @@ impl PyTransaction {
     ) -> PyResult<Py<PyAny>> {
         let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
         self.ensure_active()?;
+        if crate::embedded::database::is_transaction_control_statement(&bound_sql) {
+            return Err(error::to_py_err(
+                "Transaction.execute_sql does not accept SQL transaction control; use db.begin() and Transaction.savepoint(), rollback_to(), release(), commit(), or rollback()",
+            ));
+        }
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
         // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
@@ -516,6 +521,21 @@ impl PyTransaction {
             ExecError::Embedded(err) => error::embedded_err(err),
         })?;
         crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
+    /// Create a named savepoint within this transaction.
+    fn savepoint(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.create_savepoint(name))
+    }
+
+    /// Roll back changes made after the latest matching savepoint.
+    fn rollback_to(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.rollback_to_savepoint(name))
+    }
+
+    /// Release the latest matching savepoint and its descendants.
+    fn release(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.release_savepoint(name))
     }
 
     /// Open a local SELECT stream within this explicit transaction.
@@ -832,6 +852,59 @@ mod tests {
                 .expect("insert");
         });
         txn.rollback().expect("rollback");
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
+    }
+
+    #[test]
+    fn savepoint_rollback_to_and_release_preserve_prior_sql_work() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (1)", None)
+                .expect("first insert");
+            txn.savepoint("retry").expect("savepoint");
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (2)", None)
+                .expect("second insert");
+            txn.rollback_to("retry").expect("rollback to savepoint");
+            txn.release("retry").expect("release savepoint");
+            txn.commit(py).expect("commit");
+        });
+
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 1);
+    }
+
+    #[test]
+    fn execute_sql_guides_control_statements_before_running_a_prefix() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            for sql in [
+                "BEGIN",
+                "COMMIT",
+                "-- comment\nSAVEPOINT retry",
+                "ROLLBACK TO retry",
+                "INSERT INTO t (id) VALUES (99); COMMIT",
+            ] {
+                let error = txn
+                    .execute_sql(py, sql, None)
+                    .expect_err("SQL transaction control must use Python methods");
+                assert!(
+                    error.to_string().contains("Transaction.savepoint()"),
+                    "{sql} did not explain the Python transaction API: {error}"
+                );
+            }
+            txn.execute_sql(py, "SELECT id FROM t", None)
+                .expect("ordinary SQL remains available");
+            txn.commit(py).expect("guard did not fail transaction");
+        });
         assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
     }
 

@@ -576,7 +576,8 @@ class Database:
             NotImplementedError: ``bytes`` parameters (BLOB literals are not
                 supported by the SQL parser yet).
             AlopexError: SQL parse/execution errors (``code`` carries the
-                stable ALOPEX-P/S/C/E### error code).
+                stable ALOPEX-P/S/C/E### error code), or transaction-control
+                statements. Use :meth:`begin` for explicit transactions.
         """
         ...
     def execute_shared(
@@ -672,6 +673,15 @@ class Transaction:
             AlopexError: SQL parse/execution errors, or the transaction is
                 already completed.
         """
+        ...
+    def savepoint(self, name: str) -> None:
+        """Create a named savepoint in this transaction."""
+        ...
+    def rollback_to(self, name: str) -> None:
+        """Roll back changes made after the latest matching savepoint."""
+        ...
+    def release(self, name: str) -> None:
+        """Release the latest matching savepoint and its descendants."""
         ...
     def execute_sql_stream(
         self,

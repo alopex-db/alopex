@@ -760,6 +760,9 @@ def test_thread_mode_is_refused_with_a_reason():
 
 
 UNSUPPORTED_TRANSACTION_CALLS = [
+    ("savepoint", ("local_only",)),
+    ("rollback_to", ("local_only",)),
+    ("release", ("local_only",)),
     ("execute_sql_stream", ("SELECT 1",)),
     ("query_stream", (None,)),
     ("get", (b"k",)),
