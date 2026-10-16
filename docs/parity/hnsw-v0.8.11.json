@@ -60,6 +60,13 @@
       "issue": 306
     },
     {
+      "api": "HnswIndex.read cache clone",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/sql_api.rs#auto_commit_knn_reads_reuse_the_database_hnsw_cache",
+      "issue": 461
+    },
+    {
       "api": "HnswIndex.upsert",
       "status": "known-performance-divergence",
       "reference": "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2:src/hnsw.c",
@@ -462,6 +469,15 @@
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Rust",
+      "api": "Rust.HnswIndex.clone_for_read",
+      "claim": "HnswIndex.read cache clone",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/sql_api.rs#auto_commit_knn_reads_reuse_the_database_hnsw_cache",
+      "issue": 461
     },
     {
       "surface": "Rust",

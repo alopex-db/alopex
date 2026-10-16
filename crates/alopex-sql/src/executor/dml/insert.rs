@@ -207,6 +207,7 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     conflict: Option<&OnConflictPlan>,
     returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
+    super::reject_columnar_dml(table, "INSERT")?;
     let do_nothing =
         conflict.is_some_and(|plan| matches!(plan.action, OnConflictActionPlan::DoNothing));
     if let Some(plan) = conflict.filter(|_| !do_nothing) {
@@ -473,7 +474,7 @@ fn reject_duplicate_conflict_keys(
             let violation = if table.primary_key.as_ref() == Some(&columns) {
                 ConstraintViolation::PrimaryKey {
                     columns,
-                    value: None,
+                    value: Some(format!("{values:?}")),
                 }
             } else {
                 ConstraintViolation::Unique {
@@ -482,7 +483,7 @@ fn reject_duplicate_conflict_keys(
                         .clone()
                         .unwrap_or_else(|| "ON CONFLICT".to_string()),
                     columns,
-                    value: None,
+                    value: Some(format!("{values:?}")),
                 }
             };
             return Err(violation.into());
@@ -663,20 +664,34 @@ fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError 
     }
 }
 
-fn map_index_error(index: &IndexMetadata, err: StorageError) -> ExecutorError {
+fn map_index_error(index: &IndexMetadata, row: &[SqlValue], err: StorageError) -> ExecutorError {
     match err {
         StorageError::UniqueViolation { .. } => {
             if index.name.starts_with("__pk_") {
                 ConstraintViolation::PrimaryKey {
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             } else {
                 ConstraintViolation::Unique {
                     index_name: index.name.clone(),
                     columns: index.columns.clone(),
-                    value: None,
+                    value: Some(format!(
+                        "{:?}",
+                        index
+                            .column_indices
+                            .iter()
+                            .map(|&column| &row[column])
+                            .collect::<Vec<_>>()
+                    )),
                 }
                 .into()
             }
@@ -711,7 +726,7 @@ fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
             }
             storage
                 .insert(row, *row_id)
-                .map_err(|e| map_index_error(index, e))?;
+                .map_err(|e| map_index_error(index, row, e))?;
         }
     }
     Ok(())

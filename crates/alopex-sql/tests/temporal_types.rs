@@ -129,6 +129,47 @@ fn portable_temporal_functions_cover_calendar_boundaries() {
 }
 
 #[test]
+fn analysis_date_differences_are_numeric_and_interval_units_are_sql_standard() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT TIMESTAMP '2017-01-01 00:00:00' + INTERVAL '5' DAY, \
+                DATE_DIFF('day', TIMESTAMP '2017-01-01', TIMESTAMP '2017-01-09'), \
+                EXTRACT(EPOCH FROM TIMESTAMP '2017-01-09' - TIMESTAMP '2017-01-01')",
+    );
+
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Timestamp(1_483_660_800_000_000),
+            SqlValue::BigInt(8),
+            SqlValue::Double(691_200.0),
+        ]]
+    );
+}
+
+#[test]
+fn analysis_date_differences_preserve_sign_day_boundaries_and_nulls() {
+    let mut harness = Harness::new();
+    let query = harness.query(
+        "SELECT DATE_DIFF('day', TIMESTAMP '2017-01-09', TIMESTAMP '2017-01-01'),
+                DATE_DIFF('day', TIMESTAMP '1969-12-31 23:59:59', TIMESTAMP '1970-01-01'),
+                DATE_DIFF('day', TIMESTAMP '2017-01-01', CAST(NULL AS TIMESTAMP)),
+                EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01' - TIMESTAMP '1970-01-01 00:00:00.5'),
+                TIMESTAMP '1970-01-02' + INTERVAL '-1' DAY",
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::BigInt(-8),
+            SqlValue::BigInt(1),
+            SqlValue::Null,
+            SqlValue::Double(-0.5),
+            SqlValue::Timestamp(0),
+        ]]
+    );
+}
+
+#[test]
 fn temporal_storage_comparison_and_month_end_arithmetic_round_trip() {
     assert!(ResolvedType::Text.can_cast_to(&ResolvedType::Date));
     let mut harness = Harness::new();

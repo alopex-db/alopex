@@ -53,6 +53,11 @@ WORKLOAD_COVERAGE = {
     "sql-postgresql-curated": SQL_POSTGRESQL_CLAIMS,
     "sql-streaming": SQL_STREAMING_CLAIMS,
 }
+MEMORY_PROFILE_QUANTUM_BYTES = 1024 * 1024
+
+
+def normalize_memory_profile_bytes(memory_bytes: int) -> int:
+    return memory_bytes // MEMORY_PROFILE_QUANTUM_BYTES * MEMORY_PROFILE_QUANTUM_BYTES
 
 
 def summarize_latencies(samples: list[float], rows: int) -> dict[str, float]:
@@ -116,6 +121,7 @@ def _io_bytes() -> float:
 
 
 def _environment() -> dict[str, object]:
+    os_release = platform.freedesktop_os_release()
     cpu_model = next(
         (
             line.split(":", 1)[1].strip()
@@ -155,12 +161,12 @@ def _environment() -> dict[str, object]:
         "alopex_version": importlib.metadata.version("alopex"),
         "alopex_revision": revision,
         "alopex_tree_sha256": source_hash.hexdigest(),
-        "os": "ubuntu-24.04",
+        "os": f"{os_release['ID']}-{os_release['VERSION_ID']}",
         "kernel": platform.release(),
         "cpu_model": cpu_model,
         "logical_cpu_count": os.cpu_count(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
-        "memory_bytes": memory_bytes,
+        "memory_bytes": normalize_memory_profile_bytes(memory_bytes),
         "build_profile": "release",
         "thread_count": 1,
         "python_version": platform.python_version(),
@@ -280,7 +286,7 @@ def _streaming(
 
         def consume():
             started = time.perf_counter()
-            with build().collect_batches(chunk_size=1024) as stream:
+            with build().collect_batches(chunk_size=8192) as stream:
                 first = next(stream)
                 first_elapsed = time.perf_counter() - started
                 count = first.height + sum(batch.height for batch in stream)

@@ -146,14 +146,14 @@ pub enum Error {
     /// overwrites the first one's bytes. Opening therefore takes an OS-level
     /// exclusive lock, and this is what a caller that lost the race sees.
     ///
-    /// The message deliberately contains the stable, greppable phrase
-    /// `already open by another process`; tests and user-facing tooling match
-    /// on that substring rather than on the whole rendering, which varies with
-    /// the holder diagnostics (unavailable on Windows — see 裁定 D10).
+    /// Other-process and unknown holders retain the stable phrase
+    /// `already open by another process`. A holder reporting this process's PID
+    /// instead identifies outstanding handles; diagnostics never decide locking.
     #[error(
-        "data directory {path} is already open by another process ({holder}); \
+        "data directory {path} is already open {owner} ({holder}); \
          an Alopex database can only be opened by one process at a time — \
-         share it through alopex-server instead (lock file: {lock_path})"
+         share it through alopex-server instead (lock file: {lock_path})",
+         owner = already_open_owner(.holder)
     )]
     AlreadyOpen {
         /// The data directory that could not be opened.
@@ -236,4 +236,43 @@ pub enum Error {
     /// Required credentials are missing.
     #[error("missing credentials: {0}")]
     MissingCredentials(String),
+}
+
+fn already_open_owner(holder: &str) -> &'static str {
+    let current_pid = format!("pid={}", std::process::id());
+    if holder.split_whitespace().next() == Some(current_pid.as_str()) {
+        "in this process; release remaining Database or Transaction handles"
+    } else {
+        "by another process"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn already_open_distinguishes_current_other_and_unknown_holders() {
+        let current = std::process::id();
+        for (holder, same_process) in [
+            (format!("pid={current} host=test"), true),
+            (format!("pid={} host=test", current.wrapping_add(1)), false),
+            (format!("pid={current}0 host=test"), false),
+            ("unknown".to_owned(), false),
+        ] {
+            let error = Error::AlreadyOpen {
+                path: "database".into(),
+                lock_path: "database/.alopex.lock".into(),
+                holder,
+            };
+            let message = error.to_string();
+            if same_process {
+                assert!(message.contains("already open in this process"));
+                assert!(message.contains("Database or Transaction handles"));
+                assert!(!message.contains("another process"));
+            } else {
+                assert!(message.contains("already open by another process"));
+            }
+        }
+    }
 }

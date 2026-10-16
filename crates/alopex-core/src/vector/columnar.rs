@@ -453,6 +453,7 @@ impl VectorSegment {
         let reader = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(
             envelope.segment.data.clone(),
         )))
+        .and_then(|reader| reader.with_legacy_row_group_metadata(&envelope.segment.meta.row_groups))
         .map_err(|e| Error::InvalidFormat(e.to_string()))?;
 
         let column_count = envelope.segment.meta.schema.column_count();
@@ -1426,6 +1427,7 @@ fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
 mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
+    use crate::columnar::segment_v2::{rewrite_footer_as_v2_for_test, SegmentConfigV2};
     use crate::kv::{KVStore, KVTransaction};
     use crate::txn::TxnManager;
     use crate::types::TxnMode;
@@ -1502,6 +1504,101 @@ mod tests {
         assert_eq!(restored.keys.logical_type, LogicalType::Int64);
         assert_eq!(restored.deleted, seg.deleted);
         assert_eq!(restored.statistics.row_count, seg.statistics.row_count);
+    }
+
+    #[test]
+    fn restores_legacy_row_group_binary_metadata() {
+        let metadata_values = vec![
+            b"apple".to_vec(),
+            b"apricot".to_vec(),
+            b"zebra".to_vec(),
+            b"yak".to_vec(),
+        ];
+        let vectors = (1..=4)
+            .map(|value| {
+                let mut encoded = Vec::with_capacity(8);
+                encoded.extend_from_slice(&(value as f32).to_le_bytes());
+                encoded.extend_from_slice(&((value * 10) as f32).to_le_bytes());
+                encoded
+            })
+            .collect();
+        let schema = Schema {
+            columns: vec![
+                ColumnSchema {
+                    name: "vectors".into(),
+                    logical_type: LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: Some(8),
+                },
+                ColumnSchema {
+                    name: "keys".into(),
+                    logical_type: LogicalType::Int64,
+                    nullable: false,
+                    fixed_len: None,
+                },
+                ColumnSchema {
+                    name: "deleted".into(),
+                    logical_type: LogicalType::Bool,
+                    nullable: false,
+                    fixed_len: None,
+                },
+                ColumnSchema {
+                    name: "meta_0".into(),
+                    logical_type: LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: None,
+                },
+            ],
+        };
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Column::Binary(vectors),
+                Column::Int64(vec![1, 2, 3, 4]),
+                Column::Bool(vec![false; 4]),
+                Column::Binary(metadata_values.clone()),
+            ],
+            vec![None, None, None, None],
+        );
+        let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
+            row_group_size: 2,
+            ..Default::default()
+        });
+        writer.write_batch(batch).unwrap();
+        let mut segment = writer.finish().unwrap();
+        rewrite_footer_as_v2_for_test(&mut segment).unwrap();
+
+        let restored = VectorSegment::from_column_segment(VectorSegmentEnvelope {
+            version: VECTOR_SEGMENT_VERSION,
+            segment_id: 7,
+            dimension: 2,
+            metric: Metric::Cosine,
+            statistics: VectorSegmentStatistics {
+                row_count: 4,
+                null_count: 0,
+                active_count: 4,
+                deleted_count: 0,
+                deletion_ratio: 0.0,
+                norm_min: 0.0,
+                norm_max: 0.0,
+                min_values: Vec::new(),
+                max_values: Vec::new(),
+                created_at: 0,
+            },
+            segment,
+        })
+        .unwrap();
+
+        let metadata = restored.metadata.unwrap();
+        let decoder = create_decoder(metadata[0].encoding);
+        let (decoded, _) = decoder
+            .decode(
+                &metadata[0].data,
+                metadata[0].num_values as usize,
+                metadata[0].logical_type,
+            )
+            .unwrap();
+        assert_eq!(decoded, Column::Binary(metadata_values));
     }
 
     #[test]

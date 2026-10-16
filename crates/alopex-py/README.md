@@ -15,10 +15,10 @@ Catalog API (polars) を使う場合:
 pip install alopex[polars]
 ```
 
-開発中は maturin を利用できます。
+開発テストでは、ファイル名と行番号を保つ軽量デバッグ情報のdev profileで maturin を利用できます。
 
 ```bash
-maturin develop -m crates/alopex-py/pyproject.toml
+maturin develop -m crates/alopex-py/Cargo.toml
 ```
 
 オプション依存:
@@ -52,6 +52,18 @@ with db.begin(TxnMode.READ_ONLY) as txn:
     print(value)
 
 db.close()
+```
+
+組み込み `Database.execute_sql()` は auto-commit です。SQL の `BEGIN` や `SAVEPOINT` を渡す代わりに、明示トランザクションのメソッドを使います。保存点メソッドは組み込み `Transaction` と `AsyncTransaction` で利用できます。
+
+```python
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.execute_sql("INSERT INTO orders (id) VALUES (1)")
+    txn.savepoint("before_optional_item")
+    txn.execute_sql("INSERT INTO orders (id) VALUES (2)")
+    txn.rollback_to("before_optional_item")
+    txn.release("before_optional_item")
+    txn.commit()
 ```
 
 ## サーバー接続（v0.8.8）
@@ -89,6 +101,15 @@ statement.bind(2, "beta")
 statement.execute()
 statement.reset()
 statement.finalize()
+```
+
+組み込み`PreparedStatement.execute_many(rows)`は、`None` / bool / number / text /
+vector の行を1 transactionで実行します。各行は list または tuple にし、途中の行が
+失敗した場合は先行行も rollback されます。
+
+```python
+batch = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+assert batch.execute_many([(3, "gamma"), (4, "delta")]) == [1, 1]
 ```
 
 | target | 結果 |

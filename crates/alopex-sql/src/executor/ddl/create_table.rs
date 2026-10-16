@@ -12,6 +12,16 @@ use super::create_index::ensure_indexable_columns;
 use super::create_pk_index_name;
 use super::persistence::{persist_index, persist_table};
 
+/// Reject unsupported CTAS storage before evaluating the source or creating metadata.
+pub(crate) fn validate_ctas_storage(with_options: &[(String, String)]) -> Result<()> {
+    if parse_storage_options(with_options)?.storage_type == StorageType::Columnar {
+        return Err(ExecutorError::UnsupportedOperation(
+            "CREATE TABLE AS is not supported for columnar tables; use COPY to load data".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Execute CREATE TABLE.
 pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
@@ -33,38 +43,7 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     resolve_and_validate_foreign_keys(catalog, &mut table)?;
 
     // Resolve unique indexes before mutating the catalog to avoid partial writes.
-    let mut unique_columns = Vec::new();
-    if let Some(pk_columns) = table.primary_key.clone() {
-        unique_columns.push((create_pk_index_name(&table.name), pk_columns));
-    }
-    for (position, constraint) in table.constraints.iter().enumerate() {
-        if let TableConstraint::Unique { name, columns, .. } = constraint {
-            unique_columns.push((
-                name.clone()
-                    .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
-                columns.clone(),
-            ));
-        }
-    }
-    let mut seen = HashSet::new();
-    let mut unique_indexes = Vec::new();
-    for (index_name, columns) in unique_columns {
-        if !seen.insert(columns.clone()) {
-            continue;
-        }
-        let column_indices = resolve_column_indices(&table, &columns)?;
-        ensure_indexable_columns(&table, &column_indices, "UNIQUE")?;
-        unique_indexes.push(
-            IndexMetadata::new(
-                catalog.next_index_id(),
-                index_name,
-                table.name.clone(),
-                columns,
-            )
-            .with_column_indices(column_indices)
-            .with_unique(true),
-        );
-    }
+    let unique_indexes = constraint_indexes(catalog, &table)?;
     let table_id = catalog.next_table_id();
     table = table.with_table_id(table_id);
 
@@ -103,6 +82,51 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
 
     Ok(ExecutionResult::Success)
+}
+
+/// Resolve PRIMARY KEY and UNIQUE index metadata for both catalog execution paths.
+pub(crate) fn constraint_indexes<C: Catalog + ?Sized>(
+    catalog: &mut C,
+    table: &TableMetadata,
+) -> Result<Vec<IndexMetadata>> {
+    let mut unique_columns = Vec::new();
+    if let Some(pk_columns) = table.primary_key.clone() {
+        unique_columns.push((create_pk_index_name(&table.name), pk_columns));
+    }
+    for (position, constraint) in table.constraints.iter().enumerate() {
+        if let TableConstraint::Unique { name, columns, .. } = constraint {
+            unique_columns.push((
+                name.clone()
+                    .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
+                columns.clone(),
+            ));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut index_names = HashSet::new();
+    let mut unique_indexes = Vec::new();
+    for (index_name, columns) in unique_columns {
+        if !index_names.insert(index_name.clone()) {
+            return Err(ExecutorError::IndexAlreadyExists(index_name));
+        }
+        if !seen.insert(columns.clone()) {
+            continue;
+        }
+        let column_indices = resolve_column_indices(table, &columns)?;
+        ensure_indexable_columns(table, &column_indices, "UNIQUE")?;
+        let mut index = IndexMetadata::new(
+            catalog.next_index_id(),
+            index_name,
+            table.name.clone(),
+            columns,
+        )
+        .with_column_indices(column_indices)
+        .with_unique(true);
+        index.catalog_name = table.catalog_name.clone();
+        index.namespace_name = table.namespace_name.clone();
+        unique_indexes.push(index);
+    }
+    Ok(unique_indexes)
 }
 
 fn resolve_and_validate_foreign_keys<C: Catalog + ?Sized>(

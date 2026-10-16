@@ -65,6 +65,7 @@ wrappers!(
     eval_age => "age",
     eval_date_add => "date_add",
     eval_date_sub => "date_sub",
+    eval_date_diff => "date_diff",
     eval_extract => "extract",
     eval_date_part => "date_part",
     eval_date_trunc => "date_trunc",
@@ -106,7 +107,24 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
             values[0].clone(),
             values[1].clone(),
         ),
-        "extract" | "date_part" => {
+        "date_diff" => date_diff(values),
+        "extract" => {
+            let unit = text(values.first(), name)?;
+            match values.get(1) {
+                Some(SqlValue::Interval {
+                    months,
+                    days,
+                    micros,
+                }) => Ok(SqlValue::Double(extract_interval_part(
+                    unit, *months, *days, *micros, name,
+                )?)),
+                value => {
+                    let micros = timestamp(value, name)?;
+                    Ok(SqlValue::Double(extract_part(unit, micros, name)?))
+                }
+            }
+        }
+        "date_part" => {
             let unit = text(values.first(), name)?;
             let micros = timestamp(values.get(1), name)?;
             Ok(SqlValue::Double(extract_part(unit, micros, name)?))
@@ -364,6 +382,40 @@ fn extract_part(unit: &str, micros: i64, function: &str) -> Result<f64> {
         "epoch" => Ok(micros as f64 / 1_000_000.0),
         _ => Err(invalid(function, format!("unsupported date part '{unit}'"))),
     }
+}
+
+fn extract_interval_part(
+    unit: &str,
+    months: i32,
+    days: i32,
+    micros: i64,
+    function: &str,
+) -> Result<f64> {
+    match unit.to_ascii_lowercase().as_str() {
+        "epoch" => Ok(f64::from(months) * 2_592_000.0
+            + f64::from(days) * 86_400.0
+            + micros as f64 / 1_000_000.0),
+        _ => Err(invalid(
+            function,
+            format!("unsupported interval part '{unit}'"),
+        )),
+    }
+}
+
+fn date_diff(values: &[SqlValue]) -> Result<SqlValue> {
+    let unit = text(values.first(), "date_diff")?.to_ascii_lowercase();
+    let start = timestamp(values.get(1), "date_diff")?;
+    let end = timestamp(values.get(2), "date_diff")?;
+    let result = match unit.as_str() {
+        "day" | "days" => end.div_euclid(86_400_000_000) - start.div_euclid(86_400_000_000),
+        _ => {
+            return Err(invalid(
+                "date_diff",
+                format!("unsupported date part '{unit}'"),
+            ));
+        }
+    };
+    Ok(SqlValue::BigInt(result))
 }
 
 fn truncate(unit: &str, micros: i64) -> Result<i64> {

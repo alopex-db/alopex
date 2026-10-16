@@ -225,6 +225,72 @@ fn lsm_tombstones_consume_the_scan_budget() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn lsm_post_snapshot_search_candidates_do_not_conflict_with_unrelated_writes() {
+    for flush in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LsmKV::open(directory.path()).unwrap();
+        let mut reader = store.begin(TxnMode::ReadWrite).unwrap();
+        let mut writer = store.begin(TxnMode::ReadWrite).unwrap();
+        writer.put(b"future:a".to_vec(), b"new".to_vec()).unwrap();
+        writer.commit_self().unwrap();
+        if flush {
+            store.flush().unwrap();
+        }
+        let page = reader
+            .search_keys(&KeySearchRequest::new(
+                KeyPattern::glob(b"future:*"),
+                10,
+                10,
+            ))
+            .unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!(page.scanned, 1);
+        reader
+            .put(b"independent".to_vec(), b"value".to_vec())
+            .unwrap();
+        reader.commit_self().unwrap();
+        let mut check = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(
+            check.get(&b"independent".to_vec()).unwrap(),
+            Some(b"value".to_vec())
+        );
+    }
+}
+
+#[test]
+fn memory_search_cursor_before_prefix_is_clamped() {
+    let store = seeded_memory();
+    let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+    let page = reader
+        .search_keys(
+            &KeySearchRequest::new(KeyPattern::glob(b"tenant/*"), 10, 10).after(b"a".to_vec()),
+        )
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn lsm_search_cursor_before_prefix_is_clamped() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LsmKV::open(directory.path()).unwrap();
+    let mut writer = store.begin(TxnMode::ReadWrite).unwrap();
+    for key in [b"b".as_slice(), b"user:1"] {
+        writer.put(key.to_vec(), b"value".to_vec()).unwrap();
+    }
+    writer.commit_self().unwrap();
+    let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+    let page = reader
+        .search_keys(
+            &KeySearchRequest::new(KeyPattern::glob(b"user:*"), 10, 10).after(b"a".to_vec()),
+        )
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].key, b"user:1");
+}
+
+#[test]
 fn search_observes_cooperative_cancellation() {
     let store = seeded_memory();
     let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
