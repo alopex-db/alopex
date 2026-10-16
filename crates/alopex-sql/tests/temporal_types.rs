@@ -547,6 +547,34 @@ fn date_diff_rejects_non_temporal_arguments() {
     }
 }
 
+#[test]
+fn temporal_functions_reject_unsupported_parts() {
+    let mut harness = Harness::new();
+    for (sql, expected) in [
+        (
+            "SELECT DATE_DIFF('fortnight', DATE '2024-01-01', DATE '2024-01-15')",
+            "unsupported date part 'fortnight'",
+        ),
+        (
+            "SELECT EXTRACT(CENTURY FROM INTERVAL '1' YEAR)",
+            "unsupported interval part 'century'",
+        ),
+    ] {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse temporal expression")
+            .pop()
+            .expect("one statement");
+        let plan = Planner::new(&*harness.catalog.read().expect("catalog read"))
+            .plan(&statement)
+            .expect("plan temporal expression");
+        let error = harness
+            .executor
+            .execute(plan)
+            .expect_err("unsupported temporal part must fail");
+        assert!(error.to_string().contains(expected), "{sql}: {error}");
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
