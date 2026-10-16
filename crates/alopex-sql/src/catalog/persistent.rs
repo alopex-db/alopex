@@ -69,6 +69,14 @@ struct TableRepair {
     supporting_indexes: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+struct CatalogRepairs {
+    indexes: Vec<IndexRepair>,
+    tables: Vec<TableRepair>,
+    expected_tables: HashMap<Vec<u8>, Vec<u8>>,
+    original_meta: Option<Vec<u8>>,
+    new_meta: Option<Vec<u8>>,
+}
+
 // Reconcile redundant PK metadata without rewriting already normalized tables.
 fn normalize_persisted_primary_key(table: &mut TableMetadata) -> Result<bool, CatalogError> {
     let declarations: Vec<_> = table
@@ -1254,11 +1262,64 @@ impl<S: KVStore> PersistentCatalog<S> {
         }
 
         if needs_migration {
+            let expected_meta = txn.get(&meta_key)?;
             txn.rollback_self()?;
-            Self::migrate_v1_to_v2(&store)?;
-            return Self::load(store);
+            return Self::load_with_legacy_migration(store, expected_meta);
         }
 
+        let (catalog, repairs) = Self::read_catalog(store.clone(), &mut txn)?;
+        txn.rollback_self()?;
+        if !repairs.indexes.is_empty() || !repairs.tables.is_empty() {
+            Self::repair_indexes(&store, &repairs)?;
+        }
+        Ok(catalog)
+    }
+
+    // Legacy key migration and constraint repair form one write transaction.
+    // Failed recovery must not leave a database upgraded halfway.
+    fn load_with_legacy_migration(
+        store: Arc<S>,
+        expected_meta: Option<Vec<u8>>,
+    ) -> Result<Self, CatalogError> {
+        let bridge = crate::storage::TxnBridge::new(store.clone());
+        let mut txn = bridge
+            .begin_write()
+            .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+        let result = (|| {
+            if txn.inner_mut().get(&META_KEY.to_vec())? != expected_meta {
+                return Err(CatalogError::IndexRecovery(
+                    "catalog counter metadata changed before legacy migration".into(),
+                ));
+            }
+            Self::migrate_v1_to_v2(txn.inner_mut())?;
+            let (catalog, repairs) = Self::read_catalog(store, txn.inner_mut())?;
+            Self::apply_repairs(&mut txn, &repairs)?;
+            Ok(catalog)
+        })();
+        match result {
+            Ok(catalog) => {
+                txn.commit()
+                    .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+                Ok(catalog)
+            }
+            Err(error) => {
+                txn.rollback().map_err(|rollback| {
+                    CatalogError::IndexRecovery(format!("{error}; {rollback}"))
+                })?;
+                Err(error)
+            }
+        }
+    }
+
+    fn read_catalog(
+        store: Arc<S>,
+        txn: &mut S::Transaction<'_>,
+    ) -> Result<(Self, CatalogRepairs), CatalogError> {
+        let meta_key = META_KEY.to_vec();
+        let meta_state: Option<CatalogState> = txn
+            .get(&meta_key)?
+            .map(|bytes| bincode::deserialize(&bytes))
+            .transpose()?;
         let mut inner = MemoryCatalog::new();
         let mut catalogs = HashMap::new();
         let mut namespaces = HashMap::new();
@@ -1513,121 +1574,29 @@ impl<S: KVStore> PersistentCatalog<S> {
             })?;
             expected_tables.insert(key, value);
         }
-        txn.rollback_self()?;
-
-        if !index_repairs.is_empty() || !table_repairs.is_empty() {
-            Self::repair_indexes(
-                &store,
-                &index_repairs,
-                &expected_tables,
+        Ok((
+            Self {
+                inner,
+                store,
+                catalogs,
+                namespaces,
+            },
+            CatalogRepairs {
+                indexes: index_repairs,
+                tables: table_repairs,
+                expected_tables,
                 original_meta,
                 new_meta,
-                &table_repairs,
-            )?;
-        }
-
-        Ok(Self {
-            inner,
-            store,
-            catalogs,
-            namespaces,
-        })
+            },
+        ))
     }
 
-    fn repair_indexes(
-        store: &Arc<S>,
-        repairs: &[IndexRepair],
-        expected_tables: &HashMap<Vec<u8>, Vec<u8>>,
-        original_meta: Option<Vec<u8>>,
-        new_meta: Option<Vec<u8>>,
-        table_repairs: &[TableRepair],
-    ) -> Result<(), CatalogError> {
-        use crate::executor::ddl::recover_index::rebuild_index;
-        use crate::storage::TxnBridge;
-
-        let bridge = TxnBridge::new(store.clone());
+    fn repair_indexes(store: &Arc<S>, repairs: &CatalogRepairs) -> Result<(), CatalogError> {
+        let bridge = crate::storage::TxnBridge::new(store.clone());
         let mut txn = bridge
             .begin_write()
             .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
-        let result = (|| {
-            if txn.inner_mut().get(&META_KEY.to_vec())? != original_meta {
-                return Err(CatalogError::IndexRecovery(
-                    "catalog counter metadata changed during recovery".into(),
-                ));
-            }
-            // A changed schema between detection and repair must not be overwritten.
-            // All checks precede every deletion, rebuild and metadata write.
-            for (key, expected) in expected_tables {
-                if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
-                    return Err(CatalogError::IndexRecovery(
-                        "table metadata changed during recovery".into(),
-                    ));
-                }
-            }
-            for repair in repairs {
-                if txn.inner_mut().get(&repair.key)? != repair.original {
-                    return Err(CatalogError::IndexRecovery(
-                        "index metadata changed during recovery".into(),
-                    ));
-                }
-            }
-            for repair in table_repairs {
-                for (key, expected) in &repair.supporting_indexes {
-                    if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
-                        return Err(CatalogError::IndexRecovery(
-                            "supporting index metadata changed during recovery".into(),
-                        ));
-                    }
-                }
-            }
-            // Validate canonical rows even when an equivalent PK index already exists.
-            for repair in table_repairs {
-                let columns: Vec<_> = repair
-                    .table
-                    .primary_key
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .map(|name| repair.table.get_column_index(name).unwrap())
-                    .collect();
-                let invalid_row = txn
-                    .with_table(&repair.table, |storage| {
-                        for entry in storage.range_scan(0, u64::MAX)? {
-                            let (row_id, row) = entry?;
-                            if columns.iter().any(|&column| {
-                                row.get(column)
-                                    .is_none_or(crate::storage::SqlValue::is_null)
-                            }) {
-                                return Ok(Some(row_id));
-                            }
-                        }
-                        Ok(None)
-                    })
-                    .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
-                if let Some(row_id) = invalid_row {
-                    return Err(CatalogError::IndexRecovery(format!(
-                        "table '{}' primary key contains NULL at row {row_id}; preserve a backup and repair with the prior version before reopening",
-                        repair.table.name
-                    )));
-                }
-            }
-            for repair in repairs {
-                rebuild_index(&mut txn, &repair.table, &repair.index)
-                    .map_err(|error| CatalogError::IndexRecovery(format!(
-                        "table '{}' index '{}': {error}; preserve a backup and resolve conflicting rows with the prior version or a repair tool before reopening",
-                        repair.table.name, repair.index.name
-                    )))?;
-            }
-            for repair in table_repairs {
-                txn.inner_mut()
-                    .put(repair.key.clone(), repair.replacement.clone())?;
-            }
-            if let Some(bytes) = new_meta {
-                txn.inner_mut().put(META_KEY.to_vec(), bytes)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
+        if let Err(error) = Self::apply_repairs(&mut txn, repairs) {
             txn.rollback()
                 .map_err(|rollback| CatalogError::IndexRecovery(format!("{error}; {rollback}")))?;
             return Err(error);
@@ -1636,9 +1605,90 @@ impl<S: KVStore> PersistentCatalog<S> {
             .map_err(|error| CatalogError::IndexRecovery(error.to_string()))
     }
 
-    fn migrate_v1_to_v2(store: &Arc<S>) -> Result<(), CatalogError> {
-        let mut txn = store.begin(TxnMode::ReadWrite)?;
+    fn apply_repairs(
+        txn: &mut crate::storage::SqlTransaction<'_, S>,
+        plan: &CatalogRepairs,
+    ) -> Result<(), CatalogError> {
+        use crate::executor::ddl::recover_index::rebuild_index;
+        if txn.inner_mut().get(&META_KEY.to_vec())? != plan.original_meta {
+            return Err(CatalogError::IndexRecovery(
+                "catalog counter metadata changed during recovery".into(),
+            ));
+        }
+        // A changed schema between detection and repair must not be overwritten.
+        // All checks precede every deletion, rebuild and metadata write.
+        for (key, expected) in &plan.expected_tables {
+            if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
+                return Err(CatalogError::IndexRecovery(
+                    "table metadata changed during recovery".into(),
+                ));
+            }
+        }
+        for repair in &plan.indexes {
+            if txn.inner_mut().get(&repair.key)? != repair.original {
+                return Err(CatalogError::IndexRecovery(
+                    "index metadata changed during recovery".into(),
+                ));
+            }
+        }
+        for repair in &plan.tables {
+            for (key, expected) in &repair.supporting_indexes {
+                if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
+                    return Err(CatalogError::IndexRecovery(
+                        "supporting index metadata changed during recovery".into(),
+                    ));
+                }
+            }
+        }
+        // Validate canonical rows even when an equivalent PK index already exists.
+        for repair in &plan.tables {
+            let columns: Vec<_> = repair
+                .table
+                .primary_key
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|name| repair.table.get_column_index(name).unwrap())
+                .collect();
+            let invalid_row = txn
+                .with_table(&repair.table, |storage| {
+                    for entry in storage.range_scan(0, u64::MAX)? {
+                        let (row_id, row) = entry?;
+                        if columns.iter().any(|&column| {
+                            row.get(column)
+                                .is_none_or(crate::storage::SqlValue::is_null)
+                        }) {
+                            return Ok(Some(row_id));
+                        }
+                    }
+                    Ok(None)
+                })
+                .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+            if let Some(row_id) = invalid_row {
+                return Err(CatalogError::IndexRecovery(format!(
+                    "table '{}' primary key contains NULL at row {row_id}; preserve a backup and repair with the prior version before reopening",
+                    repair.table.name
+                )));
+            }
+        }
+        for repair in &plan.indexes {
+            rebuild_index(txn, &repair.table, &repair.index)
+                .map_err(|error| CatalogError::IndexRecovery(format!(
+                    "table '{}' index '{}': {error}; preserve a backup and resolve conflicting rows with the prior version or a repair tool before reopening",
+                    repair.table.name, repair.index.name
+                )))?;
+        }
+        for repair in &plan.tables {
+            txn.inner_mut()
+                .put(repair.key.clone(), repair.replacement.clone())?;
+        }
+        if let Some(bytes) = &plan.new_meta {
+            txn.inner_mut().put(META_KEY.to_vec(), bytes.clone())?;
+        }
+        Ok(())
+    }
 
+    fn migrate_v1_to_v2(txn: &mut S::Transaction<'_>) -> Result<(), CatalogError> {
         if txn.get(&catalog_key("default"))?.is_none() {
             let meta = CatalogMeta {
                 name: "default".to_string(),
@@ -1745,7 +1795,6 @@ impl<S: KVStore> PersistentCatalog<S> {
         };
         let meta_bytes = bincode::serialize(&meta)?;
         txn.put(META_KEY.to_vec(), meta_bytes)?;
-        txn.commit_self()?;
 
         Ok(())
     }
@@ -2800,6 +2849,88 @@ mod tests {
         let meta_bytes = bincode::serialize(&meta).unwrap();
         txn.put(META_KEY.to_vec(), meta_bytes).unwrap();
         txn.commit_self().unwrap();
+    }
+
+    #[test]
+    fn legacy_key_migration_duplicate_failure_preserves_all_bytes() {
+        use crate::storage::{KeyEncoder, RowCodec, SqlValue};
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        seed_legacy_store(&store);
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        for row_id in 1..=2 {
+            txn.put(
+                KeyEncoder::row_key(7, row_id),
+                RowCodec::encode(&[SqlValue::Integer(11)]),
+            )
+            .unwrap();
+        }
+        txn.commit_self().unwrap();
+        let snapshot = || {
+            let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+            let bytes = txn.scan_prefix(&[]).unwrap().collect::<Vec<_>>();
+            txn.rollback_self().unwrap();
+            bytes
+        };
+        let before = snapshot();
+        let error = match PersistentCatalog::load(store.clone()) {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate legacy rows must reject recovery"),
+        };
+        assert!(error.to_string().contains("users"), "{error}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "migration must roll back with failed recovery"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn legacy_key_recovery_matches_unique_reference(
+            values in proptest::collection::vec(-3i32..=3, 0..12),
+            explicit_version in proptest::bool::ANY,
+        ) {
+            use crate::storage::{KeyEncoder, RowCodec, SqlValue};
+            let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+            seed_legacy_store(&store);
+            let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+            if !explicit_version {
+                txn.delete(META_KEY.to_vec()).unwrap();
+            }
+            for (position, value) in values.iter().enumerate() {
+                txn.put(KeyEncoder::row_key(7, position as u64 + 1),
+                    RowCodec::encode(&[SqlValue::Integer(*value)])).unwrap();
+            }
+            txn.commit_self().unwrap();
+            let snapshot = || {
+                let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+                let bytes = txn.scan_prefix(&[]).unwrap().collect::<Vec<_>>();
+                txn.rollback_self().unwrap();
+                bytes
+            };
+            let before = snapshot();
+            let unique = values.iter().collect::<HashSet<_>>().len() == values.len();
+            let result = PersistentCatalog::load(store.clone());
+            proptest::prop_assert_eq!(result.is_ok(), unique);
+            if unique {
+                let catalog = result.unwrap();
+                let pk = catalog.get_index("__pk_users").unwrap();
+                let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+                proptest::prop_assert!(txn.get(&legacy_table_key("users")).unwrap().is_none());
+                proptest::prop_assert_eq!(txn.scan_prefix(&KeyEncoder::index_prefix(pk.index_id)).unwrap().count(), values.len());
+                for (position, value) in values.iter().enumerate() {
+                    proptest::prop_assert_eq!(txn.get(&KeyEncoder::row_key(7, position as u64 + 1)).unwrap(),
+                        Some(RowCodec::encode(&[SqlValue::Integer(*value)])));
+                }
+                txn.rollback_self().unwrap();
+                let after = snapshot();
+                PersistentCatalog::load(store.clone()).unwrap();
+                proptest::prop_assert_eq!(snapshot(), after);
+            } else {
+                proptest::prop_assert_eq!(snapshot(), before);
+            }
+        }
     }
 
     #[test]

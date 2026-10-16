@@ -522,3 +522,52 @@ fn issue585_pk_normalized_reload_does_not_write() {
         assert_eq!(snapshot(&store, b""), before);
     }
 }
+
+fn legacy_missing_unique_store() -> Arc<MemoryKV> {
+    let store = missing_unique_store();
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    for prefix in [TABLES_PREFIX, INDEXES_PREFIX] {
+        let entries = txn.scan_prefix(prefix).unwrap().collect::<Vec<_>>();
+        for (key, value) in entries {
+            let name = key.rsplit(|byte| *byte == b'/').next().unwrap();
+            let mut legacy = prefix.to_vec();
+            legacy.extend_from_slice(name);
+            txn.put(legacy, value).unwrap();
+            txn.delete(key).unwrap();
+        }
+    }
+    txn.delete(META_KEY.to_vec()).unwrap();
+    txn.commit_self().unwrap();
+    store
+}
+
+// Synthetic legacy-key injection; the authenticated v0.8.15 producer fixtures
+// remain separate. Exercise migration and missing-index repair in one owner.
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue585_legacy_key_migration_write_and_commit_failure_preserve_all_bytes() {
+    for failure in [FailurePoint::SecondWrite, FailurePoint::BeforeCommit] {
+        let store = legacy_missing_unique_store();
+        let before = snapshot(&store, b"");
+        let failing = failing_store(store.clone(), failure);
+        assert!(PersistentCatalog::load(failing.clone()).is_err());
+        assert_eq!(failing.write_transactions.load(Ordering::Relaxed), 1);
+        assert!(failing.staged.load(Ordering::Relaxed) > 0);
+        assert_eq!(snapshot(&store, b""), before);
+    }
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue585_legacy_migration_preserves_competing_catalog_upgrade() {
+    let store = legacy_missing_unique_store();
+    let newer_meta = bincode::serialize(&(3u32, 20u32, 30u32)).unwrap();
+    let mut expected = snapshot(&store, b"");
+    expected.push((META_KEY.to_vec(), newer_meta.clone()));
+    expected.sort();
+    let failing = failing_store(store.clone(), FailurePoint::MetaBeforeRepair(newer_meta));
+    assert_index_recovery(failing.clone(), "changed before legacy migration");
+    assert_eq!(failing.staged.load(Ordering::Relaxed), 0);
+    assert_eq!(failing.commits.load(Ordering::Relaxed), 0);
+    assert_eq!(snapshot(&store, b""), expected);
+}
