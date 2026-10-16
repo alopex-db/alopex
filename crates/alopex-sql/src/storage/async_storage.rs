@@ -469,22 +469,14 @@ where
                                 hnsw_indices,
                                 memory_policy,
                             );
-                            let result = catch_unwind(AssertUnwindSafe(|| {
-                                execute_sql_blocking_multi(
-                                    &mut worker,
-                                    &catalog,
-                                    &sql,
-                                    mode,
-                                    &copy_security,
-                                    read_security.as_ref(),
-                                )
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(ExecutorError::InvalidOperation {
-                                    operation: "async_execute_multi".into(),
-                                    reason: "worker task panicked".into(),
-                                })
-                            });
+                            let result = execute_sql_blocking_multi(
+                                &mut worker,
+                                &catalog,
+                                &sql,
+                                mode,
+                                &copy_security,
+                                read_security.as_ref(),
+                            );
                             Box::new((result, worker.hnsw_indices))
                         }))
                         .await;
@@ -500,20 +492,12 @@ where
                                 guard.hnsw_indices = hnsw_indices;
                                 result
                             }
-                            Err(_) => {
-                                let mut guard = state.lock().await;
-                                guard.txn = Some(txn);
-                                Err(ExecutorError::InvalidOperation {
-                                    operation: "async_execute_multi".into(),
-                                    reason: "invalid transaction worker response".into(),
-                                })
-                            }
+                            Err(_) => Err(ExecutorError::InvalidOperation {
+                                operation: "async_execute_multi".into(),
+                                reason: "invalid transaction worker response".into(),
+                            }),
                         },
-                        Err(error) => {
-                            let mut guard = state.lock().await;
-                            guard.txn = Some(txn);
-                            Err(ExecutorError::Storage(StorageError::from(error)))
-                        }
+                        Err(error) => Err(ExecutorError::Storage(StorageError::from(error))),
                     }
                 } else {
                     let handle = tokio::runtime::Handle::current();

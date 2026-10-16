@@ -8,7 +8,8 @@ use alopex_core::kv::{AsyncKVStore, AsyncKVTransaction, KVStore, KVTransaction};
 use alopex_core::types::TxnMode;
 use alopex_core::vector::hnsw::HnswIndex;
 use alopex_sql::catalog::{Catalog, MemoryCatalog};
-use alopex_sql::executor::{AsyncExecutor, ExecutionResult};
+use alopex_sql::executor::{AsyncExecutor, ExecutionResult, ExecutorError};
+use alopex_sql::storage::StorageError;
 use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
 use tokio::time::{Duration, timeout};
 
@@ -100,4 +101,33 @@ async fn cancelled_worker_sql_future_restores_transaction_ownership() {
         .async_commit()
         .await
         .expect("commit after cancellation");
+}
+
+#[tokio::test]
+async fn worker_sql_panic_closes_transaction_instead_of_committing_it() {
+    let store = Arc::new(MemoryKV::new());
+    let adapter = AsyncKVStoreAdapter::from_arc(store, TxnMode::ReadWrite);
+    let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+        Arc::new(RwLock::new(MemoryCatalog::new()));
+    let poison = Arc::clone(&catalog);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("controlled catalog poisoning");
+        })
+        .join()
+        .is_err()
+    );
+
+    let txn = adapter.begin_async().await.unwrap();
+    assert!(txn.supports_worker_tasks());
+    let mut bridge = AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
+    assert!(matches!(
+        bridge.async_execute("SELECT 1").await,
+        Err(ExecutorError::Storage(StorageError::TransactionClosed))
+    ));
+    assert!(matches!(
+        bridge.async_commit().await,
+        Err(StorageError::TransactionClosed)
+    ));
 }
