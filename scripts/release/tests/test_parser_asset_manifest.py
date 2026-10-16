@@ -973,7 +973,7 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
         }
         self.assertEqual(after, before, "test build must not mutate worktree output")
 
-    def test_build_script_uses_explicit_python_before_manifest_read(self) -> None:
+    def test_build_script_uses_explicit_python_and_retries_success_cleanup(self) -> None:
         fake_bin = self.root / "system-python-bin"
         fake_bin.mkdir()
         system_python = fake_bin / "python3"
@@ -1034,6 +1034,31 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
             }
         )
 
+        build_root = Path(
+            f"/tmp/alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
+            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{target}"
+        )
+        cleanup_marker = self.root / "success-cleanup-failed-once"
+        real_rm = shutil.which("rm", path=environment["PATH"])
+        self.assertIsNotNone(real_rm, "host rm is required by the build script")
+        fake_rm = fake_bin / "rm"
+        fake_rm.write_text(
+            f"""#!{sys.executable}
+from pathlib import Path
+import subprocess
+import sys
+
+marker = Path({str(cleanup_marker)!r})
+if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
+    marker.touch()
+    print("rm: Directory not empty", file=sys.stderr)
+    raise SystemExit(1)
+raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
+""",
+            encoding="utf-8",
+        )
+        fake_rm.chmod(0o755)
+
         output_dir = self.root / "explicit-python-output"
         output_dir.mkdir()
         output = output_dir / TARGET_LIBRARIES[target]
@@ -1060,6 +1085,8 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
             0,
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
         )
+        self.assertTrue(cleanup_marker.exists(), "cleanup failure was not exercised")
+        self.assertFalse(build_root.exists(), "successful build left its root behind")
         self.assertTrue(output.is_file())
         self.assertTrue((output_dir / TARGET_STATIC_LIBRARIES[target]).is_file())
         self.assertEqual(
