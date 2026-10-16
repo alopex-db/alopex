@@ -30,6 +30,15 @@ class PerformanceParityGateTests(unittest.TestCase):
                     command, 0, stdout=b"source.py\0.venv\0"
                 )
 
+            original_read_text = Path.read_text
+
+            def linux_system_info(path, *args, **kwargs):
+                if path == Path("/proc/cpuinfo"):
+                    return "model name: test CPU\n"
+                if path == Path("/proc/meminfo"):
+                    return "MemTotal: 1024 kB\n"
+                return original_read_text(path, *args, **kwargs)
+
             try:
                 os.chdir(root)
                 with (
@@ -40,6 +49,12 @@ class PerformanceParityGateTests(unittest.TestCase):
                     patch(
                         "scripts.performance.parity_v0811_measure.importlib.metadata.version",
                         return_value="0.8.14",
+                    ),
+                    patch.object(
+                        Path, "read_text", autospec=True, side_effect=linux_system_info
+                    ),
+                    patch.object(
+                        os, "sched_getaffinity", return_value={0}, create=True
                     ),
                 ):
                     environment = _environment()
