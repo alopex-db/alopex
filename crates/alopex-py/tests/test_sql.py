@@ -69,6 +69,26 @@ def test_transaction_stream_rendered_decimal_is_exact(db):
         txn.rollback()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1E+38"),
+        Decimal("1E-39"),
+        Decimal("1E+1000000"),
+    ],
+)
+def test_transaction_stream_rejects_unrepresentable_decimal_before_render(db, value):
+    txn = db.begin(TxnMode.READ_WRITE)
+    try:
+        with pytest.raises(ValueError, match="Decimal") as error:
+            txn.execute_sql_stream("SELECT ? AS amount", [value])
+        assert error.value.code == "ALOPEX-PY017"
+    finally:
+        txn.rollback()
+
+
 def test_parameter_binding_keeps_native_and_mixed_paths(db):
     db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
     assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1
@@ -113,6 +133,65 @@ def test_native_float_parameters_preserve_double_type(db):
     db.execute_sql("CREATE TABLE double_params (id BIGINT PRIMARY KEY, value DOUBLE)")
     assert db.execute_sql("INSERT INTO double_params VALUES (?, ?)", [1, 1e20]) == 1
     assert db.execute_sql("SELECT value FROM double_params") == [{"value": 1e20}]
+
+
+def test_exact_decimal_parameters_use_native_transaction_bindings(db):
+    value = Decimal("12345678901234567.89")
+    boundary = Decimal("12345678901234567890123456789012345678")
+    db.execute_sql("CREATE TABLE decimal_params (id INTEGER PRIMARY KEY, amount DECIMAL(30,2))")
+    txn = db.begin(TxnMode.READ_WRITE)
+    boundary_statement = txn.prepare("SELECT ? AS value")
+    boundary_statement.bind(1, boundary)
+    assert boundary_statement.execute() == [{"value": boundary}]
+    boundary_statement.finalize()
+    statement = txn.prepare("INSERT INTO decimal_params VALUES (?, ?)")
+    statement.bind(1, 1)
+    statement.bind(2, value)
+    assert statement.execute() == 1
+    assert statement.execute_many([[2, value], [3, Decimal("0.01")]]) == [1, 1]
+    assert txn.execute_many("INSERT INTO decimal_params VALUES (?, ?)", [[4, value]]) == [1]
+    for invalid in [Decimal("NaN"), Decimal("Infinity"), Decimal("1E+38"), Decimal("1E-39")]:
+        with pytest.raises(ValueError, match="Decimal"):
+            statement.bind(2, invalid)
+    txn.commit()
+    statement.finalize()
+    assert db.execute_sql("SELECT id, amount FROM decimal_params ORDER BY id") == [
+        {"id": 1, "amount": value},
+        {"id": 2, "amount": value},
+        {"id": 3, "amount": Decimal("0.01")},
+        {"id": 4, "amount": value},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("column_type", "value"),
+    [
+        ("DECIMAL(38,0)", Decimal("-99999999999999999999999999999999999999")),
+        ("DECIMAL(38,38)", Decimal("-1E-38")),
+    ],
+)
+def test_transaction_decimal_extremes_survive_reopen(tmp_path, column_type, value):
+    path = str(tmp_path / "decimal-extremes")
+    database = Database.open(path)
+    try:
+        database.execute_sql(
+            f"CREATE TABLE decimal_extremes (id INTEGER PRIMARY KEY, amount {column_type})"
+        )
+        transaction = database.begin(TxnMode.READ_WRITE)
+        statement = transaction.prepare("INSERT INTO decimal_extremes VALUES (?, ?)")
+        assert statement.execute_many([[1, value]]) == [1]
+        statement.finalize()
+        transaction.commit()
+    finally:
+        database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT amount FROM decimal_extremes") == [
+            {"amount": value}
+        ]
+    finally:
+        reopened.close()
 
 
 def test_transaction_parameters_use_native_prepared_values(db):

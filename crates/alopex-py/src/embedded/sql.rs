@@ -15,7 +15,7 @@ use pyo3::types::{
 };
 use pyo3::IntoPyObjectExt;
 
-use alopex_sql::storage::SqlValue;
+use alopex_sql::storage::{DecimalValue, SqlValue};
 use alopex_sql::{AlopexDialect, ExecutionResult, Parser, StatementKind};
 
 use crate::error::AlopexError;
@@ -88,6 +88,46 @@ pub(crate) enum PyPreparedBinding {
 
 fn native_binding(native: SqlValue) -> PyPreparedBinding {
     PyPreparedBinding::Native(native)
+}
+
+/// Apply the same finite, precision, and scale limits to native and rendered Decimals.
+fn decimal_value(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+) -> PyResult<Option<(DecimalValue, String)>> {
+    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
+    if !value.is_instance(&decimal_type)? {
+        return Ok(None);
+    }
+    let invalid = || {
+        PyErr::from(AlopexError::SqlParamInvalidValue(format!(
+            "params[{index}]: Decimal は有限で精度・小数桁数が 38 以下である必要があります"
+        )))
+    };
+    if !value.call_method0("is_finite")?.extract::<bool>()? {
+        return Err(invalid());
+    }
+    // Bound the fixed-point rendering before calling __format__: an exponent
+    // such as 1E+1000000 must not allocate a megabyte of SQL text.
+    let parts = value.call_method0("as_tuple")?;
+    let exponent = parts
+        .getattr("exponent")?
+        .extract::<i64>()
+        .map_err(|_| invalid())?;
+    let digits = parts.getattr("digits")?.len()?;
+    let width = if exponent >= 0 {
+        digits.checked_add(usize::try_from(exponent).map_err(|_| invalid())?)
+    } else {
+        Some(digits)
+    };
+    if width.is_none_or(|width| width > 38) || !(-38..=38).contains(&exponent) {
+        return Err(invalid());
+    }
+    let rendered = value
+        .call_method1("__format__", ("f",))?
+        .extract::<String>()?;
+    let decimal = DecimalValue::parse(&rendered).ok_or_else(invalid)?;
+    Ok(Some((decimal, rendered)))
 }
 
 pub(crate) fn render_prepared_binding(
@@ -171,6 +211,9 @@ pub(crate) fn prepared_binding(
     }
     if value.is_instance_of::<PyBytes>() || value.is_instance_of::<PyByteArray>() {
         return Ok(PyPreparedBinding::Rendered(render_param(value, index)?));
+    }
+    if let Some((decimal, _)) = decimal_value(value, index)? {
+        return Ok(native_binding(SqlValue::Decimal(decimal)));
     }
     reject_mapping_or_set(value, index)?;
     if let Ok(iter) = value.try_iter() {
@@ -421,11 +464,7 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
-    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
-    if value.is_instance(&decimal_type)? {
-        let text = value
-            .call_method1("__format__", ("f",))?
-            .extract::<String>()?;
+    if let Some((_, text)) = decimal_value(value, index)? {
         return Ok(format!("DECIMAL {}", escape_text(&text)));
     }
     if value.is_instance_of::<PyString>() {
@@ -668,11 +707,62 @@ mod tests {
 
     use alopex_sql::{storage::DecimalValue, SqlValue};
 
-    use super::{bind_params, bind_sql_params_py, sql_value_to_py};
+    use super::{bind_params, bind_sql_params_py, sql_value_to_py, PyPreparedBinding};
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
         Python::attach(f);
+    }
+
+    #[test]
+    fn prepared_decimal_is_native_exact_and_bounded() {
+        with_py(|py| {
+            let decimal = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            for (text, expected) in [
+                (
+                    "12345678901234567.89",
+                    DecimalValue::new(1234567890123456789, 2),
+                ),
+                ("1E+20", DecimalValue::new(100000000000000000000, 0)),
+                ("1E-38", DecimalValue::new(1, 38)),
+                (
+                    "12345678901234567890123456789012345678",
+                    DecimalValue::new(12345678901234567890123456789012345678, 0),
+                ),
+            ] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(matches!(
+                    super::prepared_binding(&value, 0).unwrap(),
+                    PyPreparedBinding::Native(SqlValue::Decimal(actual)) if actual == expected
+                ));
+            }
+            for text in ["NaN", "Infinity", "1E+38", "1E-39"] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(super::prepared_binding(&value, 0).is_err(), "{text}");
+            }
+        });
+    }
+
+    #[test]
+    fn rendered_decimal_is_exact_and_bounded_before_sql_allocation() {
+        with_py(|py| {
+            let decimal = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            let valid = decimal.call1(("12345678901234567.89",)).unwrap();
+            assert_eq!(
+                super::render_param(&valid, 0).unwrap(),
+                "DECIMAL '12345678901234567.89'"
+            );
+            for text in ["NaN", "Infinity", "1E+38", "1E-39", "1E+1000000"] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(super::render_param(&value, 0).is_err(), "{text}");
+            }
+        });
     }
 
     fn params_list<'py>(py: Python<'py>, values: Vec<Bound<'py, PyAny>>) -> Bound<'py, PyAny> {
