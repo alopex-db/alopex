@@ -133,7 +133,9 @@ to_posix_path() {
 to_native_path() {
   local candidate="$1"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
-    candidate="$(cygpath -w "${candidate}")"
+    # MSVC's wrapper relativizes source paths against its long working path.
+    # An 8.3 TEMP alias can turn that into an overlong, unreadable relative path.
+    candidate="$(cygpath -w -l "${candidate}")"
   fi
   printf '%s\n' "${candidate}"
 }
@@ -411,7 +413,10 @@ build_host() (
   home_owned="${build_root}/home"
   xdg_cache_owned="${build_root}/xdg-cache"
   tmp_owned="${build_root}/tmp"
+  # cygpath can expand 8.3 aliases only for paths that already exist. Create
+  # both compiler caches before converting their paths for the native tools.
   mkdir -p "${nimble_dir_owned}/pkgs2" "${build_root}/nimcache" \
+    "${build_root}/nimcache-static" \
     "${home_owned}" "${xdg_cache_owned}" "${tmp_owned}"
 
   find_seeded_package() {
@@ -466,7 +471,8 @@ EOF
   export SOURCE_DATE_EPOCH=0
   export TZ=UTC
   export ZERO_AR_DATE=1
-  export PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  export PATH
   unset NIMBLE_DIR
   export ALOPEX_NIM_BIN="${nim_bin_arg}"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
@@ -543,14 +549,14 @@ EOF
         static_flags+=(--passL:-s)
         ;;
       x86_64-apple-darwin|aarch64-apple-darwin)
-        static_flags+=(--passL:-Wl,-x)
+        static_flags+=("--passL:-Wl,-x")
         ;;
       x86_64-pc-windows-msvc)
         static_flags+=(
           --passL:-static
           --passL:-static-libgcc
           --passL:-s
-          --passL:-Wl,--no-insert-timestamp
+          "--passL:-Wl,--no-insert-timestamp"
         )
         # MSVC has no -fPIC (all code is position independent there) and
         # rejects the flag, so the Windows branch replaces it outright.

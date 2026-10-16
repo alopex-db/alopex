@@ -362,12 +362,18 @@ class ParserAssetManifestTests(unittest.TestCase):
         python_executable(
             fake_nim,
             """
+import json
+import os
 import pathlib
 import sys
 
 if "--version" in sys.argv[1:]:
     print("Nim Compiler Version 2.2.10 [Linux: amd64]")
     raise SystemExit(0)
+
+if log := os.environ.get("ALOPEX_COMPILER_PATH_LOG"):
+    with pathlib.Path(log).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(sys.argv[1:]) + "\\n")
 
 output = next(arg.split(":", 1)[1] for arg in sys.argv[1:] if arg.startswith("-o:"))
 dependency_paths = sorted(
@@ -1046,6 +1052,7 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
             "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
         )
         invocation_log = self.root / "selected-python.log"
+        compiler_log = self.root / "compiler-paths.log"
 
         host = platform.system()
         machine = platform.machine().lower()
@@ -1066,6 +1073,7 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
                 "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
                 "PYTHON": str(selected_python),
                 "ALOPEX_SELECTED_PYTHON_LOG": str(invocation_log),
+                "ALOPEX_COMPILER_PATH_LOG": str(compiler_log),
             }
         )
 
@@ -1119,6 +1127,23 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
         self.assertTrue(cleanup_marker.exists(), "cleanup failure was not exercised")
         self.assertFalse(build_root.exists(), "successful build left its root behind")
         self.assertTrue(output.is_file())
+        if platform.system() == "Windows":
+            # Check both compiler calls, including the static cache. MSVC cannot
+            # reliably relativize an 8.3 alias against a long working directory.
+            compiler_calls = [
+                json.loads(line)
+                for line in compiler_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(compiler_calls), 2)
+            for arguments in compiler_calls:
+                for argument in arguments:
+                    if argument.startswith(("--nimcache:", "--path:", "-o:")):
+                        compiler_path = argument.split(":", 1)[1]
+                        self.assertEqual(
+                            Path(compiler_path),
+                            Path(compiler_path).resolve(),
+                            "native compiler paths must expand Windows short names",
+                        )
         self.assertTrue((output_dir / TARGET_STATIC_LIBRARIES[target]).is_file())
         self.assertEqual(
             (output_dir / "CONTRACT_VERSION").read_bytes(),
