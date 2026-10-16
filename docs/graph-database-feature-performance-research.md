@@ -171,3 +171,8 @@ Issue #596のG1で、mapping model、job state machine、generation publish prot
 - [Graph Data Council: LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/)
 - [Graph Data Council: SNB Interactive](https://ldbcouncil.org/benchmarks/snb/interactive/)
 - [Graph Data Council: SNB Business Intelligence](https://ldbcouncil.org/benchmarks/snb/bi/)
+
+
+## 共通Query IRへの設計接続（2026-10-16）
+
+[#596](https://github.com/alopex-db/alopex/issues/596) のG1〜G6と [#636](https://github.com/alopex-db/alopex/issues/636) の共通実行基盤を[演算子・transaction・共通適合試験契約](query-graph-ir-contract.md)で接続する。Graph traversalとbounded pathは共通Logical IR、adjacency/HNSWはplannerが選択するphysical provider、Graph ETLは共通変換IRとatomic publish commandへ割り当てる。SQL/PGQ、将来Graph言語、Rust/Pythonのparity、Graph世代とsnapshot、EXPLAIN、分散reduceをC01〜C12で検証する。既存の競合調査、性能基準、P0〜P4とG1〜G6を維持する。
