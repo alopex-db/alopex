@@ -852,7 +852,18 @@ impl<R: Read> CompactHeader<R> {
         self.input.get_ref().limit() + self.input.buffer().len() as u64
     }
 
+    #[inline]
     fn byte(&mut self) -> Result<u8> {
+        if let Some(&byte) = self.input.buffer().first() {
+            self.input.consume(1);
+            return Ok(byte);
+        }
+        self.read_byte()
+    }
+
+    // Keep I/O and its error formatting out of buffered scalar reads.
+    #[inline(never)]
+    fn read_byte(&mut self) -> Result<u8> {
         let mut byte = [0];
         self.input.read_exact(&mut byte).map_err(parquet_io_error)?;
         Ok(byte[0])
@@ -1532,6 +1543,48 @@ mod tests {
         bytes.resize(2 + length as usize, b'x');
         bytes.push(0x2a);
         for capacity in [0, 1, 7, 4096] {
+            for value in [0, 1, 127, 128, 16_384, u64::MAX] {
+                let mut encoded = Vec::new();
+                let mut remaining = value;
+                loop {
+                    let byte = (remaining & 127) as u8;
+                    remaining >>= 7;
+                    encoded.push(byte | if remaining == 0 { 0 } else { 128 });
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                encoded.push(0x2a);
+                let mut input = header(encoded, capacity, reservation);
+                assert_eq!(input.varint().unwrap(), value);
+                assert_eq!(input.remaining(), 1);
+                assert_eq!(input.byte().unwrap(), 0x2a);
+                assert_eq!(input.remaining(), 0);
+                assert!(input.byte().is_err());
+                assert_eq!(input.decoded_bytes, 0);
+            }
+            for mut encoded in [vec![0x80], vec![0x80; 10], vec![0xff; 9]] {
+                if encoded[0] == 0xff {
+                    encoded.push(2);
+                }
+                let mut input = header(encoded, capacity, reservation);
+                assert!(input.varint().is_err());
+            }
+            let mut input = header(vec![0x80; 9], capacity, reservation);
+            assert!(input.varint().is_err());
+
+            let mut input = header(vec![0x2a, 0x7f], capacity, reservation);
+            input.input.get_mut().set_limit(1);
+            assert_eq!(input.byte().unwrap(), 0x2a);
+            assert_eq!(input.remaining(), 0);
+            assert!(input.byte().is_err());
+            assert_eq!(input.input.get_ref().get_ref().position(), 1);
+
+            let mut input = header(vec![0x2a], capacity, reservation);
+            input.input.get_mut().set_limit(2);
+            assert_eq!(input.byte().unwrap(), 0x2a);
+            assert!(input.byte().is_err());
+
             let mut input = header(bytes.clone(), capacity, reservation);
             assert_eq!(
                 input
