@@ -202,7 +202,7 @@ impl OwnedLsmTransaction {
     fn open_cursor(&mut self, bounds: OwnedLsmScanBounds) -> Result<Box<dyn OwnedKVScan>> {
         let lsm = self.lsm()?;
         let snapshot = lsm.acquire_owned_snapshot_reader();
-        let read_timestamp = {
+        {
             let state = self
                 .state
                 .lock()
@@ -211,9 +211,8 @@ impl OwnedLsmTransaction {
             if state.cursor_open {
                 return Err(Error::TxnClosed);
             }
-            state.start_timestamp
-        };
-        let tables = lsm.open_owned_sstable_cursors(&bounds, read_timestamp)?;
+        }
+        let tables = lsm.open_owned_sstable_cursors(&bounds)?;
         let mut state = self
             .state
             .lock()
@@ -548,8 +547,7 @@ impl OwnedKVScan for OwnedLsmCursor {
         }
         let read_timestamp = self.read_timestamp()?;
         let lsm = OwnedLsmTransaction::lsm_from(&self.store)?;
-        let memtable_key =
-            lsm.owned_next_memtable_key_after(self.last_key.as_ref(), &self.bounds, read_timestamp);
+        let memtable_key = lsm.owned_next_memtable_key_after(self.last_key.as_ref(), &self.bounds);
         let table_key = Self::table_candidate(&mut self.tables, self.last_key.as_ref(), lsm)?;
         let base_key = match (memtable_key, table_key) {
             (Some(memory), Some(table)) => Some(memory.min(table)),
@@ -565,10 +563,11 @@ impl OwnedKVScan for OwnedLsmCursor {
                 (base_key, write_value)
             }
             (Some(base_key), Some((write_key, _))) if base_key < write_key => {
-                self.record_read(base_key.clone())?;
-                let value = lsm
-                    .owned_visible_at(&base_key, read_timestamp)?
-                    .and_then(|entry| entry.value);
+                let entry = lsm.owned_visible_at(&base_key, read_timestamp)?;
+                if entry.is_some() {
+                    self.record_read(base_key.clone())?;
+                }
+                let value = entry.and_then(|entry| entry.value);
                 (base_key, value)
             }
             (Some(_), Some((write_key, write_value))) => {
@@ -576,10 +575,11 @@ impl OwnedKVScan for OwnedLsmCursor {
                 (write_key, write_value)
             }
             (Some(base_key), None) => {
-                self.record_read(base_key.clone())?;
-                let value = lsm
-                    .owned_visible_at(&base_key, read_timestamp)?
-                    .and_then(|entry| entry.value);
+                let entry = lsm.owned_visible_at(&base_key, read_timestamp)?;
+                if entry.is_some() {
+                    self.record_read(base_key.clone())?;
+                }
+                let value = entry.and_then(|entry| entry.value);
                 (base_key, value)
             }
             (None, Some((write_key, write_value))) => {

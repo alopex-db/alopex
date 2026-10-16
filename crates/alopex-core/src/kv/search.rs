@@ -157,9 +157,19 @@ impl PreparedKeySearch {
 
     pub(crate) fn collect(
         &self,
+        next: impl FnMut() -> Result<Option<(Key, Option<Value>)>>,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        self.collect_filtered(next, request, cancellation, &|_| true)
+    }
+
+    pub(crate) fn collect_filtered(
+        &self,
         mut next: impl FnMut() -> Result<Option<(Key, Option<Value>)>>,
         request: &KeySearchRequest,
         cancellation: &KeySearchCancellation,
+        include: &dyn Fn(&[u8]) -> bool,
     ) -> Result<KeySearchPage> {
         let mut entries = Vec::with_capacity(request.limit);
         let mut scanned = 0usize;
@@ -190,7 +200,7 @@ impl PreparedKeySearch {
                     requested: scanned_bytes,
                 });
             }
-            if let Some(value) = value.filter(|_| self.matcher.is_match(&key)) {
+            if let Some(value) = value.filter(|_| self.matcher.is_match(&key) && include(&key)) {
                 let cursor_bytes = if entries.len() + 1 == request.limit {
                     key.len()
                 } else {
