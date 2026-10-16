@@ -14,7 +14,6 @@ import os
 from decimal import Decimal
 
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -163,6 +162,37 @@ def test_exact_decimal_parameters_use_native_transaction_bindings(db):
         {"id": 3, "amount": Decimal("0.01")},
         {"id": 4, "amount": value},
     ]
+
+
+@pytest.mark.parametrize(
+    ("column_type", "value"),
+    [
+        ("DECIMAL(38,0)", Decimal("-99999999999999999999999999999999999999")),
+        ("DECIMAL(38,38)", Decimal("-1E-38")),
+    ],
+)
+def test_transaction_decimal_extremes_survive_reopen(tmp_path, column_type, value):
+    path = str(tmp_path / "decimal-extremes")
+    database = Database.open(path)
+    try:
+        database.execute_sql(
+            f"CREATE TABLE decimal_extremes (id INTEGER PRIMARY KEY, amount {column_type})"
+        )
+        transaction = database.begin(TxnMode.READ_WRITE)
+        statement = transaction.prepare("INSERT INTO decimal_extremes VALUES (?, ?)")
+        assert statement.execute_many([[1, value]]) == [1]
+        statement.finalize()
+        transaction.commit()
+    finally:
+        database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT amount FROM decimal_extremes") == [
+            {"amount": value}
+        ]
+    finally:
+        reopened.close()
 
 
 def test_transaction_parameters_use_native_prepared_values(db):
