@@ -216,22 +216,32 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
-      - name: Verify macOS release wheel LINKEDIT and SQL API
-        if: ${{ !env.ACT && matrix.os == 'macos-latest' && matrix.numpy_runtime == 'with-numpy' }}
+      - name: Verify release wheel import and SQL API
+        if: ${{ !env.ACT && matrix.numpy_runtime == 'with-numpy' }}
         run: |
           set -euo pipefail
-          wheel_dir="${RUNNER_TEMP}/alopex-release-wheel"
+          runner_temp="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            runner_temp="$(cygpath -u "$runner_temp")"
+          fi
+          wheel_dir="${runner_temp}/alopex-release-wheel"
           mkdir -p "$wheel_dir"
-          env -u RUSTFLAGS -u CARGO_PROFILE_RELEASE_STRIP \
+          env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_PROFILE_RELEASE_STRIP \
             maturin build -m crates/alopex-py/Cargo.toml --release --out "$wheel_dir"
           wheel="$(find "$wheel_dir" -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$wheel"
-          python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
-          smoke_venv="${RUNNER_TEMP}/alopex-release-wheel-smoke"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
+          fi
+          smoke_venv="${runner_temp}/alopex-release-wheel-smoke"
           python -m venv "$smoke_venv"
-          "$smoke_venv/bin/python" -m pip install pytest numpy
-          "$smoke_venv/bin/python" -m pip install --no-index --no-deps "$wheel"
-          "$smoke_venv/bin/python" -m pytest -q crates/alopex-py/tests/test_sql.py
+          smoke_python="$smoke_venv/bin/python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            smoke_python="$smoke_venv/Scripts/python.exe"
+          fi
+          "$smoke_python" -m pip install pytest numpy
+          "$smoke_python" -m pip install --no-index --no-deps "$wheel"
+          "$smoke_python" -m pytest -q crates/alopex-py/tests/test_sql.py
       - name: Verify HNSW runtime and source inventory
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
         run: python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
