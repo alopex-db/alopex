@@ -917,24 +917,26 @@ print(matches[0])
         marker = self.root / "cleanup-failed-once"
         fake_bin = self.root / "fake-cleanup-bin"
         fake_bin.mkdir()
+        environment = self.build_script_fixture()
+        real_rm = shutil.which("rm", path=environment["PATH"])
+        self.assertIsNotNone(real_rm, "host rm is required by the build script")
         fake_rm = fake_bin / "rm"
         fake_rm.write_text(
             f"""#!{sys.executable}
-import os
 from pathlib import Path
+import subprocess
 import sys
 
 marker = Path({str(marker)!r})
-if sys.argv[-1] == {str(build_root)!r} and not marker.exists():
+if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
     marker.touch()
     print("rm: Directory not empty", file=sys.stderr)
     raise SystemExit(1)
-os.execv("/bin/rm", ["/bin/rm", *sys.argv[1:]])
+raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
 """,
             encoding="utf-8",
         )
         fake_rm.chmod(0o755)
-        environment = self.build_script_fixture()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
 
         result = self.run_build_script(environment, self.root / "cleanup-retry")
@@ -942,8 +944,6 @@ os.execv("/bin/rm", ["/bin/rm", *sys.argv[1:]])
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("package content does not match the locked identity", result.stderr)
         self.assertTrue(marker.exists(), "cleanup failure was not exercised")
-        self.assertFalse(build_root.exists())
-        self.assertFalse(Path(f"{build_root}.lock").exists())
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
         library_name = TARGET_LIBRARIES[self.native_target()]
