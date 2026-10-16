@@ -219,9 +219,10 @@ impl OwnedEmbeddedTransaction {
         self.vector_cache_invalidated = savepoint.vector_cache_invalidated;
         self.vector_index = savepoint.vector_index.clone();
         self.vector_index_dirty = savepoint.vector_index_dirty;
+        // Core already discarded descendants, even if restoring the graph fails.
+        self.savepoints.truncate(position + 1);
         self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
         self.failed = false;
-        self.savepoints.truncate(position + 1);
         Ok(())
     }
 
@@ -501,10 +502,15 @@ mod tests {
         transaction
             .upsert_to_hnsw("vec_idx", b"discard", &[1.0, 0.0], b"")
             .unwrap();
+        transaction.create_savepoint("discarded_child").unwrap();
 
         assert!(matches!(
             transaction.rollback_to_savepoint("unreadable"),
             Err(Error::Core(alopex_core::Error::InvalidFormat(_)))
+        ));
+        assert!(matches!(
+            transaction.rollback_to_savepoint("discarded_child"),
+            Err(Error::SavepointNotFound(_))
         ));
         assert!(matches!(transaction.commit(), Err(Error::TxnFailed)));
         assert!(matches!(
