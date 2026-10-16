@@ -8,6 +8,7 @@ pub mod catalog_api;
 mod cluster_state;
 pub mod columnar_api;
 mod dataframe_api;
+mod kv_scan;
 pub mod options;
 pub mod owned_session;
 pub mod owned_sql;
@@ -29,6 +30,7 @@ pub use crate::catalog_api::{
 pub use crate::columnar_api::{
     ColumnarIndexInfo, ColumnarIndexType, ColumnarRowIterator, EmbeddedConfig, StorageMode,
 };
+pub use crate::kv_scan::KeyScanOptions;
 pub use crate::options::DatabaseOptions;
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};

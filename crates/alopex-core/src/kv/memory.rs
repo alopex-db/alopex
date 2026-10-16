@@ -1562,24 +1562,23 @@ impl OwnedMemoryCursor {
             && self.end.as_ref().is_none_or(|end| key < end)
     }
 
-    fn data_candidate(&self, start_version: u64) -> Option<(Key, Value, u64)> {
+    fn data_candidate(&self, start_version: u64) -> Option<(Key, Option<Value>, u64)> {
         let data = self.manager.state.data.read().unwrap();
-        let entries: Box<dyn Iterator<Item = (&Key, &(Value, u64))>> = match &self.last_key {
+        let mut entries: Box<dyn Iterator<Item = (&Key, &(Value, u64))>> = match &self.last_key {
             Some(last_key) => Box::new(data.range::<Key, _>((Excluded(last_key), Unbounded))),
             None => match &self.start {
                 Some(start) => Box::new(data.range::<Key, _>((Included(start), Unbounded))),
                 None => Box::new(data.iter()),
             },
         };
-        for (key, (value, version)) in entries {
-            if !self.key_is_in_scope(key) {
-                return None;
-            }
-            if *version <= start_version {
-                return Some((key.clone(), value.clone(), *version));
-            }
-        }
-        None
+        let (key, (value, version)) = entries.next()?;
+        self.key_is_in_scope(key).then(|| {
+            (
+                key.clone(),
+                (*version <= start_version).then(|| value.clone()),
+                *version,
+            )
+        })
     }
 
     fn write_candidate(&self) -> Option<(Key, Option<Value>)> {
@@ -1612,6 +1611,10 @@ impl OwnedMemoryCursor {
         if transaction.state != TxnState::Active || !transaction.cursor_open {
             return Err(Error::TxnClosed);
         }
+        // Invisible post-snapshot candidates consume scan work, not the read set.
+        if version > transaction.start_version {
+            return Ok(());
+        }
         if transaction.mode != TxnMode::ReadOnly {
             transaction.read_set.insert(key, version);
         }
@@ -1630,44 +1633,51 @@ impl OwnedMemoryCursor {
 
 impl OwnedKVScan for OwnedMemoryCursor {
     fn next_entry(&mut self) -> Result<Option<(Key, Value)>> {
+        loop {
+            let Some((key, value)) = self.next_search_entry()? else {
+                return Ok(None);
+            };
+            if let Some(value) = value {
+                return Ok(Some((key, value)));
+            }
+        }
+    }
+
+    fn next_search_entry(&mut self) -> Result<Option<(Key, Option<Value>)>> {
         if self.snapshot.is_none() {
             return Ok(None);
         }
-        loop {
-            let start_version = self
-                .transaction
-                .lock()
-                .expect("owned memory transaction mutex poisoned")
-                .start_version;
-            let data = self.data_candidate(start_version);
-            let write = self.write_candidate();
-            let next = match (data, write) {
-                (Some((data_key, data_value, data_version)), Some((write_key, write_value))) => {
-                    if data_key == write_key {
-                        self.record_read(data_key.clone(), data_version)?;
-                        (data_key, write_value)
-                    } else if data_key < write_key {
-                        self.record_read(data_key.clone(), data_version)?;
-                        (data_key, Some(data_value))
-                    } else {
-                        (write_key, write_value)
-                    }
-                }
-                (Some((data_key, data_value, data_version)), None) => {
+        let start_version = self
+            .transaction
+            .lock()
+            .expect("owned memory transaction mutex poisoned")
+            .start_version;
+        let data = self.data_candidate(start_version);
+        let write = self.write_candidate();
+        let next = match (data, write) {
+            (Some((data_key, data_value, data_version)), Some((write_key, write_value))) => {
+                if data_key == write_key {
                     self.record_read(data_key.clone(), data_version)?;
-                    (data_key, Some(data_value))
+                    (data_key, write_value)
+                } else if data_key < write_key {
+                    self.record_read(data_key.clone(), data_version)?;
+                    (data_key, data_value)
+                } else {
+                    (write_key, write_value)
                 }
-                (None, Some((write_key, write_value))) => (write_key, write_value),
-                (None, None) => {
-                    self.finish();
-                    return Ok(None);
-                }
-            };
-            self.last_key = Some(next.0.clone());
-            if let Some(value) = next.1 {
-                return Ok(Some((next.0, value)));
             }
-        }
+            (Some((data_key, data_value, data_version)), None) => {
+                self.record_read(data_key.clone(), data_version)?;
+                (data_key, data_value)
+            }
+            (None, Some((write_key, write_value))) => (write_key, write_value),
+            (None, None) => {
+                self.finish();
+                return Ok(None);
+            }
+        };
+        self.last_key = Some(next.0.clone());
+        Ok(Some(next))
     }
 
     fn close(&mut self) -> Result<()> {
