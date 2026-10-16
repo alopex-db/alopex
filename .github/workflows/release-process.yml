@@ -6,12 +6,16 @@ on:
       - '.github/workflows/**'
       - 'scripts/release/**'
       - 'scripts/build-nim-parser.sh'
+      - '.github/actions/setup-nim-parser-toolchain/**'
+      - 'crates/alopex-sql/nim-sql-parser/**'
       - 'formal/release-report/**'
   pull_request:
     paths:
       - '.github/workflows/**'
       - 'scripts/release/**'
       - 'scripts/build-nim-parser.sh'
+      - '.github/actions/setup-nim-parser-toolchain/**'
+      - 'crates/alopex-sql/nim-sql-parser/**'
       - 'formal/release-report/**'
 
 jobs:
@@ -34,7 +38,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +55,101 @@ jobs:
       - name: Verify native parser archive and cleanup behavior
         shell: bash
         run: python -m unittest scripts.release.tests.test_parser_asset_manifest
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build real native parser assets
+        shell: bash
+        run: |
+          bash scripts/build-nim-parser.sh --backend host \
+            --target "${{ matrix.target }}" --archive-dir artifacts/parser
+      - name: Verify archive and load native library
+        shell: bash
+        env:
+          PARSER_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          record="$(find artifacts/parser -maxdepth 1 -name "*${PARSER_TARGET}.json" -type f -print -quit)"
+          test -n "$record"
+          python scripts/release/parser_asset_manifest.py verify-target \
+            --record "$record" --asset-dir artifacts/parser
+          RECORD="$record" python - <<'PY'
+          import ctypes
+          import json
+          import os
+          import tarfile
+          from pathlib import Path
+
+          record = json.loads(Path(os.environ["RECORD"]).read_text(encoding="utf-8"))
+          asset_dir = Path("artifacts/parser")
+          extract_dir = asset_dir / "native-smoke"
+          extract_dir.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(asset_dir / record["archive"]["filename"], "r:gz") as archive:
+              archive.extractall(extract_dir)
+          loaded = ctypes.CDLL(str((extract_dir / record["library"]["path"]).resolve()))
+          loaded.alopex_parser_version.restype = ctypes.c_char_p
+          version = loaded.alopex_parser_version().decode("ascii")
+          if version != record["contract_version"]:
+              raise SystemExit(f"native smoke version mismatch: {version}")
+          print(f"native smoke passed: {record['target']} parser {version}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parser-native-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            artifacts/parser/*.json
+            artifacts/parser/*.tar.gz
+
+  parser-manifest:
+    name: Four-target parser development assets
+    needs: [parser-host]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parser-native-*
+          path: artifacts/parser
+          merge-multiple: true
+      - name: Verify complete target matrix and record development source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t records < <(find artifacts/parser -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
+          test "${#records[@]}" -eq 4
+          args=()
+          for record in "${records[@]}"; do args+=(--record "$record"); done
+          python scripts/release/parser_asset_manifest.py assemble-manifest \
+            "${args[@]}" --asset-dir artifacts/parser \
+            --output artifacts/parser/parser-vendor-manifest.json
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest artifacts/parser/parser-vendor-manifest.json --asset-dir artifacts/parser
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          source = {
+              "purpose": "development verification; not public release qualification",
+              "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          Path("artifacts/parser/development-source.json").write_text(
+              json.dumps(source, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parser-development-assets
+          if-no-files-found: error
+          path: |
+            artifacts/parser/*.json
+            artifacts/parser/*.tar.gz
 
   state-model:
     name: Release report state model
