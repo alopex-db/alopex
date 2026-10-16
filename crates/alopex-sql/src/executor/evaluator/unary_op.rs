@@ -11,6 +11,10 @@ pub fn eval_unary_op(
     ctx: &super::EvalContext<'_>,
 ) -> Result<SqlValue> {
     let value = evaluate(operand, ctx)?;
+    eval_unary_value(op, value)
+}
+
+pub(crate) fn eval_unary_value(op: &UnaryOp, value: SqlValue) -> Result<SqlValue> {
     match op {
         UnaryOp::Not => eval_not(value),
         UnaryOp::Minus => eval_minus(value),
