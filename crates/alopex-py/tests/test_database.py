@@ -1,8 +1,6 @@
-import os
 import shutil
 
 import pytest
-
 from alopex import AlopexError, Database, EmbeddedConfig, TxnMode
 
 
@@ -74,7 +72,7 @@ def test_close_converges_disk_db_into_a_single_alopex_file(tmp_path):
     target.mkdir()
     copied = target / "mydb.alopex"
     shutil.copyfile(container, copied)
-    assert list(p.name for p in target.iterdir()) == ["mydb.alopex"]
+    assert [p.name for p in target.iterdir()] == ["mydb.alopex"]
 
     restored = Database.open(str(copied))
     with restored.begin(TxnMode.READ_ONLY) as txn:
@@ -92,12 +90,8 @@ def test_second_open_of_one_database_is_rejected(tmp_path):
         with pytest.raises(AlopexError) as excinfo:
             Database.open(str(container))
         message = str(excinfo.value)
-        if os.name == "posix":
-            assert "already open in this process" in message
-            assert "Database, Transaction or PreparedStatement handles" in message
-        else:
-            # Windows can prevent reading the holder's diagnostic record.
-            assert "already open" in message
+        assert "already open in this process" in message
+        assert "Database, Transaction or PreparedStatement handles" in message
     finally:
         db.close()
 
