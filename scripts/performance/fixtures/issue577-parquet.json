@@ -1,0 +1,37 @@
+{
+  "schema": "alopex.parquet-comparison/v1",
+  "issue": 577,
+  "boundary": "public Rust SQL parse/plan/execute and fully owned column names and row values",
+  "before": "9065c93ca98ae82a8c623e6f03b53bf5e23ebb06",
+  "after": "3237d671156adb6bfa4ed18aa6f1d71f87358185",
+  "reference": {
+    "engine": "DuckDB",
+    "version": "1.4.0",
+    "revision": "b8a06e4a22672e254cd0baa68a3dbed2eb51c56e",
+    "rust_client": "=1.4.0",
+    "contract": "docs/parity/sql-v0.8.11.json"
+  },
+  "build_profile": "release",
+  "cpu_affinity": [0],
+  "thread_count": 1,
+  "cache_state": "warm",
+  "rss_scope": "whole single-case process including setup, warmup and result validation",
+  "warmup_runs": 3,
+  "measurement_runs": 21,
+  "memory_limits_bytes": [null, 268435456],
+  "primary_metric": "latency_p50_ms",
+  "metrics": ["latency_p50_ms", "latency_p95_ms", "rows_per_second", "peak_rss_bytes"],
+  "max_after_before_latency_ratio": 1.0,
+  "max_after_reference_latency_ratio": 1.0,
+  "noise_allowance": 0.0,
+  "missing_cell": "fail",
+  "case_process": "one engine, one API, one phase, one data shape, one policy per process",
+  "data": "non-null INT64 values row_index * 1000 + column_index, all columns projected",
+  "cases": [
+    {"id": "rows", "rows": 32768, "columns": 1, "row_group_rows": 32768, "field_metadata_entries": 0},
+    {"id": "row_groups", "rows": 512, "columns": 1, "row_group_rows": 1, "field_metadata_entries": 0},
+    {"id": "columns", "rows": 64, "columns": 64, "row_group_rows": 64, "field_metadata_entries": 0},
+    {"id": "statistics", "rows": 256, "columns": 16, "row_group_rows": 1, "field_metadata_entries": 0},
+    {"id": "embedded_arrow", "rows": 16, "columns": 1, "row_group_rows": 16, "field_metadata_entries": 400}
+  ]
+}
