@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -26,10 +26,95 @@ pub(crate) struct PyTransactionInner {
     state: Mutex<TxnState>,
 }
 
+/// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
+pub(super) fn rollback_tracked_for_database_close(
+    py: Python<'_>,
+    tracked: &Mutex<Vec<Weak<PyTransactionInner>>>,
+    #[cfg(test)] rollback_fail_count: &std::sync::atomic::AtomicUsize,
+) -> PyResult<()> {
+    enum CloseError {
+        TrackingLock,
+        StateLock,
+        TransactionLock,
+        Native(alopex_embedded::Error),
+        #[cfg(test)]
+        Injected,
+    }
+
+    let result = py.detach(|| {
+        let mut tracked = tracked.lock().map_err(|_| CloseError::TrackingLock)?;
+        let mut first_error = None;
+        tracked.retain(|weak| {
+            let Some(handle) = weak.upgrade() else {
+                return false;
+            };
+            // Match commit's state -> transaction order. The tracking guard is also
+            // acquired and released in this detached phase, before any Python error.
+            let mut state = match handle.state.lock() {
+                Ok(state) => state,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::StateLock);
+                    return true;
+                }
+            };
+            let mut transaction = match handle.txn.lock() {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::TransactionLock);
+                    return true;
+                }
+            };
+            #[cfg(test)]
+            {
+                use std::sync::atomic::Ordering::SeqCst;
+
+                let mut remaining = rollback_fail_count.load(SeqCst);
+                while remaining != 0 {
+                    match rollback_fail_count.compare_exchange_weak(
+                        remaining,
+                        remaining - 1,
+                        SeqCst,
+                        SeqCst,
+                    ) {
+                        Ok(_) => {
+                            first_error.get_or_insert(CloseError::Injected);
+                            return true;
+                        }
+                        Err(actual) => remaining = actual,
+                    }
+                }
+            }
+            if let Some(txn) = transaction.as_mut() {
+                if let Err(error) = txn.rollback() {
+                    // Preserve the error and handle, not a promise that the consuming
+                    // native rollback can be retried after a backend failure.
+                    first_error.get_or_insert(CloseError::Native(error));
+                    return true;
+                }
+            }
+            *transaction = None;
+            if *state == TxnState::Active {
+                *state = TxnState::RolledBack;
+            }
+            false
+        });
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    });
+    result.map_err(|error| match error {
+        CloseError::TrackingLock => error::to_py_err("transaction tracking lock poisoned"),
+        CloseError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CloseError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CloseError::Native(error) => error::embedded_err(error),
+        #[cfg(test)]
+        CloseError::Injected => error::to_py_err("ロールバック失敗（テスト注入）"),
+    })
+}
+
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
-    #[allow(dead_code)]
-    pub(crate) db: Arc<alopex_embedded::Database>,
     pub(crate) control: Arc<DatabaseControl>,
     pub(crate) streams: Arc<StreamLeaseRegistry>,
     #[allow(dead_code)]
@@ -46,7 +131,7 @@ impl PyTransaction {
         streams: Arc<StreamLeaseRegistry>,
     ) -> PyResult<Self> {
         control.ensure_open()?;
-        let txn = Arc::clone(&db)
+        let txn = db
             .begin_owned_embedded_transaction(mode)
             .map_err(error::embedded_err)?;
         let inner = PyTransactionInner {
@@ -54,7 +139,6 @@ impl PyTransaction {
             state: Mutex::new(TxnState::Active),
         };
         Ok(Self {
-            db,
             control,
             streams,
             inner: Arc::new(inner),
@@ -768,6 +852,7 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn transaction(
         database: Arc<alopex_embedded::Database>,
@@ -872,6 +957,22 @@ mod tests {
             txn.commit(py).expect("commit");
         });
         assert!(txn.get(b"key").is_err());
+    }
+
+    #[test]
+    fn committed_transaction_does_not_keep_database_locked() {
+        pyo3::Python::initialize();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("locked.alopex");
+        let db = Arc::new(alopex_embedded::Database::open(&path).expect("open"));
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+        drop(db);
+
+        Python::attach(|py| txn.commit(py).expect("commit"));
+
+        let reopened = alopex_embedded::Database::open(&path)
+            .expect("a committed transaction must not keep the database locked");
+        drop(reopened);
     }
 
     #[test]

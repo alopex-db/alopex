@@ -30,6 +30,25 @@ def test_commit_closes_transaction():
         txn.get(b"key")
 
 
+@pytest.mark.parametrize("finish", ["commit", "rollback", "active"])
+def test_retained_transaction_does_not_keep_closed_database_locked(tmp_path, finish):
+    path = tmp_path / "locked.alopex"
+    db = Database.open(str(path))
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.put(b"key", b"value")
+    if finish != "active":
+        getattr(txn, finish)()
+    db.close()
+
+    reopened = Database.open(str(path))
+    try:
+        with reopened.begin(TxnMode.READ_ONLY) as reader:
+            assert reader.get(b"key") == (b"value" if finish == "commit" else None)
+    finally:
+        reopened.close()
+    assert txn.status["state"] == ("committed" if finish == "commit" else "rolled_back")
+
+
 def test_context_manager_rolls_back():
     db = Database.new()
     with db.begin(TxnMode.READ_WRITE) as txn:
