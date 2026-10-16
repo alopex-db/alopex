@@ -61,6 +61,101 @@ def test_hnsw_batch_upsert_rejects_mismatched_lengths_atomically():
 
 
 @pytest.mark.requires_numpy
+def test_hnsw_savepoint_rollback_discards_mutations():
+    import numpy as np
+
+    db = Database.new()
+    db.create_hnsw_index("idx", HnswConfig(2))
+    db.create_hnsw_index("post_idx", HnswConfig(2))
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.upsert_to_hnsw("idx", b"keep", np.array([1.0, 0.0], dtype=np.float32), None)
+    txn.savepoint("before_hnsw")
+    txn.upsert_to_hnsw("idx", b"discard", np.array([0.0, 1.0], dtype=np.float32), None)
+    assert (
+        txn.upsert_to_hnsw_batch(
+            "idx",
+            [b"discard_batch"],
+            np.array([[1.0, 1.0]], dtype=np.float32),
+        )
+        == 1
+    )
+    txn.delete_from_hnsw("idx", b"keep")
+    txn.upsert_to_hnsw(
+        "post_idx", b"post_discard", np.array([2.0, 1.0], dtype=np.float32), None
+    )
+    txn.rollback_to("before_hnsw")
+    txn.commit()
+
+    results, _ = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 10)
+    assert {result.key for result in results} == {b"keep"}
+    post_results, _ = db.search_hnsw(
+        "post_idx", np.array([2.0, 1.0], dtype=np.float32), 10
+    )
+    assert post_results == []
+
+
+@pytest.mark.requires_numpy
+def test_prepared_kv_hnsw_savepoint_commit_releases_storage(tmp_path):
+    import numpy as np
+
+    path = str(tmp_path / "composition.alopex")
+    db = Database.open(path)
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, score DOUBLE, embedding VECTOR(2, L2))"
+    )
+    db.execute_sql("INSERT INTO items VALUES (1, 1.0, [0.0, 0.0])")
+    db.execute_sql("CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW")
+    before, _ = db.search_hnsw("idx_items_embedding", np.array([0.0, 0.0], dtype=np.float32), 1)
+    key, metadata = before[0].key, before[0].metadata
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.upsert_to_hnsw(
+        "idx_items_embedding", key, np.array([0.0, 0.0], dtype=np.float32), metadata
+    )
+    assert txn.execute_sql("SELECT ? / 2 AS value", [5.0]) == [{"value": 2.5}]
+    assert txn.execute_sql(
+        "UPDATE items SET score = ?, embedding = ? WHERE id = ?",
+        [2.5, [9.0, 0.0], 1],
+    ) == 1
+    txn.put(b"cart:keep", b"kept")
+    txn.savepoint("keep")
+    txn.upsert_to_hnsw(
+        "idx_items_embedding", key, np.array([3.0, 0.0], dtype=np.float32), metadata
+    )
+    txn.execute_sql("UPDATE items SET score = ? WHERE id = ?", [8.5, 1])
+    txn.put(b"cart:discard", b"discarded")
+    txn.savepoint("later")
+    txn.rollback_to("keep")
+    expected = [(b"cart:keep", b"kept")]
+    snapshot = txn.scan_prefix(b"cart:")
+    assert list(txn.scan_range(b"cart:", b"cart;")) == expected
+    assert txn.search_keys(b"cart:*")["entries"] == expected
+    txn.commit()
+
+    after, _ = db.search_hnsw("idx_items_embedding", np.array([9.0, 0.0], dtype=np.float32), 1)
+    assert after[0].key == key
+    assert after[0].score == 0.0
+    db.close()
+    # Keep both the completed transaction and materialized scan alive while reopening.
+    reopened = Database.open(path)
+    try:
+        assert list(snapshot) == expected
+        assert reopened.execute_sql("SELECT score, embedding FROM items") == [
+            {"score": 2.5, "embedding": [9.0, 0.0]}
+        ]
+        with reopened.begin(TxnMode.READ_ONLY) as reader:
+            assert reader.search_keys(b"cart:*")["entries"] == expected
+        persisted, _ = reopened.search_hnsw(
+            "idx_items_embedding", np.array([9.0, 0.0], dtype=np.float32), 1
+        )
+        assert persisted[0].key == key
+        assert persisted[0].score == 0.0
+    finally:
+        reopened.close()
+
+
+@pytest.mark.requires_numpy
 def test_hnsw_multithreaded_search_releases_gil():
     import time
     import threading

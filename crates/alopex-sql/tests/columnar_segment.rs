@@ -3,9 +3,16 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use alopex_core::columnar::encoding_v2::EncodingV2;
 use alopex_core::columnar::kvs_bridge::key_layout;
-use alopex_core::columnar::segment_v2::decode_row_id;
+use alopex_core::columnar::segment_v2::{
+    ColumnSegmentV2, SEGMENT_FORMAT_VERSION_V2, decode_row_id, rewrite_footer_as_v2_for_test,
+};
 use alopex_core::kv::memory::MemoryKV;
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
+use alopex_core::txn::TxnManager;
+use alopex_core::types::TxnMode;
 use alopex_sql::Catalog;
 use alopex_sql::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
 use alopex_sql::dialect::AlopexDialect;
@@ -18,6 +25,7 @@ use alopex_sql::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::{SqlValue, TxnBridge};
 use alopex_sql::{RowIdMode, Span};
+use bincode::Options;
 
 type ExecutorContext = (
     Arc<MemoryKV>,
@@ -92,6 +100,28 @@ fn write_csv(path: &Path) {
     writeln!(f, "4,delta").unwrap();
 }
 
+fn query(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> Vec<Vec<SqlValue>> {
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let plan = {
+        let guard = catalog.read().unwrap();
+        Planner::new(&*guard).plan(&stmt).unwrap()
+    };
+    let ExecutionResult::Query(result) = executor
+        .execute(plan)
+        .unwrap_or_else(|error| panic!("query {sql:?} failed: {error}"))
+    else {
+        panic!("expected query result");
+    };
+    result.rows
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn copy_and_select_columnar_with_pruning_and_projection() {
@@ -149,6 +179,124 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
             );
         }
         other => panic!("unexpected result {other:?}"),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn copy_columnar_text_across_row_groups_remains_queryable() {
+    let (store, bridge, catalog, mut executor) = create_executor();
+    let table = TableMetadata::new(
+        "reviews",
+        vec![
+            ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+            ColumnMetadata::new("reviewer", ResolvedType::Text),
+            ColumnMetadata::new("title", ResolvedType::Text),
+            ColumnMetadata::new("body", ResolvedType::Text),
+        ],
+    );
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table,
+            if_not_exists: false,
+            with_options: vec![
+                ("storage".into(), "columnar".into()),
+                ("row_group_size".into(), "1000".into()),
+            ],
+        })
+        .unwrap();
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut csv = File::create(file.path()).unwrap();
+    writeln!(csv, "id,reviewer,title,body").unwrap();
+    for id in (1..=1_000).rev() {
+        writeln!(csv, "{id},reviewer-{id:04},title-{id:04},body-{id:04}").unwrap();
+    }
+    for id in 1_001..=2_000 {
+        writeln!(csv, "{id},reviewer-{id:04},title-{id:04},body-{id:04}").unwrap();
+    }
+
+    {
+        let guard = catalog.read().unwrap();
+        let mut copy_txn = bridge.begin_write().unwrap();
+        let result = execute_copy(
+            &mut copy_txn,
+            &*guard,
+            "reviews",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        copy_txn.commit().unwrap();
+        assert_eq!(result, ExecutionResult::RowsAffected(2_000));
+    }
+
+    assert_eq!(
+        query(&mut executor, &catalog, "SELECT COUNT(*) FROM reviews"),
+        vec![vec![SqlValue::BigInt(2_000)]]
+    );
+    let rows = query(&mut executor, &catalog, "SELECT * FROM reviews ORDER BY id");
+    assert_eq!(rows.len(), 2_000);
+    for id in 1..=2_000 {
+        assert_eq!(
+            rows[(id - 1) as usize],
+            vec![
+                SqlValue::Integer(id),
+                SqlValue::Text(format!("reviewer-{id:04}")),
+                SqlValue::Text(format!("title-{id:04}")),
+                SqlValue::Text(format!("body-{id:04}")),
+            ]
+        );
+    }
+    assert_eq!(
+        query(
+            &mut executor,
+            &catalog,
+            "SELECT l.id, r.body FROM reviews l JOIN reviews r ON l.id = r.id \
+             WHERE l.id IN (1, 1000, 1001, 2000) ORDER BY l.id",
+        ),
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("body-0001".into())],
+            vec![SqlValue::Integer(1000), SqlValue::Text("body-1000".into())],
+            vec![SqlValue::Integer(1001), SqlValue::Text("body-1001".into())],
+            vec![SqlValue::Integer(2000), SqlValue::Text("body-2000".into())],
+        ]
+    );
+
+    let table = catalog
+        .read()
+        .unwrap()
+        .get_table("reviews")
+        .unwrap()
+        .clone();
+    let key = key_layout::column_segment_key(table.table_id, 0, 0);
+    let manager = store.txn_manager();
+    let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+    let bytes = txn.get(&key).unwrap().unwrap();
+    let mut segment: ColumnSegmentV2 = bincode_config().deserialize(&bytes).unwrap();
+    assert_eq!(
+        segment.meta.row_groups[0].column_chunks[1].encoding,
+        EncodingV2::Plain
+    );
+    assert_eq!(
+        segment.meta.row_groups[1].column_chunks[1].encoding,
+        EncodingV2::IncrementalString
+    );
+    rewrite_footer_as_v2_for_test(&mut segment).unwrap();
+    assert_eq!(
+        u16::from_le_bytes(segment.data[4..6].try_into().unwrap()),
+        SEGMENT_FORMAT_VERSION_V2
+    );
+    txn.put(key, bincode_config().serialize(&segment).unwrap())
+        .unwrap();
+    manager.commit(txn).unwrap();
+
+    let reviewers = query(&mut executor, &catalog, "SELECT reviewer FROM reviews");
+    assert_eq!(reviewers.len(), 2_000);
+    for (row, id) in reviewers.iter().zip((1..=1_000).rev().chain(1_001..=2_000)) {
+        assert_eq!(row, &vec![SqlValue::Text(format!("reviewer-{id:04}"))]);
     }
 }
 

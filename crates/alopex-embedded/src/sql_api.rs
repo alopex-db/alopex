@@ -193,9 +193,13 @@ fn plan_stmt<'a, S: KVStore>(
     catalog: &'a alopex_sql::catalog::PersistentCatalog<S>,
     overlay: &'a CatalogOverlay,
     stmt: &Statement,
+    parameters: Option<&[SqlValue]>,
 ) -> Result<alopex_sql::LogicalPlan> {
     let view = TxnCatalogView::new(catalog, overlay);
-    let planner = Planner::new(&view);
+    let planner = match parameters {
+        Some(parameters) => Planner::with_parameters(&view, parameters),
+        None => Planner::new(&view),
+    };
     planner
         .plan(stmt)
         .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
@@ -218,17 +222,116 @@ pub(crate) fn execute_sql_owned(
             return Err(error);
         }
     };
+    execute_statements_owned(transaction, &statements, None)
+}
+
+pub(crate) fn execute_prepared_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statement: &Statement,
+    parameters: &[SqlValue],
+) -> Result<SqlResult> {
+    execute_statements_owned(
+        transaction,
+        std::slice::from_ref(statement),
+        Some(parameters),
+    )
+}
+
+pub(crate) fn execute_prepared_many_owned<I, V, F>(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statement: &Statement,
+    rows: I,
+    mut validate: F,
+) -> Result<Vec<SqlResult>>
+where
+    I: IntoIterator<Item = V>,
+    V: AsRef<[SqlValue]>,
+    F: FnMut(&[SqlValue]) -> Result<()>,
+{
+    transaction.stage_hnsw_before_sql()?;
+    if statement.kind.requires_write() {
+        let mut vector_cache = transaction
+            .db
+            .vector_cache
+            .write()
+            .expect("vector cache lock poisoned");
+        *vector_cache = None;
+    }
+
+    let db = Arc::clone(&transaction.db);
+    let session = transaction.session.clone();
+    let overlay = &mut transaction.overlay;
+    let catalog_modified = &mut transaction.catalog_modified;
+    let mut outcome: Result<Vec<SqlResult>> = Ok(Vec::new());
+
+    let session_result = session
+        .with_transaction(|owned| {
+            outcome = (|| {
+                let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
+                let mode = raw.mode();
+                let mut borrowed =
+                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let mut executor: Executor<_, _> =
+                    Executor::new(db.store.clone(), db.sql_catalog.clone());
+                let results = executor.execute_hnsw_batch_in_txn(
+                    &mut borrowed,
+                    |batch, borrowed| {
+                        let mut results = Vec::new();
+                        for row in rows {
+                            let parameters = row.as_ref();
+                            validate(parameters)?;
+                            let plan = {
+                                let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                                let (_, overlay) = borrowed.split_parts();
+                                plan_stmt(&*catalog, &*overlay, statement, Some(parameters))?
+                            };
+
+                            {
+                                let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                                let (_, overlay) = borrowed.split_parts();
+                                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                                db.record_routing(&view, statement, 0);
+                            }
+
+                            results.push(
+                                batch.execute(plan, borrowed).map_err(|error| {
+                                    Error::Sql(alopex_sql::SqlError::from(error))
+                                })?,
+                            );
+                        }
+                        Ok(results)
+                    },
+                    |error| Error::Sql(alopex_sql::SqlError::from(error)),
+                )?;
+                if stmt_changes_catalog(statement) {
+                    *catalog_modified = true;
+                }
+                Ok(results)
+            })();
+            Ok(())
+        })
+        .map_err(Error::Core);
+    if let Err(error) = session_result {
+        transaction.failed = true;
+        return Err(error);
+    }
+    if outcome.is_err() {
+        transaction.failed = true;
+    }
+    outcome
+}
+
+fn execute_statements_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    statements: &[Statement],
+    parameters: Option<&[SqlValue]>,
+) -> Result<SqlResult> {
     if statements.is_empty() {
         return Ok(alopex_sql::ExecutionResult::Success);
     }
 
+    transaction.stage_hnsw_before_sql()?;
     if statements.iter().any(stmt_requires_write) {
-        let mut cache = transaction
-            .db
-            .hnsw_cache
-            .write()
-            .expect("hnsw cache lock poisoned");
-        cache.clear();
         let mut vector_cache = transaction
             .db
             .vector_cache
@@ -258,7 +361,7 @@ pub(crate) fn execute_sql_owned(
                     let plan = {
                         let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
                         let (_, overlay) = borrowed.split_parts();
-                        plan_stmt(&*catalog, &*overlay, stmt)?
+                        plan_stmt(&*catalog, &*overlay, stmt, parameters)?
                     };
 
                     {
@@ -432,6 +535,24 @@ impl Database {
     /// ```
     pub fn execute_sql_multi(&self, sql: &str) -> Result<Vec<SqlResult>> {
         let stmts = parse_sql(sql)?;
+        self.execute_statements(&stmts, None)
+    }
+
+    pub(crate) fn execute_prepared_statement(
+        &self,
+        statement: &Statement,
+        parameters: &[SqlValue],
+    ) -> Result<SqlResult> {
+        self.execute_statements(std::slice::from_ref(statement), Some(parameters))?
+            .pop()
+            .ok_or(Error::SqlSessionRequiresSingleStatement)
+    }
+
+    fn execute_statements(
+        &self,
+        stmts: &[Statement],
+        parameters: Option<&[SqlValue]>,
+    ) -> Result<Vec<SqlResult>> {
         if stmts.is_empty() {
             return Ok(Vec::new());
         }
@@ -444,7 +565,7 @@ impl Database {
             let overlay = CatalogOverlay::new();
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
-                plan_stmt(&*catalog, &overlay, &stmts[0])?
+                plan_stmt(&*catalog, &overlay, &stmts[0], parameters)?
             };
             if matches!(stmts[0].kind, StatementKind::Pragma { .. })
                 || alopex_sql::executor::is_store_direct_plan(&plan)
@@ -465,7 +586,26 @@ impl Database {
             TxnMode::ReadOnly
         };
 
+        // A cache entry and the catalog consulted by execution are valid only
+        // for the storage snapshot that supplied them. Keep the read gate
+        // through read transaction start, cache snapshot, planning, and
+        // execution so a committed DDL writer cannot split those views.
+        let cache_gate = if mode == TxnMode::ReadOnly {
+            Some(
+                self.hnsw_cache_gate
+                    .read()
+                    .expect("hnsw cache gate lock poisoned"),
+            )
+        } else {
+            None
+        };
         let mut txn = self.store.begin(mode).map_err(Error::Core)?;
+        let (hnsw_cache_epoch, cached_hnsw_entries) = if mode == TxnMode::ReadOnly {
+            let (epoch, cached) = self.hnsw_cache_snapshot();
+            (Some(epoch), cached)
+        } else {
+            (None, Vec::new())
+        };
         let journal = if mode == TxnMode::ReadWrite
             && stmts.iter().any(stmt_changes_user_data)
             && self.store.range_change_journal_capability()
@@ -482,16 +622,18 @@ impl Database {
         let mut overlay = CatalogOverlay::new();
         let mut borrowed =
             TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+        if hnsw_cache_epoch.is_some() {
+            borrowed.seed_hnsw_read_cache(cached_hnsw_entries);
+        }
 
         let mut executor: Executor<_, _> =
             Executor::new(self.store.clone(), self.sql_catalog.clone());
-
         let mut results = Vec::with_capacity(stmts.len());
         for (statement_index, stmt) in stmts.iter().enumerate() {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, parameters)?
             };
 
             {
@@ -506,9 +648,27 @@ impl Database {
                     .execute_in_txn(plan, &mut borrowed)
                     .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
             );
+            #[cfg(test)]
+            if mode == TxnMode::ReadOnly {
+                if let Some(barrier) = self
+                    .hnsw_cache_after_executor_barrier
+                    .lock()
+                    .expect("hnsw cache after executor barrier lock poisoned")
+                    .clone()
+                {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
         }
 
+        let hnsw_cache_entries = if mode == TxnMode::ReadOnly {
+            borrowed.cloned_hnsw_entries()
+        } else {
+            Vec::new()
+        };
         drop(borrowed);
+        drop(cache_gate);
 
         if let Some(journal) = journal {
             journal.stage(&mut txn).map_err(Error::Core)?;
@@ -518,17 +678,24 @@ impl Database {
         // ここでは KV commit と overlay 適用のみを行う。
         //
         // commit_self は `txn` を消費するため、失敗時に rollback はできない。
-        txn.commit_self().map_err(Error::Core)?;
         if mode == TxnMode::ReadWrite {
-            let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
-            catalog.apply_overlay(overlay);
+            self.commit_with_hnsw_cache_update(
+                || txn.commit_self().map_err(Error::Core),
+                || {
+                    let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+                    catalog.apply_overlay(overlay);
+                },
+            )?;
+        } else {
+            txn.commit_self().map_err(Error::Core)?;
+        }
+        if let Some(epoch) = hnsw_cache_epoch {
+            self.hnsw_cache_insert_if_current(epoch, hnsw_cache_entries);
         }
         if stmts.iter().any(stmt_changes_catalog) {
             self.invalidate_table_info_cache();
         }
         if requires_write {
-            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-            cache.clear();
             let mut vector_cache = self
                 .vector_cache
                 .write()
@@ -593,7 +760,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay_ref) = borrowed.split_parts();
-                plan_stmt(&*catalog, overlay_ref, stmt)?
+                plan_stmt(&*catalog, overlay_ref, stmt, None)?
             };
 
             if alopex_sql::executor::is_store_direct_plan(&plan) {
@@ -740,7 +907,7 @@ impl Database {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             let (mut sql_txn, _overlay) = borrowed.split_parts();
@@ -814,12 +981,6 @@ impl<'a> Transaction<'a> {
         }
 
         if stmts.iter().any(stmt_requires_write) {
-            let mut cache = self
-                .db
-                .hnsw_cache
-                .write()
-                .expect("hnsw cache lock poisoned");
-            cache.clear();
             let mut vector_cache = self
                 .db
                 .vector_cache
@@ -843,7 +1004,7 @@ impl<'a> Transaction<'a> {
             let plan = {
                 let catalog = sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
-                plan_stmt(&*catalog, &*overlay, stmt)?
+                plan_stmt(&*catalog, &*overlay, stmt, None)?
             };
 
             {
@@ -870,6 +1031,8 @@ mod tests {
     use super::*;
     use alopex_core::kv::decode_range_change;
     use alopex_core::kv::RangeChangePayload;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
 
     #[test]
     fn auto_commit_stages_sql_row_and_index_changes_before_visibility() {
@@ -930,5 +1093,372 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn auto_commit_knn_reads_reuse_the_database_hnsw_cache() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));\
+             CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;\
+             INSERT INTO items (id, embedding) VALUES (1, [0.0, 0.0]);",
+        )
+        .unwrap();
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+
+        let query = "EXPLAIN SELECT id FROM items \
+            ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1";
+        db.execute_sql(query).unwrap();
+        let first = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the first SQL kNN read must populate the cache");
+
+        db.execute_sql(query).unwrap();
+        let second = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the cached index must remain available");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn auto_sql_read_holds_hnsw_cache_gate_until_execution_completes() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        db.execute_sql("INSERT INTO items (id) VALUES (1);")
+            .unwrap();
+
+        let after_executor_barrier = Arc::new(Barrier::new(2));
+        let write_gate_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() =
+            Some(Arc::clone(&after_executor_barrier));
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+        let (write_done_tx, write_done_rx) = mpsc::channel();
+        let (write_gate_acquired_tx, write_gate_acquired_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_acquired.lock().unwrap() = Some(write_gate_acquired_tx);
+
+        std::thread::scope(|scope| {
+            let reader_db = Arc::clone(&db);
+            scope.spawn(move || {
+                reader_db.execute_sql("SELECT id FROM items;").unwrap();
+                read_done_tx.send(()).unwrap();
+            });
+            // The actual auto-SQL SELECT completed its executor call and is
+            // paused before releasing the read gate.
+            after_executor_barrier.wait();
+
+            let writer_db = Arc::clone(&db);
+            scope.spawn(move || {
+                writer_db
+                    .commit_with_hnsw_cache_invalidation(|| Ok::<(), ()>(()))
+                    .unwrap();
+                write_done_tx.send(()).unwrap();
+            });
+            // The writer reached the instruction immediately before write
+            // gate acquisition. It cannot acquire that gate while the real
+            // SELECT is paused after executor completion.
+            write_gate_barrier.wait();
+            write_gate_barrier.wait();
+            assert!(matches!(
+                write_gate_acquired_rx.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert_eq!(
+                db.hnsw_cache_epoch
+                    .load(std::sync::atomic::Ordering::Acquire),
+                epoch
+            );
+
+            after_executor_barrier.wait();
+            read_done_rx.recv().unwrap();
+            write_gate_acquired_rx.recv().unwrap();
+            write_done_rx.recv().unwrap();
+        });
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch + 1
+        );
+    }
+
+    #[test]
+    fn auto_commit_hnsw_read_reports_writer_gate_wait() {
+        let (db, _, query, _) = hnsw_cache_test_fixture();
+        let db = Arc::new(db);
+        db.execute_sql("CREATE TABLE writes (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        db.execute_sql(&query).unwrap();
+
+        let after_executor_barrier = Arc::new(Barrier::new(2));
+        let write_gate_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() =
+            Some(Arc::clone(&after_executor_barrier));
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
+        let (write_gate_wait_tx, write_gate_wait_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_wait.lock().unwrap() = Some(write_gate_wait_tx);
+        let (write_gate_wait_started_tx, write_gate_wait_started_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_wait_started.lock().unwrap() = Some(write_gate_wait_started_tx);
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+        let (write_done_tx, write_done_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let reader_db = Arc::clone(&db);
+            scope.spawn(move || {
+                reader_db.execute_sql(&query).unwrap();
+                read_done_tx.send(()).unwrap();
+            });
+            after_executor_barrier.wait();
+
+            let writer_db = Arc::clone(&db);
+            scope.spawn(move || {
+                writer_db
+                    .execute_sql("INSERT INTO writes (id) VALUES (1);")
+                    .unwrap();
+                write_done_tx.send(()).unwrap();
+            });
+            write_gate_barrier.wait();
+            write_gate_barrier.wait();
+            let writer_reached_gate_request =
+                write_gate_wait_started_rx.recv_timeout(Duration::from_secs(1));
+            let writer_blocked = matches!(
+                write_gate_wait_rx.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            after_executor_barrier.wait();
+            read_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let wait = write_gate_wait_rx.recv_timeout(Duration::from_secs(1));
+            write_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                writer_reached_gate_request.is_ok(),
+                "writer must reach the measured gate request before the read is released"
+            );
+            assert!(
+                writer_blocked,
+                "writer must not acquire the gate while the auto-commit HNSW read is in flight"
+            );
+            assert!(
+                wait.unwrap() >= Duration::from_millis(250),
+                "writer gate wait must cover the reader-held interval"
+            );
+        });
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_wait.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_wait_started.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn failed_commit_does_not_publish_hnsw_cache_state() {
+        let (db, _, query, _) = hnsw_cache_test_fixture();
+        db.execute_sql(&query).unwrap();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        let cached = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the read must populate the HNSW cache");
+        let update_called = std::sync::atomic::AtomicBool::new(false);
+
+        let result = db.commit_with_hnsw_cache_update(
+            || Err::<(), ()>(()),
+            || update_called.store(true, std::sync::atomic::Ordering::Release),
+        );
+
+        assert_eq!(result, Err(()));
+        assert!(!update_called.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch
+        );
+        let retained = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("a failed commit must retain the prior HNSW cache entry");
+        assert!(Arc::ptr_eq(&cached, &retained));
+    }
+
+    fn hnsw_cache_test_fixture() -> (Database, String, String, i32) {
+        const DIMENSION: usize = 1024;
+        const ROWS: usize = 1025;
+
+        let db = Database::open_in_memory().unwrap();
+        let stored_vector = format!("[{}]", vec!["1.0"; DIMENSION].join(", "));
+        let query_vector = format!("[{}]", vec!["0.0"; DIMENSION].join(", "));
+        db.execute_sql(&format!(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR({DIMENSION}, L2));\
+             CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;"
+        ))
+        .unwrap();
+        for start in (0..ROWS).step_by(16) {
+            let end = (start + 16).min(ROWS);
+            let values = (start..end)
+                .map(|id| format!("({id}, {stored_vector})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            db.execute_sql(&format!(
+                "INSERT INTO items (id, embedding) VALUES {values}"
+            ))
+            .unwrap();
+        }
+        let query = format!(
+            "SELECT id FROM items \
+             ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 1"
+        );
+        (db, query_vector, query, ROWS as i32)
+    }
+
+    #[test]
+    fn auto_commit_knn_select_populates_database_hnsw_cache() {
+        let (db, _, query, _) = hnsw_cache_test_fixture();
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+
+        db.execute_sql(&query).unwrap();
+        let first = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("a normal SQL kNN SELECT must populate the cache");
+
+        db.execute_sql(&query).unwrap();
+        let second = db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .get("idx_items_embedding")
+            .cloned()
+            .expect("the cached index must remain available for the next normal SELECT");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn committed_sql_write_invalidates_hnsw_cache() {
+        let (db, query_vector, query, new_id) = hnsw_cache_test_fixture();
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+        transaction
+            .execute_sql(&format!(
+                "INSERT INTO items (id, embedding) VALUES ({new_id}, {query_vector})"
+            ))
+            .unwrap();
+
+        db.execute_sql(&query).unwrap();
+        assert!(db
+            .hnsw_cache
+            .read()
+            .unwrap()
+            .contains_key("idx_items_embedding"));
+        transaction.commit().unwrap();
+
+        let ExecutionResult::Query(result) = db.execute_sql(&query).unwrap() else {
+            panic!("kNN SELECT must return a query result");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Integer(new_id)]]);
+    }
+
+    #[test]
+    fn hnsw_cache_rejects_entries_copied_before_a_committed_write() {
+        let (db, query_vector, query, new_id) = hnsw_cache_test_fixture();
+        db.execute_sql(&query).unwrap();
+        let (epoch, stale_entries) = db.hnsw_cache_snapshot();
+
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+        transaction
+            .execute_sql(&format!(
+                "INSERT INTO items (id, embedding) VALUES ({new_id}, {query_vector})"
+            ))
+            .unwrap();
+        transaction.commit().unwrap();
+
+        // Model a read that started before the commit and completed its HNSW
+        // load after the cache transition. The old generation must not be
+        // re-published into the current cache.
+        db.hnsw_cache.write().unwrap().clear();
+        db.hnsw_cache_insert_if_current(epoch, stale_entries);
+        assert!(db.hnsw_cache.read().unwrap().is_empty());
+
+        let ExecutionResult::Query(result) = db.execute_sql(&query).unwrap() else {
+            panic!("kNN SELECT must return a query result");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Integer(new_id)]]);
+    }
+
+    #[test]
+    fn auto_commit_knn_query_does_not_republish_stale_cache_after_write() {
+        let (db, query_vector, query, new_id) = hnsw_cache_test_fixture();
+        let db = Arc::new(db);
+        db.execute_sql(&query).unwrap();
+
+        let after_executor_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() =
+            Some(Arc::clone(&after_executor_barrier));
+        let write_gate_barrier = Arc::new(Barrier::new(2));
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = Some(Arc::clone(&write_gate_barrier));
+        let (write_gate_acquired_tx, write_gate_acquired_rx) = mpsc::channel();
+        *db.hnsw_cache_write_gate_acquired.lock().unwrap() = Some(write_gate_acquired_tx);
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+        let (write_done_tx, write_done_rx) = mpsc::channel();
+
+        let write_gate_acquired_before_reader_release = std::thread::scope(|scope| {
+            let reader_db = Arc::clone(&db);
+            let reader_query = query.clone();
+            scope.spawn(move || {
+                reader_db.execute_sql(&reader_query).unwrap();
+                read_done_tx.send(()).unwrap();
+            });
+            after_executor_barrier.wait();
+
+            let writer_db = Arc::clone(&db);
+            scope.spawn(move || {
+                writer_db
+                    .execute_sql(&format!(
+                        "INSERT INTO items (id, embedding) VALUES ({new_id}, {query_vector})"
+                    ))
+                    .unwrap();
+                write_done_tx.send(()).unwrap();
+            });
+
+            write_gate_barrier.wait();
+            write_gate_barrier.wait();
+            let write_gate_acquired_before_reader_release = write_gate_acquired_rx
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok();
+            after_executor_barrier.wait();
+            read_done_rx.recv().unwrap();
+            write_done_rx.recv().unwrap();
+            write_gate_acquired_before_reader_release
+        });
+        *db.hnsw_cache_after_executor_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_barrier.lock().unwrap() = None;
+        *db.hnsw_cache_write_gate_acquired.lock().unwrap() = None;
+
+        let ExecutionResult::Query(result) = db.execute_sql(&query).unwrap() else {
+            panic!("kNN SELECT must return a query result");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Integer(new_id)]]);
+        assert!(
+            !write_gate_acquired_before_reader_release,
+            "a write commit must not overtake an in-flight auto-commit kNN read"
+        );
     }
 }

@@ -168,6 +168,10 @@ _KV_REASON = (
     "separate from SQL sessions; mixing both into one RemoteTransaction would "
     "misreport which transaction the operation joined"
 )
+_SAVEPOINT_REASON = (
+    "the server session API exposes no savepoint action, so this local-only "
+    "transaction operation cannot be represented without changing the session contract"
+)
 _LOCAL_ONLY_REASON = "it reports process-local engine state that a remote server does not expose for its caller"
 _CONSTRUCTOR_REASON = (
     "the server client is constructed from a URL; use alopex.connect(url) or "
@@ -746,6 +750,15 @@ class RemoteTransaction:
 
     # -- explicit refusals ---------------------------------------------------
 
+    def savepoint(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.savepoint", _SAVEPOINT_REASON)
+
+    def rollback_to(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.rollback_to", _SAVEPOINT_REASON)
+
+    def release(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.release", _SAVEPOINT_REASON)
+
     def execute_sql_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.execute_sql_stream", _STREAM_REASON)
 
@@ -760,6 +773,15 @@ class RemoteTransaction:
 
     def delete(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.delete", _KV_REASON)
+
+    def scan_prefix(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_prefix", _KV_REASON)
+
+    def scan_range(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_range", _KV_REASON)
+
+    def search_keys(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.search_keys", _KV_REASON)
 
     def upsert_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.upsert_vector", _KV_REASON)

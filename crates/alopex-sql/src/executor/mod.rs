@@ -68,7 +68,6 @@ pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
     system::is_store_direct_plan(plan)
 }
 
-use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::KVStore;
@@ -79,34 +78,97 @@ use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
 use crate::storage::{
-    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, TxnBridge,
+    BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, SqlValue, StorageError,
+    TxnBridge,
 };
 use crate::{ExplainFormat, ResolvedType};
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
+struct ExplainAnalysis<'a> {
+    knn_stats: Option<&'a query::KnnExecutionStats>,
+    elapsed_ns: u64,
+    rows: u64,
+}
+
 fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
-    analyze: bool,
+    btree_indexes: &[Option<String>],
     format: ExplainFormat,
-    elapsed_ns: Option<u64>,
-    rows: Option<u64>,
+    analysis: Option<ExplainAnalysis<'_>>,
 ) -> ExecutionResult {
+    let elapsed_ns = analysis.map(|analysis| analysis.elapsed_ns);
+    let rows = analysis.map(|analysis| analysis.rows);
+    let knn_stats = analysis.and_then(|analysis| analysis.knn_stats);
     let (column, value) = match format {
         ExplainFormat::Text => {
             let mut text = plan.explain_text(elapsed_ns, rows);
-            if let Some(path) = hnsw_path {
-                text = format!("{path}\n{text}");
+            if let Some(path) = hnsw_path.as_deref() {
+                text = if path.starts_with("HnswSearch") {
+                    explain_hnsw_text(plan, path, knn_stats, elapsed_ns, rows)
+                } else {
+                    format!("{path}\n{text}")
+                };
             }
+            if hnsw_path
+                .as_deref()
+                .is_none_or(|path| !path.starts_with("HnswSearch"))
+                && let Some(stats) = knn_stats
+            {
+                text.push('\n');
+                text.push_str(&explain_knn_stats_text(stats));
+            }
+            let mut indexes = btree_indexes.iter();
+            text = text
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.trim_start().starts_with("Scan table=")
+                        && let Some(Some(index_name)) = indexes.next()
+                    {
+                        return line.replacen(
+                            "Scan table=",
+                            &format!("IndexScan index={index_name} table="),
+                            1,
+                        );
+                    }
+                    line.to_owned()
+                })
+                .collect();
             ("QUERY PLAN", text)
         }
         ExplainFormat::Json => {
             let mut document: serde_json::Value =
-                serde_json::from_str(&plan.explain_json(analyze, elapsed_ns, rows))
+                serde_json::from_str(&plan.explain_json(analysis.is_some(), elapsed_ns, rows))
                     .expect("logical plan must render valid JSON");
             if let Some(selected_path) = hnsw_path {
                 document["physical_plan"]["selected_path"] =
                     serde_json::Value::String(selected_path);
+            }
+            fn annotate_scans<'a>(
+                node: &mut serde_json::Value,
+                indexes: &mut impl Iterator<Item = &'a Option<String>>,
+            ) {
+                if node["node"] == "Scan"
+                    && let Some(Some(index_name)) = indexes.next()
+                {
+                    node["node"] = serde_json::json!("IndexScan");
+                    node["index"] = serde_json::json!(index_name);
+                }
+                if let Some(children) = node["children"].as_array_mut() {
+                    for child in children {
+                        annotate_scans(child, indexes);
+                    }
+                }
+            }
+            annotate_scans(
+                &mut document["physical_plan"]["root"],
+                &mut btree_indexes.iter(),
+            );
+            if let [Some(index_name)] = btree_indexes {
+                document["physical_plan"]["access_path"] = serde_json::json!({
+                    "node": "IndexScan", "index": index_name,
+                });
             }
             ("query_plan", document.to_string())
         }
@@ -115,6 +177,73 @@ fn explain_result(
         vec![ColumnInfo::new(column, ResolvedType::Text)],
         vec![vec![SqlValue::Text(value)]],
     ))
+}
+
+fn explain_hnsw_text(
+    plan: &LogicalPlan,
+    path: &str,
+    stats: Option<&query::KnnExecutionStats>,
+    elapsed_ns: Option<u64>,
+    rows: Option<u64>,
+) -> String {
+    let logical_text = plan.explain_text(elapsed_ns, rows);
+    let mut physical_text = String::new();
+    let mut omitted_sort = false;
+
+    for line in logical_text.lines() {
+        if line.starts_with("  Sort table=") {
+            omitted_sort = true;
+            continue;
+        }
+        if omitted_sort && let Some(line) = line.strip_prefix("  ") {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("Scan table=") {
+                let indent = &line[..line.len() - trimmed.len()];
+                physical_text.push_str(indent);
+                physical_text.push_str(path);
+                physical_text.push('\n');
+                if let Some(stats) = stats {
+                    physical_text.push_str(indent);
+                    physical_text.push_str("  ");
+                    physical_text.push_str(&explain_knn_stats_text(stats));
+                    physical_text.push('\n');
+                }
+                continue;
+            }
+            physical_text.push_str(line);
+            physical_text.push('\n');
+            continue;
+        }
+        physical_text.push_str(line);
+        physical_text.push('\n');
+    }
+    physical_text
+}
+
+fn explain_knn_stats_text(stats: &query::KnnExecutionStats) -> String {
+    let (nodes_visited, distance_computations, search_time_us) = stats
+        .hnsw_stats
+        .as_ref()
+        .map(|stats| {
+            (
+                stats.nodes_visited,
+                stats.distance_computations,
+                stats.search_time_us,
+            )
+        })
+        .unwrap_or_default();
+    let ef_search = stats
+        .ef_search
+        .map(|ef_search| ef_search.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let fallback = if stats.fallback {
+        "ExactKnnScan"
+    } else {
+        "none"
+    };
+    format!(
+        "nodes_visited={nodes_visited} distance_computations={distance_computations} search_time_us={search_time_us} ef_search={ef_search} fallback={fallback}"
+    )
 }
 
 fn result_rows(result: &ExecutionResult) -> u64 {
@@ -140,6 +269,25 @@ pub struct Executor<S: KVStore, C: Catalog> {
 
     /// Catalog for metadata operations.
     catalog: Arc<RwLock<C>>,
+}
+
+/// Executes plans inside an HNSW batch owned by [`Executor`].
+///
+/// Values of this type are only supplied to [`Executor::execute_hnsw_batch_in_txn`], which
+/// always flushes successful HNSW changes and abandons failed ones.
+pub struct HnswBatchExecutor<'a, S: KVStore> {
+    executor: &'a mut Executor<S, PersistentCatalog<S>>,
+}
+
+impl<S: KVStore> HnswBatchExecutor<'_, S> {
+    /// Execute one plan without ending the enclosing batch's HNSW changes.
+    pub fn execute<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.executor.execute_in_txn_without_hnsw_flush(plan, txn)
+    }
 }
 
 impl<S: KVStore, C: Catalog> Executor<S, C> {
@@ -251,23 +399,48 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 format,
                 input,
             } => {
+                let btree_index = {
+                    let catalog = self.catalog.read().expect("catalog lock poisoned");
+                    query::selected_btree_indexes(&input, &*catalog)
+                };
                 let hnsw_path = self.run_in_write_txn(|txn| {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     query::explain_knn_path(txn, &*catalog, &input)
                 })?;
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
-                let result = self.execute((*input).clone())?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = self.run_in_write_txn(|txn| {
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        query::execute_query_with_knn_stats(txn, &*catalog, &input)
+                    })?;
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute((*input).clone())?, None),
+                    }
+                } else {
+                    (self.execute((*input).clone())?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
+                    &btree_index,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
@@ -283,6 +456,12 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 if_not_exists,
                 with_options,
             } => self.execute_create_table(table, with_options, if_not_exists),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => self.execute_create_table_as(table, with_options, if_not_exists, *source),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
             LogicalPlan::CreateView {
                 table,
@@ -472,6 +651,55 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         })
     }
 
+    fn execute_create_table_as(
+        &mut self,
+        table: crate::catalog::TableMetadata,
+        with_options: Vec<(String, String)>,
+        if_not_exists: bool,
+        source: LogicalPlan,
+    ) -> Result<ExecutionResult> {
+        let table_name = table.name.clone();
+        let columns = table
+            .column_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            if catalog.table_exists(&table_name) {
+                return if if_not_exists {
+                    Ok(ExecutionResult::Success)
+                } else {
+                    Err(ExecutorError::TableAlreadyExists(table_name))
+                };
+            }
+            ddl::create_table::validate_ctas_storage(&with_options)?;
+            let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "CREATE TABLE AS".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *catalog,
+                table,
+                with_options,
+                false,
+            )?;
+            dml::execute_insert_rows_with_plan(
+                txn,
+                &*catalog,
+                &table_name,
+                columns,
+                result.rows,
+                None,
+                None,
+            )
+        })
+    }
+
     fn execute_drop_table(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
         let mut catalog = self.catalog.write().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| {
@@ -657,30 +885,109 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         plan: LogicalPlan,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
+        let flush_hnsw = txn.mode() != TxnMode::ReadOnly;
+        self.execute_in_txn_with_hnsw_flush(plan, txn, flush_hnsw)
+    }
+
+    /// Execute a bounded batch and finalize its HNSW changes before returning.
+    ///
+    /// The callback may execute several plans against the same transaction, but it cannot leave
+    /// staged HNSW changes for its caller to finalize.
+    pub fn execute_hnsw_batch_in_txn<'a, 'b, 'c, E, F, M>(
+        &mut self,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        execute: F,
+        map_flush_error: M,
+    ) -> std::result::Result<Vec<ExecutionResult>, E>
+    where
+        F: FnOnce(
+            &mut HnswBatchExecutor<'_, S>,
+            &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        ) -> std::result::Result<Vec<ExecutionResult>, E>,
+        M: FnOnce(StorageError) -> E,
+    {
+        let result = {
+            let mut batch = HnswBatchExecutor { executor: self };
+            execute(&mut batch, txn)
+        };
+        let (mut sql_txn, _) = txn.split_parts();
+        match result {
+            Ok(results) => sql_txn
+                .flush_hnsw()
+                .map_err(map_flush_error)
+                .map(|_| results),
+            Err(error) => {
+                let _ = sql_txn.abandon_hnsw();
+                Err(error)
+            }
+        }
+    }
+
+    fn execute_in_txn_without_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+    ) -> Result<ExecutionResult> {
+        self.execute_in_txn_with_hnsw_flush(plan, txn, false)
+    }
+
+    fn execute_in_txn_with_hnsw_flush<'a, 'b, 'c>(
+        &mut self,
+        plan: LogicalPlan,
+        txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
+        flush_hnsw: bool,
+    ) -> Result<ExecutionResult> {
         let plan = match plan {
             LogicalPlan::Explain {
                 analyze,
                 format,
                 input,
             } => {
-                let hnsw_path = {
-                    let (mut sql_txn, _) = txn.split_parts();
+                let (btree_index, hnsw_path) = {
+                    let (mut sql_txn, overlay) = txn.split_parts();
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
-                    query::explain_knn_path(&mut sql_txn, &*catalog, &input)?
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    (
+                        query::selected_btree_indexes(&input, &view),
+                        query::explain_knn_path(&mut sql_txn, &view, &input)?,
+                    )
                 };
                 if !analyze {
-                    return Ok(explain_result(&input, hnsw_path, false, format, None, None));
+                    return Ok(explain_result(
+                        &input,
+                        hnsw_path,
+                        &btree_index,
+                        format,
+                        None,
+                    ));
                 }
                 let started = Instant::now();
-                let result = self.execute_in_txn((*input).clone(), txn)?;
+                let (result, knn_stats) = if hnsw_path.is_some() {
+                    let _statement_timestamp = evaluator::begin_statement();
+                    let execution = {
+                        let (mut sql_txn, overlay) = txn.split_parts();
+                        let catalog = self.catalog.read().expect("catalog lock poisoned");
+                        let view = TxnCatalogView::new(&*catalog, &*overlay);
+                        query::execute_query_with_knn_stats(&mut sql_txn, &view, &input)?
+                    };
+                    match execution {
+                        Some((result, stats)) => (result, Some(stats)),
+                        None => (self.execute_in_txn((*input).clone(), txn)?, None),
+                    }
+                } else {
+                    (self.execute_in_txn((*input).clone(), txn)?, None)
+                };
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
                     hnsw_path,
-                    true,
+                    &btree_index,
                     format,
-                    Some(elapsed_ns),
-                    Some(result_rows(&result)),
+                    Some(ExplainAnalysis {
+                        knn_stats: knn_stats.as_ref(),
+                        elapsed_ns,
+                        rows: result_rows(&result),
+                    }),
                 ));
             }
             plan => plan,
@@ -728,6 +1035,57 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 with_options,
                 if_not_exists,
             ),
+            LogicalPlan::CreateTableAs {
+                table,
+                if_not_exists,
+                with_options,
+                source,
+            } => {
+                let table_name = table.name.clone();
+                let columns = table
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                if catalog.table_exists_in_txn(&table_name, overlay) {
+                    return if if_not_exists {
+                        Ok(ExecutionResult::Success)
+                    } else {
+                        Err(ExecutorError::TableAlreadyExists(table_name))
+                    };
+                }
+                ddl::create_table::validate_ctas_storage(&with_options)?;
+                let result = {
+                    let view = TxnCatalogView::new(&*catalog, &*overlay);
+                    let ExecutionResult::Query(result) =
+                        query::execute_query(&mut sql_txn, &view, *source)?
+                    else {
+                        return Err(ExecutorError::InvalidOperation {
+                            operation: "CREATE TABLE AS".into(),
+                            reason: "SELECT source did not return query rows".into(),
+                        });
+                    };
+                    result
+                };
+                self.execute_create_table_in_txn(
+                    &mut *catalog,
+                    &mut sql_txn,
+                    overlay,
+                    table,
+                    with_options,
+                    false,
+                )?;
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                dml::execute_insert_rows_with_plan(
+                    &mut sql_txn,
+                    &view,
+                    &table_name,
+                    columns,
+                    result.rows,
+                    None,
+                    None,
+                )
+            }
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table_in_txn(
                 &mut *catalog,
                 &mut sql_txn,
@@ -1002,7 +1360,9 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         match result {
             Ok(value) => {
-                sql_txn.flush_hnsw()?;
+                if flush_hnsw {
+                    sql_txn.flush_hnsw()?;
+                }
                 Ok(value)
             }
             Err(err) => {
@@ -1050,45 +1410,13 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
 
         table.storage_options = ddl::create_table::parse_storage_options(&with_options)?;
 
-        let mut unique_columns = Vec::new();
-        if let Some(columns) = table.primary_key.clone() {
-            unique_columns.push((ddl::create_pk_index_name(&table.name), columns));
-        }
-        for (position, constraint) in table.constraints.iter().enumerate() {
-            if let crate::ast::ddl::TableConstraint::Unique { name, columns, .. } = constraint {
-                unique_columns.push((
-                    name.clone()
-                        .unwrap_or_else(|| format!("__uq_{}_{}", table.name, position)),
-                    columns.clone(),
-                ));
+        let unique_indexes = ddl::create_table::constraint_indexes(catalog, &table)?;
+        let mut index_names = std::collections::HashSet::new();
+        for index in &unique_indexes {
+            if catalog.index_exists_in_txn(&index.name, overlay) || !index_names.insert(&index.name)
+            {
+                return Err(ExecutorError::IndexAlreadyExists(index.name.clone()));
             }
-        }
-        let mut seen = HashSet::new();
-        let mut unique_indexes = Vec::new();
-        for (name, columns) in unique_columns {
-            if !seen.insert(columns.clone()) {
-                continue;
-            }
-            let column_indices = columns
-                .iter()
-                .map(|column| {
-                    table
-                        .get_column_index(column)
-                        .ok_or_else(|| ExecutorError::ColumnNotFound(column.clone()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            ddl::create_index::ensure_indexable_columns(&table, &column_indices, "UNIQUE")?;
-            let mut index = crate::catalog::IndexMetadata::new(
-                catalog.next_index_id(),
-                name,
-                table.name.clone(),
-                columns,
-            )
-            .with_column_indices(column_indices)
-            .with_unique(true);
-            index.catalog_name = table.catalog_name.clone();
-            index.namespace_name = table.namespace_name.clone();
-            unique_indexes.push(index);
         }
 
         let table_id = catalog.next_table_id();

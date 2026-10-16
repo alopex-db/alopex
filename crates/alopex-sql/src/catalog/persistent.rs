@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
 use alopex_core::types::TxnMode;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -798,18 +800,21 @@ impl From<PersistedIndexMeta> for IndexMetadata {
 }
 
 fn deserialize_table_meta(bytes: &[u8]) -> Result<PersistedTableMeta, CatalogError> {
-    match bincode::deserialize::<PersistedTableMeta>(bytes) {
+    match bincode_config().deserialize::<PersistedTableMeta>(bytes) {
         Ok(meta) => Ok(meta),
-        Err(err) => {
+        Err(current_error) => {
+            if let Ok(legacy) = bincode_config().deserialize::<PersistedTableMetaV2>(bytes) {
+                return Ok(legacy.into());
+            }
             let is_legacy = matches!(
-                err.as_ref(),
+                current_error.as_ref(),
                 bincode::ErrorKind::Io(io)
                     if io.kind() == std::io::ErrorKind::UnexpectedEof
             );
             if !is_legacy {
-                return Err(err.into());
+                return Err(current_error.into());
             }
-            let legacy: PersistedTableMetaV1 = bincode::deserialize(bytes)?;
+            let legacy: PersistedTableMetaV1 = bincode_config().deserialize(bytes)?;
             Ok(PersistedTableMeta {
                 table_id: legacy.table_id,
                 name: legacy.name,
@@ -2803,6 +2808,59 @@ mod tests {
         let catalog = PersistentCatalog::load(store).unwrap();
         assert_eq!(catalog.inner.table_count(), 0);
         assert_eq!(catalog.inner.index_count(), 0);
+    }
+
+    #[test]
+    fn deserializes_v084_table_meta_without_generated_sequence() {
+        let legacy = PersistedTableMetaV2 {
+            table_id: 7,
+            name: "users".to_string(),
+            catalog_name: "default".to_string(),
+            namespace_name: "default".to_string(),
+            table_type: TableType::Managed,
+            data_source_format: DataSourceFormat::Alopex,
+            columns: vec![
+                PersistedColumnMetaV2 {
+                    name: "id".to_string(),
+                    data_type: PersistedType::Integer,
+                    not_null: true,
+                    primary_key: true,
+                    unique: true,
+                },
+                PersistedColumnMetaV2 {
+                    name: "title".to_string(),
+                    data_type: PersistedType::Text,
+                    not_null: false,
+                    primary_key: false,
+                    unique: false,
+                },
+            ],
+            primary_key: Some(vec!["id".to_string()]),
+            storage_options: PersistedStorageOptions {
+                storage_type: PersistedStorageType::Row,
+                compression: PersistedCompression::None,
+                row_group_size: 1024,
+                row_id_mode: PersistedRowIdMode::Direct,
+            },
+            storage_location: None,
+            comment: None,
+            properties: HashMap::new(),
+        };
+
+        let bytes = bincode::serialize(&legacy).unwrap();
+        let decoded = deserialize_table_meta(&bytes).unwrap();
+
+        assert_eq!(decoded.columns.len(), 2);
+        assert_eq!(decoded.columns[0].name, "id");
+        assert!(decoded.columns[0].generated_sequence.is_none());
+        assert!(decoded.columns[0].generated_sequence_options.is_none());
+        assert_eq!(decoded.columns[1].name, "title");
+        assert!(decoded.columns[1].generated_sequence.is_none());
+        assert!(decoded.columns[1].generated_sequence_options.is_none());
+
+        let mut corrupt = bytes;
+        corrupt.push(0);
+        assert!(deserialize_table_meta(&corrupt).is_err());
     }
 
     #[test]

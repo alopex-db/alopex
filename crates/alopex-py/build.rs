@@ -54,21 +54,33 @@ print(sys.version_info.minor);",
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
     let profile = env::var("PROFILE").unwrap_or_default();
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     // The Python extension keeps its own native asset directory for the
     // optional Python-facing parser library. Rust consumers link the parser
     // statically through alopex-sql and do not need an inherited rpath.
-    if cfg!(target_os = "linux") {
+    if target_os == "linux" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/native");
-    } else if cfg!(target_os = "macos") {
+    } else if target_os == "macos" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/native");
+        if profile == "release" {
+            // Have Apple's linker strip local symbols so dyld accepts the
+            // LINKEDIT string-pool alignment on macOS 27 and newer.
+            println!("cargo:rustc-link-arg-cdylib=-Wl,-x");
+        }
     }
-    if cfg!(target_os = "windows") {
-        println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
+    if target_os == "windows" {
+        println!(
+            "cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします"
+        );
         return;
     }
 
-    if profile == "release" {
+    // Maturin marks extension builds independently of the Cargo profile.
+    // Unix extensions resolve Python symbols from the loading interpreter;
+    // embedding flags can load a second runtime with standalone Python.
+    println!("cargo:rerun-if-env-changed=PYO3_BUILD_EXTENSION_MODULE");
+    if profile == "release" || env::var_os("PYO3_BUILD_EXTENSION_MODULE").is_some() {
         return;
     }
 

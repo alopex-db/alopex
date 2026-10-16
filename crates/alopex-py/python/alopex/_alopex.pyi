@@ -1,5 +1,5 @@
 from builtins import str as _str
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union, overload
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -537,6 +537,13 @@ class PreparedStatement:
     def reset(self) -> None: ...
     def finalize(self) -> None: ...
     def execute(self) -> Union[List[Dict[str, Any]], int, None]: ...
+    def execute_many(
+        self,
+        rows: Union[
+            List[Union[List[Any], Tuple[Any, ...]]],
+            Tuple[Union[List[Any], Tuple[Any, ...]], ...],
+        ],
+    ) -> List[Union[List[Dict[str, Any]], int, None]]: ...
 
 
 class Database:
@@ -576,7 +583,8 @@ class Database:
             NotImplementedError: ``bytes`` parameters (BLOB literals are not
                 supported by the SQL parser yet).
             AlopexError: SQL parse/execution errors (``code`` carries the
-                stable ALOPEX-P/S/C/E### error code).
+                stable ALOPEX-P/S/C/E### error code), or transaction-control
+                statements. Use :meth:`begin` for explicit transactions.
         """
         ...
     def execute_shared(
@@ -673,6 +681,15 @@ class Transaction:
                 already completed.
         """
         ...
+    def savepoint(self, name: str) -> None:
+        """Create a named savepoint in this transaction."""
+        ...
+    def rollback_to(self, name: str) -> None:
+        """Roll back changes made after the latest matching savepoint."""
+        ...
+    def release(self, name: str) -> None:
+        """Release the latest matching savepoint and its descendants."""
+        ...
     def execute_sql_stream(
         self,
         sql: str,
@@ -684,6 +701,32 @@ class Transaction:
     def get(self, key: bytes) -> Optional[bytes]: ...
     def put(self, key: bytes, value: bytes) -> None: ...
     def delete(self, key: bytes) -> None: ...
+    def scan_prefix(self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_range(self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: bytes,
+        mode: Literal["glob"] = "glob",
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+        *,
+        include_internal: bool = False,
+    ) -> Dict[str, Any]: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: str,
+        mode: Literal["regex"],
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+        *,
+        include_internal: bool = False,
+    ) -> Dict[str, Any]: ...
     def upsert_vector(
         self,
         key: bytes,

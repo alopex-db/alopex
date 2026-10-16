@@ -2,11 +2,14 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
+use alopex_sql::{AlopexDialect, Parser, SqlValue, StatementKind};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::IntoPyObjectExt;
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::sql::{self, PyPreparedBinding};
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
@@ -38,10 +41,65 @@ pub struct PyDatabase {
 pub struct PyPreparedStatement {
     database: Arc<alopex_embedded::Database>,
     sql: String,
-    bindings: Vec<Option<String>>,
+    bindings: Vec<Option<PyPreparedBinding>>,
     finalized: bool,
 }
 
+fn is_transaction_control_statement(sql: &str) -> bool {
+    let keyword = leading_sql_keyword(sql);
+    let starts_with_transaction_control = [
+        "BEGIN",
+        "START",
+        "SET",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+    ]
+    .iter()
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
+    if !starts_with_transaction_control && !sql.contains(';') {
+        return false;
+    }
+
+    Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement.kind,
+                StatementKind::Begin { .. }
+                    | StatementKind::SetTransaction { .. }
+                    | StatementKind::Commit
+                    | StatementKind::Rollback
+                    | StatementKind::Savepoint { .. }
+                    | StatementKind::RollbackToSavepoint { .. }
+                    | StatementKind::ReleaseSavepoint { .. }
+            )
+        })
+    })
+}
+
+fn leading_sql_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(newline) = comment.find('\n') else {
+                return "";
+            };
+            sql = &comment[newline + 1..];
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return "";
+            };
+            sql = &comment[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    sql.split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
+}
 struct PythonReader(Py<PyAny>);
 
 impl Read for PythonReader {
@@ -112,7 +170,7 @@ impl PyPreparedStatement {
             .ok_or_else(|| {
                 error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
             })?;
-        *slot = Some(crate::embedded::sql::render_param(&value, index - 1)?);
+        *slot = Some(sql::prepared_binding(&value, index - 1)?);
         Ok(())
     }
 
@@ -131,7 +189,7 @@ impl PyPreparedStatement {
 
     fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
-        let rendered = self
+        let bindings = self
             .bindings
             .iter()
             .enumerate()
@@ -141,13 +199,107 @@ impl PyPreparedStatement {
                     .ok_or_else(|| error::to_py_err(format!("parameter ?{} is unbound", index + 1)))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let sql = crate::embedded::sql::bind_rendered_params(&self.sql, &rendered)?;
         let database = Arc::clone(&self.database);
-        let result = py
-            .detach(move || database.execute_sql(&sql))
-            .map_err(error::embedded_err)?;
+        let sql = self.sql.clone();
+        let result = if bindings
+            .iter()
+            .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
+        {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            py.detach(move || {
+                let mut statement = database.prepare(&sql)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    statement.bind(index + 1, value)?;
+                }
+                statement.execute()
+            })
+            .map_err(error::embedded_err)?
+        } else {
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let sql = crate::embedded::sql::bind_rendered_params(&sql, &rendered)?;
+            py.detach(move || database.execute_sql(&sql))
+                .map_err(error::embedded_err)?
+        };
         crate::embedded::sql::execution_result_to_py(py, result)
     }
+
+    /// Execute native parameter rows atomically in one transaction.
+    fn execute_many(&mut self, py: Python<'_>, rows: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let rows = prepared_native_rows(&rows, self.bindings.len())?;
+        let database = Arc::clone(&self.database);
+        let sql = self.sql.clone();
+        let results = py
+            .detach(move || database.prepare(&sql)?.execute_many(rows))
+            .map_err(error::embedded_err)?;
+        let values = PyList::empty(py);
+        for result in results {
+            values.append(crate::embedded::sql::execution_result_to_py(py, result)?)?;
+        }
+        values.into_py_any(py)
+    }
+}
+
+fn prepared_native_rows(
+    rows: &Bound<'_, PyAny>,
+    parameter_count: usize,
+) -> PyResult<Vec<Vec<SqlValue>>> {
+    let rows: Vec<Bound<'_, PyAny>> = if let Ok(list) = rows.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = rows.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Err(error::AlopexError::SqlParamUnsupportedType(
+            "execute_many の rows には list または tuple を指定してください".to_string(),
+        )
+        .into());
+    };
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let values: Vec<Bound<'_, PyAny>> = if let Ok(list) = row.cast::<PyList>() {
+                list.iter().collect()
+            } else if let Ok(tuple) = row.cast::<PyTuple>() {
+                tuple.iter().collect()
+            } else {
+                return Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                    "execute_many の rows[{row_index}] には list または tuple を指定してください"
+                ))
+                .into());
+            };
+            if values.len() != parameter_count {
+                return Err(error::AlopexError::SqlParamCountMismatch {
+                    expected: parameter_count,
+                    actual: values.len(),
+                }
+                .into());
+            }
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| match sql::prepared_binding(value, index)? {
+                    PyPreparedBinding::Native(native) => Ok(native),
+                    PyPreparedBinding::Rendered(_) => {
+                        Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                            "execute_many の rows[{row_index}][{index}] は native scalar または vector である必要があります"
+                        ))
+                        .into())
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 impl PyPreparedStatement {
@@ -297,10 +449,52 @@ impl PyDatabase {
         params: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.ensure_open()?;
-        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
-        let result = py
-            .detach(move || db.execute_sql(&bound_sql))
-            .map_err(error::embedded_err)?;
+        sql::validate_sql_input(sql)?;
+        let bindings = sql::prepared_bindings(params.as_ref())?;
+        let validated_sql =
+            crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
+        if is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
+            ));
+        }
+        let result = if !bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
+            && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() == 1)
+        {
+            drop(validated_sql);
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            let sql = sql.to_owned();
+            py.detach(move || {
+                let mut statement = db.prepare(&sql)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    statement.bind(index + 1, value)?;
+                }
+                statement.execute()
+            })
+            .map_err(error::embedded_err)?
+        } else if bindings.is_empty() {
+            py.detach(move || db.execute_sql(&validated_sql))
+                .map_err(error::embedded_err)?
+        } else {
+            drop(validated_sql);
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let bound_sql = crate::embedded::sql::bind_rendered_params(sql, &rendered)?;
+            py.detach(move || db.execute_sql(&bound_sql))
+                .map_err(error::embedded_err)?
+        };
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
@@ -813,6 +1007,43 @@ mod tests {
     }
 
     #[test]
+    fn prepared_statement_python_vectors_stay_out_of_the_parser_payload() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            const DIMENSIONS: usize = 128;
+
+            let db = PyDatabase::new(None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let sql = format!(
+                "INSERT INTO items (id, embedding) VALUES {}",
+                std::iter::repeat_n("(?, ?)", ROWS)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let mut statement = db.prepare(&sql).expect("prepare");
+            for row in 0..ROWS {
+                statement
+                    .bind(2 * row + 1, (row as i64).into_bound_py_any(py).unwrap())
+                    .expect("id");
+                statement
+                    .bind(
+                        2 * row + 2,
+                        PyList::new(py, vec![0.25f64; DIMENSIONS])
+                            .unwrap()
+                            .into_any(),
+                    )
+                    .expect("vector");
+            }
+            statement.execute(py).expect("insert");
+        });
+    }
+
+    #[test]
     fn python_database_sql_stream_reads_rows_written_by_detached_auto_commit_calls() {
         with_py(|py| {
             let db = Py::new(py, PyDatabase::new(None).expect("db")).expect("python database");
@@ -860,6 +1091,22 @@ mod tests {
                 .extract()
                 .expect("code str");
             assert!(code.starts_with("ALOPEX-"), "unexpected code: {code}");
+        });
+    }
+
+    #[test]
+    fn execute_sql_guides_explicit_transaction_statements_to_begin() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            for sql in ["BEGIN", "SAVEPOINT retry", "COMMIT", "ROLLBACK"] {
+                let err = db
+                    .execute_sql(py, sql, None)
+                    .expect_err("transaction statement must be guided");
+                assert!(
+                    err.to_string().contains("db.begin()"),
+                    "{sql} did not explain the Python transaction API: {err}"
+                );
+            }
         });
     }
 
@@ -944,6 +1191,37 @@ mod tests {
                 .expect("embedding present");
             let embedding: Vec<f64> = embedding.extract().expect("vec f64");
             assert_eq!(embedding, vec![0.25, -1.5, 2.0]);
+        });
+    }
+
+    #[test]
+    fn execute_sql_vector_batch_stays_out_of_the_parser_payload() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            const DIMENSIONS: usize = 128;
+
+            let db = PyDatabase::new(None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let sql = format!(
+                "INSERT INTO items (id, embedding) VALUES {}",
+                std::iter::repeat_n("(?, ?)", ROWS)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let params = PyList::empty(py);
+            for row in 0..ROWS {
+                params.append(row as i64).expect("id");
+                params
+                    .append(PyList::new(py, vec![0.25f64; DIMENSIONS]).unwrap())
+                    .expect("vector");
+            }
+            db.execute_sql(py, &sql, Some(params.into_any()))
+                .expect("insert");
         });
     }
 

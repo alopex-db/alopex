@@ -12,9 +12,9 @@ mod update;
 use alopex_core::kv::KVStore;
 
 use crate::ast::expr::BinaryOp;
-use crate::catalog::{Catalog, TableMetadata};
+use crate::catalog::{Catalog, StorageType, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
-use crate::executor::{Result, Row};
+use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
 use crate::storage::{SqlTxn, SqlValue};
 
@@ -28,6 +28,16 @@ pub use insert::{
 pub use merge::execute_merge;
 #[allow(unused_imports)]
 pub use update::{execute_update, execute_update_with_returning};
+
+/// Row DML cannot update columnar segments; reject before accessing row storage.
+fn reject_columnar_dml(table: &TableMetadata, operation: &str) -> Result<()> {
+    if table.storage_options.storage_type == StorageType::Columnar {
+        return Err(ExecutorError::UnsupportedOperation(format!(
+            "{operation} is not supported for columnar tables; use COPY to load data"
+        )));
+    }
+    Ok(())
+}
 
 /// Resolve a single-column PRIMARY KEY equality against its implicit B-tree.
 ///
@@ -57,6 +67,60 @@ where
     let row_ids = txn
         .index_storage(index.index_id, index.unique, index.column_indices.clone())
         .lookup(&value)?;
+    let mut storage = txn.table_storage(table);
+    let mut rows = Vec::with_capacity(row_ids.len());
+    for row_id in row_ids {
+        if let Some(values) = storage.get(row_id)? {
+            rows.push(Row::new(row_id, values));
+        }
+    }
+    Ok(Some(rows))
+}
+
+/// Resolve a row-storage `TO_TSVECTOR(column) @@ tsquery` predicate through
+/// a matching FTS index. Callers retain the predicate for exact evaluation.
+pub(crate) fn lookup_fts_match<'txn, S, C, T>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    predicate: &TypedExpr,
+) -> Result<Option<Vec<Row>>>
+where
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+{
+    if table.storage_options.storage_type != StorageType::Row {
+        return Ok(None);
+    }
+    let Some((column, config, query_expr)) = fts_match_parts(table, predicate) else {
+        return Ok(None);
+    };
+    let Some(index) = catalog
+        .get_indexes_for_table(&table.name)
+        .into_iter()
+        .find(|index| {
+            matches!(index.method, Some(crate::ast::ddl::IndexMethod::Fts))
+                && index.column_indices == [column]
+                && crate::executor::fts_bridge::config(index).eq_ignore_ascii_case(config)
+                && index.get_option("fts_format_version") == Some(crate::fts::INDEX_FORMAT_VERSION)
+        })
+    else {
+        return Ok(None);
+    };
+    let Some(query_value) = fts_query_value(query_expr)? else {
+        return Ok(None);
+    };
+    let SqlValue::Text(query_value) = query_value else {
+        return Ok(Some(Vec::new()));
+    };
+    let query = match crate::fts::parse_tsquery("simple", &query_value) {
+        Ok(query) => query,
+        Err(_) => return Ok(None),
+    };
+    let Some(row_ids) = crate::executor::fts_bridge::lookup_query(txn, index, &query)? else {
+        return Ok(None);
+    };
     let mut storage = txn.table_storage(table);
     let mut rows = Vec::with_capacity(row_ids.len());
     for row_id in row_ids {
@@ -148,6 +212,62 @@ fn primary_key_equality_value(
         _ => None,
     };
     Ok(value.and_then(|value| normalize_primary_key_value(table, primary_key_index, value)))
+}
+
+fn fts_match_parts<'a>(
+    table: &TableMetadata,
+    predicate: &'a TypedExpr,
+) -> Option<(usize, &'a str, &'a TypedExpr)> {
+    let TypedExprKind::BinaryOp {
+        left,
+        op: BinaryOp::TsMatch,
+        right,
+    } = &predicate.kind
+    else {
+        return None;
+    };
+    let TypedExprKind::FunctionCall { name, args, .. } = &left.kind else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("to_tsvector") {
+        return None;
+    }
+    let (config, column) = match args.as_slice() {
+        [column] => ("simple", column),
+        [
+            TypedExpr {
+                kind: TypedExprKind::Literal(crate::ast::expr::Literal::String(config)),
+                ..
+            },
+            column,
+        ] => (config.as_str(), column),
+        _ => return None,
+    };
+    let TypedExprKind::ColumnRef { column_index, .. } = &column.kind else {
+        return None;
+    };
+    // This helper is called only for a direct Filter over this physical Scan.
+    // A resolved column stores the query-visible alias, not the storage table
+    // name, so validate the physical column position instead of its alias.
+    (*column_index < table.columns.len()).then_some((*column_index, config, right))
+}
+
+/// Evaluate only an FTS query expression whose value is independent of a row.
+/// Other expressions retain the normal filter so their per-row semantics hold.
+fn fts_query_value(expr: &TypedExpr) -> Result<Option<SqlValue>> {
+    let is_query_function = matches!(
+        &expr.kind,
+        TypedExprKind::FunctionCall { name, args, .. }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "to_tsquery" | "plainto_tsquery" | "websearch_to_tsquery"
+            ) && args.iter().all(is_literal_expression)
+    );
+    if is_literal_expression(expr) || is_query_function {
+        Ok(Some(evaluate(expr, &EvalContext::new(&[]))?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Return the lower bound of a direct single-column primary-key predicate.
@@ -376,6 +496,56 @@ mod tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn fts_match_parts_accepts_an_aliased_scan_column() {
+        let table = TableMetadata::new(
+            "docs",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer),
+                ColumnMetadata::new("body", ResolvedType::Text),
+            ],
+        );
+        let vector = |relation: &str, column_index| {
+            TypedExpr::function_call(
+                "to_tsvector".into(),
+                vec![TypedExpr::column_ref(
+                    relation.into(),
+                    "body".into(),
+                    column_index,
+                    ResolvedType::Text,
+                    Span::default(),
+                )],
+                false,
+                false,
+                ResolvedType::Text,
+                Span::default(),
+            )
+        };
+        let query = TypedExpr::literal(
+            Literal::String("quick".into()),
+            ResolvedType::Text,
+            Span::default(),
+        );
+
+        let aliased_predicate = predicate_with_op(vector("d", 1), BinaryOp::TsMatch, query.clone());
+        let parts = fts_match_parts(&table, &aliased_predicate)
+            .expect("an alias of the direct scan column remains indexable");
+        assert_eq!(parts.0, 1);
+        assert_eq!(parts.1, "simple");
+
+        assert!(
+            fts_match_parts(
+                &table,
+                &predicate_with_op(
+                    vector("outer_docs", table.columns.len()),
+                    BinaryOp::TsMatch,
+                    query,
+                ),
+            )
+            .is_none()
         );
     }
 }

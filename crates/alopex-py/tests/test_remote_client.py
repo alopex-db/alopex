@@ -760,11 +760,17 @@ def test_thread_mode_is_refused_with_a_reason():
 
 
 UNSUPPORTED_TRANSACTION_CALLS = [
+    ("savepoint", ("local_only",)),
+    ("rollback_to", ("local_only",)),
+    ("release", ("local_only",)),
     ("execute_sql_stream", ("SELECT 1",)),
     ("query_stream", (None,)),
     ("get", (b"k",)),
     ("put", (b"k", b"v")),
     ("delete", (b"k",)),
+    ("scan_prefix", (b"k",)),
+    ("scan_range", (b"a", b"z")),
+    ("search_keys", (b"*",)),
     ("upsert_vector", (b"k", None, [1.0], None)),
     ("search_similar", ([1.0], None, 1)),
     ("get_vector", (b"k", None)),

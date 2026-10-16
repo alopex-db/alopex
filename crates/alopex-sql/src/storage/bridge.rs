@@ -241,6 +241,11 @@ pub trait SqlTxn<'txn, S: KVStore + 'txn> {
         None
     }
 
+    /// File-read restrictions inherited by nested query and DML execution.
+    fn read_security(&self) -> Option<&crate::executor::bulk::CopySecurityConfig> {
+        None
+    }
+
     fn mode(&self) -> TxnMode;
 
     fn ensure_write_txn(&self) -> CoreResult<()>;
@@ -443,6 +448,27 @@ pub struct HnswTxnEntry {
     pub index: HnswIndex,
     pub state: HnswTransactionState,
     pub dirty: bool,
+    pub(crate) cached_read: bool,
+}
+
+impl HnswTxnEntry {
+    pub(crate) fn loaded(index: HnswIndex) -> Self {
+        Self {
+            index,
+            state: HnswTransactionState::default(),
+            dirty: false,
+            cached_read: false,
+        }
+    }
+
+    pub(crate) fn cached_read(index: HnswIndex) -> Self {
+        Self {
+            index,
+            state: HnswTransactionState::default(),
+            dirty: false,
+            cached_read: true,
+        }
+    }
 }
 
 impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
@@ -488,14 +514,8 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     pub(crate) fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
@@ -504,14 +524,8 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     pub(crate) fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
     }
@@ -682,6 +696,21 @@ impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
             self.overlay,
         )
     }
+
+    pub fn seed_hnsw_read_cache(&mut self, entries: Vec<(String, HnswIndex)>) {
+        for (name, index) in entries {
+            self.hnsw_indices
+                .entry(name)
+                .or_insert_with(|| HnswTxnEntry::cached_read(index));
+        }
+    }
+
+    pub fn cloned_hnsw_entries(&self) -> Vec<(String, HnswIndex)> {
+        self.hnsw_indices
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.index.clone_for_read()))
+            .collect()
+    }
 }
 
 impl<'a, 'b, 'c, S: KVStore + 'b> Drop for BorrowedSqlTransaction<'a, 'b, 'c, S> {
@@ -721,29 +750,24 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
     fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
 
     fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
+        if self
+            .hnsw_indices
+            .get(name)
+            .is_some_and(|entry| entry.cached_read)
+        {
+            self.hnsw_indices.remove(name);
+        }
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
     }
@@ -808,6 +832,7 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use alopex_core::kv::{KVStore, decode_range_change, journal_key};
     use alopex_core::types::TxnMode;
+    use alopex_core::vector::hnsw::{HnswConfig, HnswIndex};
     use std::sync::Arc;
 
     fn sample_table_meta() -> TableMetadata {
@@ -858,6 +883,25 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn seeded_hnsw_read_entry_is_used_without_reloading() {
+        let store = MemoryKV::new();
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        let mut overlay = CatalogOverlay::new();
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadOnly, &mut overlay);
+        borrowed.seed_hnsw_read_cache(vec![(
+            "cached_index".into(),
+            HnswIndex::create("cached_index", HnswConfig::default().with_dimension(2)).unwrap(),
+        )]);
+
+        let (mut sql_txn, _) = borrowed.split_parts();
+        assert_eq!(
+            sql_txn.hnsw_entry("cached_index").unwrap().name(),
+            "cached_index"
+        );
     }
 
     #[test]
