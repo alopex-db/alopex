@@ -63,17 +63,19 @@ impl HnswGraph {
 
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, true)
+        self.insert_with_pruning(key, vector, metadata, true, None)
     }
 
     /// Inserts a vector while deferring reverse-edge pruning to the bulk owner.
+    /// An optional batch-local hint supplements the existing entry without changing ef.
     pub(crate) fn insert_unpruned(
         &mut self,
         key: &[u8],
         vector: &[f32],
         metadata: &[u8],
+        entry_hint: Option<u32>,
     ) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, false)
+        self.insert_with_pruning(key, vector, metadata, false, entry_hint)
     }
 
     fn insert_with_pruning(
@@ -82,6 +84,7 @@ impl HnswGraph {
         vector: &[f32],
         metadata: &[u8],
         prune_reverse_edges: bool,
+        entry_hint: Option<u32>,
     ) -> Result<u32> {
         self.validate_vector(vector)?;
 
@@ -152,8 +155,14 @@ impl HnswGraph {
 
         // Connect across layers down to 0.
         for l in (0..=level.min(self.max_level)).rev() {
-            let candidates =
-                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
+            let candidates = self.search_layer(
+                query,
+                enter_point,
+                l,
+                self.config.ef_construction,
+                entry_hint.filter(|&hint| hint != node_id).as_slice(),
+                None,
+            );
             let max_conn = if l == 0 {
                 self.config.m * 2
             } else {
@@ -255,8 +264,14 @@ impl HnswGraph {
             .unwrap_or_default();
         let query = PreparedQuery::new(self.config.metric, &vector);
         for l in (0..=level.min(baseline)).rev() {
-            let candidates =
-                self.search_layer(query, enter_point, l, self.config.ef_construction, None);
+            let candidates = self.search_layer(
+                query,
+                enter_point,
+                l,
+                self.config.ef_construction,
+                &[],
+                None,
+            );
             let max_conn = if l == 0 {
                 self.config.m * 2
             } else {
@@ -321,6 +336,7 @@ impl HnswGraph {
             },
         };
 
+        let original_entry = enter_point;
         // Greedy descent from the top layer to level 1.
         if max_level > 0 {
             for l in (1..=max_level).rev() {
@@ -335,7 +351,46 @@ impl HnswGraph {
             stats.effective_ef_search = ef;
         }
 
-        let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
+        let mut candidates = self.search_layer(query, enter_point, 0, ef, &[], Some(&mut stats));
+        // Upper-layer descent can miss a better base-layer basin. Preserve the
+        // original search before considering another route: adding a seed to
+        // its heap could evict a useful entry before that entry is expanded.
+        if enter_point != original_entry {
+            let cutoff = candidates.get(k - 1).map_or(f64::NEG_INFINITY, |c| c.score);
+            // The root route only matters if it reaches a base entry that beats
+            // the first route's k-th result. It replaces an abandoned
+            // `max_level`-hop descent plus an ef-wide search, so allow half of
+            // ef hops on top of that; a slower ladder is abandoned.
+            let max_hops = (ef / 2).max(1).saturating_add(max_level);
+            let probed =
+                self.probe_base_entry_above(query, original_entry, cutoff, max_hops, &mut stats);
+            if let Some(base_entry) = probed.filter(|&base_entry| {
+                base_entry != enter_point
+                    && self.node(base_entry).is_some_and(|node| !node.deleted)
+                    && !candidates.iter().any(|c| c.node_id == base_entry)
+            }) {
+                // At most two ef-bounded searches; their retained results and
+                // all additional distance work are part of the resource cost.
+                // Seed the second heap with the first search's candidates so
+                // filling ef does not require traversing known worse regions.
+                let retained_ids: Vec<u32> = candidates.iter().map(|c| c.node_id).collect();
+                candidates.extend(self.search_layer(
+                    query,
+                    base_entry,
+                    0,
+                    ef,
+                    &retained_ids,
+                    Some(&mut stats),
+                ));
+                candidates.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
+                });
+                candidates.dedup_by_key(|c| c.node_id);
+                candidates.truncate(ef);
+            }
+        }
 
         let mut scored_results: Vec<(f64, HnswSearchResult)> = candidates
             .into_iter()
@@ -502,12 +557,54 @@ impl HnswGraph {
         current
     }
 
+    /// Base-layer greedy probe from `start` that succeeds with the first node
+    /// scoring above `cutoff`. Returns `None` if the walk stalls below
+    /// `cutoff` or has not crossed it within `max_hops` moves, so a partial,
+    /// below-cutoff node can never seed another search.
+    fn probe_base_entry_above(
+        &self,
+        target: PreparedQuery<'_>,
+        start: u32,
+        cutoff: f64,
+        max_hops: usize,
+        stats: &mut SearchStats,
+    ) -> Option<u32> {
+        let mut current = start;
+        let mut current_score = self.distance(target, current, stats);
+        for hop in 0..=max_hops {
+            if current_score > cutoff {
+                return Some(current);
+            }
+            if hop == max_hops {
+                break;
+            }
+            let mut best = current;
+            let mut best_score = current_score;
+            if let Some(neighbors) = self.node(current).and_then(|node| node.neighbors.first()) {
+                for &n in neighbors {
+                    let s = self.distance(target, n, stats);
+                    if s > best_score {
+                        best = n;
+                        best_score = s;
+                    }
+                }
+            }
+            if best == current {
+                return None;
+            }
+            current = best;
+            current_score = best_score;
+        }
+        None
+    }
+
     fn search_layer(
         &self,
         query: PreparedQuery<'_>,
         entry_point: u32,
         level: usize,
         ef: usize,
+        entry_hints: &[u32],
         mut stats: Option<&mut SearchStats>,
     ) -> Vec<ScoredEntry> {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
@@ -531,6 +628,26 @@ impl HnswGraph {
         candidates.push(entry.clone());
         if self.node(entry_point).is_some_and(|node| !node.deleted) {
             best.push(Reverse(entry));
+        }
+
+        for &hint in entry_hints {
+            if self
+                .node(hint)
+                .is_none_or(|node| node.deleted || level >= node.neighbors.len())
+                || visited[hint as usize]
+            {
+                continue;
+            }
+            visited[hint as usize] = true;
+            let entry = ScoredEntry {
+                node_id: hint,
+                score: self.distance(query, hint, stats_ref),
+            };
+            candidates.push(entry.clone());
+            best.push(Reverse(entry));
+            if best.len() > ef {
+                best.pop();
+            }
         }
 
         while let Some(candidate) = candidates.pop() {

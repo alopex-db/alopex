@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 EVIDENCE_BY_CLAIM = {
+    "DATE_DIFF": "crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_are_numeric_and_interval_units_are_sql_standard;crates/alopex-sql/tests/temporal_types.rs#analysis_date_differences_preserve_sign_day_boundaries_and_nulls",
     "portable SELECT/null/order/coercion": "scripts/reference_tests/sql_v0811_differential.py#main",
     "parser/lexer": "crates/alopex-sql/tests/nim_bridge_test.rs#parses_v0811_relational_sql_across_the_nim_boundary",
     "transactions/savepoints": "crates/alopex-embedded/tests/sql_integration.rs#sql_integration_transaction_rollback_discards_sql_changes",
@@ -37,6 +38,8 @@ def claim_for(row: dict[str, str]) -> str:
     surface, api = row["surface"], row["api"]
     name = api.rsplit(".", 1)[-1]
     if surface == "scalar":
+        if name == "date_diff":
+            return "DATE_DIFF"
         return "portable SELECT/null/order/coercion"
     if surface == "metadata":
         return "information_schema"

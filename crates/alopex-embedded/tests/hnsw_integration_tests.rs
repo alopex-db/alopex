@@ -12,6 +12,95 @@ fn config() -> HnswConfig {
         .with_ef_construction(32)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_query_ef_changes_observed_search_work() {
+    let db = Database::new();
+    db.create_hnsw_index("breadth", config().with_m(2).with_ef_construction(16))
+        .unwrap();
+    let keys: Vec<_> = (0..128).map(|i| i.to_string().into_bytes()).collect();
+    let vectors: Vec<_> = (0..128).map(|i| vec![i as f32, 1.0]).collect();
+    let refs: Vec<_> = vectors.iter().map(Vec::as_slice).collect();
+    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    assert_eq!(
+        txn.upsert_to_hnsw_batch("breadth", &keys, &refs, None)
+            .unwrap(),
+        128
+    );
+    txn.commit().unwrap();
+
+    let (narrow, narrow_stats) = db.search_hnsw("breadth", &vectors[64], 1, Some(1)).unwrap();
+    let (wide, wide_stats) = db
+        .search_hnsw("breadth", &vectors[64], 1, Some(128))
+        .unwrap();
+    assert_eq!(narrow.len(), 1);
+    assert_eq!(wide.len(), 1);
+    assert_eq!(wide[0].key, b"64");
+    assert!(wide_stats.nodes_visited > narrow_stats.nodes_visited);
+    assert!(narrow_stats.nodes_visited > 0);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn borrowed_hnsw_batch_rejects_invalid_inputs_without_partial_writes() {
+    let db = Database::new();
+    db.create_hnsw_index("batch", config()).unwrap();
+    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    let good = [0.0, 0.0];
+    let other = [1.0, 0.0];
+    let vectors = [good.as_slice(), other.as_slice()];
+    let keys = [b"a".to_vec(), b"b".to_vec()];
+    assert_eq!(
+        txn.upsert_to_hnsw_batch("batch", &keys, &vectors, None)
+            .unwrap(),
+        2
+    );
+
+    let duplicate = [b"duplicate".to_vec(), b"duplicate".to_vec()];
+    assert!(matches!(
+        txn.upsert_to_hnsw_batch("batch", &duplicate, &vectors, None),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::InvalidParameter { .. }
+        ))
+    ));
+    assert!(matches!(
+        txn.upsert_to_hnsw_batch("batch", &[], &[], None),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::InvalidParameter { .. }
+        ))
+    ));
+    assert!(matches!(
+        txn.upsert_to_hnsw_batch("batch", &[b"length".to_vec()], &vectors, None),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::InvalidParameter { .. }
+        ))
+    ));
+    assert!(matches!(
+        txn.upsert_to_hnsw_batch("batch", &keys, &vectors, Some(&[None])),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::InvalidParameter { .. }
+        ))
+    ));
+    let later_invalid = [good.as_slice(), &[2.0]];
+    assert!(matches!(
+        txn.upsert_to_hnsw_batch(
+            "batch",
+            &[b"must-not-appear".to_vec(), b"invalid".to_vec()],
+            &later_invalid,
+            None,
+        ),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::DimensionMismatch { .. }
+        ))
+    ));
+    txn.commit().unwrap();
+
+    let (hits, _) = db.search_hnsw("batch", &good, 10, Some(32)).unwrap();
+    let mut actual: Vec<_> = hits.into_iter().map(|hit| hit.key).collect();
+    actual.sort();
+    assert_eq!(actual, keys);
+}
+
 const MIXED_INDEX: &str = "idx_items_embedding";
 
 fn seed_borrowed_sql_hnsw(db: &Database) -> (Vec<u8>, Vec<u8>) {

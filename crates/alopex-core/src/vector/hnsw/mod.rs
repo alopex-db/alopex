@@ -133,9 +133,11 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             if all_new {
-                graph.insert_unpruned(key, vector, metadata)?;
+                previous_insert =
+                    Some(graph.insert_unpruned(key, vector, metadata, previous_insert)?);
                 if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
                     graph.prune_overfull_neighbors();
                 }
@@ -297,10 +299,13 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             let existed = graph.find_node_id(key).is_some();
             let node_id = if all_new {
-                graph.insert_unpruned(key, vector, metadata)?
+                let node_id = graph.insert_unpruned(key, vector, metadata, previous_insert)?;
+                previous_insert = Some(node_id);
+                node_id
             } else {
                 graph.upsert(key, vector, metadata)?
             };
