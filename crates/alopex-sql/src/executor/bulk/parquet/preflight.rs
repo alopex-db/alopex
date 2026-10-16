@@ -9,6 +9,58 @@ use crate::planner::types::ResolvedType;
 
 use super::{CopyField, parquet_io_error};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetadataContext {
+    Unknown,
+    AesGcmCtrV1,
+    AesGcmV1,
+    BsonType,
+    ColumnChunk,
+    ColumnCryptoMetaData,
+    ColumnEncoding,
+    ColumnHistogram,
+    ColumnMetaData,
+    ColumnOrder,
+    DataPageHeader,
+    DataPageHeaderV2,
+    DateType,
+    DecimalType,
+    DictionaryPageHeader,
+    EncryptionAlgorithm,
+    EncryptionWithColumnKey,
+    EncryptionWithFooterKey,
+    EnumType,
+    FileKeyValue,
+    FileMetaData,
+    Float16Type,
+    IndexPageHeader,
+    IntType,
+    JsonType,
+    KeyValue,
+    ListType,
+    LogicalType,
+    MapType,
+    MicroSeconds,
+    MilliSeconds,
+    NanoSeconds,
+    NullType,
+    PageEncodingStats,
+    PageHeader,
+    RetainedMetadata,
+    RetainedStatistics,
+    RowGroup,
+    SchemaElement,
+    SizeStatistics,
+    SortingColumn,
+    Statistics,
+    StringType,
+    TimeType,
+    TimeUnit,
+    TimestampType,
+    TypeDefinedOrder,
+    UuidType,
+}
+
 fn arc_bytes<T>() -> usize {
     std::mem::size_of::<(usize, usize, T)>()
 }
@@ -214,8 +266,8 @@ fn check_metadata<R: Read>(
         + arc_bytes::<SchemaDescriptor>()
         + arc_bytes::<parquet::arrow::FieldLevels>()
         + 2 * arc_bytes::<arrow_schema::Schema>();
-    footer.charge_metadata(roots as u64, "RetainedMetadata")?;
-    let row_groups = footer.metadata_fields(0, "FileMetaData")?;
+    footer.charge_metadata(roots as u64, MetadataContext::RetainedMetadata)?;
+    let row_groups = footer.metadata_fields(0, MetadataContext::FileMetaData)?;
     if footer
         .schema_path
         .iter()
@@ -432,7 +484,7 @@ pub(super) fn read_page_header_bytes(
         arrow_schema: None,
         file_key_values: 0,
     };
-    let _ = typed.metadata_fields(0, "PageHeader")?;
+    let _ = typed.metadata_fields(0, MetadataContext::PageHeader)?;
     if typed.remaining() != 0 {
         return Err(invalid_page());
     }
@@ -456,19 +508,19 @@ struct CompactHeader<R: Read> {
 }
 
 impl<R: Read> CompactHeader<R> {
-    fn charge_metadata(&mut self, bytes: u64, context: &str) -> Result<()> {
+    fn charge_metadata(&mut self, bytes: u64, context: MetadataContext) -> Result<()> {
         self.decoded_bytes = self
             .decoded_bytes
             .checked_add(bytes)
             .ok_or_else(invalid_page)?;
         check_declared_bytes(self.decoded_bytes, self.maximum)?;
-        if context == "FileKeyValue" {
+        if context == MetadataContext::FileKeyValue {
             self.retained_key_values = self
                 .retained_key_values
                 .checked_add(bytes)
                 .ok_or_else(invalid_page)?;
         }
-        if context == "RetainedMetadata" {
+        if context == MetadataContext::RetainedMetadata {
             self.retained_other_metadata = self
                 .retained_other_metadata
                 .checked_add(bytes)
@@ -496,26 +548,26 @@ impl<R: Read> CompactHeader<R> {
         let bytes = capacity
             .checked_mul(width as u64)
             .ok_or_else(invalid_page)?;
-        self.charge_metadata(bytes, "RetainedMetadata")?;
+        self.charge_metadata(bytes, MetadataContext::RetainedMetadata)?;
         if count > initial {
             // A relocating growth may keep the old converted backing alive temporarily.
             let previous = (capacity / 2)
                 .checked_mul(width as u64)
                 .ok_or_else(invalid_page)?;
-            self.charge_metadata(previous, "")?;
+            self.charge_metadata(previous, MetadataContext::Unknown)?;
         }
         Ok(())
     }
 
-    fn metadata_binary_length(&mut self, context: &str) -> Result<u64> {
+    fn metadata_binary_length(&mut self, context: MetadataContext) -> Result<u64> {
         let length = self.varint()?;
         check_declared_bytes(length, self.maximum)?;
         if length > self.remaining() {
             return Err(invalid_page());
         }
-        let statistics = context == "RetainedStatistics";
+        let statistics = context == MetadataContext::RetainedStatistics;
         let context = if statistics {
-            "RetainedMetadata"
+            MetadataContext::RetainedMetadata
         } else {
             context
         };
@@ -526,7 +578,11 @@ impl<R: Read> CompactHeader<R> {
         Ok(length)
     }
 
-    fn metadata_binary(&mut self, context: &str, inspect_arrow_key: bool) -> Result<(u64, bool)> {
+    fn metadata_binary(
+        &mut self,
+        context: MetadataContext,
+        inspect_arrow_key: bool,
+    ) -> Result<(u64, bool)> {
         let length = self.metadata_binary_length(context)?;
         let schema_key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
         let mut arrow_key = inspect_arrow_key && length == schema_key.len() as u64;
@@ -543,7 +599,7 @@ impl<R: Read> CompactHeader<R> {
         Ok((length, arrow_key))
     }
 
-    fn metadata_binary_copy(&mut self, context: &str) -> Result<Vec<u8>> {
+    fn metadata_binary_copy(&mut self, context: MetadataContext) -> Result<Vec<u8>> {
         let length = self.metadata_binary_length(context)?;
         let length = usize::try_from(length).map_err(|_| invalid_page())?;
         let mut value = Vec::new();
@@ -580,10 +636,10 @@ impl<R: Read> CompactHeader<R> {
         // Original IPC metadata and the converted reader field can coexist.
         self.charge_metadata(
             table.checked_mul(2).ok_or_else(invalid_page)?,
-            "RetainedMetadata",
+            MetadataContext::RetainedMetadata,
         )?;
         // Rehashing can retain the preceding smaller table until relocation finishes.
-        self.charge_metadata(table, "")
+        self.charge_metadata(table, MetadataContext::Unknown)
     }
 
     fn reserve_arrow_key_values<'a>(
@@ -599,7 +655,7 @@ impl<R: Read> CompactHeader<R> {
                     .checked_add(value.len())
                     .and_then(|v| v.checked_mul(2))
                     .ok_or_else(invalid_page)?;
-                self.charge_metadata(bytes as u64, "RetainedMetadata")?;
+                self.charge_metadata(bytes as u64, MetadataContext::RetainedMetadata)?;
             }
         }
         self.reserve_arrow_map(count)?;
@@ -623,14 +679,14 @@ impl<R: Read> CompactHeader<R> {
                 .checked_add(name.len().checked_mul(2).ok_or_else(invalid_page)?)
                 .ok_or_else(invalid_page)?;
             // Visit each occurrence: IPC tables may be shared, owned Arrow Fields are not.
-            self.charge_metadata(owners as u64, "RetainedMetadata")?;
+            self.charge_metadata(owners as u64, MetadataContext::RetainedMetadata)?;
             self.reserve_arrow_key_values(
                 field.custom_metadata().into_iter().flat_map(|v| v.iter()),
             )?;
             if field.dictionary().is_some() {
                 self.charge_metadata(
                     (6 * std::mem::size_of::<arrow_schema::DataType>()) as u64,
-                    "RetainedMetadata",
+                    MetadataContext::RetainedMetadata,
                 )?;
             }
             if let Some(timestamp) = field.type_as_timestamp()
@@ -641,7 +697,7 @@ impl<R: Read> CompactHeader<R> {
                     .checked_add(2 * std::mem::size_of::<usize>())
                     .and_then(|v| v.checked_mul(2))
                     .ok_or_else(invalid_page)?;
-                self.charge_metadata(bytes as u64, "RetainedMetadata")?;
+                self.charge_metadata(bytes as u64, MetadataContext::RetainedMetadata)?;
             }
             if let Some(union) = field.type_as_union()
                 && let Some(ids) = union.typeIds()
@@ -659,7 +715,7 @@ impl<R: Read> CompactHeader<R> {
             if count != 0 {
                 self.charge_metadata(
                     (2 * std::mem::size_of::<usize>()) as u64,
-                    "RetainedMetadata",
+                    MetadataContext::RetainedMetadata,
                 )?;
             }
         }
@@ -669,7 +725,7 @@ impl<R: Read> CompactHeader<R> {
     fn reserve_arrow_schema(&mut self, encoded: &[u8]) -> Result<()> {
         use base64::Engine;
         let capacity = base64::decoded_len_estimate(encoded.len());
-        self.charge_metadata(capacity as u64, "")?;
+        self.charge_metadata(capacity as u64, MetadataContext::Unknown)?;
         let mut decoded = Vec::new();
         decoded
             .try_reserve_exact(capacity)
@@ -714,11 +770,14 @@ impl<R: Read> CompactHeader<R> {
         field_id: Option<i32>,
     ) -> Result<()> {
         let root = !self.schema_root_seen;
-        self.charge_metadata(arc_bytes::<Type>() as u64, "RetainedMetadata")?;
+        self.charge_metadata(
+            arc_bytes::<Type>() as u64,
+            MetadataContext::RetainedMetadata,
+        )?;
         if !root {
             self.charge_metadata(
                 (2 * arc_bytes::<arrow_schema::Field>()) as u64,
-                "RetainedMetadata",
+                MetadataContext::RetainedMetadata,
             )?;
         }
         if !root && field_id.is_some() {
@@ -726,7 +785,10 @@ impl<R: Read> CompactHeader<R> {
             // four buckets plus controls (at most 16 bytes per SIMD group).
             let table = 4 * std::mem::size_of::<(String, String)>() + 4 + 16;
             let strings = parquet::arrow::PARQUET_FIELD_ID_META_KEY.len() + "-2147483648".len();
-            self.charge_metadata((2 * (table + strings)) as u64, "RetainedMetadata")?;
+            self.charge_metadata(
+                (2 * (table + strings)) as u64,
+                MetadataContext::RetainedMetadata,
+            )?;
         }
         let (prefix, mut retained) = if root {
             self.schema_root_seen = true;
@@ -762,7 +824,7 @@ impl<R: Read> CompactHeader<R> {
                 )?;
                 self.charge_metadata(
                     (2 * std::mem::size_of::<usize>()) as u64,
-                    "RetainedMetadata",
+                    MetadataContext::RetainedMetadata,
                 )?;
             }
             // The already charged SchemaElement slots also bound this smaller traversal stack.
@@ -772,7 +834,10 @@ impl<R: Read> CompactHeader<R> {
             self.schema_path.push((children, path));
         } else {
             self.schema_leaves = self.schema_leaves.checked_add(1).ok_or_else(invalid_page)?;
-            self.charge_metadata(arc_bytes::<ColumnDescriptor>() as u64, "RetainedMetadata")?;
+            self.charge_metadata(
+                arc_bytes::<ColumnDescriptor>() as u64,
+                MetadataContext::RetainedMetadata,
+            )?;
             self.reserve_converted_metadata(
                 self.schema_path.len() as u64,
                 std::mem::size_of::<String>(),
@@ -780,7 +845,7 @@ impl<R: Read> CompactHeader<R> {
             // Each primitive ColumnDescriptor owns the names of all its ancestors.
             retained = retained.checked_add(path).ok_or_else(invalid_page)?;
         }
-        self.charge_metadata(retained, "RetainedMetadata")
+        self.charge_metadata(retained, MetadataContext::RetainedMetadata)
     }
 
     fn remaining(&self) -> u64 {
@@ -838,7 +903,11 @@ impl<R: Read> CompactHeader<R> {
         i16::try_from(id).map_err(|_| invalid_page())
     }
 
-    fn metadata_fields(&mut self, depth: usize, context: &str) -> Result<Option<(u64, u64)>> {
+    fn metadata_fields(
+        &mut self,
+        depth: usize,
+        context: MetadataContext,
+    ) -> Result<Option<(u64, u64)>> {
         if depth > 32 {
             return Err(invalid_page());
         }
@@ -853,14 +922,15 @@ impl<R: Read> CompactHeader<R> {
         loop {
             let field = self.byte()?;
             if field == 0 {
-                if context == "SchemaElement" {
+                if context == MetadataContext::SchemaElement {
                     self.schema_name(
                         schema_name.ok_or_else(invalid_page)?,
                         schema_children,
                         schema_field_id,
                     )?;
                 }
-                if context == "FileKeyValue" && arrow_key && metadata_value.is_some() {
+                if context == MetadataContext::FileKeyValue && arrow_key && metadata_value.is_some()
+                {
                     self.arrow_schema = metadata_value;
                     self.has_arrow_schema = true;
                 }
@@ -869,34 +939,35 @@ impl<R: Read> CompactHeader<R> {
             id = self.field_id(field, id)?;
             let kind = field & 15;
             let known = metadata_field(context, id);
-            let (expected, child, width, element) = known.unwrap_or((kind, "", 0, 0));
+            let (expected, child, width, element) =
+                known.unwrap_or((kind, MetadataContext::Unknown, 0, 0));
             if kind != expected && !(expected == 1 && kind == 2) {
                 return Err(invalid_page());
             }
             let begin = self.remaining();
             // Compact field booleans carry their value in the field tag.
-            if context == "SchemaElement" && id == 4 {
-                schema_name = Some(self.metadata_binary("", false)?.0);
-            } else if context == "SchemaElement" && id == 5 {
+            if context == MetadataContext::SchemaElement && id == 4 {
+                schema_name = Some(self.metadata_binary(MetadataContext::Unknown, false)?.0);
+            } else if context == MetadataContext::SchemaElement && id == 5 {
                 let children = self.integer()?;
                 let children = i32::try_from(children).map_err(|_| invalid_page())?;
                 schema_children = Some(u64::try_from(children).map_err(|_| invalid_page())?);
-            } else if context == "SchemaElement" && id == 9 {
+            } else if context == MetadataContext::SchemaElement && id == 9 {
                 schema_field_id = Some(i32::try_from(self.integer()?).map_err(|_| invalid_page())?);
-            } else if context == "FileKeyValue" && id == 1 {
+            } else if context == MetadataContext::FileKeyValue && id == 1 {
                 arrow_key = self.metadata_binary(context, true)?.1;
-            } else if context == "FileKeyValue" && id == 2 {
+            } else if context == MetadataContext::FileKeyValue && id == 2 {
                 // Thrift permits the value before its key; retain only the last matching value.
                 metadata_value = Some(self.metadata_binary_copy(context)?);
             } else if kind != 1 && kind != 2 {
-                let child = if known.is_some() && context == "FileKeyValue" {
+                let child = if known.is_some() && context == MetadataContext::FileKeyValue {
                     context
                 } else {
                     child
                 };
                 self.metadata_value(kind, depth, child, width, element)?;
             }
-            if context == "FileMetaData" && id == 4 {
+            if context == MetadataContext::FileMetaData && id == 4 {
                 // Repeated fields retain the ordinary decoder's last-value semantics.
                 row_groups = if row_groups_seen {
                     None
@@ -912,7 +983,7 @@ impl<R: Read> CompactHeader<R> {
         &mut self,
         kind: u8,
         depth: usize,
-        context: &str,
+        context: MetadataContext,
         width: usize,
         element: u8,
     ) -> Result<()> {
@@ -951,26 +1022,35 @@ impl<R: Read> CompactHeader<R> {
                 }
                 self.charge_metadata(
                     bytes,
-                    if matches!(context, "SortingColumn" | "ColumnHistogram") {
-                        "RetainedMetadata"
+                    if matches!(
+                        context,
+                        MetadataContext::SortingColumn | MetadataContext::ColumnHistogram
+                    ) {
+                        MetadataContext::RetainedMetadata
                     } else {
                         context
                     },
                 )?;
                 let converted_width = match context {
-                    "RowGroup" => std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>(),
-                    "ColumnChunk" => {
+                    MetadataContext::RowGroup => {
+                        std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>()
+                    }
+                    MetadataContext::ColumnChunk => {
                         std::mem::size_of::<parquet::file::metadata::ColumnChunkMetaData>()
                     }
-                    "ColumnOrder" => std::mem::size_of::<parquet::basic::ColumnOrder>(),
-                    "ColumnEncoding" => std::mem::size_of::<parquet::basic::Encoding>(),
-                    "PageEncodingStats" => {
+                    MetadataContext::ColumnOrder => {
+                        std::mem::size_of::<parquet::basic::ColumnOrder>()
+                    }
+                    MetadataContext::ColumnEncoding => {
+                        std::mem::size_of::<parquet::basic::Encoding>()
+                    }
+                    MetadataContext::PageEncodingStats => {
                         std::mem::size_of::<parquet::file::page_encoding_stats::PageEncodingStats>()
                     }
                     _ => 0,
                 };
                 self.reserve_converted_metadata(count, converted_width)?;
-                if context == "FileKeyValue" {
+                if context == MetadataContext::FileKeyValue {
                     self.arrow_schema = None;
                     self.has_arrow_schema = false;
                     self.file_key_values = count;
@@ -988,8 +1068,8 @@ impl<R: Read> CompactHeader<R> {
                 if count != 0 {
                     let kinds = self.byte()?;
                     for _ in 0..count {
-                        self.metadata_value(kinds >> 4, depth + 1, "", 0, 0)?;
-                        self.metadata_value(kinds & 15, depth + 1, "", 0, 0)?;
+                        self.metadata_value(kinds >> 4, depth + 1, MetadataContext::Unknown, 0, 0)?;
+                        self.metadata_value(kinds & 15, depth + 1, MetadataContext::Unknown, 0, 0)?;
                     }
                 }
             }
@@ -1128,167 +1208,206 @@ impl<R: Read> CompactHeader<R> {
 }
 
 // Field and slot types follow the pinned Parquet format decoder to keep both readers aligned.
-fn metadata_field(context: &str, id: i16) -> Option<(u8, &'static str, usize, u8)> {
+fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataContext, usize, u8)> {
     Some(match (context, id) {
-        ("PageHeader", 1..=4) => (5, "", 0, 0),
-        ("PageHeader", 5) => (12, "DataPageHeader", 0, 0),
-        ("PageHeader", 6) => (12, "IndexPageHeader", 0, 0),
-        ("PageHeader", 7) => (12, "DictionaryPageHeader", 0, 0),
-        ("PageHeader", 8) => (12, "DataPageHeaderV2", 0, 0),
-        ("DataPageHeader", 1..=4) => (5, "", 0, 0),
-        ("DataPageHeader", 5) => (12, "Statistics", 0, 0),
-        ("DataPageHeaderV2", 1..=6) => (5, "", 0, 0),
-        ("DataPageHeaderV2", 7) => (1, "", 0, 0),
-        ("DataPageHeaderV2", 8) => (12, "Statistics", 0, 0),
-        ("DictionaryPageHeader", 1..=2) => (5, "", 0, 0),
-        ("DictionaryPageHeader", 3) => (1, "", 0, 0),
-        ("AesGcmCtrV1", 1) | ("AesGcmCtrV1", 2) => (8, "", 0, 0),
-        ("AesGcmCtrV1", 3) => (1, "", 0, 0),
-        ("AesGcmV1", 1) | ("AesGcmV1", 2) => (8, "", 0, 0),
-        ("AesGcmV1", 3) => (1, "", 0, 0),
-        ("ColumnChunk", 1) => (8, "RetainedMetadata", 0, 0),
-        ("ColumnChunk", 9) => (8, "", 0, 0),
-        ("ColumnChunk", 2) | ("ColumnChunk", 4) | ("ColumnChunk", 6) => (6, "", 0, 0),
-        ("ColumnChunk", 3) => (12, "ColumnMetaData", 0, 0),
-        ("ColumnChunk", 5) | ("ColumnChunk", 7) => (5, "", 0, 0),
-        ("ColumnChunk", 8) => (12, "ColumnCryptoMetaData", 0, 0),
-        ("ColumnCryptoMetaData", 1) => (12, "EncryptionWithFooterKey", 0, 0),
-        ("ColumnCryptoMetaData", 2) => (12, "EncryptionWithColumnKey", 0, 0),
-        ("ColumnMetaData", 1) | ("ColumnMetaData", 4) | ("ColumnMetaData", 15) => (5, "", 0, 0),
-        ("ColumnMetaData", 2) => (
+        (MetadataContext::PageHeader, 1..=4) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::PageHeader, 5) => (12, MetadataContext::DataPageHeader, 0, 0),
+        (MetadataContext::PageHeader, 6) => (12, MetadataContext::IndexPageHeader, 0, 0),
+        (MetadataContext::PageHeader, 7) => (12, MetadataContext::DictionaryPageHeader, 0, 0),
+        (MetadataContext::PageHeader, 8) => (12, MetadataContext::DataPageHeaderV2, 0, 0),
+        (MetadataContext::DataPageHeader, 1..=4) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::DataPageHeader, 5) => (12, MetadataContext::Statistics, 0, 0),
+        (MetadataContext::DataPageHeaderV2, 1..=6) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::DataPageHeaderV2, 7) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::DataPageHeaderV2, 8) => (12, MetadataContext::Statistics, 0, 0),
+        (MetadataContext::DictionaryPageHeader, 1..=2) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::DictionaryPageHeader, 3) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::AesGcmCtrV1, 1) | (MetadataContext::AesGcmCtrV1, 2) => {
+            (8, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::AesGcmCtrV1, 3) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::AesGcmV1, 1) | (MetadataContext::AesGcmV1, 2) => {
+            (8, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::AesGcmV1, 3) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::ColumnChunk, 1) => (8, MetadataContext::RetainedMetadata, 0, 0),
+        (MetadataContext::ColumnChunk, 9) => (8, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::ColumnChunk, 2)
+        | (MetadataContext::ColumnChunk, 4)
+        | (MetadataContext::ColumnChunk, 6) => (6, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::ColumnChunk, 3) => (12, MetadataContext::ColumnMetaData, 0, 0),
+        (MetadataContext::ColumnChunk, 5) | (MetadataContext::ColumnChunk, 7) => {
+            (5, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::ColumnChunk, 8) => (12, MetadataContext::ColumnCryptoMetaData, 0, 0),
+        (MetadataContext::ColumnCryptoMetaData, 1) => {
+            (12, MetadataContext::EncryptionWithFooterKey, 0, 0)
+        }
+        (MetadataContext::ColumnCryptoMetaData, 2) => {
+            (12, MetadataContext::EncryptionWithColumnKey, 0, 0)
+        }
+        (MetadataContext::ColumnMetaData, 1)
+        | (MetadataContext::ColumnMetaData, 4)
+        | (MetadataContext::ColumnMetaData, 15) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::ColumnMetaData, 2) => (
             9,
-            "ColumnEncoding",
+            MetadataContext::ColumnEncoding,
             std::mem::size_of::<parquet::format::Encoding>(),
             5,
         ),
-        ("ColumnMetaData", 3) => (9, "", std::mem::size_of::<String>(), 8),
-        ("ColumnMetaData", 5)
-        | ("ColumnMetaData", 6)
-        | ("ColumnMetaData", 7)
-        | ("ColumnMetaData", 9)
-        | ("ColumnMetaData", 10)
-        | ("ColumnMetaData", 11)
-        | ("ColumnMetaData", 14) => (6, "", 0, 0),
-        ("ColumnMetaData", 8) => (
+        (MetadataContext::ColumnMetaData, 3) => (
             9,
-            "KeyValue",
+            MetadataContext::Unknown,
+            std::mem::size_of::<String>(),
+            8,
+        ),
+        (MetadataContext::ColumnMetaData, 5)
+        | (MetadataContext::ColumnMetaData, 6)
+        | (MetadataContext::ColumnMetaData, 7)
+        | (MetadataContext::ColumnMetaData, 9)
+        | (MetadataContext::ColumnMetaData, 10)
+        | (MetadataContext::ColumnMetaData, 11)
+        | (MetadataContext::ColumnMetaData, 14) => (6, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::ColumnMetaData, 8) => (
+            9,
+            MetadataContext::KeyValue,
             std::mem::size_of::<parquet::format::KeyValue>(),
             12,
         ),
-        ("ColumnMetaData", 12) => (12, "RetainedStatistics", 0, 0),
-        ("ColumnMetaData", 13) => (
+        (MetadataContext::ColumnMetaData, 12) => (12, MetadataContext::RetainedStatistics, 0, 0),
+        (MetadataContext::ColumnMetaData, 13) => (
             9,
-            "PageEncodingStats",
+            MetadataContext::PageEncodingStats,
             std::mem::size_of::<parquet::format::PageEncodingStats>(),
             12,
         ),
-        ("ColumnMetaData", 16) => (12, "SizeStatistics", 0, 0),
-        ("ColumnOrder", 1) => (12, "TypeDefinedOrder", 0, 0),
-        ("DecimalType", 1) | ("DecimalType", 2) => (5, "", 0, 0),
-        ("EncryptionAlgorithm", 1) => (12, "AesGcmV1", 0, 0),
-        ("EncryptionAlgorithm", 2) => (12, "AesGcmCtrV1", 0, 0),
-        ("EncryptionWithColumnKey", 1) => (9, "", std::mem::size_of::<String>(), 8),
-        ("EncryptionWithColumnKey", 2) => (8, "", 0, 0),
-        ("FileMetaData", 1) => (5, "", 0, 0),
-        ("FileMetaData", 2) => (
+        (MetadataContext::ColumnMetaData, 16) => (12, MetadataContext::SizeStatistics, 0, 0),
+        (MetadataContext::ColumnOrder, 1) => (12, MetadataContext::TypeDefinedOrder, 0, 0),
+        (MetadataContext::DecimalType, 1) | (MetadataContext::DecimalType, 2) => {
+            (5, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::EncryptionAlgorithm, 1) => (12, MetadataContext::AesGcmV1, 0, 0),
+        (MetadataContext::EncryptionAlgorithm, 2) => (12, MetadataContext::AesGcmCtrV1, 0, 0),
+        (MetadataContext::EncryptionWithColumnKey, 1) => (
             9,
-            "SchemaElement",
+            MetadataContext::Unknown,
+            std::mem::size_of::<String>(),
+            8,
+        ),
+        (MetadataContext::EncryptionWithColumnKey, 2) => (8, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::FileMetaData, 1) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::FileMetaData, 2) => (
+            9,
+            MetadataContext::SchemaElement,
             std::mem::size_of::<parquet::format::SchemaElement>(),
             12,
         ),
-        ("FileMetaData", 3) => (6, "", 0, 0),
-        ("FileMetaData", 4) => (
+        (MetadataContext::FileMetaData, 3) => (6, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::FileMetaData, 4) => (
             9,
-            "RowGroup",
+            MetadataContext::RowGroup,
             std::mem::size_of::<parquet::format::RowGroup>(),
             12,
         ),
-        ("FileMetaData", 5) => (
+        (MetadataContext::FileMetaData, 5) => (
             9,
-            "FileKeyValue",
+            MetadataContext::FileKeyValue,
             std::mem::size_of::<parquet::format::KeyValue>(),
             12,
         ),
-        ("FileMetaData", 6) => (8, "RetainedMetadata", 0, 0),
-        ("FileMetaData", 9) => (8, "", 0, 0),
-        ("FileMetaData", 7) => (
+        (MetadataContext::FileMetaData, 6) => (8, MetadataContext::RetainedMetadata, 0, 0),
+        (MetadataContext::FileMetaData, 9) => (8, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::FileMetaData, 7) => (
             9,
-            "ColumnOrder",
+            MetadataContext::ColumnOrder,
             std::mem::size_of::<parquet::format::ColumnOrder>(),
             12,
         ),
-        ("FileMetaData", 8) => (12, "EncryptionAlgorithm", 0, 0),
-        ("IntType", 1) => (3, "", 0, 0),
-        ("IntType", 2) => (1, "", 0, 0),
-        ("KeyValue", 1) | ("KeyValue", 2) | ("FileKeyValue", 1) | ("FileKeyValue", 2) => {
-            (8, "", 0, 0)
-        }
-        ("LogicalType", 1) => (12, "StringType", 0, 0),
-        ("LogicalType", 2) => (12, "MapType", 0, 0),
-        ("LogicalType", 3) => (12, "ListType", 0, 0),
-        ("LogicalType", 4) => (12, "EnumType", 0, 0),
-        ("LogicalType", 5) => (12, "DecimalType", 0, 0),
-        ("LogicalType", 6) => (12, "DateType", 0, 0),
-        ("LogicalType", 7) => (12, "TimeType", 0, 0),
-        ("LogicalType", 8) => (12, "TimestampType", 0, 0),
-        ("LogicalType", 10) => (12, "IntType", 0, 0),
-        ("LogicalType", 11) => (12, "NullType", 0, 0),
-        ("LogicalType", 12) => (12, "JsonType", 0, 0),
-        ("LogicalType", 13) => (12, "BsonType", 0, 0),
-        ("LogicalType", 14) => (12, "UUIDType", 0, 0),
-        ("LogicalType", 15) => (12, "Float16Type", 0, 0),
-        ("PageEncodingStats", 1) | ("PageEncodingStats", 2) | ("PageEncodingStats", 3) => {
-            (5, "", 0, 0)
-        }
-        ("RowGroup", 1) => (
+        (MetadataContext::FileMetaData, 8) => (12, MetadataContext::EncryptionAlgorithm, 0, 0),
+        (MetadataContext::IntType, 1) => (3, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::IntType, 2) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::KeyValue, 1)
+        | (MetadataContext::KeyValue, 2)
+        | (MetadataContext::FileKeyValue, 1)
+        | (MetadataContext::FileKeyValue, 2) => (8, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::LogicalType, 1) => (12, MetadataContext::StringType, 0, 0),
+        (MetadataContext::LogicalType, 2) => (12, MetadataContext::MapType, 0, 0),
+        (MetadataContext::LogicalType, 3) => (12, MetadataContext::ListType, 0, 0),
+        (MetadataContext::LogicalType, 4) => (12, MetadataContext::EnumType, 0, 0),
+        (MetadataContext::LogicalType, 5) => (12, MetadataContext::DecimalType, 0, 0),
+        (MetadataContext::LogicalType, 6) => (12, MetadataContext::DateType, 0, 0),
+        (MetadataContext::LogicalType, 7) => (12, MetadataContext::TimeType, 0, 0),
+        (MetadataContext::LogicalType, 8) => (12, MetadataContext::TimestampType, 0, 0),
+        (MetadataContext::LogicalType, 10) => (12, MetadataContext::IntType, 0, 0),
+        (MetadataContext::LogicalType, 11) => (12, MetadataContext::NullType, 0, 0),
+        (MetadataContext::LogicalType, 12) => (12, MetadataContext::JsonType, 0, 0),
+        (MetadataContext::LogicalType, 13) => (12, MetadataContext::BsonType, 0, 0),
+        (MetadataContext::LogicalType, 14) => (12, MetadataContext::UuidType, 0, 0),
+        (MetadataContext::LogicalType, 15) => (12, MetadataContext::Float16Type, 0, 0),
+        (MetadataContext::PageEncodingStats, 1)
+        | (MetadataContext::PageEncodingStats, 2)
+        | (MetadataContext::PageEncodingStats, 3) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::RowGroup, 1) => (
             9,
-            "ColumnChunk",
+            MetadataContext::ColumnChunk,
             std::mem::size_of::<parquet::format::ColumnChunk>(),
             12,
         ),
-        ("RowGroup", 2) | ("RowGroup", 3) | ("RowGroup", 5) | ("RowGroup", 6) => (6, "", 0, 0),
-        ("RowGroup", 4) => (
+        (MetadataContext::RowGroup, 2)
+        | (MetadataContext::RowGroup, 3)
+        | (MetadataContext::RowGroup, 5)
+        | (MetadataContext::RowGroup, 6) => (6, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::RowGroup, 4) => (
             9,
-            "SortingColumn",
+            MetadataContext::SortingColumn,
             std::mem::size_of::<parquet::format::SortingColumn>(),
             12,
         ),
-        ("RowGroup", 7) => (4, "", 0, 0),
-        ("SchemaElement", 1)
-        | ("SchemaElement", 2)
-        | ("SchemaElement", 3)
-        | ("SchemaElement", 5)
-        | ("SchemaElement", 6)
-        | ("SchemaElement", 7)
-        | ("SchemaElement", 8)
-        | ("SchemaElement", 9) => (5, "", 0, 0),
-        ("SchemaElement", 4) => (8, "", 0, 0),
-        ("SchemaElement", 10) => (12, "LogicalType", 0, 0),
-        ("SizeStatistics", 1) => (6, "", 0, 0),
-        ("SizeStatistics", 2) | ("SizeStatistics", 3) => {
-            (9, "ColumnHistogram", std::mem::size_of::<i64>(), 6)
+        (MetadataContext::RowGroup, 7) => (4, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::SchemaElement, 1)
+        | (MetadataContext::SchemaElement, 2)
+        | (MetadataContext::SchemaElement, 3)
+        | (MetadataContext::SchemaElement, 5)
+        | (MetadataContext::SchemaElement, 6)
+        | (MetadataContext::SchemaElement, 7)
+        | (MetadataContext::SchemaElement, 8)
+        | (MetadataContext::SchemaElement, 9) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::SchemaElement, 4) => (8, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::SchemaElement, 10) => (12, MetadataContext::LogicalType, 0, 0),
+        (MetadataContext::SizeStatistics, 1) => (6, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::SizeStatistics, 2) | (MetadataContext::SizeStatistics, 3) => (
+            9,
+            MetadataContext::ColumnHistogram,
+            std::mem::size_of::<i64>(),
+            6,
+        ),
+        (MetadataContext::SortingColumn, 1) => (5, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::SortingColumn, 2) | (MetadataContext::SortingColumn, 3) => {
+            (1, MetadataContext::Unknown, 0, 0)
         }
-        ("SortingColumn", 1) => (5, "", 0, 0),
-        ("SortingColumn", 2) | ("SortingColumn", 3) => (1, "", 0, 0),
-        ("Statistics" | "RetainedStatistics", 1 | 2 | 5 | 6) => (
+        (MetadataContext::Statistics | MetadataContext::RetainedStatistics, 1 | 2 | 5 | 6) => (
             8,
-            if context == "RetainedStatistics" {
-                "RetainedStatistics"
+            if context == MetadataContext::RetainedStatistics {
+                MetadataContext::RetainedStatistics
             } else {
-                ""
+                MetadataContext::Unknown
             },
             0,
             0,
         ),
-        ("Statistics" | "RetainedStatistics", 3 | 4) => (6, "", 0, 0),
-        ("Statistics" | "RetainedStatistics", 7 | 8) => (1, "", 0, 0),
-        ("TimeType", 1) => (1, "", 0, 0),
-        ("TimeType", 2) => (12, "TimeUnit", 0, 0),
-        ("TimeUnit", 1) => (12, "MilliSeconds", 0, 0),
-        ("TimeUnit", 2) => (12, "MicroSeconds", 0, 0),
-        ("TimeUnit", 3) => (12, "NanoSeconds", 0, 0),
-        ("TimestampType", 1) => (1, "", 0, 0),
-        ("TimestampType", 2) => (12, "TimeUnit", 0, 0),
+        (MetadataContext::Statistics | MetadataContext::RetainedStatistics, 3 | 4) => {
+            (6, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::Statistics | MetadataContext::RetainedStatistics, 7 | 8) => {
+            (1, MetadataContext::Unknown, 0, 0)
+        }
+        (MetadataContext::TimeType, 1) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::TimeType, 2) => (12, MetadataContext::TimeUnit, 0, 0),
+        (MetadataContext::TimeUnit, 1) => (12, MetadataContext::MilliSeconds, 0, 0),
+        (MetadataContext::TimeUnit, 2) => (12, MetadataContext::MicroSeconds, 0, 0),
+        (MetadataContext::TimeUnit, 3) => (12, MetadataContext::NanoSeconds, 0, 0),
+        (MetadataContext::TimestampType, 1) => (1, MetadataContext::Unknown, 0, 0),
+        (MetadataContext::TimestampType, 2) => (12, MetadataContext::TimeUnit, 0, 0),
         _ => return None,
     })
 }
@@ -1415,7 +1534,9 @@ mod tests {
         for capacity in [0, 1, 7, 4096] {
             let mut input = header(bytes.clone(), capacity, reservation);
             assert_eq!(
-                input.metadata_binary("RetainedStatistics", false).unwrap(),
+                input
+                    .metadata_binary(MetadataContext::RetainedStatistics, false)
+                    .unwrap(),
                 (length, false)
             );
             assert_eq!(input.decoded_bytes, reservation);
@@ -1426,7 +1547,7 @@ mod tests {
 
             let mut input = header(bytes.clone(), capacity, reservation - 1);
             assert!(matches!(
-                input.metadata_binary("RetainedStatistics", false),
+                input.metadata_binary(MetadataContext::RetainedStatistics, false),
                 Err(ExecutorError::ResourceExhausted { .. })
             ));
             assert_eq!(input.remaining(), length + 1);
@@ -1440,7 +1561,11 @@ mod tests {
             // A file can become shorter after its declared length was checked.
             let mut input = header(bytes[..bytes.len() - 2].to_vec(), capacity, reservation);
             input.input.get_mut().set_limit(bytes.len() as u64);
-            assert!(input.metadata_binary("RetainedStatistics", false).is_err());
+            assert!(
+                input
+                    .metadata_binary(MetadataContext::RetainedStatistics, false)
+                    .is_err()
+            );
 
             let key = parquet::arrow::ARROW_SCHEMA_META_KEY.as_bytes();
             for matches in [true, false] {
@@ -1452,7 +1577,9 @@ mod tests {
                 bytes.push(0x2a);
                 let mut input = header(bytes, capacity, reservation);
                 assert_eq!(
-                    input.metadata_binary("FileKeyValue", true).unwrap(),
+                    input
+                        .metadata_binary(MetadataContext::FileKeyValue, true)
+                        .unwrap(),
                     (key.len() as u64, matches)
                 );
                 assert_eq!(input.retained_key_values, key.len() as u64);
@@ -1462,7 +1589,11 @@ mod tests {
             for available in 0..8 {
                 let mut input = header(vec![0; available], capacity, reservation);
                 input.input.get_mut().set_limit(8);
-                assert!(input.metadata_value(7, 0, "", 0, 0).is_err());
+                assert!(
+                    input
+                        .metadata_value(7, 0, MetadataContext::Unknown, 0, 0)
+                        .is_err()
+                );
             }
         }
     }
