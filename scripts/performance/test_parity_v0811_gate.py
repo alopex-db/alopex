@@ -1,5 +1,4 @@
 import hashlib
-import json
 import os
 import subprocess
 import tempfile
@@ -7,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.performance.parity_v0811_gate import evaluate, percentile, validate_document
+from scripts.performance.parity_v0811_gate import (
+    evaluate,
+    percentile,
+    validate_document,
+)
 from scripts.performance.parity_v0811_measure import (
     _environment,
     normalize_hnsw,
@@ -26,9 +29,11 @@ class PerformanceParityGateTests(unittest.TestCase):
             def git_run(command, **_kwargs):
                 if command[1:3] == ["rev-parse", "HEAD"]:
                     return subprocess.CompletedProcess(command, 0, stdout="revision\n")
-                return subprocess.CompletedProcess(
-                    command, 0, stdout=b"source.py\0.venv\0"
-                )
+                if command[1:2] == ["ls-files"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=b"source.py\0.venv\0"
+                    )
+                raise AssertionError(f"unexpected subprocess: {command!r}")
 
             original_read_text = Path.read_text
 
@@ -45,6 +50,10 @@ class PerformanceParityGateTests(unittest.TestCase):
                     patch(
                         "scripts.performance.parity_v0811_measure.subprocess.run",
                         side_effect=git_run,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.processor",
+                        return_value="test cpu",
                     ),
                     patch(
                         "scripts.performance.parity_v0811_measure.importlib.metadata.version",
