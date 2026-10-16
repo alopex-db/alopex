@@ -765,6 +765,8 @@ UNSUPPORTED_TRANSACTION_CALLS = [
     ("release", ("local_only",)),
     ("execute_sql_stream", ("SELECT 1",)),
     ("query_stream", (None,)),
+    ("prepare", ("SELECT 1",)),
+    ("execute_many", ("SELECT ?", [(1,)])),
     ("get", (b"k",)),
     ("put", (b"k", b"v")),
     ("delete", (b"k",)),

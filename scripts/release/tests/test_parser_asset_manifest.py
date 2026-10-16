@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Behavior tests for deterministic Nim parser target archives."""
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from scripts.release.tests.host_tools import git_bash
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
 BUILD_SCRIPT = REPOSITORY_ROOT / "scripts/build-nim-parser.sh"
@@ -31,13 +32,7 @@ NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-dual-library-v2"
 # Git's bin/bash.exe launcher prepends system tools to PATH when given a script,
 # bypassing the injected rm fixture. Use the actual shell for failure injection.
-BASH = (
-    subprocess.check_output(
-        ["bash", "-c", "cygpath -w /usr/bin/bash.exe"], text=True
-    ).strip()
-    if platform.system() == "Windows"
-    else "bash"
-)
+BASH = git_bash()
 TARGET_LIBRARIES = {
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
@@ -114,23 +109,21 @@ def retrying_rm_executable(
 
 
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
-    with path.open("wb") as raw:
-        with gzip.GzipFile(
-            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-        ) as compressed:
-            with tarfile.open(
-                fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
-            ) as archive:
-                for name, content in members:
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(content)
-                    info.mode = 0o644
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(content))
+    with path.open("wb") as raw, gzip.GzipFile(
+        filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+    ) as compressed, tarfile.open(
+        fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
+    ) as archive:
+        for name, content in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
 
 
 class ParserAssetManifestTests(unittest.TestCase):
@@ -790,11 +783,10 @@ print(matches[0])
             self.verify_target(record_path)
 
         oversized_tar = b"\0" * (16 * 1024 * 1024 + 1)
-        with archive_path.open("wb") as raw:
-            with gzip.GzipFile(
-                filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-            ) as compressed:
-                compressed.write(oversized_tar)
+        with archive_path.open("wb") as raw, gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+        ) as compressed:
+            compressed.write(oversized_tar)
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["archive"]["size"] = archive_path.stat().st_size
         record["archive"]["sha256"] = sha256(archive_path)

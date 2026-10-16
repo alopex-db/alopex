@@ -459,7 +459,25 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 Self::floating_parameter_literal(*value)
             }
             SqlValue::Text(value) => Literal::String(value.clone()),
-            SqlValue::Decimal(value) => Literal::Number(value.to_string()),
+            SqlValue::Decimal(value) => {
+                let digits = value.coefficient.unsigned_abs().max(1).ilog10() + 1;
+                let precision = digits.max(u32::from(value.scale));
+                if precision > 38 {
+                    return Err(PlannerError::InvalidExpression {
+                        message: format!(
+                            "decimal parameter ?{index} exceeds precision or scale 38"
+                        ),
+                    });
+                }
+                return Ok(TypedExpr::cast(
+                    self.infer_literal_type(&Literal::String(value.to_string()), span)?,
+                    ResolvedType::Decimal {
+                        precision: precision as u8,
+                        scale: value.scale,
+                    },
+                    span,
+                ));
+            }
             SqlValue::Json(value) => {
                 return Ok(TypedExpr::cast(
                     self.infer_literal_type(&Literal::String(value.as_str().to_owned()), span)?,

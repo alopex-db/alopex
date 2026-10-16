@@ -172,6 +172,10 @@ _SAVEPOINT_REASON = (
     "the server session API exposes no savepoint action, so this local-only "
     "transaction operation cannot be represented without changing the session contract"
 )
+_PREPARED_REASON = (
+    "the server session API exposes no prepared-statement handle or batch execution "
+    "contract, so this embedded transaction operation cannot be represented remotely"
+)
 _LOCAL_ONLY_REASON = "it reports process-local engine state that a remote server does not expose for its caller"
 _CONSTRUCTOR_REASON = (
     "the server client is constructed from a URL; use alopex.connect(url) or "
@@ -764,6 +768,12 @@ class RemoteTransaction:
 
     def query_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.query_stream", _STREAM_REASON)
+
+    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.prepare", _PREPARED_REASON)
+
+    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.execute_many", _PREPARED_REASON)
 
     def get(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get", _KV_REASON)
