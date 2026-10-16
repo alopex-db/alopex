@@ -1287,6 +1287,114 @@ fn issue577_async_routing_planning_metadata_budget() {
     async_planning_metadata_budget("routing");
 }
 
+#[cfg(feature = "tokio")]
+#[test]
+fn issue577_bounded_routing_schema_avoids_row_group_materialization() {
+    use alopex_core::kv::AsyncKVStore;
+    use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
+    use alopex_core::types::TxnMode;
+    use alopex_sql::catalog::Catalog;
+    use alopex_sql::planner::{LogicalPlan, ResolvedType, TableFunctionKind};
+    use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::RwLock;
+
+    const GROUPS: usize = 256;
+    const COLUMNS: usize = 16;
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(
+        (0..COLUMNS)
+            .map(|column| Field::new(format!("c{column}"), DataType::Int64, false))
+            .collect::<Vec<_>>(),
+    ));
+    let arrays = (0..COLUMNS)
+        .map(|column| {
+            Arc::new(Int64Array::from(
+                (0..GROUPS)
+                    .map(|row| (row * 1000 + column) as i64)
+                    .collect::<Vec<_>>(),
+            )) as _
+        })
+        .collect();
+    let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_size(1)
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let reader = SerializedFileReader::new(File::open(file.path()).unwrap()).unwrap();
+    assert_eq!(reader.num_row_groups(), GROUPS);
+    drop(reader);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(2)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let store =
+            AsyncKVStoreAdapter::from_arc(Arc::new(MemoryKV::new()), TxnMode::ReadWrite);
+        let transaction = store.begin_async().await.unwrap();
+        let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+            Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut bridge = AsyncTxnBridge::with_catalog(transaction, TxnMode::ReadWrite, catalog);
+        bridge.async_execute("SELECT 1").await.unwrap();
+        bridge.set_memory_policy(Some(MemoryPolicy::new(
+            Some(268_435_456),
+            SpillPolicy::FailFast,
+        )));
+        let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+        MAX_REQUEST.with(|maximum| maximum.set(Some(0)));
+        let result = bridge.async_plan_for_routing(&sql).await;
+        let maximum = MAX_REQUEST.with(|maximum| maximum.replace(None).unwrap());
+        let plans = result.unwrap();
+        assert_eq!(plans.len(), 1);
+        let mut plan = &plans[0].plan;
+        while let Some(input) = plan.input() {
+            plan = input;
+        }
+        let LogicalPlan::TableFunction {
+            function: TableFunctionKind::ReadParquet,
+            schema,
+            ..
+        } = plan
+        else {
+            panic!("expected planned Parquet schema");
+        };
+        assert_eq!(schema.len(), COLUMNS);
+        for (column, field) in schema.iter().enumerate() {
+            assert_eq!(field.name, format!("c{column}"));
+            assert_eq!(field.data_type, ResolvedType::BigInt);
+        }
+        // The planner needs schema fields, not a backing array of every row group.
+        let group_backing =
+            GROUPS * std::mem::size_of::<parquet::file::metadata::RowGroupMetaData>();
+        println!(
+            "routing_schema groups={GROUPS} columns={COLUMNS} maximum_request={maximum} row_group_backing={group_backing}"
+        );
+        assert!(
+            maximum < group_backing,
+            "schema planning materialized row-group-sized metadata"
+        );
+    });
+}
+
+#[test]
+fn issue577_schema_projection_keeps_row_group_decode_validation() {
+    let file = fixture(false);
+    let (result, _) = execute_observed_after_planning(&file, || {
+        let footer = rewritten_metadata_footer(&file, |footer| {
+            footer.row_groups[0].columns.clear();
+        });
+        replace_footer(&file, &footer);
+    });
+    assert!(matches!(result, Err(ExecutorError::BulkLoad(_))));
+}
+
 #[test]
 fn issue577_planning_resource_error_preserves_kind_and_code() {
     use alopex_sql::SqlError;

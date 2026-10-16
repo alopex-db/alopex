@@ -23,6 +23,7 @@ use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_fi
 
 mod pages;
 mod preflight;
+mod schema;
 use preflight::{check_footer, check_pages};
 
 const MAX_READ_PARQUET_ROWS: u64 = 100_000;
@@ -236,12 +237,18 @@ pub(crate) fn parquet_schema_with_read_options(
             .as_ref()
             .is_some_and(|footer| !footer.has_arrow_schema),
     );
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new_with_options(file, options).map_err(|error| {
-            ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
-        })?;
-    builder
-        .schema()
+    let schema = match (limit, footer.as_ref()) {
+        (Some(limit), Some(footer)) if footer.row_groups.is_some() => {
+            schema::read(&mut file, footer, limit)?
+        }
+        _ => ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
+            .map_err(|error| {
+                ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
+            })?
+            .schema()
+            .clone(),
+    };
+    schema
         .fields()
         .iter()
         .map(|field| {

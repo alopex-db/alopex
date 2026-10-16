@@ -130,7 +130,7 @@ fn invalid_page() -> ExecutorError {
     ExecutorError::BulkLoad("invalid parquet page or chunk declaration".into())
 }
 
-fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
+pub(super) fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
     if bytes > limit {
         return Err(ExecutorError::ResourceExhausted {
             message: format!(
@@ -143,8 +143,10 @@ fn check_declared_bytes(bytes: u64, limit: u64) -> Result<()> {
 
 pub(super) struct FooterReservation {
     pub(super) start: u64,
+    pub(super) size: u64,
     pub(super) retained_metadata_bytes: u64,
     pub(super) has_arrow_schema: bool,
+    pub(super) row_groups: Option<std::ops::Range<u64>>,
 }
 
 pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservation> {
@@ -165,8 +167,38 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         .ok_or_else(invalid_page)?;
     file.seek(SeekFrom::Start(start))
         .map_err(parquet_io_error)?;
+    let mut reservation = check_metadata(
+        BufReader::with_capacity(size.min(4096) as usize, (&mut *file).take(size)),
+        size,
+        limit,
+    )?;
+    reservation.start = start;
+    if let Some(groups) = &mut reservation.row_groups {
+        groups.start += start;
+        groups.end += start;
+    }
+    file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
+    Ok(reservation)
+}
+
+pub(super) fn check_schema_projection(bytes: &[u8], limit: u64) -> Result<bool> {
+    let size = bytes.len() as u64;
+    check_declared_bytes(size, limit)?;
+    let reservation = check_metadata(
+        BufReader::with_capacity(0, std::io::Cursor::new(bytes).take(size)),
+        size,
+        limit,
+    )?;
+    Ok(reservation.has_arrow_schema)
+}
+
+fn check_metadata<R: Read>(
+    input: BufReader<std::io::Take<R>>,
+    size: u64,
+    limit: u64,
+) -> Result<FooterReservation> {
     let mut footer = CompactHeader {
-        input: BufReader::with_capacity(size.min(4096) as usize, (&mut *file).take(size)),
+        input,
         maximum: limit,
         decoded_bytes: size,
         retained_key_values: 0,
@@ -183,7 +215,7 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         + arc_bytes::<parquet::arrow::FieldLevels>()
         + 2 * arc_bytes::<arrow_schema::Schema>();
     footer.charge_metadata(roots as u64, "RetainedMetadata")?;
-    footer.metadata_fields(0, "FileMetaData")?;
+    let row_groups = footer.metadata_fields(0, "FileMetaData")?;
     if footer
         .schema_path
         .iter()
@@ -210,11 +242,12 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         .ok_or_else(invalid_page)?;
     check_declared_bytes(retained_metadata_bytes, limit)?;
     drop(footer);
-    file.seek(SeekFrom::Start(0)).map_err(parquet_io_error)?;
     Ok(FooterReservation {
-        start,
+        start: 0,
+        size,
         retained_metadata_bytes,
         has_arrow_schema,
+        row_groups: row_groups.map(|(begin, end)| size - begin..size - end),
     })
 }
 
@@ -399,7 +432,7 @@ pub(super) fn read_page_header_bytes(
         arrow_schema: None,
         file_key_values: 0,
     };
-    typed.metadata_fields(0, "PageHeader")?;
+    let _ = typed.metadata_fields(0, "PageHeader")?;
     if typed.remaining() != 0 {
         return Err(invalid_page());
     }
@@ -805,7 +838,7 @@ impl<R: Read> CompactHeader<R> {
         i16::try_from(id).map_err(|_| invalid_page())
     }
 
-    fn metadata_fields(&mut self, depth: usize, context: &str) -> Result<()> {
+    fn metadata_fields(&mut self, depth: usize, context: &str) -> Result<Option<(u64, u64)>> {
         if depth > 32 {
             return Err(invalid_page());
         }
@@ -815,6 +848,8 @@ impl<R: Read> CompactHeader<R> {
         let mut schema_field_id = None;
         let mut arrow_key = false;
         let mut metadata_value = None;
+        let mut row_groups = None;
+        let mut row_groups_seen = false;
         loop {
             let field = self.byte()?;
             if field == 0 {
@@ -829,7 +864,7 @@ impl<R: Read> CompactHeader<R> {
                     self.arrow_schema = metadata_value;
                     self.has_arrow_schema = true;
                 }
-                return Ok(());
+                return Ok(row_groups);
             }
             id = self.field_id(field, id)?;
             let kind = field & 15;
@@ -838,6 +873,7 @@ impl<R: Read> CompactHeader<R> {
             if kind != expected && !(expected == 1 && kind == 2) {
                 return Err(invalid_page());
             }
+            let begin = self.remaining();
             // Compact field booleans carry their value in the field tag.
             if context == "SchemaElement" && id == 4 {
                 schema_name = Some(self.metadata_binary("", false)?.0);
@@ -859,6 +895,15 @@ impl<R: Read> CompactHeader<R> {
                     child
                 };
                 self.metadata_value(kind, depth, child, width, element)?;
+            }
+            if context == "FileMetaData" && id == 4 {
+                // Repeated fields retain the ordinary decoder's last-value semantics.
+                row_groups = if row_groups_seen {
+                    None
+                } else {
+                    Some((begin, self.remaining()))
+                };
+                row_groups_seen = true;
             }
         }
     }
@@ -948,7 +993,9 @@ impl<R: Read> CompactHeader<R> {
                     }
                 }
             }
-            12 => self.metadata_fields(depth + 1, context)?,
+            12 => {
+                let _ = self.metadata_fields(depth + 1, context)?;
+            }
             _ => return Err(invalid_page()),
         }
         Ok(())
