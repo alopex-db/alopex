@@ -374,6 +374,7 @@ pub(crate) fn read_parquet_with_plan(
     Ok(rows)
 }
 
+#[cold]
 fn parquet_io_error(error: std::io::Error) -> ExecutorError {
     ExecutorError::BulkLoad(format!("failed to inspect parquet: {error}"))
 }

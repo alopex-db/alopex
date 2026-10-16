@@ -863,7 +863,7 @@ impl<R: Read> CompactHeader<R> {
     }
 
     // Keep I/O and its error formatting out of buffered scalar reads.
-    #[inline(never)]
+    #[inline]
     fn read_byte(&mut self) -> Result<u8> {
         let mut byte = [0];
         self.input.read_exact(&mut byte).map_err(parquet_io_error)?;
