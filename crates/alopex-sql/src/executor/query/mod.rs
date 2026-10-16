@@ -1089,6 +1089,14 @@ fn build_iterator_pipeline_with_outer<
         LogicalPlan::Project { input, projection } => {
             let input_result =
                 execute_query_result_with_context(txn, catalog, *input, outer, memory, context)?;
+            if let Projection::All(names) = &projection
+                && names.iter().map(String::as_str).eq(input_result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str()))
+            {
+                return Ok(materialize_query_result(input_result));
+            }
             let (mut input_iter, _input_projection, schema) =
                 materialize_query_result(input_result);
             let mut rows = Vec::new();

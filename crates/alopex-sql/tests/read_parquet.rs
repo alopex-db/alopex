@@ -125,6 +125,112 @@ fn issue577_primitive_and_text_rows_preserve_nulls_across_batches() {
 }
 
 #[test]
+fn issue577_identity_projection_preserves_schema_and_nonidentity_fallback() {
+    use alopex_sql::planner::logical_plan::LogicalPlan;
+    use alopex_sql::planner::typed_expr::Projection;
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("label", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![Some(7), None, Some(-1)])),
+            Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+        ],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let source = format!("read_parquet('{}')", file.path().display());
+    let sql = format!("SELECT * FROM {source}");
+    let baseline = run(&mut executor, &catalog, &sql).unwrap().unwrap();
+    assert_eq!(
+        baseline.rows,
+        vec![
+            vec![SqlValue::BigInt(7), SqlValue::Text("a".into())],
+            vec![SqlValue::Null, SqlValue::Text("b".into())],
+            vec![SqlValue::BigInt(-1), SqlValue::Null],
+        ]
+    );
+    for (query, names, rows) in [
+        (
+            format!("SELECT * FROM (SELECT * FROM {source}) AS nested"),
+            ["id", "label"],
+            baseline.rows.clone(),
+        ),
+        (
+            format!("SELECT * FROM (SELECT id AS item, label AS body FROM {source}) AS nested"),
+            ["item", "body"],
+            baseline.rows.clone(),
+        ),
+        (
+            format!("SELECT * FROM (SELECT * FROM {source} WHERE id > 100) AS nested"),
+            ["id", "label"],
+            Vec::new(),
+        ),
+    ] {
+        let result = run(&mut executor, &catalog, &query).unwrap().unwrap();
+        let mut columns = baseline.columns.clone();
+        for (column, name) in columns.iter_mut().zip(names) {
+            column.name = name.into();
+        }
+        assert_eq!(result.columns, columns);
+        assert_eq!(result.rows, rows);
+    }
+
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let input = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    for (names, indices) in [
+        (vec!["renamed_id", "renamed_label"], vec![0, 1]),
+        (vec!["label"], vec![1]),
+    ] {
+        let plan = LogicalPlan::Project {
+            input: Box::new(input.clone()),
+            projection: Projection::All(names.iter().map(|name| (*name).into()).collect()),
+        };
+        let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+            panic!("expected rows");
+        };
+        let expected_columns = names
+            .iter()
+            .zip(&indices)
+            .map(|(name, index)| {
+                let mut column = baseline.columns[*index].clone();
+                column.name = (*name).into();
+                column
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result.columns, expected_columns);
+        assert_eq!(
+            result.rows,
+            baseline
+                .rows
+                .iter()
+                .map(|row| {
+                    indices
+                        .iter()
+                        .map(|index| row[*index].clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    let invalid = LogicalPlan::Project {
+        input: Box::new(input),
+        projection: Projection::All(vec!["missing".into()]),
+    };
+    assert!(
+        matches!(executor.execute(invalid), Err(ExecutorError::ColumnNotFound(name)) if name == "missing")
+    );
+}
+
+#[test]
 fn parquet_columnar_bigint_boundaries_preserve_exact_rows() {
     // Deliberately unsorted; every expected value/comparison stays in native i64.
     let values = [
