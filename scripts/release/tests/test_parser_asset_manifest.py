@@ -91,6 +91,28 @@ def python_executable(path: Path, source: str) -> None:
     path.chmod(0o755)
 
 
+def retrying_rm_executable(
+    path: Path, marker: Path, build_root: Path, real_rm: str
+) -> None:
+    # Keep the failure injector in MSYS: a native Python subprocess can cause
+    # a new rm runtime to mount the build-owned TEMP as /tmp and refuse deletion.
+    path.write_bytes(
+        (
+            "#!/bin/sh\n"
+            "last=''\n"
+            'for argument do last="$argument"; done\n'
+            'if [ "${last##*/}" = ' + shlex.quote(build_root.name) + " ] && "
+            "[ ! -e " + shlex.quote(marker.as_posix()) + " ]; then\n"
+            "  : > " + shlex.quote(marker.as_posix()) + "\n"
+            "  printf '%s\\n' 'rm: Directory not empty' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            "exec " + shlex.quote(Path(real_rm).as_posix()) + ' "$@"\n'
+        ).encode("utf-8")
+    )
+    path.chmod(0o755)
+
+
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
     with path.open("wb") as raw:
         with gzip.GzipFile(
@@ -415,6 +437,13 @@ print(matches[0])
         )
 
         environment = os.environ.copy()
+        if platform.system() == "Windows":
+            # BASH is the actual shell, bypassing Git's launcher PATH setup.
+            # Use its MSYS tools before native Windows coreutils: /tmp in the
+            # build script must retain Git Bash's path semantics.
+            environment["PATH"] = (
+                f"{Path(BASH).parent}{os.pathsep}{environment['PATH']}"
+            )
         environment.update(
             {
                 "ALOPEX_NIM_BIN": str(fake_nim),
@@ -954,6 +983,25 @@ print(matches[0])
         self.assertNotIn('${npeg_resolved}/src', text)
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
+    @unittest.skipUnless(os.name == "nt", "requires native Windows path aliases")
+    def test_native_compiler_path_expands_windows_short_alias(self) -> None:
+        bash = Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe"
+        self.assertTrue(bash.is_file(), "Git Bash is required for the Windows builder")
+        directory = self.root / "long compiler cache directory"
+        directory.mkdir()
+        source = BUILD_SCRIPT.read_text(encoding="utf-8")
+        function = source.split("to_native_path() {", 1)[1].split("\n}\n", 1)[0]
+        script = "to_native_path() {" + function + "\n}\n" + (
+            'set -euo pipefail\nRUNNER_IS_WINDOWS=1\n'
+            'short="$(cygpath -w -s "$1")"\n'
+            'to_native_path "$short"\n'
+        )
+        result = subprocess.run(
+            [str(bash), "-c", script, "compiler-path-test", str(directory)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip().lower(), str(directory.resolve()).lower())
+
     def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
         build_root = self.native_build_root()
         marker = self.root / "cleanup-failed-once"
@@ -963,21 +1011,7 @@ print(matches[0])
         real_rm = shutil.which("rm", path=environment["PATH"])
         self.assertIsNotNone(real_rm, "host rm is required by the build script")
         fake_rm = fake_bin / "rm"
-        python_executable(
-            fake_rm,
-            f"""
-from pathlib import Path
-import subprocess
-import sys
-
-marker = Path({str(marker)!r})
-if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
-    marker.touch()
-    print("rm: Directory not empty", file=sys.stderr)
-    raise SystemExit(1)
-raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
-""",
-        )
+        retrying_rm_executable(fake_rm, marker, build_root, str(real_rm))
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
 
         result = self.run_build_script(environment, self.root / "cleanup-retry")
@@ -1082,21 +1116,7 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
         real_rm = shutil.which("rm", path=environment["PATH"])
         self.assertIsNotNone(real_rm, "host rm is required by the build script")
         fake_rm = fake_bin / "rm"
-        python_executable(
-            fake_rm,
-            f"""
-from pathlib import Path
-import subprocess
-import sys
-
-marker = Path({str(cleanup_marker)!r})
-if Path(sys.argv[-1]).name == {build_root.name!r} and not marker.exists():
-    marker.touch()
-    print("rm: Directory not empty", file=sys.stderr)
-    raise SystemExit(1)
-raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
-""",
-        )
+        retrying_rm_executable(fake_rm, cleanup_marker, build_root, str(real_rm))
 
         output_dir = self.root / "explicit-python-output"
         output_dir.mkdir()

@@ -298,6 +298,7 @@ jobs:
             python scripts/release/verify_wheel_contents.py "$wheel" \
               --expected-library-path alopex/native/libalopex_sql_parser.dylib \
             --expected-library-sha256 "$library_sha" --expected-contract-version 0.27.0
+            python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
           done
       - name: Exercise macOS wheel vector and streaming APIs
         shell: bash
@@ -305,9 +306,10 @@ jobs:
           set -euo pipefail
           smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
           python -m venv "${smoke_venv}"
-          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
+          "${smoke_venv}/bin/python" -m pip install pytest numpy==2.2.1
           "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
           "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
+          "${smoke_venv}/bin/python" -m pytest -q crates/alopex-py/tests/test_sql.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
