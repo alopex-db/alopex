@@ -178,6 +178,7 @@ fn validate_arrow_field(field: arrow_ipc::Field<'_>) -> Result<()> {
     Ok(())
 }
 
+#[cold]
 fn invalid_page() -> ExecutorError {
     ExecutorError::BulkLoad("invalid parquet page or chunk declaration".into())
 }
@@ -885,6 +886,7 @@ impl<R: Read> CompactHeader<R> {
         Ok(())
     }
 
+    #[inline]
     fn varint(&mut self) -> Result<u64> {
         let mut value = 0_u64;
         for shift in (0..70).step_by(7) {
@@ -905,6 +907,7 @@ impl<R: Read> CompactHeader<R> {
         Ok(((value >> 1) as i64) ^ -((value & 1) as i64))
     }
 
+    #[inline]
     fn field_id(&mut self, field: u8, previous: i16) -> Result<i16> {
         let id = if field >> 4 == 0 {
             self.integer()?
@@ -1219,6 +1222,7 @@ impl<R: Read> CompactHeader<R> {
 }
 
 // Field and slot types follow the pinned Parquet format decoder to keep both readers aligned.
+#[inline]
 fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataContext, usize, u8)> {
     Some(match (context, id) {
         (MetadataContext::PageHeader, 1..=4) => (5, MetadataContext::Unknown, 0, 0),
