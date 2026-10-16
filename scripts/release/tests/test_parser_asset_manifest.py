@@ -9,7 +9,6 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import platform
 import shutil
 import subprocess
@@ -18,8 +17,8 @@ import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
@@ -945,6 +944,19 @@ print(matches[0])
         )
         system_python.chmod(0o755)
 
+        checksum_marker = self.root / "path-checksum-invoked"
+        if platform.system() == "Darwin":
+            for name in ("sha256sum", "shasum"):
+                incompatible_checksum = fake_bin / name
+                incompatible_checksum.write_text(
+                    f"#!{sys.executable}\n"
+                    "from pathlib import Path\n"
+                    f"Path({str(checksum_marker)!r}).write_text('invoked')\n"
+                    "raise SystemExit(126)\n",
+                    encoding="utf-8",
+                )
+                incompatible_checksum.chmod(0o755)
+
         selected_python = self.root / "selected-python"
         selected_python.write_text(
             f"#!{sys.executable}\n"
@@ -1019,6 +1031,7 @@ print(matches[0])
         self.assertEqual(invocations[0], f"- {REPOSITORY_ROOT / 'Cargo.toml'}")
         self.assertTrue(invocations[1].startswith(f"{MANIFEST_TOOL} verify-inputs "))
         self.assertEqual(len(invocations), 2)
+        self.assertFalse(checksum_marker.exists(), "incompatible checksum tool was invoked")
 
     def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
         if self.native_target() != "x86_64-unknown-linux-gnu":

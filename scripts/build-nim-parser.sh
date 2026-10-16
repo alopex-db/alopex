@@ -684,7 +684,13 @@ write_identity_sidecars() (
   checksum_tmp="${output_dir}/.SHA256SUMS.$$"
   trap 'rm -f -- "${contract_tmp}" "${checksum_tmp}"' EXIT
 
-  if command -v sha256sum >/dev/null 2>&1; then
+  # PATH may contain x86-only checksum tools on an arm64 macOS host.
+  if [[ "$(uname -s)" == "Darwin" && -x /usr/bin/shasum ]]; then
+    output_sha="$(/usr/bin/shasum -a 256 "${OUTPUT}")"
+    output_sha="${output_sha%% *}"
+    static_output_sha="$(/usr/bin/shasum -a 256 "${STATIC_OUTPUT}")"
+    static_output_sha="${static_output_sha%% *}"
+  elif command -v sha256sum >/dev/null 2>&1; then
     output_sha="$(sha256sum "${OUTPUT}")"
     output_sha="${output_sha%% *}"
     static_output_sha="$(sha256sum "${STATIC_OUTPUT}")"
