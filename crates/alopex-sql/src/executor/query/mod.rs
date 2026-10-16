@@ -221,6 +221,11 @@ pub(crate) fn selected_btree_index_name<C: Catalog + ?Sized>(
     plan: &LogicalPlan,
     catalog: &C,
 ) -> Option<String> {
+    // Sort and Limit keep the child's access path; inspect through these
+    // single-input wrappers without attributing one index to a multi-input join.
+    if let LogicalPlan::Sort { input, .. } | LogicalPlan::Limit { input, .. } = plan {
+        return selected_btree_index_name(input, catalog);
+    }
     let LogicalPlan::Filter { input, predicate } = plan else {
         return None;
     };
