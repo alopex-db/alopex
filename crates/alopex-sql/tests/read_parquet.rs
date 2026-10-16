@@ -83,6 +83,9 @@ fn issue577_primitive_and_text_rows_preserve_nulls_across_batches() {
         ],
     )
     .unwrap();
+    let primitive_file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let primitive_batch = batch.project(&[0, 1, 2, 3, 4]).unwrap();
+    write_parquet(&primitive_file, primitive_batch.schema(), primitive_batch);
     write_parquet(&file, schema, batch);
     let expected = values
         .into_iter()
@@ -99,18 +102,25 @@ fn issue577_primitive_and_text_rows_preserve_nulls_across_batches() {
         })
         .collect::<Vec<_>>();
     let catalog = MemoryCatalog::new();
-    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
-    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
-    let plan = Planner::new(&catalog).plan(&statement).unwrap();
     let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
     let mut txn = bridge.begin_write().unwrap();
     let finite = MemoryPolicy::new(Some(16 * 1024 * 1024), SpillPolicy::FailFast);
-    for policy in [None, Some(&finite)] {
-        let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), policy).unwrap();
-        let ExecutionResult::Query(result) = result else {
-            panic!("expected rows");
-        };
-        assert_eq!(result.rows, expected);
+    for (source, width) in [(&primitive_file, 5), (&file, 6)] {
+        let sql = format!("SELECT * FROM read_parquet('{}')", source.path().display());
+        let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+        let plan = Planner::new(&catalog).plan(&statement).unwrap();
+        let expected = expected
+            .iter()
+            .map(|row| row[..width].to_vec())
+            .collect::<Vec<_>>();
+        for policy in [None, Some(&finite)] {
+            let result =
+                execute_query_with_policy(&mut txn, &catalog, plan.clone(), policy).unwrap();
+            let ExecutionResult::Query(result) = result else {
+                panic!("expected rows");
+            };
+            assert_eq!(result.rows, expected);
+        }
     }
 }
 

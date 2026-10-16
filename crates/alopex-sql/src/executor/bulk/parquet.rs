@@ -410,21 +410,67 @@ impl BulkReader for ParquetReader {
         };
 
         let mut rows: Vec<Vec<SqlValue>> = Vec::with_capacity(batch.num_rows());
-        for row_idx in 0..batch.num_rows() {
-            let mut row = Vec::with_capacity(self.schema.fields.len());
-            for col_idx in 0..self.schema.fields.len() {
-                let value = arrow_value_to_sql(
-                    batch.column(col_idx).as_ref(),
-                    batch.schema_ref().field(col_idx).data_type(),
-                    self.target_types
-                        .get(col_idx)
-                        .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
-                    row_idx,
-                    self.row_offset + row_idx,
-                )?;
-                row.push(value);
+        let native_primitives = self.schema.fields.len() == batch.num_columns()
+            && self.target_types.len() == batch.num_columns()
+            && batch
+                .schema_ref()
+                .fields()
+                .iter()
+                .zip(&self.target_types)
+                .all(|(field, target)| {
+                    matches!(
+                        (field.data_type(), target),
+                        (ArrowDataType::Int32, ResolvedType::Integer)
+                            | (ArrowDataType::Int64, ResolvedType::BigInt)
+                            | (ArrowDataType::Float32, ResolvedType::Float)
+                            | (ArrowDataType::Float64, ResolvedType::Double)
+                            | (ArrowDataType::Boolean, ResolvedType::Boolean)
+                    )
+                });
+        if native_primitives {
+            rows.resize_with(batch.num_rows(), || {
+                Vec::with_capacity(self.schema.fields.len())
+            });
+            for (col_idx, field) in batch.schema_ref().fields().iter().enumerate() {
+                macro_rules! append_column {
+                    ($array:ty, $value:ident) => {{
+                        let values = batch
+                            .column(col_idx)
+                            .as_any()
+                            .downcast_ref::<$array>()
+                            .unwrap();
+                        for (row, value) in rows.iter_mut().zip(values.iter()) {
+                            row.push(value.map_or(SqlValue::Null, SqlValue::$value));
+                        }
+                    }};
+                }
+                match field.data_type() {
+                    ArrowDataType::Int32 => append_column!(Int32Array, Integer),
+                    ArrowDataType::Int64 => append_column!(Int64Array, BigInt),
+                    ArrowDataType::Float32 => append_column!(Float32Array, Float),
+                    ArrowDataType::Float64 => append_column!(Float64Array, Double),
+                    ArrowDataType::Boolean => append_column!(BooleanArray, Boolean),
+                    _ => unreachable!("native primitive types were checked before allocation"),
+                }
             }
-            rows.push(row);
+        } else {
+            // Fallible conversions keep the existing row-first error order.
+            for row_idx in 0..batch.num_rows() {
+                let mut row = Vec::with_capacity(self.schema.fields.len());
+                for col_idx in 0..self.schema.fields.len() {
+                    let value = arrow_value_to_sql(
+                        batch.column(col_idx).as_ref(),
+                        batch.schema_ref().field(col_idx).data_type(),
+                        self.target_types
+                            .get(col_idx)
+                            .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
+                        row_idx,
+                        self.row_offset + row_idx,
+                    )?;
+                    row.push(value);
+                }
+                rows.push(row);
+            }
         }
         self.row_offset += batch.num_rows();
 
@@ -462,7 +508,6 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
     }
 }
 
-#[inline]
 fn arrow_value_to_sql(
     array: &dyn Array,
     dt: &ArrowDataType,
@@ -479,35 +524,6 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::Integer(arr.value(row_idx)))
         }
-        (ArrowDataType::Int64, ResolvedType::BigInt) => {
-            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            Ok(SqlValue::BigInt(arr.value(row_idx)))
-        }
-        (ArrowDataType::Float32, ResolvedType::Float) => {
-            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
-            Ok(SqlValue::Float(arr.value(row_idx)))
-        }
-        (ArrowDataType::Float64, ResolvedType::Double) => {
-            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            Ok(SqlValue::Double(arr.value(row_idx)))
-        }
-        (ArrowDataType::Boolean, ResolvedType::Boolean) => {
-            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            Ok(SqlValue::Boolean(arr.value(row_idx)))
-        }
-        _ => arrow_value_to_sql_converted(array, dt, expected, row_idx, source_row_idx),
-    }
-}
-
-// Keep recursive and fallible conversions out of the native scalar call boundary.
-fn arrow_value_to_sql_converted(
-    array: &dyn Array,
-    dt: &ArrowDataType,
-    expected: &ResolvedType,
-    row_idx: usize,
-    source_row_idx: usize,
-) -> Result<SqlValue> {
-    match (dt, expected) {
         (ArrowDataType::Int32, ResolvedType::BigInt) => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::BigInt(arr.value(row_idx) as i64))
@@ -519,6 +535,10 @@ fn arrow_value_to_sql_converted(
         (ArrowDataType::Int32, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
+        }
+        (ArrowDataType::Int64, ResolvedType::BigInt) => {
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Ok(SqlValue::BigInt(arr.value(row_idx)))
         }
         (ArrowDataType::Int64, ResolvedType::Integer) => {
             let value = array
@@ -537,9 +557,21 @@ fn arrow_value_to_sql_converted(
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
         }
+        (ArrowDataType::Float32, ResolvedType::Float) => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            Ok(SqlValue::Float(arr.value(row_idx)))
+        }
         (ArrowDataType::Float32, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
+        }
+        (ArrowDataType::Float64, ResolvedType::Double) => {
+            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            Ok(SqlValue::Double(arr.value(row_idx)))
+        }
+        (ArrowDataType::Boolean, ResolvedType::Boolean) => {
+            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            Ok(SqlValue::Boolean(arr.value(row_idx)))
         }
         (ArrowDataType::Utf8, ResolvedType::Text) => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
