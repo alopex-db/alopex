@@ -297,6 +297,7 @@ pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservat
         BufReader::with_capacity(size.min(4096) as usize, (&mut *file).take(size)),
         size,
         limit,
+        super::input::InputFile::allocation_bytes(),
     )?;
     reservation.start = start;
     if let Some(groups) = &mut reservation.row_groups {
@@ -314,6 +315,7 @@ pub(super) fn check_schema_projection(bytes: &[u8], limit: u64) -> Result<bool> 
         BufReader::with_capacity(0, std::io::Cursor::new(bytes).take(size)),
         size,
         limit,
+        0,
     )?;
     Ok(reservation.has_arrow_schema)
 }
@@ -322,6 +324,7 @@ fn check_metadata<R: Read>(
     input: BufReader<std::io::Take<R>>,
     size: u64,
     limit: u64,
+    reader_bytes: usize,
 ) -> Result<FooterReservation> {
     let mut footer = CompactHeader {
         input,
@@ -339,7 +342,8 @@ fn check_metadata<R: Read>(
     let roots = arc_bytes::<parquet::file::metadata::ParquetMetaData>()
         + arc_bytes::<SchemaDescriptor>()
         + arc_bytes::<parquet::arrow::FieldLevels>()
-        + 2 * arc_bytes::<arrow_schema::Schema>();
+        + 2 * arc_bytes::<arrow_schema::Schema>()
+        + reader_bytes;
     footer.charge_metadata(roots as u64, MetadataContext::RetainedMetadata)?;
     let row_groups = footer.metadata_fields(0, MetadataContext::FileMetaData)?;
     if footer

@@ -21,6 +21,7 @@ use crate::storage::SqlValue;
 
 use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_file};
 
+mod input;
 mod pages;
 mod preflight;
 mod schema;
@@ -60,7 +61,7 @@ impl ParquetReader {
         let footer = limit
             .map(|limit| check_footer(&mut file, limit))
             .transpose()?;
-        let input = file.try_clone().map_err(parquet_io_error)?;
+        let input = input::InputFile::from(file.try_clone().map_err(parquet_io_error)?);
         // SQL exposes fields and rows; ordinary root KV need not be cloned into Arrow Schema.
         let options = ArrowReaderOptions::new().with_skip_arrow_metadata(
             footer

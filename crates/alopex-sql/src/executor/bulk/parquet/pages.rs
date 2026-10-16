@@ -14,6 +14,8 @@ use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::serialized_reader::SerializedPageReader;
 
+use super::input::InputFile;
+
 mod bounded;
 
 pub(super) fn reader(
@@ -41,7 +43,7 @@ pub(super) fn reader(
         Some(schema.fields()),
     )?;
     let groups = FileRowGroups {
-        file: Arc::new(file),
+        file: Arc::new(InputFile::from(file)),
         metadata,
         num_rows,
         limit,
@@ -56,7 +58,7 @@ pub(super) fn reader(
 }
 
 struct FileRowGroups {
-    file: Arc<File>,
+    file: Arc<InputFile>,
     metadata: Arc<ParquetMetaData>,
     num_rows: usize,
     limit: u64,
@@ -85,7 +87,7 @@ impl RowGroups for FileRowGroups {
 }
 
 struct ColumnChunks {
-    file: Arc<File>,
+    file: Arc<InputFile>,
     metadata: Arc<ParquetMetaData>,
     column: usize,
     next_group: usize,
@@ -132,7 +134,7 @@ impl Iterator for ColumnChunks {
                     | parquet::basic::Compression::BROTLI(_)
             ) {
                 Box::new(bounded::BoundedPages::new(
-                    Arc::clone(&self.file),
+                    Arc::clone(self.file.raw_file()),
                     column,
                     group.num_rows() as usize,
                     locations,
@@ -519,7 +521,7 @@ mod tests {
         let metadata = Arc::clone(builder.metadata());
         assert!(metadata.offset_index().is_some());
         let groups = FileRowGroups {
-            file: Arc::new(input.try_clone().unwrap()),
+            file: Arc::new(InputFile::from(input.try_clone().unwrap())),
             metadata: Arc::clone(&metadata),
             num_rows: 4,
             limit,
