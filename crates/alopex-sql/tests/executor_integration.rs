@@ -11,6 +11,9 @@ use std::sync::{Arc, RwLock};
 #[path = "support/btree_read_counts.rs"]
 mod btree_read_counts;
 
+#[path = "support/integer_primary_key_boundaries.rs"]
+mod integer_primary_key_boundaries;
+
 fn create_executor() -> (
     Executor<MemoryKV, MemoryCatalog>,
     Arc<RwLock<MemoryCatalog>>,
@@ -916,7 +919,7 @@ fn btree_same_type_boundaries_preserve_scan_comparison_semantics() {
             ResolvedType::BigInt,
             vec!["9007199254740992", "9007199254740993", "9007199254740994"],
             "9007199254740992",
-            2,
+            1,
         ),
         (ResolvedType::Text, vec!["a", "a\0b", "b"], "a", 1),
     ] {
@@ -1021,6 +1024,97 @@ fn btree_same_type_boundaries_preserve_scan_comparison_semantics() {
                 panic!("expected plan text")
             };
             assert_eq!(explain.contains("IndexScan"), uses_index, "{explain}");
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_text_btree_comparisons_match_scan_and_report_safe_access_paths() {
+    use alopex_sql::storage::SqlValue;
+    use alopex_sql::{AlopexDialect, Parser, planner::Planner};
+
+    let (mut executor, catalog) = create_executor();
+    let mut execute = |sql: &str| {
+        let mut result = None;
+        for statement in Parser::parse_sql(&AlopexDialect, sql).expect("parse SQL") {
+            let plan = Planner::new(&*catalog.read().unwrap())
+                .plan(&statement)
+                .expect("plan SQL");
+            result = Some(executor.execute(plan).expect("execute SQL"));
+        }
+        result.expect("at least one statement")
+    };
+    execute(
+        "CREATE TABLE text_items (id INT PRIMARY KEY, label TEXT);
+         INSERT INTO text_items VALUES (1, 'c'), (2, 'b'), (3, 'a'), (4, 'b'), (5, NULL);",
+    );
+    // Independent expected IDs cover equality, both bounds, duplicate keys,
+    // NULL exclusion, and literal-on-the-left comparisons through the SQL parser.
+    // TEXT key encoding does not preserve SQL ordering for every string (for
+    // example, embedded NULs), so only equality may use the index.
+    let cases: [(&str, &[i32], bool); 10] = [
+        ("label = 'b'", &[2, 4], true),
+        ("label > 'b'", &[1], false),
+        ("label >= 'b'", &[1, 2, 4], false),
+        ("label < 'b'", &[3], false),
+        ("label <= 'b'", &[2, 3, 4], false),
+        ("'b' = label", &[2, 4], true),
+        ("'b' < label", &[1], false),
+        ("'b' <= label", &[1, 2, 4], false),
+        ("'b' > label", &[3], false),
+        ("'b' >= label", &[2, 3, 4], false),
+    ];
+    let mut unindexed = Vec::new();
+    for indexed in [false, true] {
+        if indexed {
+            execute("CREATE INDEX idx_text_items_label ON text_items (label)");
+        }
+        for (position, (predicate, expected, indexable)) in cases.iter().enumerate() {
+            let uses_index = indexed && *indexable;
+            let query = format!("SELECT id FROM text_items WHERE {predicate} ORDER BY id LIMIT 10");
+            let ExecutionResult::Query(result) = execute(&query) else {
+                panic!("query result expected");
+            };
+            let expected_rows = expected
+                .iter()
+                .map(|id| vec![SqlValue::Integer(*id)])
+                .collect::<Vec<_>>();
+            assert_eq!(result.rows, expected_rows, "indexed={indexed}, {predicate}");
+            if indexed {
+                assert_eq!(result.rows, unindexed[position], "{predicate}");
+            } else {
+                unindexed.push(result.rows);
+            }
+            let ExecutionResult::Query(plan) = execute(&format!("EXPLAIN {query}")) else {
+                panic!("EXPLAIN result expected");
+            };
+            let SqlValue::Text(plan) = &plan.rows[0][0] else {
+                panic!("text plan expected");
+            };
+            assert_eq!(
+                plan.contains("IndexScan index=idx_text_items_label"),
+                uses_index,
+                "indexed={indexed}, {predicate}: {plan}"
+            );
+            let ExecutionResult::Query(plan) = execute(&format!("EXPLAIN (FORMAT JSON) {query}"))
+            else {
+                panic!("JSON EXPLAIN result expected");
+            };
+            let SqlValue::Text(plan) = &plan.rows[0][0] else {
+                panic!("JSON plan expected");
+            };
+            let plan: serde_json::Value = serde_json::from_str(plan).unwrap();
+            let access_path = &plan["physical_plan"]["access_path"];
+            if uses_index {
+                assert_eq!(access_path["node"], "IndexScan", "{predicate}: {plan}");
+                assert_eq!(
+                    access_path["index"], "idx_text_items_label",
+                    "{predicate}: {plan}"
+                );
+            } else {
+                assert!(access_path.is_null(), "{predicate}: {plan}");
+            }
         }
     }
 }
