@@ -132,8 +132,96 @@ fn btree_index_answers_equality_and_range_filters() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-#[ignore = "the performance workflow runs this fixed 4k/7-sample case"]
+fn sql_text_btree_ranges_match_unindexed_results_and_report_index_scan() {
+    use alopex_sql::storage::SqlValue;
+    use alopex_sql::{AlopexDialect, Parser, planner::Planner};
+
+    let (mut executor, catalog) = create_executor();
+    let mut execute = |sql: &str| {
+        let mut result = None;
+        for statement in Parser::parse_sql(&AlopexDialect, sql).expect("parse SQL") {
+            let plan = Planner::new(&*catalog.read().unwrap())
+                .plan(&statement)
+                .expect("plan SQL");
+            result = Some(executor.execute(plan).expect("execute SQL"));
+        }
+        result.expect("at least one statement")
+    };
+    execute(
+        "CREATE TABLE text_items (id INT PRIMARY KEY, label TEXT);
+         INSERT INTO text_items VALUES (1, 'c'), (2, 'b'), (3, 'a'), (4, 'b'), (5, NULL);",
+    );
+    // Independent expected IDs cover equality, both bounds, duplicate keys,
+    // NULL exclusion, and literal-on-the-left comparisons through the SQL parser.
+    let cases: [(&str, &[i32]); 10] = [
+        ("label = 'b'", &[2, 4]),
+        ("label > 'b'", &[1]),
+        ("label >= 'b'", &[1, 2, 4]),
+        ("label < 'b'", &[3]),
+        ("label <= 'b'", &[2, 3, 4]),
+        ("'b' = label", &[2, 4]),
+        ("'b' < label", &[1]),
+        ("'b' <= label", &[1, 2, 4]),
+        ("'b' > label", &[3]),
+        ("'b' >= label", &[2, 3, 4]),
+    ];
+    let mut unindexed = Vec::new();
+    for indexed in [false, true] {
+        if indexed {
+            execute("CREATE INDEX idx_text_items_label ON text_items (label)");
+        }
+        for (position, (predicate, expected)) in cases.iter().enumerate() {
+            let query = format!("SELECT id FROM text_items WHERE {predicate} ORDER BY id LIMIT 10");
+            let ExecutionResult::Query(result) = execute(&query) else {
+                panic!("query result expected");
+            };
+            let expected_rows = expected
+                .iter()
+                .map(|id| vec![SqlValue::Integer(*id)])
+                .collect::<Vec<_>>();
+            assert_eq!(result.rows, expected_rows, "indexed={indexed}, {predicate}");
+            if indexed {
+                assert_eq!(result.rows, unindexed[position], "{predicate}");
+            } else {
+                unindexed.push(result.rows);
+            }
+            let ExecutionResult::Query(plan) = execute(&format!("EXPLAIN {query}")) else {
+                panic!("EXPLAIN result expected");
+            };
+            let SqlValue::Text(plan) = &plan.rows[0][0] else {
+                panic!("text plan expected");
+            };
+            assert_eq!(
+                plan.contains("IndexScan index=idx_text_items_label"),
+                indexed,
+                "indexed={indexed}, {predicate}: {plan}"
+            );
+            let ExecutionResult::Query(plan) = execute(&format!("EXPLAIN (FORMAT JSON) {query}"))
+            else {
+                panic!("JSON EXPLAIN result expected");
+            };
+            let SqlValue::Text(plan) = &plan.rows[0][0] else {
+                panic!("JSON plan expected");
+            };
+            let plan: serde_json::Value = serde_json::from_str(plan).unwrap();
+            let access_path = &plan["physical_plan"]["access_path"];
+            if indexed {
+                assert_eq!(access_path["node"], "IndexScan", "{predicate}: {plan}");
+                assert_eq!(
+                    access_path["index"], "idx_text_items_label",
+                    "{predicate}: {plan}"
+                );
+            } else {
+                assert!(access_path.is_null(), "{predicate}: {plan}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual fixed 4k/7-sample measurement; requires ALOPEX_BTREE_MEASUREMENT_OUTPUT"]
 fn btree_access_path_measurement() {
     const ROWS: i32 = 4_000;
     const SAMPLES: usize = 7;
