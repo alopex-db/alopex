@@ -30,6 +30,7 @@ futures = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3.8"
 criterion = { workspace = true }
 rand = { workspace = true }
