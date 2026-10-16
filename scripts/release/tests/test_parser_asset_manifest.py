@@ -944,6 +944,8 @@ raise SystemExit(subprocess.call([{str(real_rm)!r}, *sys.argv[1:]]))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("package content does not match the locked identity", result.stderr)
         self.assertTrue(marker.exists(), "cleanup failure was not exercised")
+        self.assertNotIn("failed to remove invocation-owned build root", result.stderr)
+        self.assertNotIn("failed to remove invocation-owned build lock", result.stderr)
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
         library_name = TARGET_LIBRARIES[self.native_target()]
