@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Behavior tests for deterministic Nim parser target archives."""
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from scripts.release.tests.host_tools import git_bash
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
 BUILD_SCRIPT = REPOSITORY_ROOT / "scripts/build-nim-parser.sh"
@@ -31,13 +32,7 @@ NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-dual-library-v2"
 # Git's bin/bash.exe launcher prepends system tools to PATH when given a script,
 # bypassing the injected rm fixture. Use the actual shell for failure injection.
-BASH = (
-    subprocess.check_output(
-        ["bash", "-c", "cygpath -w /usr/bin/bash.exe"], text=True
-    ).strip()
-    if platform.system() == "Windows"
-    else "bash"
-)
+BASH = git_bash()
 TARGET_LIBRARIES = {
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
@@ -114,23 +109,25 @@ def retrying_rm_executable(
 
 
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
-    with path.open("wb") as raw:
-        with gzip.GzipFile(
+    with (
+        path.open("wb") as raw,
+        gzip.GzipFile(
             filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-        ) as compressed:
-            with tarfile.open(
-                fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
-            ) as archive:
-                for name, content in members:
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(content)
-                    info.mode = 0o644
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(content))
+        ) as compressed,
+        tarfile.open(
+            fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
+        ) as archive,
+    ):
+        for name, content in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
 
 
 class ParserAssetManifestTests(unittest.TestCase):
@@ -177,7 +174,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             'version = "0.6.0"\n', encoding="utf-8"
         )
         (self.source / "src/alopex_sql_parser.nim").write_text(
-            "proc parserVersion(): string = \"0.27.0\"\n", encoding="utf-8"
+            'proc parserVersion(): string = "0.27.0"\n', encoding="utf-8"
         )
 
         self.nim = self.root / "nim"
@@ -189,9 +186,7 @@ class ParserAssetManifestTests(unittest.TestCase):
         self.msgpack = self.root / "msgpack4nim-0.4.4"
         self.npeg.mkdir()
         self.msgpack.mkdir()
-        (self.npeg / "npeg.nimble").write_text(
-            'version = "1.3.0"\n', encoding="utf-8"
-        )
+        (self.npeg / "npeg.nimble").write_text('version = "1.3.0"\n', encoding="utf-8")
         (self.npeg / "npeg.nim").write_bytes(b"npeg-content")
         canonical_json(
             self.npeg / "nimblemeta.json",
@@ -202,9 +197,7 @@ class ParserAssetManifestTests(unittest.TestCase):
                     "files": ["/npeg.nimble", "/npeg.nim"],
                     "specialVersions": ["1.3.0"],
                     "url": "",
-                    "vcsRevision": MANIFEST.REQUIRED_PACKAGES["npeg"][
-                        "vcs_revision"
-                    ],
+                    "vcsRevision": MANIFEST.REQUIRED_PACKAGES["npeg"]["vcs_revision"],
                 },
                 "version": 1,
             },
@@ -270,7 +263,6 @@ class ParserAssetManifestTests(unittest.TestCase):
         MANIFEST.REQUIRED_PACKAGES = self.original_required_packages
         MANIFEST.REQUIRED_REGISTRY_METADATA = self.original_required_metadata
         self.temp.cleanup()
-
 
     def run_cli(
         self, *arguments: str, expected: int = 0
@@ -367,16 +359,12 @@ class ParserAssetManifestTests(unittest.TestCase):
             expected=expected,
         )
 
-    def build_script_fixture(
-        self, *, nimble_version: str = "0.22.3"
-    ) -> dict[str, str]:
+    def build_script_fixture(self, *, nimble_version: str = "0.22.3") -> dict[str, str]:
         seed = self.root / "seed"
         packages = seed / "pkgs2"
         packages.mkdir(parents=True)
         shutil.copytree(self.npeg, packages / "npeg-1.3.0-fixture")
-        shutil.copytree(
-            self.msgpack, packages / "msgpack4nim-0.4.4-fixture"
-        )
+        shutil.copytree(self.msgpack, packages / "msgpack4nim-0.4.4-fixture")
         for name, path in self.metadata.items():
             shutil.copy2(path, seed / name)
 
@@ -491,22 +479,16 @@ print(matches[0])
 
         record = json.loads(second_record.read_text(encoding="utf-8"))
         self.assertEqual(record["schema"], "alopex-parser-target-record-v2")
-        self.assertEqual(
-            record["alopex_version"], MANIFEST.REQUIRED_ALOPEX_VERSION
-        )
+        self.assertEqual(record["alopex_version"], MANIFEST.REQUIRED_ALOPEX_VERSION)
         self.assertEqual(record["contract_version"], "0.27.0")
         self.assertEqual(record["target"], "x86_64-unknown-linux-gnu")
-        self.assertEqual(
-            record["builder"]["compile"]["profile"], BUILD_PROFILE
-        )
+        self.assertEqual(record["builder"]["compile"]["profile"], BUILD_PROFILE)
         self.assertEqual(
             record["builder"]["compile"]["dependency_path_policy"],
             "fixed-/tmp-target-qualified-v1",
         )
         packer = record["builder"]["packer"]
-        self.assertEqual(
-            packer["build_script"]["binary_sha256"], sha256(BUILD_SCRIPT)
-        )
+        self.assertEqual(packer["build_script"]["binary_sha256"], sha256(BUILD_SCRIPT))
         self.assertEqual(
             packer["manifest_tool"]["binary_sha256"], sha256(MANIFEST_TOOL)
         )
@@ -602,9 +584,7 @@ print(matches[0])
 
         (self.npeg / "npeg.nim").write_bytes(b"same-version-content-drift")
         third_dir = self.root / "package-drift"
-        third_record, third_archive = self.pack(
-            output=third_dir, expected=2
-        )
+        third_record, third_archive = self.pack(output=third_dir, expected=2)
         self.assertFalse(third_record.exists())
         self.assertFalse(third_archive.exists())
 
@@ -615,9 +595,7 @@ print(matches[0])
             {"fixture": "packages_official.json", "revision": 2},
         )
         fourth_dir = self.root / "metadata-drift"
-        fourth_record, fourth_archive = self.pack(
-            output=fourth_dir, expected=2
-        )
+        fourth_record, fourth_archive = self.pack(output=fourth_dir, expected=2)
         self.assertFalse(fourth_record.exists())
         self.assertFalse(fourth_archive.exists())
 
@@ -625,9 +603,7 @@ print(matches[0])
         first_record, _ = self.pack()
         first = json.loads(first_record.read_text(encoding="utf-8"))
 
-        (self.source / "CONTRACT_VERSION").write_text(
-            "0.6.0\n", encoding="utf-8"
-        )
+        (self.source / "CONTRACT_VERSION").write_text("0.6.0\n", encoding="utf-8")
         (self.source / "SHA256SUMS").write_text(
             f"{'0' * 64}  libalopex_sql_parser.so\n", encoding="utf-8"
         )
@@ -790,11 +766,13 @@ print(matches[0])
             self.verify_target(record_path)
 
         oversized_tar = b"\0" * (16 * 1024 * 1024 + 1)
-        with archive_path.open("wb") as raw:
-            with gzip.GzipFile(
+        with (
+            archive_path.open("wb") as raw,
+            gzip.GzipFile(
                 filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-            ) as compressed:
-                compressed.write(oversized_tar)
+            ) as compressed,
+        ):
+            compressed.write(oversized_tar)
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["archive"]["size"] = archive_path.stat().st_size
         record["archive"]["sha256"] = sha256(archive_path)
@@ -821,9 +799,7 @@ print(matches[0])
         (self.source / "src/alopex_sql_parser.nim").write_bytes(
             b"different-reviewed-source"
         )
-        mac_record, _ = self.pack(
-            target="x86_64-apple-darwin", output=self.output
-        )
+        mac_record, _ = self.pack(target="x86_64-apple-darwin", output=self.output)
         inconsistent = self.run_cli(
             "assemble-manifest",
             "--record",
@@ -973,14 +949,12 @@ print(matches[0])
             text,
         )
         self.assertNotIn("mktemp -d", text)
-        self.assertIn(
-            'npeg_source_arg="$(to_native_path "${npeg_resolved}")"', text
-        )
+        self.assertIn('npeg_source_arg="$(to_native_path "${npeg_resolved}")"', text)
         self.assertIn(
             'msgpack_source_arg="$(to_native_path "${msgpack_resolved}")"',
             text,
         )
-        self.assertNotIn('${npeg_resolved}/src', text)
+        self.assertNotIn("${npeg_resolved}/src", text)
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
     @unittest.skipUnless(os.name == "nt", "requires native Windows path aliases")
@@ -991,18 +965,29 @@ print(matches[0])
         directory.mkdir()
         source = BUILD_SCRIPT.read_text(encoding="utf-8")
         function = source.split("to_native_path() {", 1)[1].split("\n}\n", 1)[0]
-        script = "to_native_path() {" + function + "\n}\n" + (
-            'set -euo pipefail\nRUNNER_IS_WINDOWS=1\n'
-            'short="$(cygpath -w -s "$1")"\n'
-            'to_native_path "$short"\n'
+        script = (
+            "to_native_path() {"
+            + function
+            + "\n}\n"
+            + (
+                "set -euo pipefail\nRUNNER_IS_WINDOWS=1\n"
+                'short="$(cygpath -w -s "$1")"\n'
+                'to_native_path "$short"\n'
+            )
         )
         result = subprocess.run(
             [str(bash), "-c", script, "compiler-path-test", str(directory)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
-        self.assertEqual(result.stdout.strip().lower(), str(directory.resolve()).lower())
+        self.assertEqual(
+            result.stdout.strip().lower(), str(directory.resolve()).lower()
+        )
 
-    def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
+    def test_build_script_retries_transient_cleanup_failure_after_preflight_error(
+        self,
+    ) -> None:
         build_root = self.native_build_root()
         marker = self.root / "cleanup-failed-once"
         fake_bin = self.root / "fake-cleanup-bin"
@@ -1017,7 +1002,9 @@ print(matches[0])
         result = self.run_build_script(environment, self.root / "cleanup-retry")
 
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("package content does not match the locked identity", result.stderr)
+        self.assertIn(
+            "package content does not match the locked identity", result.stderr
+        )
         self.assertTrue(marker.exists(), "cleanup failure was not exercised")
         self.assertNotIn("failed to remove invocation-owned build root", result.stderr)
         self.assertNotIn("failed to remove invocation-owned build lock", result.stderr)
@@ -1049,7 +1036,9 @@ print(matches[0])
         }
         self.assertEqual(after, before, "test build must not mutate worktree output")
 
-    def test_build_script_uses_explicit_python_and_retries_success_cleanup(self) -> None:
+    def test_build_script_uses_explicit_python_and_retries_success_cleanup(
+        self,
+    ) -> None:
         fake_bin = self.root / "system-python-bin"
         fake_bin.mkdir()
         system_python = fake_bin / "python3"
@@ -1175,12 +1164,15 @@ print(matches[0])
         ]
         self.assertEqual(invocations[0][0], "-")
         self.assertEqual(
-            Path(invocations[0][1]).resolve(), (REPOSITORY_ROOT / "Cargo.toml").resolve()
+            Path(invocations[0][1]).resolve(),
+            (REPOSITORY_ROOT / "Cargo.toml").resolve(),
         )
         self.assertEqual(Path(invocations[1][0]).resolve(), MANIFEST_TOOL.resolve())
         self.assertEqual(invocations[1][1], "verify-inputs")
         self.assertEqual(len(invocations), 2)
-        self.assertFalse(checksum_marker.exists(), "incompatible checksum tool was invoked")
+        self.assertFalse(
+            checksum_marker.exists(), "incompatible checksum tool was invoked"
+        )
 
     def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
         if self.native_target() != "x86_64-unknown-linux-gnu":
@@ -1243,9 +1235,7 @@ raise SystemExit(43)
         docker.chmod(0o755)
         isolated_dir = self.root / "docker-output"
         isolated_dir.mkdir()
-        isolated_output = isolated_dir / TARGET_LIBRARIES[
-            "x86_64-unknown-linux-gnu"
-        ]
+        isolated_output = isolated_dir / TARGET_LIBRARIES["x86_64-unknown-linux-gnu"]
         repo_outputs = [
             PARSER_DIR / "libalopex_sql_parser.so",
             PARSER_DIR / "libalopex_sql_parser.a",
@@ -1277,7 +1267,9 @@ raise SystemExit(43)
             check=False,
         )
 
-        docker_arguments = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        docker_arguments = (
+            capture.read_text(encoding="utf-8") if capture.exists() else ""
+        )
         self.assertEqual(
             result.returncode,
             0,
@@ -1315,7 +1307,9 @@ raise SystemExit(43)
         }
         self.assertEqual(after, before, "docker build must not mutate worktree output")
 
-    def test_docker_build_rejects_a_non_linux_target_before_output_cleanup(self) -> None:
+    def test_docker_build_rejects_a_non_linux_target_before_output_cleanup(
+        self,
+    ) -> None:
         fake_bin = self.root / "rejecting-docker-bin"
         fake_bin.mkdir()
         docker = fake_bin / "docker"
@@ -1385,18 +1379,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         cls.workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     def test_publish_does_not_create_a_synthetic_git_commit(self) -> None:
-        self.assertNotIn("git add \"${NIM_SQL_PARSER_DIR}/vendor\"", self.workflow)
+        self.assertNotIn('git add "${NIM_SQL_PARSER_DIR}/vendor"', self.workflow)
         self.assertNotIn("Commit vendored libraries locally", self.workflow)
         self.assertNotIn("cargo publish", self.workflow)
         self.assertIn("package_candidate_crates.py", self.workflow)
         self.assertIn("git archive", self.workflow)
 
-    def test_release_build_verifies_archive_and_native_smoke_before_upload(self) -> None:
+    def test_release_build_verifies_archive_and_native_smoke_before_upload(
+        self,
+    ) -> None:
         verify = self.workflow.index("verify-target")
         upload = self.workflow.index("uses: actions/upload-artifact@v4")
         self.assertLess(verify, upload)
         self.assertIn("native smoke", self.workflow.lower())
-        self.assertIn('envelope="artifacts/parser-assets-v${version}.json"', self.workflow)
+        self.assertIn(
+            'envelope="artifacts/parser-assets-v${version}.json"', self.workflow
+        )
 
     def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
         self.assertIn("git rev-parse", self.workflow)
@@ -1406,11 +1404,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("release-envelope", self.workflow)
 
-    def test_python_release_consumes_public_core_assets_without_nim_rebuild(self) -> None:
+    def test_python_release_consumes_public_core_assets_without_nim_rebuild(
+        self,
+    ) -> None:
         workflow = PY_RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('echo "CORE_TAG=${core_tag:-v${version}}"', workflow)
         self.assertIn("seq 1 30", workflow)
-        self.assertIn('parser-assets-v${ALOPEX_VERSION}.json', workflow)
+        self.assertIn("parser-assets-v${ALOPEX_VERSION}.json", workflow)
         self.assertIn("parser_asset_manifest.py verify-manifest", workflow)
         self.assertNotIn("setup-nim-action", workflow)
         self.assertNotIn("nimble lib", workflow)
