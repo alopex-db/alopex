@@ -10,6 +10,26 @@ proc parseErrorMessage(sql: string): string =
   except ParseError as error:
     result = error.msg
 
+suite "Decimal literal precision":
+  test "integer trailing zeros count toward every supported precision":
+    for width in 1 .. 38:
+      for prefix in ["", "-", "+", "000", "-000"]:
+        let literal = prefix & "1" & repeat('0', width - 1)
+        let expr = parseSql("SELECT DECIMAL '" & literal & "'").children[0].children[0]
+        check expr.kind == nkCast
+        check expr.children[1].children[1].intVal == width
+        check expr.children[1].children[2].intVal == 0
+    expect ParseError:
+      discard parseSql("SELECT DECIMAL '1" & repeat('0', 38) & "'")
+
+  test "only leading whole zeros are excluded from precision":
+    for (literal, precision, scale) in [
+        ("10.00", 4, 2), ("00010.00", 4, 2), ("-1000.0", 5, 1),
+        ("0.000", 3, 3), ("000", 1, 0), ("1.000", 4, 3)]:
+      let expr = parseSql("SELECT DECIMAL '" & literal & "'").children[0].children[0]
+      check expr.children[1].children[1].intVal == precision
+      check expr.children[1].children[2].intVal == scale
+
 # ---------------------------------------------------------------------------
 # Tokenizer tests
 # ---------------------------------------------------------------------------

@@ -566,7 +566,7 @@ proc parsePrimary(p: var Parser): SqlNode =
     let dot = unsigned.find('.')
     let scale = if dot < 0: 0 else: unsigned.len - dot - 1
     let whole = if dot < 0: unsigned else: unsigned[0 ..< dot]
-    let precision = max(1, whole.strip(chars = {'0'}).len + scale)
+    let precision = max(1, whole.strip(trailing = false, chars = {'0'}).len + scale)
     if precision > 38 or scale > precision:
       p.error("DECIMAL literal precision must be between 1 and 38")
     let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
