@@ -550,3 +550,97 @@ mod tests {
         assert_eq!(actual, vec![batch]);
     }
 }
+
+pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
+    let semantic =
+        |key: &str| key == parquet::arrow::PARQUET_FIELD_ID_META_KEY || key.starts_with("ARROW:");
+    if schema
+        .fields()
+        .iter()
+        .all(|field| field.metadata().keys().all(|key| semantic(key)))
+    {
+        return schema;
+    }
+    // SQL exposes names/types/values; the decoder only needs semantic field metadata.
+    let Schema { fields, metadata } = Arc::unwrap_or_clone(schema);
+    let owned_fields = fields.to_vec();
+    drop(fields);
+    let fields = owned_fields
+        .into_iter()
+        .map(|field| {
+            if field.metadata().keys().all(|key| semantic(key)) {
+                return field;
+            }
+            let mut field = Arc::unwrap_or_clone(field);
+            let metadata = field
+                .metadata()
+                .iter()
+                .filter(|(key, _)| semantic(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            field.set_metadata(metadata);
+            Arc::new(field)
+        })
+        .collect::<Vec<_>>();
+    Arc::new(Schema::new_with_metadata(fields, metadata))
+}
+
+#[cfg(test)]
+mod schema_hint_tests {
+    use super::reader_schema_hint;
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn hint_preserves_semantics_without_copying_ordinary_field_metadata() {
+        let metadata = HashMap::from([
+            ("description".into(), "x".repeat(4096)),
+            (PARQUET_FIELD_ID_META_KEY.into(), "7".into()),
+            ("ARROW:extension:name".into(), "example".into()),
+            ("ARROW:extension:metadata".into(), "{}".into()),
+        ]);
+        let field = Field::new_dict(
+            "value",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+            17,
+            true,
+        )
+        .with_metadata(metadata);
+        let root = HashMap::from([("root".into(), "retained".into())]);
+        let source = Arc::new(Schema::new_with_metadata(vec![field], root));
+        let hint = reader_schema_hint(Arc::clone(&source));
+        let field = hint.field(0);
+        assert_eq!(field.name(), source.field(0).name());
+        assert_eq!(field.data_type(), source.field(0).data_type());
+        assert_eq!(field.is_nullable(), source.field(0).is_nullable());
+        assert_eq!(field.dict_id(), Some(17));
+        assert_eq!(field.dict_is_ordered(), Some(true));
+        assert_eq!(hint.metadata(), source.metadata());
+        assert_eq!(
+            field.metadata().get(PARQUET_FIELD_ID_META_KEY).unwrap(),
+            "7"
+        );
+        assert_eq!(
+            field.metadata().get("ARROW:extension:name").unwrap(),
+            "example"
+        );
+        assert_eq!(
+            field.metadata().get("ARROW:extension:metadata").unwrap(),
+            "{}"
+        );
+        assert!(!field.metadata().contains_key("description"));
+        assert_eq!(source.field(0).metadata()["description"].len(), 4096);
+
+        let plain = Arc::new(Schema::new(vec![Field::new(
+            "plain",
+            DataType::Int64,
+            false,
+        )]));
+        assert!(Arc::ptr_eq(&plain, &reader_schema_hint(Arc::clone(&plain))));
+        let owned = reader_schema_hint(source);
+        assert_eq!(owned, hint);
+    }
+}

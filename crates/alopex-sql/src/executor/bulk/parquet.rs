@@ -190,6 +190,7 @@ impl ParquetReader {
             let metadata = builder.metadata().clone();
             let schema = builder.schema().clone();
             drop(builder);
+            let schema = pages::reader_schema_hint(schema);
             pages::reader(
                 file,
                 metadata,
