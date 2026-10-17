@@ -10,6 +10,7 @@
 //! `PreparedStatement` の両方が同じ変換規則を使う。
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
 };
@@ -90,13 +91,26 @@ fn native_binding(native: SqlValue) -> PyPreparedBinding {
     PyPreparedBinding::Native(native)
 }
 
+// Like DuckDB's import cache, retain the Decimal class rather than importing
+// and resolving it for every bound value and every result cell.
+fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static DECIMAL_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(DECIMAL_TYPE
+        .get_or_try_init(py, || {
+            PyModule::import(py, "decimal")?
+                .getattr("Decimal")
+                .map(Bound::unbind)
+        })?
+        .bind(py))
+}
+
 /// Apply the same finite, precision, and scale limits to native and rendered Decimals.
 fn decimal_value(
     value: &Bound<'_, PyAny>,
     index: usize,
-) -> PyResult<Option<(DecimalValue, String)>> {
-    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
-    if !value.is_instance(&decimal_type)? {
+) -> PyResult<Option<(DecimalValue, Option<String>)>> {
+    let decimal_type = decimal_type(value.py())?;
+    if !value.is_instance(decimal_type)? {
         return Ok(None);
     }
     let invalid = || {
@@ -104,6 +118,14 @@ fn decimal_value(
             "params[{index}]: Decimal は有限で精度・小数桁数が 38 以下である必要があります"
         )))
     };
+    // Decimal.__str__ uses scientific notation for extreme exponents, so this
+    // path never expands 1E+1000000 into a million-character fixed-point value.
+    // Keep subclass hooks on the compatibility path below.
+    if value.get_type().is(decimal_type) {
+        let text = value.str()?;
+        let decimal = decimal_from_python_text(&text.to_cow()?).ok_or_else(invalid)?;
+        return Ok(Some((decimal, None)));
+    }
     if !value.call_method0("is_finite")?.extract::<bool>()? {
         return Err(invalid());
     }
@@ -127,7 +149,67 @@ fn decimal_value(
         .call_method1("__format__", ("f",))?
         .extract::<String>()?;
     let decimal = DecimalValue::parse(&rendered).ok_or_else(invalid)?;
-    Ok(Some((decimal, rendered)))
+    Ok(Some((decimal, Some(rendered))))
+}
+
+/// Parse the canonical text of an exact Python Decimal without Python tuple or
+/// formatting calls. Preserve the original coefficient's precision and exponent
+/// limits, including trailing zeros and zero with an out-of-range exponent.
+fn decimal_from_python_text(text: &str) -> Option<DecimalValue> {
+    let (mantissa, exponent) = match text.split_once(['E', 'e']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, mantissa),
+    };
+    let mut coefficient = 0_i128;
+    let mut fraction = None::<i64>;
+    let mut precision = 0_u32;
+    let mut seen_digit = false;
+    for byte in unsigned.bytes() {
+        if byte == b'.' && fraction.is_none() {
+            fraction = Some(0);
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        seen_digit = true;
+        let digit = i128::from(byte - b'0');
+        if coefficient != 0 || digit != 0 {
+            precision += 1;
+            if precision > 38 {
+                return None;
+            }
+        }
+        coefficient = coefficient.checked_mul(10)?.checked_add(digit)?;
+        if let Some(fraction) = fraction.as_mut() {
+            *fraction = fraction.checked_add(1)?;
+        }
+    }
+    if !seen_digit {
+        return None;
+    }
+    let exponent = exponent.checked_sub(fraction.unwrap_or(0))?;
+    if !(-38..=38).contains(&exponent) {
+        return None;
+    }
+    let scale = if exponent >= 0 {
+        let exponent = u32::try_from(exponent).ok()?;
+        if precision.max(1) + exponent > 38 {
+            return None;
+        }
+        coefficient = coefficient.checked_mul(10_i128.checked_pow(exponent)?)?;
+        0
+    } else {
+        u8::try_from(-exponent).ok()?
+    };
+    Some(DecimalValue::new(
+        if negative { -coefficient } else { coefficient },
+        scale,
+    ))
 }
 
 pub(crate) fn render_prepared_binding(
@@ -464,7 +546,8 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
-    if let Some((_, text)) = decimal_value(value, index)? {
+    if let Some((decimal, text)) = decimal_value(value, index)? {
+        let text = text.unwrap_or_else(|| decimal.to_string());
         return Ok(format!("DECIMAL {}", escape_text(&text)));
     }
     if value.is_instance_of::<PyString>() {
@@ -654,8 +737,7 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
             value.set_item("microseconds", micros)?;
             value.into_py_any(py)
         }
-        SqlValue::Decimal(value) => PyModule::import(py, "decimal")?
-            .getattr("Decimal")?
+        SqlValue::Decimal(value) => decimal_type(py)?
             .call1((value.to_string(),))?
             .unbind()
             .into_py_any(py),
@@ -744,6 +826,30 @@ mod tests {
                 assert!(super::prepared_binding(&value, 0).is_err(), "{text}");
             }
         });
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decimal_text_matches_python_tuple_reference(
+            digits in "[0-9]{1,40}",
+            exponent in -45_i64..46,
+            negative in proptest::prelude::any::<bool>(),
+        ) {
+            with_py(|py| {
+                let decimal = PyModule::import(py, "decimal").unwrap().getattr("Decimal").unwrap();
+                let value = decimal.call1((format!("{}{digits}E{exponent}", if negative { "-" } else { "" }),)).unwrap();
+                let parts = value.call_method0("as_tuple").unwrap();
+                let exponent = parts.getattr("exponent").unwrap().extract::<i64>().unwrap();
+                let digits = parts.getattr("digits").unwrap().len().unwrap();
+                let expected = if (-38..=38).contains(&exponent) && digits as i64 + exponent.max(0) <= 38 {
+                    DecimalValue::parse(&value.call_method1("__format__", ("f",)).unwrap().extract::<String>().unwrap())
+                } else {
+                    None
+                };
+                let text = value.str().unwrap().extract::<String>().unwrap();
+                assert_eq!(super::decimal_from_python_text(&text), expected, "{text}");
+            });
+        }
     }
 
     #[test]

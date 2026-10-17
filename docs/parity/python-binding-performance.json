@@ -1,0 +1,36 @@
+{
+  "scope": "Python Decimal and native binding performance repair",
+  "references": [
+    {
+      "project": "duckdb/duckdb-python",
+      "version": "v1.5.0",
+      "commit": "87e7928a47eced6b72d6fc95c2d860f769390038",
+      "source": [
+        "src/duckdb_py/native/python_objects.cpp#PyDecimal",
+        "src/duckdb_py/native/python_conversion.cpp#HandleObjectInternal",
+        "src/duckdb_py/include/duckdb_python/import_cache/modules/decimal_module.hpp"
+      ],
+      "test": "tests/fast/types/test_decimal.py#TestDecimal.test_decimal",
+      "relationship": "diverged",
+      "application": "Reuse cached Decimal type and exact coefficient/scale conversion; remove duplicate parsing in Alopex native execution. Exact built-in Decimal uses bounded canonical-text parsing; subclass hooks retain legacy path.",
+      "intentional_difference": "Alopex rejects non-finite values and precision/scale outside 38; DuckDB may fall back to floating point. No float fallback added.",
+      "license": "MIT; consulted implementation, no source or test fixture copied.",
+      "alopex_tests": [
+        "crates/alopex-py/tests/test_sql.py#test_decimal_native_matches_tuple_reference",
+        "crates/alopex-py/tests/test_sql.py#test_decimal_subclass_keeps_formatting_contract",
+        "crates/alopex-py/src/embedded/sql.rs#decimal_text_matches_python_tuple_reference"
+      ],
+      "test_classification": "handwritten-regression; oracle executes Python Decimal tuple and fixed-point formatting, not DuckDB conformance"
+    }
+  ],
+  "verification": {
+    "correctness": "Focused PR checkout based on 5847a511: release extension built successfully; 212 Python SQL/remote tests passed; 4 Rust Decimal tests passed including the independent tuple/format property oracle; fmt, Ruff and all-targets/all-features alopex-py Clippy passed. Benchmark script completed 42000 checked calls as a smoke test; that concurrent-build timing is excluded from performance evidence.",
+    "mutation": "6 selected Decimal parser mutants caught; no survivors in selected set.",
+    "benchmark": "6 fresh processes per arm, 21 measured samples x 1000 checked SQL calls per process, same Python and release profile. Composed candidate before 12.2696255 ms/1000 Decimal calls; repaired 8.215 ms (-33.05%). Integer 10.4202915 -> 6.7164995 ms (-35.54%). This run excludes the rejected FIFO experiment.",
+    "benchmark_scope": "macOS arm64, in-memory SELECT ? AS value round trip; not a released-package or cross-platform qualification.",
+    "evidence": "/private/tmp/alopex-perf-repair-evidence-20261017/decimal-final",
+    "coupling": "Existing database/transaction cycle and shared binding converter retained. Converter impacts native execution, transaction and remote rendering; Python regression suite covers these paths. Static timing, identity, implicit functional and macro/cfg blind spots remain; no new cross-crate dependency.",
+    "measured_source": "02d30d1e20fb914149245f3e23018d6e56f009fa plus this Python patch and early stale-commit check; the in-memory SQL workload does not use the disk commit path. The focused PR targets the Decimal parent branch rather than the full composed candidate.",
+    "reproduce": "Build both arms using the same release profile and PYO3_PYTHON. Alternate six fresh processes per arm with PYTHONPATH=<package-parent> python crates/alopex-py/tests/benchmarks/bench_native_parameters.py; compare the median of process medians. Run without concurrent builds."
+  }
+}
