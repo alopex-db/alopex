@@ -454,6 +454,20 @@ fn execute_query_result_with_context<
     memory: Option<&MemoryPolicy>,
     context: &QueryExecutionContext,
 ) -> Result<QueryResult> {
+    let plan = match plan {
+        LogicalPlan::Project {
+            input,
+            projection: Projection::All(names),
+        } if matches!(input.as_ref(), LogicalPlan::TableFunction {
+            function: crate::planner::TableFunctionKind::ReadParquet,
+            schema,
+            ..
+        } if names.iter().map(String::as_str).eq(schema.iter().map(|column| column.name.as_str()))) =>
+        {
+            return execute_query_result_with_context(txn, catalog, *input, outer, memory, context);
+        }
+        plan => plan,
+    };
     let (mut iter, projection, schema) =
         build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer, context)?;
     let mut rows = Vec::new();
