@@ -16,6 +16,15 @@ fn run_sql(
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let mut executor = Executor::new(store, catalog.clone());
+    execute_sql(&mut executor, &catalog, sql);
+    (executor, catalog)
+}
+
+fn execute_sql(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) {
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
     for stmt in stmts {
@@ -25,7 +34,28 @@ fn run_sql(
         };
         let _ = executor.execute(plan).expect("execute");
     }
-    (executor, catalog)
+}
+
+fn explain_text(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    sql: &str,
+) -> String {
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse explain")
+        .pop()
+        .expect("one explain statement");
+    let plan = {
+        let guard = catalog.read().expect("catalog lock");
+        Planner::new(&*guard).plan(&stmt).expect("plan explain")
+    };
+    let ExecutionResult::Query(result) = executor.execute(plan).expect("execute explain") else {
+        panic!("EXPLAIN must return a query result");
+    };
+    let alopex_sql::storage::SqlValue::Text(text) = &result.rows[0][0] else {
+        panic!("EXPLAIN must return text");
+    };
+    text.clone()
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -137,4 +167,79 @@ fn hnsw_index_accepts_search_ef_default() {
             .get_option("ef_search"),
         Some("256")
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explain_hnsw_replaces_logical_sort_and_scan_nodes() {
+    const ROWS: u64 = 8_193;
+    const DIMENSIONS: usize = 128;
+    const BATCH_SIZE: u64 = 256;
+
+    let (mut executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2));");
+    let vector = format!(
+        "[{}]",
+        std::iter::repeat_n("0.0", DIMENSIONS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS);
+        let values = (start..=end)
+            .map(|id| format!("({id}, {vector})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql(
+            &mut executor,
+            &catalog,
+            &format!("INSERT INTO items (id, embedding) VALUES {values};"),
+        );
+    }
+    execute_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    );
+
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
+    let indexed = explain_text(&mut executor, &catalog, &format!("EXPLAIN {query}"));
+    assert!(
+        indexed.contains("Limit table=items\n  HnswSearch index=idx_items_embedding k=10\n"),
+        "{indexed}"
+    );
+    assert!(!indexed.contains("Sort table=items"), "{indexed}");
+    assert!(!indexed.contains("Scan table=items"), "{indexed}");
+
+    let filtered = explain_text(
+        &mut executor,
+        &catalog,
+        &format!(
+            "EXPLAIN SELECT id FROM items WHERE id > 0 ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+        ),
+    );
+    assert!(
+        filtered.contains(
+            "Limit table=items\n  Filter table=items\n    HnswSearchPostFilter index=idx_items_embedding k=10 fallback=ExactKnnScan\n"
+        ),
+        "{filtered}"
+    );
+    assert!(!filtered.contains("Sort table=items"), "{filtered}");
+    assert!(!filtered.contains("Scan table=items"), "{filtered}");
+
+    let analyzed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(
+        analyzed.contains("Limit table=items\n  HnswSearch index=idx_items_embedding k=10\n"),
+        "{analyzed}"
+    );
+    assert!(analyzed.contains("elapsed_ns="), "{analyzed}");
+    assert!(analyzed.contains("rows="), "{analyzed}");
+
+    execute_sql(&mut executor, &catalog, "DROP INDEX idx_items_embedding;");
+    let exact = explain_text(&mut executor, &catalog, &format!("EXPLAIN {query}"));
+    assert!(exact.starts_with("ExactKnnScan\n"), "{exact}");
+    assert!(exact.contains("Sort table=items"), "{exact}");
+    assert!(exact.contains("Scan table=items"), "{exact}");
 }
