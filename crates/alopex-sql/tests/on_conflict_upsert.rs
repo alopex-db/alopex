@@ -658,3 +658,90 @@ fn unique_index_creation_reports_existing_duplicate_and_rolls_back() {
         ]
     );
 }
+
+#[test]
+fn explicit_conflict_target_requires_a_unique_key_even_without_conflicting_rows() {
+    use alopex_sql::executor::ExecutorError;
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(&mut executor, &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE, qty INT, UNIQUE(id, code), CONSTRAINT positive CHECK(qty > 0)); CREATE INDEX qty_idx ON items(qty);").unwrap();
+    for target in [
+        "(qty)",
+        "(code, qty)",
+        "(code, code)",
+        "ON CONSTRAINT missing",
+        "ON CONSTRAINT positive",
+        "ON CONSTRAINT qty_idx",
+    ] {
+        for action in ["NOTHING", "UPDATE SET qty=EXCLUDED.qty"] {
+            let error = execute_sql_on(
+                &mut executor,
+                &catalog,
+                &format!("INSERT INTO items VALUES (1,'a',10) ON CONFLICT {target} DO {action}"),
+            )
+            .expect_err("invalid target must fail before accepting any row");
+            assert!(
+                matches!(error, ExecutorError::InvalidOperation { .. }),
+                "{target}: {error}"
+            );
+        }
+    }
+    let result = execute_sql_on(&mut executor, &catalog, "SELECT id FROM items").unwrap();
+    let ExecutionResult::Query(result) = &result[0] else {
+        panic!("expected query");
+    };
+    assert!(result.rows.is_empty());
+}
+
+#[test]
+fn named_unique_conflict_uses_its_columns_and_rejects_repeated_updates() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    execute_sql_on(&mut executor, &catalog,
+        "CREATE TABLE items (id INT, code TEXT, region INT, qty INT, CONSTRAINT item_pk PRIMARY KEY(id), CONSTRAINT item_key UNIQUE(code, region)); INSERT INTO items VALUES (1,'a',7,10)").unwrap();
+    let result = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "INSERT INTO items VALUES (2,'a',7,20) ON CONFLICT ON CONSTRAINT item_key DO NOTHING",
+    )
+    .unwrap();
+    assert_eq!(result[0], ExecutionResult::RowsAffected(0));
+    for target in ["ON CONSTRAINT item_key", "(region, code)"] {
+        let result = execute_sql_on(&mut executor, &catalog,
+            &format!("INSERT INTO items VALUES (2,'a',7,20) ON CONFLICT {target} DO UPDATE SET qty=EXCLUDED.qty")).unwrap();
+        assert_eq!(result[0], ExecutionResult::RowsAffected(1));
+        let error = execute_sql_on(&mut executor, &catalog,
+            &format!("INSERT INTO items VALUES (3,'a',7,30),(4,'a',7,40) ON CONFLICT {target} DO UPDATE SET qty=EXCLUDED.qty")).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                alopex_sql::executor::ExecutorError::ConstraintViolation(
+                    alopex_sql::executor::ConstraintViolation::Unique { .. }
+                )
+            ),
+            "{target}: {error}"
+        );
+    }
+    let result = execute_sql_on(&mut executor, &catalog,
+        "INSERT INTO items VALUES (1,'unused',9,20) ON CONFLICT ON CONSTRAINT item_pk DO UPDATE SET qty=EXCLUDED.qty").unwrap();
+    assert_eq!(result[0], ExecutionResult::RowsAffected(1));
+    let result = execute_sql_on(
+        &mut executor,
+        &catalog,
+        "SELECT id,code,region,qty FROM items",
+    )
+    .unwrap();
+    let ExecutionResult::Query(result) = &result[0] else {
+        panic!("expected query");
+    };
+    assert_eq!(
+        result.rows,
+        vec![vec![
+            SqlValue::Integer(1),
+            SqlValue::Text("a".into()),
+            SqlValue::Integer(7),
+            SqlValue::Integer(20)
+        ]]
+    );
+}

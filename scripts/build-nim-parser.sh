@@ -332,6 +332,7 @@ build_host() (
   local python_bin
   local original_status
   local cleanup_status
+  local attempt
   local build_succeeded=0
 
   resolve_host_tools
@@ -357,6 +358,8 @@ build_host() (
   # created by this invocation.
   build_root="/tmp/alopex-nim-parser-v${REQUIRED_ALOPEX_VERSION}-contract-${REQUIRED_CONTRACT_VERSION}-${HOST_TARGET}"
   build_lock="${build_root}.lock"
+  # Called indirectly by the EXIT trap below.
+  # shellcheck disable=SC2329
   cleanup_host_build() {
     original_status=$?
     trap - EXIT
