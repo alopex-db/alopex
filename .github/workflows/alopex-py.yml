@@ -220,11 +220,11 @@ jobs:
         if: ${{ !env.ACT && matrix.numpy_runtime == 'with-numpy' }}
         run: |
           set -euo pipefail
-          runner_temp="$RUNNER_TEMP"
+          release_temp_root="$RUNNER_TEMP"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            runner_temp="$(cygpath -u "$runner_temp")"
+            release_temp_root="$(cygpath -u "$release_temp_root")"
           fi
-          wheel_dir="${runner_temp}/alopex-release-wheel"
+          wheel_dir="${release_temp_root}/alopex-release-wheel"
           mkdir -p "$wheel_dir"
           env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_PROFILE_RELEASE_STRIP \
             maturin build -m crates/alopex-py/Cargo.toml --release --out "$wheel_dir"
@@ -233,7 +233,7 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
           fi
-          smoke_venv="${runner_temp}/alopex-release-wheel-smoke"
+          smoke_venv="${release_temp_root}/alopex-release-wheel-smoke"
           python -m venv "$smoke_venv"
           smoke_python="$smoke_venv/bin/python"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
