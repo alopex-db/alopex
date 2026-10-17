@@ -1,5 +1,5 @@
 import pytest
-from alopex import AlopexError, Database, TxnMode
+from alopex import AlopexError, Database, HnswConfig, Metric, TxnMode
 
 
 @pytest.mark.parametrize("finish", ["commit", "rollback"])
@@ -379,5 +379,208 @@ def test_transaction_sql_control_words_in_data_comments_and_explain_are_allowed(
         assert db.execute_sql("SELECT value FROM items ORDER BY id") == [
             {"value": "SAVEPOINT retry; COMMIT"}, {"value": "ROLLBACK; BEGIN"},
         ]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("finish", ["commit", "rollback"])
+def test_completed_transaction_does_not_keep_database_locked(tmp_path, finish):
+    path = tmp_path / "locked.alopex"
+    db = Database.open(str(path))
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.put(b"key", b"value")
+    getattr(txn, finish)()
+    db.close()
+
+    reopened = Database.open(str(path))
+    try:
+        with reopened.begin(TxnMode.READ_ONLY) as reader:
+            assert reader.get(b"key") == (b"value" if finish == "commit" else None)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT retry",
+        "ROLLBACK TO retry",
+        "RELEASE retry",
+        "-- leading comment\nSAVEPOINT retry",
+        "/* leading comment */ COMMIT",
+        "INSERT INTO items (id) VALUES (99); COMMIT",
+    ],
+)
+def test_transaction_execute_sql_rejects_control_before_any_statement_runs(sql):
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        with pytest.raises(AlopexError, match=r"Transaction\.savepoint\(\)"):
+            txn.execute_sql(sql)
+        assert txn.execute_sql("SELECT id FROM items") == []
+        txn.commit()
+        assert db.execute_sql("SELECT id FROM items") == []
+    finally:
+        db.close()
+
+
+def test_transaction_control_guard_preserves_native_parameter_validation():
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        txn = db.begin(TxnMode.READ_WRITE)
+        with pytest.raises(AlopexError, match=r"Transaction\.savepoint\(\)"):
+            txn.execute_sql("INSERT INTO items VALUES (?); COMMIT", [99])
+        assert txn.execute_sql("SELECT id FROM items") == []
+        assert txn.execute_sql("SELECT ? AS value", ["COMMIT; SAVEPOINT literal"]) == [
+            {"value": "COMMIT; SAVEPOINT literal"}
+        ]
+        txn.commit()
+        assert db.execute_sql("SELECT id FROM items") == []
+    finally:
+        db.close()
+
+
+@pytest.mark.requires_numpy
+def test_nested_hnsw_savepoint_rollback_restores_only_retained_graph():
+    import numpy as np
+
+    db = Database.new()
+    try:
+        db.create_hnsw_index("vec_idx", HnswConfig(2, metric=Metric.L2))
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.upsert_to_hnsw("vec_idx", b"keep", np.array([0.0, 0.0], dtype=np.float32))
+        txn.savepoint("first")
+        txn.upsert_to_hnsw(
+            "vec_idx", b"discard", np.array([1.0, 0.0], dtype=np.float32)
+        )
+        txn.savepoint("second")
+        txn.rollback_to("first")
+        txn.upsert_to_hnsw(
+            "vec_idx", b"discard_again", np.array([2.0, 0.0], dtype=np.float32)
+        )
+        txn.rollback_to("first")
+        txn.release("first")
+        txn.commit()
+
+        results, _ = db.search_hnsw(
+            "vec_idx", np.array([0.0, 0.0], dtype=np.float32), 10
+        )
+        assert [result.key for result in results] == [b"keep"]
+    finally:
+        db.close()
+
+
+@pytest.mark.requires_numpy
+@pytest.mark.parametrize("recover", [False, True])
+def test_failed_hnsw_restore_blocks_commit_or_recovers_from_clean_savepoint(recover):
+    import numpy as np
+
+    db = Database.new()
+    try:
+        db.create_hnsw_index("vec_idx", HnswConfig(2, metric=Metric.L2))
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.upsert_to_hnsw("vec_idx", b"keep", np.array([0.0, 0.0], dtype=np.float32))
+        txn.savepoint("clean")
+        txn.put(b"hnsw:node:vec_idx:0", b"invalid")
+        txn.savepoint("unreadable")
+        txn.upsert_to_hnsw(
+            "vec_idx", b"discard", np.array([1.0, 0.0], dtype=np.float32)
+        )
+        txn.savepoint("discarded_child")
+
+        with pytest.raises(AlopexError):
+            txn.rollback_to("unreadable")
+        with pytest.raises(AlopexError, match="[Ss]avepoint.*not found"):
+            txn.rollback_to("discarded_child")
+        with pytest.raises(AlopexError):
+            txn.execute_sql("SELECT 1")
+        with pytest.raises(AlopexError):
+            txn.savepoint("new")
+        with pytest.raises(AlopexError):
+            txn.release("clean")
+
+        if recover:
+            txn.rollback_to("clean")
+            txn.commit()
+            expected = [b"keep"]
+        else:
+            with pytest.raises(AlopexError):
+                txn.commit()
+            expected = []
+        results, _ = db.search_hnsw(
+            "vec_idx", np.array([0.0, 0.0], dtype=np.float32), 10
+        )
+        assert [result.key for result in results] == expected
+    finally:
+        db.close()
+
+
+@pytest.mark.requires_numpy
+def test_sql_after_direct_hnsw_change_can_drop_index():
+    import numpy as np
+
+    db = Database.new()
+    try:
+        db.execute_sql(
+            "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2)); "
+            "CREATE INDEX vec_idx ON items (embedding) USING HNSW; "
+            "INSERT INTO items VALUES (1, [0.0, 0.0]);"
+        )
+        txn = db.begin(TxnMode.READ_WRITE)
+        txn.upsert_to_hnsw(
+            "vec_idx", (2).to_bytes(8, "big"), np.array([1.0, 0.0], dtype=np.float32)
+        )
+        txn.execute_sql("DROP INDEX vec_idx")
+        txn.commit()
+        with pytest.raises(AlopexError):
+            db.search_hnsw("vec_idx", np.array([0.0, 0.0], dtype=np.float32), 10)
+    finally:
+        db.close()
+
+
+@pytest.mark.requires_numpy
+def test_prepared_decimal_batch_obeys_failed_hnsw_restore_and_recovery():
+    from decimal import Decimal
+
+    import numpy as np
+
+    db = Database.new()
+    try:
+        db.execute_sql("CREATE TABLE amounts (id INTEGER PRIMARY KEY, value DECIMAL(30,2))")
+        db.create_hnsw_index("vec_idx", HnswConfig(2, metric=Metric.L2))
+        txn = db.begin(TxnMode.READ_WRITE)
+        statement = txn.prepare("INSERT INTO amounts VALUES (?, ?)")
+        value = Decimal("12345678901234567.89")
+        statement.bind(1, 1)
+        statement.bind(2, value)
+        txn.upsert_to_hnsw("vec_idx", b"keep", np.array([0.0, 0.0], dtype=np.float32))
+        txn.savepoint("clean")
+        txn.put(b"hnsw:node:vec_idx:0", b"invalid")
+        txn.savepoint("unreadable")
+        with pytest.raises(AlopexError):
+            txn.rollback_to("unreadable")
+        with pytest.raises(AlopexError):
+            statement.execute()
+        with pytest.raises(AlopexError):
+            statement.execute_many([[2, value]])
+        with pytest.raises(AlopexError):
+            txn.execute_many("INSERT INTO amounts VALUES (?, ?)", [[3, value]])
+
+        txn.rollback_to("clean")
+        assert txn.execute_sql("SELECT id FROM amounts") == []
+        assert statement.execute() == 1
+        assert statement.execute_many([[2, value]]) == [1]
+        statement.finalize()
+        txn.commit()
+        assert db.execute_sql("SELECT id, value FROM amounts ORDER BY id") == [
+            {"id": 1, "value": value}, {"id": 2, "value": value}
+        ]
+        results, _ = db.search_hnsw("vec_idx", np.array([0.0, 0.0], dtype=np.float32), 10)
+        assert [result.key for result in results] == [b"keep"]
     finally:
         db.close()
