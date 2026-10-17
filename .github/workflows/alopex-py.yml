@@ -111,10 +111,10 @@ jobs:
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
         run: |
           if [[ -n "${ACT:-}" ]]; then
-            python -m pip install numpy
+            python -m pip install numpy pyarrow
             exit 0
           fi
-          python -m pip install numpy
+          python -m pip install numpy pyarrow
       - name: Install patchelf (Linux)
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
