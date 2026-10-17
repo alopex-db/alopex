@@ -8,16 +8,19 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::storage::{SqlTxn, SqlValue};
 
+use super::QueryExecutionContext;
+
 /// Execute scalar subquery.
 pub fn execute_scalar_subquery<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     subquery: &LogicalPlan,
 ) -> Result<SqlValue> {
-    execute_scalar_subquery_with_outer(txn, catalog, subquery, None)
+    let context = QueryExecutionContext::default();
+    execute_scalar_subquery_with_outer(txn, catalog, subquery, None, &context)
 }
 
-pub(crate) fn execute_scalar_subquery_with_outer<
+fn execute_scalar_subquery_with_outer<
     'txn,
     S: KVStore + 'txn,
     C: Catalog + ?Sized,
@@ -27,8 +30,9 @@ pub(crate) fn execute_scalar_subquery_with_outer<
     catalog: &C,
     subquery: &LogicalPlan,
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<SqlValue> {
-    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer, context)?;
     if rows.len() > 1 {
         return Err(ExecutorError::InvalidOperation {
             operation: "execute_scalar_subquery".into(),
@@ -60,10 +64,11 @@ pub fn execute_in_subquery<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
     subquery: &LogicalPlan,
     negated: bool,
 ) -> Result<SqlValue> {
-    execute_in_subquery_with_outer(txn, catalog, value, subquery, negated, None)
+    let context = QueryExecutionContext::default();
+    execute_in_subquery_with_outer(txn, catalog, value, subquery, negated, None, &context)
 }
 
-pub(crate) fn execute_in_subquery_with_outer<
+fn execute_in_subquery_with_outer<
     'txn,
     S: KVStore + 'txn,
     C: Catalog + ?Sized,
@@ -75,8 +80,9 @@ pub(crate) fn execute_in_subquery_with_outer<
     subquery: &LogicalPlan,
     negated: bool,
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<SqlValue> {
-    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer, context)?;
     let mut unknown = false;
     let matched = semi_join_probe(&rows, |row| {
         let Some(candidate) = row.first() else {
@@ -108,27 +114,24 @@ pub fn execute_exists<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     catalog: &C,
     subquery: &LogicalPlan,
 ) -> Result<bool> {
-    execute_exists_with_outer(txn, catalog, subquery, false, None)
+    let context = QueryExecutionContext::default();
+    execute_exists_with_outer(txn, catalog, subquery, false, None, &context)
 }
 
-pub(crate) fn execute_exists_with_outer<
-    'txn,
-    S: KVStore + 'txn,
-    C: Catalog + ?Sized,
-    T: SqlTxn<'txn, S>,
->(
+fn execute_exists_with_outer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     subquery: &LogicalPlan,
     negated: bool,
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<bool> {
-    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer, context)?;
     let exists = semi_join_probe(&rows, |_| Ok::<bool, ExecutorError>(true))?;
     Ok(if negated { !exists } else { exists })
 }
 
-pub(crate) fn evaluate_expr_with_subqueries<
+pub(super) fn evaluate_expr_with_subqueries<
     'txn,
     S: KVStore + 'txn,
     C: Catalog + ?Sized,
@@ -138,21 +141,30 @@ pub(crate) fn evaluate_expr_with_subqueries<
     catalog: &C,
     expr: &TypedExpr,
     row: &Row,
+    context: &QueryExecutionContext,
 ) -> Result<SqlValue> {
     match &expr.kind {
         TypedExprKind::ScalarSubquery(subquery) => {
-            execute_scalar_subquery_with_outer(txn, catalog, subquery, Some(row))
+            execute_scalar_subquery_with_outer(txn, catalog, subquery, Some(row), context)
         }
         TypedExprKind::InSubquery {
             expr,
             subquery,
             negated,
         } => {
-            let value = evaluate_expr_with_subqueries(txn, catalog, expr, row)?;
-            execute_in_subquery_with_outer(txn, catalog, &value, subquery, *negated, Some(row))
+            let value = evaluate_expr_with_subqueries(txn, catalog, expr, row, context)?;
+            execute_in_subquery_with_outer(
+                txn,
+                catalog,
+                &value,
+                subquery,
+                *negated,
+                Some(row),
+                context,
+            )
         }
         TypedExprKind::Exists { subquery, negated } => {
-            execute_exists_with_outer(txn, catalog, subquery, *negated, Some(row))
+            execute_exists_with_outer(txn, catalog, subquery, *negated, Some(row), context)
                 .map(SqlValue::Boolean)
         }
         TypedExprKind::Quantified {
@@ -161,7 +173,7 @@ pub(crate) fn evaluate_expr_with_subqueries<
             quantifier,
             subquery,
         } => {
-            let value = evaluate_expr_with_subqueries(txn, catalog, expr, row)?;
+            let value = evaluate_expr_with_subqueries(txn, catalog, expr, row, context)?;
             execute_quantified_with_outer(
                 txn,
                 catalog,
@@ -169,13 +181,16 @@ pub(crate) fn evaluate_expr_with_subqueries<
                 *op,
                 *quantifier,
                 subquery,
-                Some(row),
+                SubqueryExecutionInput {
+                    outer: Some(row),
+                    context,
+                },
             )
             .map(SqlValue::Boolean)
         }
         TypedExprKind::BinaryOp { left, op, right } if contains_subquery(expr) => {
-            let left = evaluate_expr_with_subqueries(txn, catalog, left, row)?;
-            let right = evaluate_expr_with_subqueries(txn, catalog, right, row)?;
+            let left = evaluate_expr_with_subqueries(txn, catalog, left, row, context)?;
+            let right = evaluate_expr_with_subqueries(txn, catalog, right, row, context)?;
             crate::executor::evaluator::binary_op::eval_binary_values(op, left, right)
         }
         TypedExprKind::Case {
@@ -185,25 +200,26 @@ pub(crate) fn evaluate_expr_with_subqueries<
         } if contains_subquery(expr) => {
             let operand = operand
                 .as_deref()
-                .map(|operand| evaluate_expr_with_subqueries(txn, catalog, operand, row))
+                .map(|operand| evaluate_expr_with_subqueries(txn, catalog, operand, row, context))
                 .transpose()?;
             for branch in branches {
                 let matched = if let Some(operand) = &operand {
-                    let condition = evaluate_expr_with_subqueries(txn, catalog, &branch.when, row)?;
+                    let condition =
+                        evaluate_expr_with_subqueries(txn, catalog, &branch.when, row, context)?;
                     crate::executor::evaluator::binary_op::eval_binary_values(
                         &crate::ast::expr::BinaryOp::Eq,
                         operand.clone(),
                         condition,
                     )?
                 } else {
-                    evaluate_expr_with_subqueries(txn, catalog, &branch.when, row)?
+                    evaluate_expr_with_subqueries(txn, catalog, &branch.when, row, context)?
                 };
                 if matches!(matched, SqlValue::Boolean(true)) {
-                    return evaluate_expr_with_subqueries(txn, catalog, &branch.then, row);
+                    return evaluate_expr_with_subqueries(txn, catalog, &branch.then, row, context);
                 }
             }
             if let Some(else_expr) = else_expr {
-                evaluate_expr_with_subqueries(txn, catalog, else_expr, row)
+                evaluate_expr_with_subqueries(txn, catalog, else_expr, row, context)
             } else {
                 Ok(SqlValue::Null)
             }
@@ -212,14 +228,14 @@ pub(crate) fn evaluate_expr_with_subqueries<
             expr: inner,
             target_type,
         } if contains_subquery(expr) => {
-            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row)?;
+            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row, context)?;
             crate::executor::evaluator::coerce_value(value, target_type)
         }
         TypedExprKind::TryCast {
             expr: inner,
             target_type,
         } if contains_subquery(expr) => {
-            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row)?;
+            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row, context)?;
             crate::executor::evaluator::try_coerce_value(value, target_type)
         }
         _ => {
@@ -359,6 +375,15 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
     }
 }
 
+/// The outer row and per-query state that a nested execution receives.
+///
+/// Keeping them together makes the evaluator boundary explicit and prevents
+/// a subquery branch from accidentally constructing a default query context.
+struct SubqueryExecutionInput<'outer, 'context> {
+    outer: Option<&'outer Row>,
+    context: &'context QueryExecutionContext,
+}
+
 fn execute_quantified_with_outer<
     'txn,
     S: KVStore + 'txn,
@@ -371,9 +396,15 @@ fn execute_quantified_with_outer<
     op: crate::ast::expr::BinaryOp,
     quantifier: Quantifier,
     subquery: &LogicalPlan,
-    outer: Option<&Row>,
+    execution: SubqueryExecutionInput<'_, '_>,
 ) -> Result<bool> {
-    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let rows = execute_subquery_rows_with_outer(
+        txn,
+        catalog,
+        subquery,
+        execution.outer,
+        execution.context,
+    )?;
     if rows.is_empty() {
         return Ok(matches!(quantifier, Quantifier::All));
     }
@@ -406,20 +437,35 @@ fn execute_subquery_rows_with_outer<
     catalog: &C,
     subquery: &LogicalPlan,
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<Vec<Vec<SqlValue>>> {
     if outer.is_none() {
         let mut cache = materialize_cache();
         return cache.get_or_try_insert_with((), || {
             nested_scan(|| {
-                super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)
-                    .map(|result| result.rows)
+                super::execute_query_result_with_context(
+                    txn,
+                    catalog,
+                    subquery.clone(),
+                    outer,
+                    None,
+                    context,
+                )
+                .map(|result| result.rows)
             })
         });
     }
 
     nested_scan(|| {
-        super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)
-            .map(|result| result.rows)
+        super::execute_query_result_with_context(
+            txn,
+            catalog,
+            subquery.clone(),
+            outer,
+            None,
+            context,
+        )
+        .map(|result| result.rows)
     })
 }
 

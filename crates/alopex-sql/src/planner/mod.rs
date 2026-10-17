@@ -708,6 +708,27 @@ pub fn plan_sql_for_routing<C: Catalog + ?Sized>(
         .collect()
 }
 
+#[cfg(feature = "tokio")]
+pub(crate) fn plan_sql_for_routing_with_copy_security<C: Catalog + ?Sized>(
+    catalog: &C,
+    sql: &str,
+    copy_security: &crate::executor::bulk::CopySecurityConfig,
+) -> Result<Vec<PlannedStatement>, SqlError> {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).map_err(SqlError::from)?;
+    statements
+        .iter()
+        .map(|statement| {
+            let planner = Planner::with_copy_security(catalog, copy_security.clone());
+            let plan = planner.plan(statement).map_err(SqlError::from)?;
+            let routing_input = routing_input_for_plan(statement, &plan).map_err(SqlError::from)?;
+            Ok(PlannedStatement {
+                plan,
+                routing_input,
+            })
+        })
+        .collect()
+}
+
 /// Plan a parsed statement without executing it, returning SQL-owned routing input.
 pub fn plan_statement_for_routing<C: Catalog + ?Sized>(
     catalog: &C,
@@ -1411,6 +1432,7 @@ pub struct Planner<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
     name_resolver: NameResolver<'a, C>,
     type_checker: TypeChecker<'a, C>,
+    copy_security: Option<crate::executor::bulk::CopySecurityConfig>,
 }
 
 impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
@@ -1420,6 +1442,20 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             catalog,
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog),
+            copy_security: None,
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub(crate) fn with_copy_security(
+        catalog: &'a C,
+        copy_security: crate::executor::bulk::CopySecurityConfig,
+    ) -> Self {
+        Self {
+            catalog,
+            name_resolver: NameResolver::new(catalog),
+            type_checker: TypeChecker::new(catalog),
+            copy_security: Some(copy_security),
         }
     }
 
@@ -4057,6 +4093,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ];
                 (typed, schema)
             }
+            TableFunctionKind::ReadParquet => {
+                if args.len() != 1 {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function READ_PARQUET takes exactly 1 argument, found {}",
+                        args.len()
+                    )));
+                }
+                let typed = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+                let TypedExprKind::Literal(Literal::String(path)) = &typed.kind else {
+                    return Err(PlannerError::invalid_expression(
+                        "READ_PARQUET requires a string literal path",
+                    ));
+                };
+                let schema = match &self.copy_security {
+                    Some(config) => {
+                        crate::executor::bulk::parquet_schema_with_security(path, config)
+                    }
+                    None => crate::executor::bulk::parquet_schema(path),
+                }
+                .map_err(|error| PlannerError::invalid_expression(error.to_string()))?
+                .fields
+                .into_iter()
+                .map(|field| {
+                    Ok(ColumnMetadata::new(
+                        field.name.ok_or_else(|| {
+                            PlannerError::invalid_expression("missing parquet field name")
+                        })?,
+                        field.data_type.ok_or_else(|| {
+                            PlannerError::invalid_expression("missing parquet field type")
+                        })?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+                (vec![typed], schema)
+            }
         };
 
         let relation_name = alias
@@ -6078,8 +6149,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         match (source, target) {
             // Integer can be assigned to BigInt, Float, Double
             (Integer, BigInt) | (Integer, Float) | (Integer, Double) => true,
-            // BigInt can be assigned to Float, Double
-            (BigInt, Float) | (BigInt, Double) => true,
+            // BigInt narrowing is checked by assignment evaluation, so a
+            // Parquet INT64 can flow into an INTEGER target.
+            (BigInt, Integer | Float | Double) => true,
             // Float can be assigned to Double
             (Float, Double) => true,
             // A decimal literal is typed DOUBLE, so a FLOAT column needs this
@@ -6334,7 +6406,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         let mut clauses = Vec::with_capacity(stmt.clauses.len());
         for clause in &stmt.clauses {
-            let condition = clause.condition.as_ref().map(&infer).transpose()?;
+            let condition = clause.condition.as_ref().map(infer).transpose()?;
             if let (Some(expression), Some(typed)) = (&clause.condition, &condition)
                 && typed.resolved_type != ResolvedType::Boolean
             {

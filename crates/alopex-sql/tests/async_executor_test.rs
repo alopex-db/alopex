@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+use std::fs::{self, File};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -8,10 +10,15 @@ use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdap
 use alopex_core::kv::memory::MemoryKV;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, MemoryCatalog};
+use alopex_sql::executor::bulk::CopySecurityConfig;
 use alopex_sql::executor::{AsyncExecutor, ExecutionResult};
 use alopex_sql::storage::SqlValue;
-use alopex_sql::storage::async_storage::AsyncTxnBridge;
+use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
+use arrow_array::{Int32Array, RecordBatch};
+use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
+use parquet::arrow::ArrowWriter;
+use tempfile::tempdir;
 
 fn rss_check_enabled() -> bool {
     std::env::var("ALOPEX_ASYNC_RSS_CHECK")
@@ -62,6 +69,94 @@ async fn build_executor() -> (
     let txn = async_store.begin_async().await.expect("begin");
     let bridge = AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
     (AsyncExecutor::new(bridge), async_store)
+}
+
+fn write_int_parquet(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int32Array::from(vec![7]))],
+    )
+    .expect("record batch");
+    let mut writer = ArrowWriter::try_new(File::create(path).expect("parquet file"), schema, None)
+        .expect("parquet writer");
+    writer.write(&batch).expect("parquet batch");
+    writer.close().expect("parquet close");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn read_parquet_honors_copy_allowed_dirs() {
+    let temp = tempdir().expect("tempdir");
+    let allowed_dir = temp.path().join("allowed");
+    fs::create_dir(&allowed_dir).expect("allowed directory");
+    let allowed_file = allowed_dir.join("allowed.parquet");
+    let outside_file = temp.path().join("outside.parquet");
+    write_int_parquet(&allowed_file);
+    write_int_parquet(&outside_file);
+
+    let store = Arc::new(MemoryKV::new());
+    let async_store = Arc::new(AsyncKVStoreAdapter::from_arc(
+        Arc::clone(&store),
+        TxnMode::ReadWrite,
+    ));
+    let catalog = build_catalog();
+    let allowed_sql = format!("SELECT id FROM read_parquet('{}')", allowed_file.display());
+    let outside_sql = format!("SELECT id FROM read_parquet('{}')", outside_file.display());
+
+    let default_txn = async_store.begin_async().await.expect("begin default");
+    let default_bridge =
+        AsyncTxnBridge::with_catalog(default_txn, TxnMode::ReadWrite, Arc::clone(&catalog));
+    let default_rows: Vec<_> = default_bridge.async_query(&outside_sql).collect().await;
+    assert_eq!(default_rows.len(), 1);
+    assert_eq!(
+        default_rows[0].as_ref().expect("default row").values,
+        vec![SqlValue::Integer(7)]
+    );
+    drop(default_bridge);
+
+    let txn = async_store.begin_async().await.expect("begin");
+    let mut bridge = AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
+    bridge.set_copy_security(CopySecurityConfig {
+        allowed_base_dirs: Some(vec![
+            allowed_dir.canonicalize().expect("canonical allowed dir"),
+        ]),
+        allow_symlinks: false,
+    });
+
+    bridge
+        .async_plan_for_routing(&allowed_sql)
+        .await
+        .expect("allowed path plans");
+    let allowed_rows: Vec<_> = bridge.async_query(&allowed_sql).collect().await;
+    assert_eq!(allowed_rows.len(), 1);
+    assert_eq!(
+        allowed_rows[0].as_ref().expect("allowed row").values,
+        vec![SqlValue::Integer(7)]
+    );
+
+    let planning_error = bridge
+        .async_plan_for_routing(&outside_sql)
+        .await
+        .expect_err("outside path must not plan");
+    assert!(
+        planning_error
+            .to_string()
+            .contains("path not in allowed directories"),
+        "{planning_error}"
+    );
+
+    let outside_rows: Vec<_> = bridge.async_query(&outside_sql).collect().await;
+    assert_eq!(outside_rows.len(), 1);
+    let query_error = outside_rows[0]
+        .as_ref()
+        .expect_err("outside path must not execute");
+    assert!(
+        query_error
+            .to_string()
+            .contains("path not in allowed directories"),
+        "{query_error}"
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
