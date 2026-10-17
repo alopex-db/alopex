@@ -1,5 +1,4 @@
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -143,3 +142,62 @@ def test_issue583_post_snapshot_sstable_candidates_consume_scan_budget(tmp_path)
     finally:
         reader.rollback()
         db.close()
+
+
+@pytest.mark.parametrize("prefix", [b"\xff", b"user:\xff"])
+def test_binary_prefix_pages_resume_before_nul_extensions(scan_db, prefix, tmp_path):
+    with scan_db.begin(TxnMode.READ_WRITE) as seed:
+        for suffix in (b"", b"\x00", b"\x00\x00", b"\x80", b"\xff"):
+            seed.put(prefix + suffix, b"old")
+        seed.commit()
+
+    with scan_db.begin(TxnMode.READ_WRITE) as txn:
+        txn.delete(prefix + b"\x80")
+        txn.put(prefix + b"\x00", b"updated")
+        txn.put(prefix + b"\x00\xff", b"added")
+        expected = [
+            (prefix, b"old"),
+            (prefix + b"\x00", b"updated"),
+            (prefix + b"\x00\x00", b"old"),
+            (prefix + b"\x00\xff", b"added"),
+            (prefix + b"\xff", b"old"),
+        ]
+        methods = [
+            (txn.scan_prefix, (prefix,)),
+            (txn.scan_range, (prefix, prefix + b"\xff\x00")),
+            (txn.search_keys, (prefix + b"*",)),
+        ]
+        for method, args in methods:
+            cursor = None
+            found = []
+            for _ in range(len(expected) + 1):
+                result = method(*args, limit=1, cursor=cursor)
+                entries = result["entries"] if isinstance(result, dict) else list(result)
+                if not entries:
+                    if isinstance(result, dict):
+                        assert result["next_cursor"] is None
+                    break
+                assert len(entries) == 1
+                next_cursor = entries[-1][0]
+                assert cursor is None or cursor < next_cursor
+                if isinstance(result, dict):
+                    assert result["next_cursor"] == next_cursor
+                found.extend(entries)
+                cursor = next_cursor
+            else:
+                pytest.fail("enumeration did not terminate after the last key")
+            assert found == expected
+
+    path = tmp_path / "scan.alopex"
+    if path.exists():
+        scan_db.flush()
+        scan_db.close()
+        reopened = Database.open(str(path))
+        try:
+            with reopened.begin(TxnMode.READ_ONLY) as reader:
+                assert list(reader.scan_prefix(prefix)) == [
+                    (prefix + suffix, b"old")
+                    for suffix in (b"", b"\x00", b"\x00\x00", b"\x80", b"\xff")
+                ]
+        finally:
+            reopened.close()
