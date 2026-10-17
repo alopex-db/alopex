@@ -207,11 +207,14 @@ fn maximum_ef_search_is_clamped_to_active_node_count() {
 fn deleted_nodes_are_skipped_in_results() {
     let mut graph = make_graph();
     graph.insert(b"a", &[0.0, 0.0], b"ma").unwrap();
-    graph.insert(b"b", &[0.1, 0.0], b"mb").unwrap();
+    graph.insert(b"c", &[2.0, 0.0], b"mc").unwrap();
 
     graph.delete(b"a").unwrap();
-    let (results, _) = graph.search(&[0.0, 0.0], 2, 8).unwrap();
-    assert!(results.iter().all(|r| r.key != b"a"));
+    graph.insert(b"b", &[1.0, 0.0], b"mb").unwrap();
+    let (results, _) = graph.search(&[0.0, 0.0], 4, 8).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].key, b"b");
+    assert_eq!(results[1].key, b"c");
     assert_eq!(graph.deleted_count, 1);
 }
 
