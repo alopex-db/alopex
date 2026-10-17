@@ -142,7 +142,9 @@ to_posix_path() {
 to_native_path() {
   local candidate="$1"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
-    candidate="$(cygpath -w "${candidate}")"
+    # MSVC relativizes source paths against its long working directory.
+    # Expand existing 8.3 aliases before handing paths to native compilers.
+    candidate="$(cygpath -w -l "${candidate}")"
   fi
   printf '%s\n' "${candidate}"
 }
@@ -353,8 +355,18 @@ build_host() (
     set +e
     cleanup_status=0
     if [[ "${build_root_created}" == "1" ]]; then
-      rm -rf -- "${build_root}"
-      cleanup_status=$?
+      # Windows runners can retain a just-closed Nim output handle briefly.
+      # Retry only this invocation's canonical build root, then fail visibly.
+      for attempt in 1 2 3 4 5; do
+        if rm -rf -- "${build_root}" && [[ ! -e "${build_root}" ]]; then
+          cleanup_status=0
+          break
+        fi
+        cleanup_status=1
+        if [[ "${attempt}" != "5" ]]; then
+          sleep 1
+        fi
+      done
     fi
     if [[ "${build_lock_created}" == "1" ]]; then
       rmdir -- "${build_lock}" || cleanup_status=1
@@ -393,7 +405,9 @@ build_host() (
   home_owned="${build_root}/home"
   xdg_cache_owned="${build_root}/xdg-cache"
   tmp_owned="${build_root}/tmp"
+  # Long-name expansion requires both compiler cache directories to exist.
   mkdir -p "${nimble_dir_owned}/pkgs2" "${build_root}/nimcache" \
+    "${build_root}/nimcache-static" \
     "${home_owned}" "${xdg_cache_owned}" "${tmp_owned}"
 
   find_seeded_package() {
@@ -448,7 +462,8 @@ EOF
   export SOURCE_DATE_EPOCH=0
   export TZ=UTC
   export ZERO_AR_DATE=1
-  export PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  export PATH
   unset NIMBLE_DIR
   export ALOPEX_NIM_BIN="${nim_bin_arg}"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
@@ -525,14 +540,14 @@ EOF
         static_flags+=(--passL:-s)
         ;;
       x86_64-apple-darwin|aarch64-apple-darwin)
-        static_flags+=(--passL:-Wl,-x)
+        static_flags+=("--passL:-Wl,-x")
         ;;
       x86_64-pc-windows-msvc)
         static_flags+=(
           --passL:-static
           --passL:-static-libgcc
           --passL:-s
-          --passL:-Wl,--no-insert-timestamp
+          "--passL:-Wl,--no-insert-timestamp"
         )
         # MSVC has no -fPIC (all code is position independent there) and
         # rejects the flag, so the Windows branch replaces it outright.
