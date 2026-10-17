@@ -11,7 +11,6 @@
 import json
 
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -671,6 +670,85 @@ def test_execute_sql_null_vector_is_sql_null_and_skipped_by_hnsw(db):
     db.execute_sql("CREATE INDEX vector_items_hnsw ON vector_items (embedding) USING HNSW")
     assert db.execute_sql(nearest) == [{"id": 1}]
 
+
+
+def test_all_null_hnsw_survives_updates_and_disk_reopen(tmp_path):
+    path = str(tmp_path / "null-vectors.alopex")
+    database = Database.open(path)
+    database.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    database.execute_sql("INSERT INTO items VALUES (1, NULL), (2, NULL)")
+    database.execute_sql("CREATE INDEX items_hnsw ON items (embedding) USING HNSW")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    nearest = (
+        "SELECT id FROM items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2"
+    )
+    assert database.execute_sql(nearest) == []
+    database.execute_sql("INSERT INTO items VALUES (3, NULL)")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    database.execute_sql("UPDATE items SET embedding = [0.0, 0.0] WHERE id = 2")
+    assert database.execute_sql(nearest) == [{"id": 2}]
+    database.execute_sql("UPDATE items SET embedding = NULL WHERE id = 2")
+    assert database.execute_sql(nearest) == []
+    database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id, embedding FROM items ORDER BY id") == [
+            {"id": 1, "embedding": None},
+            {"id": 2, "embedding": None},
+            {"id": 3, "embedding": None},
+        ]
+        assert reopened.execute_sql(nearest) == []
+        reopened.execute_sql("UPDATE items SET embedding = [1.0, 0.0] WHERE id = 1")
+        assert reopened.execute_sql(nearest) == [{"id": 1}]
+    finally:
+        reopened.close()
+
+
+def test_physical_hnsw_null_updates_match_exact_search(db):
+    # This head selects HNSW above 1,024 rows for 1,024-dimensional vectors.
+    # The smaller NULL regression alone does not prove this execution path.
+    tail = ", 0.0" * 1023
+    query_vector = f"[-1.0{tail}]"
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(1024, L2))"
+    )
+    db.execute_sql("INSERT INTO items VALUES (0, NULL)")
+    for item_id in range(1, 1025):
+        db.execute_sql(f"INSERT INTO items VALUES ({item_id}, [{item_id - 1}.0{tail}])")
+    nearest = (
+        f"SELECT id FROM items ORDER BY "
+        f"vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 2"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}, {"id": 2}]
+    db.execute_sql(
+        "CREATE INDEX items_hnsw ON items (embedding) USING HNSW WITH (ef_search = 1024)"
+    )
+    assert db.get_hnsw_stats("items_hnsw").node_count == 1024
+    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
+    assert plan.startswith("HnswSearch"), plan
+    assert db.execute_sql(nearest) == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql(f"UPDATE items SET embedding = {query_vector} WHERE id = 0")
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 1")
+    assert db.execute_sql(nearest) == [{"id": 0}, {"id": 2}]
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 0")
+    expected = [{"id": 2}, {"id": 3}]
+    assert db.execute_sql(nearest) == expected
+    assert db.execute_sql(
+        f"SELECT vector_distance(embedding, {query_vector}, 'l2') AS distance, "
+        f"vector_similarity(embedding, {query_vector}, 'l2') AS similarity "
+        "FROM items WHERE id = 0"
+    ) == [{"distance": None, "similarity": None}]
+    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
+    assert plan.startswith("HnswSearch"), plan
+    db.execute_sql("DROP INDEX items_hnsw")
+    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
+    assert not plan.startswith("HnswSearch"), plan
+    assert db.execute_sql(nearest) == expected
 
 def test_execute_sql_numpy_vector_param(db):
     np = pytest.importorskip("numpy")
