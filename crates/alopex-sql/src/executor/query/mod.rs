@@ -454,6 +454,16 @@ fn execute_query_result_with_context<
     memory: Option<&MemoryPolicy>,
     context: &QueryExecutionContext,
 ) -> Result<QueryResult> {
+    if let LogicalPlan::TableFunction {
+        function: crate::planner::TableFunctionKind::ReadParquet,
+        schema,
+        ..
+    } = &plan
+    {
+        let rows = execute_table_function(txn, catalog, &plan, outer, memory, context)?;
+        let projection = Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+        return project::execute_project(rows, &projection, schema);
+    }
     let plan = match plan {
         LogicalPlan::Project {
             input,

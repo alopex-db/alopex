@@ -18,6 +18,40 @@ use super::input::InputFile;
 
 mod bounded;
 
+pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
+    let semantic =
+        |key: &str| key == parquet::arrow::PARQUET_FIELD_ID_META_KEY || key.starts_with("ARROW:");
+    if schema
+        .fields()
+        .iter()
+        .all(|field| field.metadata().keys().all(|key| semantic(key)))
+    {
+        return schema;
+    }
+    // SQL exposes names/types/values; the decoder only needs semantic field metadata.
+    let Schema { fields, metadata } = Arc::unwrap_or_clone(schema);
+    let owned_fields = fields.to_vec();
+    drop(fields);
+    let fields = owned_fields
+        .into_iter()
+        .map(|field| {
+            if field.metadata().keys().all(|key| semantic(key)) {
+                return field;
+            }
+            let mut field = Arc::unwrap_or_clone(field);
+            let metadata = field
+                .metadata()
+                .iter()
+                .filter(|(key, _)| semantic(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            field.set_metadata(metadata);
+            Arc::new(field)
+        })
+        .collect::<Vec<_>>();
+    Arc::new(Schema::new_with_metadata(fields, metadata))
+}
+
 pub(super) fn reader(
     file: File,
     metadata: Arc<ParquetMetaData>,
@@ -549,40 +583,6 @@ mod tests {
             .unwrap();
         assert_eq!(actual, vec![batch]);
     }
-}
-
-pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
-    let semantic =
-        |key: &str| key == parquet::arrow::PARQUET_FIELD_ID_META_KEY || key.starts_with("ARROW:");
-    if schema
-        .fields()
-        .iter()
-        .all(|field| field.metadata().keys().all(|key| semantic(key)))
-    {
-        return schema;
-    }
-    // SQL exposes names/types/values; the decoder only needs semantic field metadata.
-    let Schema { fields, metadata } = Arc::unwrap_or_clone(schema);
-    let owned_fields = fields.to_vec();
-    drop(fields);
-    let fields = owned_fields
-        .into_iter()
-        .map(|field| {
-            if field.metadata().keys().all(|key| semantic(key)) {
-                return field;
-            }
-            let mut field = Arc::unwrap_or_clone(field);
-            let metadata = field
-                .metadata()
-                .iter()
-                .filter(|(key, _)| semantic(key))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            field.set_metadata(metadata);
-            Arc::new(field)
-        })
-        .collect::<Vec<_>>();
-    Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 
 #[cfg(test)]
