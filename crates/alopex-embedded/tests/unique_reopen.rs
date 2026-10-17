@@ -101,20 +101,33 @@ fn unique_constraints_and_indexes_survive_file_database_reopen() {
 #[test]
 fn unique_conflict_updates_and_nullable_keys_survive_reopen() {
     for (kind, definition, index, target, composite) in [
-        ("column", "code TEXT UNIQUE, region INT", "", "code", false),
+        (
+            "column",
+            "code TEXT UNIQUE, region INT",
+            "",
+            "(code)",
+            false,
+        ),
         (
             "composite",
             "code TEXT, region INT, UNIQUE(code, region)",
             "",
-            "code, region",
+            "(code, region)",
             true,
         ),
         (
             "index",
             "code TEXT, region INT",
             "CREATE UNIQUE INDEX items_key ON items(code)",
-            "code",
+            "(code)",
             false,
+        ),
+        (
+            "named_unique",
+            "code TEXT, region INT, CONSTRAINT item_key UNIQUE(code, region)",
+            "",
+            "ON CONSTRAINT item_key",
+            true,
         ),
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -157,7 +170,7 @@ fn unique_conflict_updates_and_nullable_keys_survive_reopen() {
             );
             let qty = 30 + reopen;
             assert_eq!(db.execute_sql(&format!(
-                "INSERT INTO items (id, qty, code, region) VALUES (99, {qty}, 'a', 1) ON CONFLICT ({target}) DO UPDATE SET qty=EXCLUDED.qty"
+                "INSERT INTO items (id, qty, code, region) VALUES (99, {qty}, 'a', 1) ON CONFLICT {target} DO UPDATE SET qty=EXCLUDED.qty"
             )).unwrap(), ExecutionResult::RowsAffected(1), "{kind} {reopen}");
             // Preserve Alopex's documented targetless DO UPDATE extension:
             // it selects only the primary key, even when other keys exist.
@@ -166,7 +179,7 @@ fn unique_conflict_updates_and_nullable_keys_survive_reopen() {
             )).unwrap(), ExecutionResult::RowsAffected(1), "{kind} {reopen}");
             for sql in [
                 "INSERT INTO items (id, qty, code, region) VALUES (99, 999, 'a', 1) ON CONFLICT DO UPDATE SET qty=EXCLUDED.qty".to_owned(),
-                format!("INSERT INTO items (id, qty, code, region) VALUES (99, 999, 'a', 1) ON CONFLICT ({target}) DO UPDATE SET code='b', region=2"),
+                format!("INSERT INTO items (id, qty, code, region) VALUES (99, 999, 'a', 1) ON CONFLICT {target} DO UPDATE SET code='b', region=2"),
             ] {
                 let error = db.execute_sql(&sql).expect_err("non-target or updated UNIQUE conflict must fail");
                 assert!(error.to_string().to_lowercase().contains("unique"), "{kind} {reopen}: {error}");
@@ -179,7 +192,7 @@ fn unique_conflict_updates_and_nullable_keys_survive_reopen() {
                 } else {
                     ("'same'", "NULL")
                 };
-                db.execute_sql(&format!("INSERT INTO items (id, qty, code, region) VALUES ({id}, 0, {code}, {region}) ON CONFLICT ({target}) DO NOTHING")).unwrap();
+                db.execute_sql(&format!("INSERT INTO items (id, qty, code, region) VALUES ({id}, 0, {code}, {region}) ON CONFLICT {target} DO NOTHING")).unwrap();
                 null_rows.push(vec![
                     SqlValue::Integer(id),
                     SqlValue::Integer(0),

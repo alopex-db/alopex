@@ -2,7 +2,7 @@
 
 use alopex_core::kv::{KVStore, KVTransaction};
 
-use crate::ast::ddl::IndexMethod;
+use crate::ast::ddl::{IndexMethod, TableConstraint};
 use crate::ast::expr::Expr;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::Row;
@@ -209,12 +209,14 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
 ) -> Result<ExecutionResult> {
     let do_nothing =
         conflict.is_some_and(|plan| matches!(plan.action, OnConflictActionPlan::DoNothing));
-    if let Some(plan) = conflict.filter(|_| !do_nothing) {
-        reject_duplicate_conflict_keys(table, plan, &rows)?;
-    }
     let target = conflict
         .map(|plan| ConflictTarget::resolve(catalog, table, plan))
         .transpose()?;
+    if let (Some(plan), Some(ConflictTarget::Columns(indices))) =
+        (conflict.filter(|_| !do_nothing), target.as_ref())
+    {
+        reject_duplicate_conflict_keys(table, plan, indices, &rows)?;
+    }
     let mut pending_keys = HashSet::new();
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
@@ -405,22 +407,60 @@ impl ConflictTarget {
                     .collect(),
             ));
         }
-        // The existing targetless DO UPDATE contract uses only the primary key.
-        let names = if plan.columns.is_empty() {
+        let invalid_target = || ExecutorError::InvalidOperation {
+            operation: "ON CONFLICT".into(),
+            reason: "conflict target must match a PRIMARY KEY or UNIQUE constraint/index".into(),
+        };
+        let names = if let Some(name) = &plan.constraint {
+            table
+                .constraints
+                .iter()
+                .find_map(|constraint| match constraint {
+                    TableConstraint::PrimaryKey {
+                        name: Some(candidate),
+                        columns,
+                        ..
+                    }
+                    | TableConstraint::Unique {
+                        name: Some(candidate),
+                        columns,
+                        ..
+                    } if candidate == name => Some(columns.as_slice()),
+                    _ => None,
+                })
+                .ok_or_else(invalid_target)?
+        } else if plan.columns.is_empty() {
+            // Preserve the documented primary-key-only targetless DO UPDATE extension.
             table.primary_key.as_deref().unwrap_or_default()
         } else {
             &plan.columns
         };
-        Ok(Self::Columns(
-            names
+        let indices = names
+            .iter()
+            .map(|name| {
+                table
+                    .get_column_index(name)
+                    .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Resolve against a real unique key before reading or changing rows.
+        // Key order does not matter, but a subset/superset is not that key.
+        if (!plan.columns.is_empty() || plan.constraint.is_some())
+            && !catalog
+                .get_indexes_for_table(&table.name)
                 .iter()
-                .map(|name| {
-                    table
-                        .get_column_index(name)
-                        .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
+                .any(|index| {
+                    index.unique
+                        && index.column_indices.len() == indices.len()
+                        && index
+                            .column_indices
+                            .iter()
+                            .all(|column| indices.contains(column))
                 })
-                .collect::<Result<_>>()?,
-        ))
+        {
+            return Err(invalid_target());
+        }
+        Ok(Self::Columns(indices))
     }
 
     fn keys(&self, row: &[SqlValue]) -> Result<Vec<Vec<u8>>> {
@@ -445,20 +485,16 @@ impl ConflictTarget {
 fn reject_duplicate_conflict_keys(
     table: &TableMetadata,
     plan: &OnConflictPlan,
+    indices: &[usize],
     rows: &[Vec<SqlValue>],
 ) -> Result<()> {
-    let columns = if plan.columns.is_empty() {
-        table.primary_key.clone().unwrap_or_default()
-    } else {
-        plan.columns.clone()
-    };
-    let indices = columns
-        .iter()
-        .filter_map(|column| table.get_column_index(column))
-        .collect::<Vec<_>>();
-    if columns.is_empty() || indices.len() != columns.len() {
+    if indices.is_empty() {
         return Ok(());
     }
+    let columns = indices
+        .iter()
+        .map(|&index| table.columns[index].name.clone())
+        .collect::<Vec<_>>();
 
     let mut seen = HashSet::with_capacity(rows.len());
     for row in rows {
