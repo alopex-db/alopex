@@ -340,7 +340,20 @@ pub fn render_prepared_parameter(value: &SqlValue) -> Result<String> {
         SqlValue::Float(value) if value.is_finite() => format_finite_float(value.to_string())?,
         SqlValue::Double(value) if value.is_finite() => format_finite_float(value.to_string())?,
         SqlValue::Text(value) => quote(value),
-        SqlValue::Decimal(value) => value.to_string(),
+        SqlValue::Decimal(value) => {
+            let digits = value.coefficient.unsigned_abs().max(1).ilog10() + 1;
+            let precision = digits.max(u32::from(value.scale));
+            if precision > 38 {
+                return Err(Error::UnsupportedPreparedParameterType);
+            }
+            // Keep the native parameter's exact type and scale on fallback paths.
+            // Bare numeric text becomes a floating-point or integer literal.
+            format!(
+                "CAST({} AS DECIMAL({precision},{}))",
+                quote(&value.to_string()),
+                value.scale
+            )
+        }
         SqlValue::Json(value) => format!("CAST({} AS JSON)", quote(value.as_str())),
         SqlValue::Vector(values) if values.iter().all(|value| value.is_finite()) => format!(
             "[{}]",

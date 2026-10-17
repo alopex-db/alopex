@@ -546,9 +546,9 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
-    if let Some((decimal, text)) = decimal_value(value, index)? {
-        let text = text.unwrap_or_else(|| decimal.to_string());
-        return Ok(format!("DECIMAL {}", escape_text(&text)));
+    if let Some((decimal, _)) = decimal_value(value, index)? {
+        return alopex_embedded::render_prepared_parameter(&SqlValue::Decimal(decimal))
+            .map_err(crate::error::embedded_err);
     }
     if value.is_instance_of::<PyString>() {
         let text = value.extract::<String>()?;
@@ -862,7 +862,7 @@ mod tests {
             let valid = decimal.call1(("12345678901234567.89",)).unwrap();
             assert_eq!(
                 super::render_param(&valid, 0).unwrap(),
-                "DECIMAL '12345678901234567.89'"
+                "CAST('12345678901234567.89' AS DECIMAL(19,2))"
             );
             for text in ["NaN", "Infinity", "1E+38", "1E-39", "1E+1000000"] {
                 let value = decimal.call1((text,)).unwrap();
@@ -1112,7 +1112,7 @@ mod tests {
             let params = params_list(py, vec![input]);
             assert_eq!(
                 bind_params("SELECT ?", Some(&params)).unwrap(),
-                "SELECT DECIMAL '12.340'"
+                "SELECT CAST('12.340' AS DECIMAL(5,3))"
             );
 
             let output =
