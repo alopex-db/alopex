@@ -116,6 +116,7 @@ proc normalizedBinaryOp(op: BinaryOpKind): string =
   of opBitXor: "BitXor"
   of opShiftLeft: "ShiftLeft"
   of opShiftRight: "ShiftRight"
+  of opTsMatch: "TsMatch"
   of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
      opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
 
@@ -147,6 +148,7 @@ proc normalizedBinaryOp(opName: string): string =
   of "opBitXor": "BitXor"
   of "opShiftLeft": "ShiftLeft"
   of "opShiftRight": "ShiftRight"
+  of "opTsMatch": "TsMatch"
   else: opName
 
 proc normalizedUnaryOp(op: UnaryOpKind): string =
