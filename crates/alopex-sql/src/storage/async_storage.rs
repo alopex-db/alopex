@@ -9,7 +9,7 @@ use alopex_core::kv::{
 };
 use alopex_core::txn::TxnManager;
 use alopex_core::types::{Key, TxnId, TxnMode, Value};
-use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
+use alopex_core::vector::hnsw::HnswIndex;
 
 use crate::ast::Statement;
 use crate::catalog::{Catalog, TableMetadata};
@@ -897,14 +897,8 @@ where
     fn hnsw_entry(&mut self, name: &str) -> alopex_core::Result<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
@@ -912,14 +906,8 @@ where
     fn hnsw_entry_mut(&mut self, name: &str) -> alopex_core::Result<&mut HnswTxnEntry> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;
-            self.hnsw_indices.insert(
-                name.to_string(),
-                HnswTxnEntry {
-                    index,
-                    state: HnswTransactionState::default(),
-                    dirty: false,
-                },
-            );
+            self.hnsw_indices
+                .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
         Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
     }
