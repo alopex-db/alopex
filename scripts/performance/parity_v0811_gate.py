@@ -23,10 +23,10 @@ def percentile(values: list[float], quantile: float) -> float:
 
 
 def _ratio(subject: object, reference: object, label: str, errors: list[str]) -> float | None:
-    if not isinstance(subject, (int, float)) or not math.isfinite(subject):
-        errors.append(f"{label}: subject metric must be finite")
+    if type(subject) not in (int, float) or not math.isfinite(subject) or subject < 0:
+        errors.append(f"{label}: subject metric must be finite and nonnegative")
         return None
-    if not isinstance(reference, (int, float)) or not math.isfinite(reference) or reference <= 0:
+    if type(reference) not in (int, float) or not math.isfinite(reference) or reference <= 0:
         errors.append(f"{label}: reference metric must be finite and positive")
         return None
     return float(subject) / float(reference)
@@ -54,11 +54,15 @@ def evaluate(name: str, contract: dict[str, object], measurement: dict[str, obje
         if metric == "recall_at_10":
             value = subject[metric]
             reference_value = reference[metric]
-            if not isinstance(value, (int, float)) or not math.isfinite(value):
-                errors.append(f"{name}: subject recall_at_10 must be finite")
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                errors.append(f"{name}: subject recall_at_10 must be finite and between zero and one")
                 continue
-            if not isinstance(reference_value, (int, float)) or not math.isfinite(reference_value):
-                errors.append(f"{name}: reference recall_at_10 must be finite")
+            if (
+                type(reference_value) not in (int, float)
+                or not math.isfinite(reference_value)
+                or not 0 <= reference_value <= 1
+            ):
+                errors.append(f"{name}: reference recall_at_10 must be finite and between zero and one")
                 continue
             if value < thresholds["min_recall"]:
                 errors.append(f"{name}: recall_at_10 is below min_recall")
@@ -132,7 +136,12 @@ def validate_document(
         if not environment.get(field):
             errors.append(f"environment: missing {field}")
     results = measurements.get("results", [])
-    indexed = {(row.get("contract"), row.get("evidence_id")): row for row in results}
+    indexed = {}
+    for row in results:
+        key = (row.get("contract"), row.get("evidence_id"))
+        if key in indexed:
+            errors.append(f"{key[0]}: duplicate evidence {key[1]}")
+        indexed[key] = row
     for name, contract in contracts.get("contracts", {}).items():
         evidence_ids = contract.get("evidence_ids", [])
         required = evidence_ids if suite == "full" else evidence_ids[:1]

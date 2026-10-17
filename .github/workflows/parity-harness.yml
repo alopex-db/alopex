@@ -35,5 +35,10 @@ jobs:
             scripts.parity.runner.test_surfaces \
             scripts.parity.test_compat_fixture_contract \
             scripts.test_validate_v0811_ledgers
+      - name: Verify performance evidence contracts
+        run: |
+          python -m unittest \
+            scripts.performance.test_parity_v0811_gate \
+            scripts.performance.test_release_hnsw_evidence
       - name: Verify v0.8.11 compatibility ledgers
         run: python scripts/validate_v0811_ledgers.py

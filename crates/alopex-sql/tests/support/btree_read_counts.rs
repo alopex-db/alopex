@@ -247,3 +247,83 @@ fn btree_access_path_reads_only_matching_table_rows() {
     assert_eq!(rows, baseline_equal);
     assert_eq!(counts, (0, 256), "cross-type fallback (get, scan)");
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn knn_cost_boundary_changes_table_reads_without_changing_nearest_ids() {
+    // Reuse the SQL/KV row counter: this counts delivered table rows, not
+    // graph traversal, index metadata, or backend-internal operations.
+    let store = Arc::new(CountingKV::default());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::clone(&store), Arc::clone(&catalog));
+    let run = |executor: &mut Executor<CountingKV, MemoryCatalog>, sql: &str| {
+        let statement =
+            alopex_sql::parser::Parser::parse_sql(&alopex_sql::dialect::AlopexDialect, sql)
+                .unwrap()
+                .pop()
+                .unwrap();
+        let plan = alopex_sql::planner::Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        executor.execute(plan).unwrap()
+    };
+    run(
+        &mut executor,
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(128, L2))",
+    );
+    let tail = ", 0".repeat(127);
+    for start in (1..=8_192).step_by(256) {
+        let values = (start..start + 256)
+            .map(|id| format!("({id}, [{id}{tail}])"))
+            .collect::<Vec<_>>()
+            .join(",");
+        run(&mut executor, &format!("INSERT INTO items VALUES {values}"));
+    }
+    run(
+        &mut executor,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=64)",
+    );
+    let query = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0{tail}], 'l2') ASC LIMIT 10"
+    );
+    let expected = (1..=10)
+        .map(|id| vec![SqlValue::Integer(id)])
+        .collect::<Vec<_>>();
+    for (rows, path, counts) in [
+        (8_192, "ExactKnnScan", (0, 8_192)),
+        (8_193, "HnswSearch index=idx_items_embedding", (10, 0)),
+    ] {
+        if rows == 8_193 {
+            run(
+                &mut executor,
+                &format!("INSERT INTO items VALUES (8193, [8193{tail}])"),
+            );
+        }
+        let ExecutionResult::Query(plan) = run(&mut executor, &format!("EXPLAIN ANALYZE {query}"))
+        else {
+            panic!("expected explain result");
+        };
+        let SqlValue::Text(plan) = &plan.rows[0][0] else {
+            panic!("expected plan text");
+        };
+        assert!(plan.contains(path), "{plan}");
+        if rows == 8_193 {
+            assert!(plan.contains("fallback=none"), "{plan}");
+            assert!(!plan.contains("nodes_visited=0"), "{plan}");
+        }
+        store.reads.reset();
+        let ExecutionResult::Query(result) = run(&mut executor, &query) else {
+            panic!("expected query result");
+        };
+        assert_eq!(result.rows, expected, "rows={rows}");
+        assert_eq!(store.reads.snapshot(), counts, "rows={rows} (get, scan)");
+    }
+    store.reads.reset();
+    let ExecutionResult::Query(result) =
+        run(&mut executor, &format!("{query} WITH (enable_hnsw=false)"))
+    else {
+        panic!("expected exact query result");
+    };
+    assert_eq!(result.rows, expected);
+    assert_eq!(store.reads.snapshot(), (0, 8_193));
+}

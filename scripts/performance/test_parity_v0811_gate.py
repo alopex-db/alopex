@@ -406,6 +406,36 @@ class PerformanceParityGateTests(unittest.TestCase):
 
         self.assertEqual(evaluate("example", contract, measurement), [])
 
+    def test_gate_rejects_invalid_metric_domains(self):
+        contract = {
+            "reference_revision": "project@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "thresholds": {"max_latency_ratio": 2.0, "min_recall": 0.99,
+                           "max_recall_delta": 0.01},
+        }
+        for metric, invalid in (
+            ("latency_p50_ms", -1.0), ("latency_p50_ms", True),
+            ("latency_p50_ms", float("nan")),
+            ("latency_p50_ms", float("inf")),
+            ("recall_at_10", 1.01), ("recall_at_10", True),
+            ("recall_at_10", -0.01), ("recall_at_10", float("nan")),
+        ):
+            for arm in ("subject", "reference"):
+                with self.subTest(metric=metric, invalid=invalid, arm=arm):
+                    row = {
+                        "reference_revision": "project@v1.0.0",
+                        "dataset_sha256": "a" * 64,
+                        "subject": {metric: 1.0}, "reference": {metric: 1.0},
+                    }
+                    row[arm][metric] = invalid
+                    errors = evaluate("hnsw", {**contract, "metrics": [metric]}, row)
+                    self.assertTrue(errors, f"accepted invalid {arm} {metric}: {invalid}")
+
+    def test_gate_rejects_duplicate_evidence_instead_of_overwriting(self):
+        row = {"contract": "hnsw", "evidence_id": "query"}
+        errors = validate_document({}, {"results": [row, dict(row)]}, "full")
+        self.assertTrue(any("duplicate evidence" in error for error in errors))
+
     def test_hnsw_gate_rejects_recall_outside_the_reference_band(self):
         contract = {
             "reference_revision": "project@v1.0.0",
