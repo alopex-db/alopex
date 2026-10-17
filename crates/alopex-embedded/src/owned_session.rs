@@ -211,6 +211,50 @@ impl OwnedEmbeddedTransaction {
             .map_err(Error::Core)
     }
 
+    /// Return one bounded prefix page, hiding internal namespaces by default.
+    pub fn scan_prefix_page(
+        &mut self,
+        prefix: &[u8],
+        options: &crate::KeyScanOptions,
+    ) -> Result<KeySearchPage> {
+        self.session
+            .with_transaction(|transaction| {
+                crate::kv_scan::prefix_page(transaction, prefix, options)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Return one bounded page in `[start, end)`, strictly after the optional cursor.
+    pub fn scan_range_page(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        options: &crate::KeyScanOptions,
+    ) -> Result<KeySearchPage> {
+        self.session
+            .with_transaction(|transaction| {
+                crate::kv_scan::range_page(transaction, start, Some(end), options)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Search with bounded physical work and optional internal-namespace visibility.
+    pub fn search_keys_visible(
+        &mut self,
+        request: &KeySearchRequest,
+        include_internal: bool,
+    ) -> Result<KeySearchPage> {
+        self.session
+            .with_transaction(|transaction| {
+                transaction.search_keys_filtered(
+                    request,
+                    &alopex_core::kv::KeySearchCancellation::default(),
+                    &|key| include_internal || !crate::kv_scan::is_internal_key(key),
+                )
+            })
+            .map_err(Error::Core)
+    }
+
     /// Search opaque keys with the shared bounded search contract.
     pub fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
         self.session
