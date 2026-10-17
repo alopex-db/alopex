@@ -39,6 +39,7 @@
 #[cfg(feature = "tokio")]
 pub mod async_executor;
 pub mod bulk;
+mod columnar_constraints;
 pub(crate) mod ddl;
 pub(crate) mod dml;
 mod error;

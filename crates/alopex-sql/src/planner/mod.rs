@@ -1939,7 +1939,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Collect primary key from table constraints
-        let primary_key = Self::extract_primary_key(stmt);
+        let primary_key = Self::extract_primary_key(stmt)?;
+        if let Some(names) = &primary_key {
+            for column in &mut columns {
+                if names.contains(&column.name) {
+                    column.not_null = true;
+                }
+            }
+        }
 
         // Build table metadata
         // Note: table_id defaults to 0 as placeholder; Executor assigns the actual ID
@@ -1995,29 +2002,30 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     }
 
     /// Extract primary key columns from table constraints.
-    fn extract_primary_key(stmt: &CreateTable) -> Option<Vec<String>> {
+    fn extract_primary_key(stmt: &CreateTable) -> Result<Option<Vec<String>>, PlannerError> {
         use crate::ast::ddl::TableConstraint;
 
-        // First check table-level constraints
-        // Note: Currently only PrimaryKey variant exists; when more variants are added,
-        // this should iterate to find the first PrimaryKey constraint
-        if let Some(TableConstraint::PrimaryKey { columns, .. }) = stmt.constraints.first() {
-            return Some(columns.clone());
-        }
-
-        // Then check column-level PRIMARY KEY constraints
-        let pk_columns: Vec<String> = stmt
-            .columns
+        let mut declarations = stmt
+            .constraints
             .iter()
-            .filter(|col| col.constraints.iter().any(Self::is_primary_key_constraint))
-            .map(|col| col.name.clone())
-            .collect();
-
-        if pk_columns.is_empty() {
-            None
-        } else {
-            Some(pk_columns)
+            .filter_map(|constraint| match constraint {
+                TableConstraint::PrimaryKey { columns, .. } => Some(columns.clone()),
+                _ => None,
+            })
+            .chain(stmt.columns.iter().flat_map(|column| {
+                column
+                    .constraints
+                    .iter()
+                    .filter(|constraint| Self::is_primary_key_constraint(constraint))
+                    .map(|_| vec![column.name.clone()])
+            }));
+        let first = declarations.next();
+        if declarations.next().is_some() {
+            return Err(PlannerError::invalid_expression(
+                "multiple PRIMARY KEY declarations are not allowed",
+            ));
         }
+        Ok(first)
     }
 
     fn normalized_table_constraints(stmt: &CreateTable) -> Vec<crate::ast::ddl::TableConstraint> {

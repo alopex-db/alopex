@@ -26,6 +26,13 @@ All notable changes to this project will be documented in this file.
   releases did not persist. Re-declare those defaults explicitly; the new
   persistence behavior preserves defaults recorded by v0.8.16 (#472).
 
+- Opening a database created by v0.8.15 or earlier now rebuilds missing UNIQUE
+  constraint indexes. If existing rows violate a UNIQUE constraint, opening
+  fails without changing the database. Keep a backup, remove the conflicting
+  rows with the prior version or a repair tool, then reopen with v0.8.16.
+  Table-level PRIMARY KEY declarations are recognized regardless of their
+  order among constraints; multiple declarations are rejected (#585).
+
 ## [0.8.15] — 2026-09-24
 
 ### Fixed
