@@ -231,7 +231,7 @@ pub(crate) fn parquet_schema_with_read_options(
             .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
     };
     // The reader checks all metadata before decoding; planning retains only the schema.
-    let schema = match schema::read(&mut file, limit.unwrap_or(u64::MAX)) {
+    let schema = match schema::read(&mut file, limit) {
         Ok(schema) => schema,
         Err(error) if limit.is_some() => return Err(error),
         // Preserve the legacy decoder's broader grammar for unbounded planning.

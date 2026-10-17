@@ -11,8 +11,8 @@ use crate::executor::{ExecutorError, Result};
 
 /// Budget only metadata retained by schema planning before owned decoding.
 /// The data reader retains responsibility for decoding and validating row groups.
-pub(super) fn read(file: &mut File, limit: u64) -> Result<Arc<Schema>> {
-    let footer = schema_footer(file, limit)?;
+pub(super) fn read(file: &mut File, limit: Option<u64>) -> Result<Arc<Schema>> {
+    let footer = schema_footer(file, limit.unwrap_or(u64::MAX))?;
     let invalid = || ExecutorError::BulkLoad("invalid parquet schema projection".into());
     let groups = &footer.row_groups;
     let end = footer.start.checked_add(footer.size).ok_or_else(invalid)?;
@@ -25,7 +25,7 @@ pub(super) fn read(file: &mut File, limit: u64) -> Result<Arc<Schema>> {
         .checked_add(1)
         .and_then(|length| length.checked_add(suffix))
         .ok_or_else(invalid)?;
-    check_declared_bytes(length as u64, limit)?;
+    check_declared_bytes(length as u64, limit.unwrap_or(u64::MAX))?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(length).map_err(|_| invalid())?;
     bytes.resize(length, 0);
@@ -40,12 +40,21 @@ pub(super) fn read(file: &mut File, limit: u64) -> Result<Arc<Schema>> {
     file.read_exact(&mut bytes[prefix + 1..])
         .map_err(parquet_io_error)?;
 
-    // Validate the copied bytes before owned decoding, including any changed schema/KV data.
-    let has_arrow_schema = check_schema_projection(&bytes, limit)?;
+    // Configured budgets must cover copied schema/KV bytes before owned decoding.
+    let budgeted_arrow_schema = limit
+        .map(|limit| check_schema_projection(&bytes, limit))
+        .transpose()?;
     let metadata = ParquetMetaDataReader::decode_metadata(&bytes).map_err(|error| {
         ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
     })?;
     let file_metadata = metadata.file_metadata();
+    let has_arrow_schema = budgeted_arrow_schema.unwrap_or_else(|| {
+        file_metadata.key_value_metadata().is_some_and(|values| {
+            values.iter().any(|entry| {
+                entry.key == parquet::arrow::ARROW_SCHEMA_META_KEY && entry.value.is_some()
+            })
+        })
+    });
     let key_values = if has_arrow_schema {
         file_metadata.key_value_metadata()
     } else {
