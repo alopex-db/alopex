@@ -454,3 +454,106 @@ fn btree_access_path_reads_only_matching_table_rows() {
         assert_eq!(counts, (0, 1281), "broad predicate must scan table");
     }
 }
+
+#[test]
+#[ignore = "manual SQL/row-read measurement; requires ALOPEX_BTREE_MEASUREMENT_OUTPUT"]
+fn btree_budget_access_path_measurement() {
+    use alopex_sql::{AlopexDialect, Parser, Planner};
+    use std::time::Instant;
+
+    const ROWS: i32 = 4000;
+    const SAMPLES: usize = 11;
+    const REPEATS: usize = 20;
+    let indexed = std::env::var("ALOPEX_BTREE_MEASUREMENT_INDEXED").unwrap() == "1";
+    let store = Arc::new(CountingKV::default());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let mut sql = |text: &str| {
+        let statement = Parser::parse_sql(&AlopexDialect, text).unwrap().remove(0);
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        executor.execute(plan).unwrap()
+    };
+    sql("CREATE TABLE measured (id INTEGER PRIMARY KEY, score INTEGER, bucket INTEGER)");
+    for batch in 0..8 {
+        let values = (batch * 500..(batch + 1) * 500)
+            .map(|id| format!("({id},{id},{})", id % 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        sql(&format!("INSERT INTO measured VALUES {values}"));
+    }
+    if indexed {
+        sql("CREATE INDEX measured_score ON measured (score)");
+        sql("CREATE INDEX measured_bucket ON measured (bucket)");
+    }
+    let mut cases = Vec::new();
+    for (name, predicate, ids, indexed_reads) in [
+        ("point", "score = 2000", vec![2000], (1, 0)),
+        (
+            "candidate_cap",
+            "score < 1024",
+            (0..1024).collect(),
+            (1024, 0),
+        ),
+        (
+            "broad",
+            "score >= 0",
+            (0..ROWS).collect(),
+            (0, ROWS as usize),
+        ),
+        (
+            "duplicates",
+            "bucket = 0",
+            (0..ROWS).step_by(2).collect(),
+            (0, ROWS as usize),
+        ),
+    ] {
+        let expected: Vec<Vec<SqlValue>> = ids
+            .into_iter()
+            .map(|id| vec![SqlValue::Integer(id)])
+            .collect();
+        let query = format!("SELECT id FROM measured WHERE {predicate} ORDER BY id");
+        let expected_reads = if indexed {
+            indexed_reads
+        } else {
+            (0, ROWS as usize)
+        };
+        let mut samples = Vec::new();
+        for sample in 0..SAMPLES + 2 {
+            let mut elapsed = 0;
+            for _ in 0..REPEATS {
+                store.reads.reset();
+                let started = Instant::now();
+                let ExecutionResult::Query(result) = sql(&query) else {
+                    panic!("query expected")
+                };
+                elapsed += started.elapsed().as_nanos();
+                assert_eq!(result.rows, expected, "{name}");
+                assert_eq!(
+                    store.reads.snapshot(),
+                    expected_reads,
+                    "{name}: runtime path changed"
+                );
+            }
+            if sample >= 2 {
+                samples.push(elapsed);
+            }
+        }
+        let mut ordered = samples.clone();
+        ordered.sort_unstable();
+        cases.push(serde_json::json!({
+            "case": name, "sql": query, "result_rows": expected.len(),
+            "row_gets_per_query": expected_reads.0, "row_scans_per_query": expected_reads.1,
+            "samples_ns": samples, "median_ns_per_query": ordered[SAMPLES / 2] / REPEATS as u128,
+        }));
+    }
+    let output = std::env::var("ALOPEX_BTREE_MEASUREMENT_OUTPUT").unwrap();
+    let data = serde_json::json!({
+        "schema": "alopex.btree-budget-measurement/v1", "indexed": indexed,
+        "source_commit": std::env::var("ALOPEX_BTREE_MEASUREMENT_SOURCE_COMMIT").unwrap(),
+        "rows": ROWS, "samples": SAMPLES, "warmup_samples": 2,
+        "repeats_per_sample": REPEATS, "cases": cases,
+    });
+    std::fs::write(output, serde_json::to_vec_pretty(&data).unwrap()).unwrap();
+}
