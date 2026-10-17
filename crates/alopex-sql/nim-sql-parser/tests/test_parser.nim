@@ -190,6 +190,12 @@ suite "Expressions — literals":
     check expr.binRight.kind == nkIntervalLit
     check expr.binRight.strVal == "24 hours"
 
+  test "fractional and year-to-month INTERVAL qualifiers are preserved":
+    let ast = parseSql("SELECT INTERVAL '1.5' DAY, INTERVAL '1-2' YEAR TO MONTH")
+    let projection = ast.children[0]
+    check projection.children[0].strVal == "1.5 DAY"
+    check projection.children[1].strVal == "1-2 YEAR TO MONTH"
+
   test "SQL-TS reserved names are accepted as functions and columns":
     let ast = parseSql(
       "SELECT TIME_BUCKET(INTERVAL '1 hour', time) AS bucket, " &
@@ -1199,6 +1205,21 @@ suite "DML — COPY":
 # ---------------------------------------------------------------------------
 
 suite "DDL — CREATE TABLE":
+
+  test "CTAS accepts storage options before AS":
+    let ast = parseSql("CREATE TABLE copy WITH (storage='columnar') AS SELECT 1 AS id")
+    check ast.kind == nkCreateTable
+    check ast.children.anyIt(it.kind == nkWithOptions)
+    check ast.children.anyIt(it.kind == nkSelect)
+
+  test "CTAS accepts trailing storage options and rejects duplicate options":
+    let ast = parseSql("CREATE TABLE copy AS SELECT 1 AS id WITH (storage='columnar')")
+    check ast.kind == nkCreateTable
+    check ast.children.anyIt(it.kind == nkWithOptions)
+    check ast.children.anyIt(it.kind == nkSelect)
+    check parseErrorMessage(
+      "CREATE TABLE copy WITH (storage='row') AS SELECT 1 AS id WITH (storage='columnar')"
+    ).contains("duplicate CREATE TABLE WITH options")
 
   test "CREATE TABLE with common constraints":
     let ast = parseSql("""
