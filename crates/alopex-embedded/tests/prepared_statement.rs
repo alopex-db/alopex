@@ -12,6 +12,40 @@ fn assert_decimal_query(result: ExecutionResult, expected: SqlValue) {
     assert_eq!(rows.rows, vec![vec![expected]]);
 }
 
+#[test]
+fn rendered_decimal_matches_native_type_value_and_scale() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    for (coefficient, scale) in [
+        (0, 38),
+        (10, 0),
+        (-1000, 0),
+        (12300, 4),
+        (1_234_567_890_123_456_789, 2),
+        (10_i128.pow(38) - 1, 0),
+        (-1, 38),
+    ] {
+        let value = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+        let rendered = alopex_embedded::render_prepared_parameter(&value).unwrap();
+        assert_decimal_query(
+            database.execute_sql(&format!("SELECT {rendered}")).unwrap(),
+            value.clone(),
+        );
+        let mut native = database.prepare("SELECT ?").unwrap();
+        native.bind(1, value.clone()).unwrap();
+        assert_decimal_query(native.execute().unwrap(), value);
+    }
+    for (coefficient, scale) in [(10_i128.pow(38), 0), (1, 39), (i128::MIN, 0)] {
+        assert!(
+            alopex_embedded::render_prepared_parameter(&SqlValue::Decimal(DecimalValue::new(
+                coefficient,
+                scale
+            )))
+            .is_err()
+        );
+    }
+}
+
 fn check_native_decimal(coefficient: i128, scale: u8, literal: &str, stored: i128) {
     use alopex_sql::storage::DecimalValue;
     let database = Arc::new(Database::new());

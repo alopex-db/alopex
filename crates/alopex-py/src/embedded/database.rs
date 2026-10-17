@@ -478,7 +478,6 @@ impl PyDatabase {
             && bindings
                 .iter()
                 .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
-            && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() == 1)
         {
             drop(validated_sql);
             let values = bindings
@@ -490,6 +489,9 @@ impl PyDatabase {
                 .collect::<Vec<_>>();
             let sql = sql.to_owned();
             py.detach(move || {
+                // prepare performs the single-statement parse and validation.
+                // Parsing here and again before entering this branch doubled
+                // parser work for every native parameter, including Decimal.
                 let mut statement = db.prepare(&sql)?;
                 for (index, value) in values.into_iter().enumerate() {
                     statement.bind(index + 1, value)?;
