@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-
 from alopex import AlopexError, LocalScan, TxnMode
 from alopex.asyncio import AsyncDatabase, AsyncSqlResultStream, AsyncTransaction
 
@@ -55,6 +54,11 @@ def test_async_kv_scans_preserve_transaction_visibility(thread_mode):
             assert iter(bounded) is bounded
             assert list(await txn.scan_range(b"cart:1", b"cart:3")) == expected[:1]
             assert list(await txn.scan_prefix(b"missing:")) == []
+            assert (await txn.search_keys(b"cart:*"))["entries"] == expected
+            assert (await txn.search_keys(r"^cart:", mode="regex"))["entries"] == expected
+            page = await txn.search_keys(b"cart:*", limit=1, cursor=b"cart:1")
+            assert page["entries"] == expected[1:]
+            assert page["next_cursor"] == b"cart:3"
             await txn.put(b"cart:1", b"later")
             await txn.commit()
             assert list(prefix) == expected
