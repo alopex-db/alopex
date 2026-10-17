@@ -23,7 +23,11 @@ the statement's target data unchanged.
 Alopex treats targetless `ON CONFLICT DO NOTHING` as handling every primary-key,
 UNIQUE-constraint, and UNIQUE-index conflict. Alopex skips only conflicting rows
 within a batch; nullable UNIQUE keys remain distinct. An explicit conflict
-target does not suppress violations of other unique constraints.
+target does not suppress violations of other unique constraints. Explicit column
+targets must match a complete primary or unique key; column order may differ.
+`ON CONFLICT ON CONSTRAINT name` resolves a named primary-key or UNIQUE
+constraint on the target table. Unknown names and targets without a unique key
+are rejected before any rows are changed.
 
 Alopex retains its existing targetless `DO UPDATE` extension: only primary-key
 conflicts select an existing row for update. Other UNIQUE conflicts remain
