@@ -322,6 +322,7 @@ build_host() (
   local python_bin
   local original_status
   local cleanup_status
+  local attempt
   local build_succeeded=0
 
   resolve_host_tools
@@ -347,14 +348,26 @@ build_host() (
   # created by this invocation.
   build_root="/tmp/alopex-nim-parser-v${REQUIRED_ALOPEX_VERSION}-contract-${REQUIRED_CONTRACT_VERSION}-${HOST_TARGET}"
   build_lock="${build_root}.lock"
+  # Called indirectly by the EXIT trap below.
+  # shellcheck disable=SC2329
   cleanup_host_build() {
     original_status=$?
     trap - EXIT
     set +e
     cleanup_status=0
     if [[ "${build_root_created}" == "1" ]]; then
-      rm -rf -- "${build_root}"
-      cleanup_status=$?
+      # Windows runners can retain a just-closed Nim output handle briefly.
+      # Retry only this invocation's canonical build root, then fail visibly.
+      for attempt in 1 2 3 4 5; do
+        if rm -rf -- "${build_root}" && [[ ! -e "${build_root}" ]]; then
+          cleanup_status=0
+          break
+        fi
+        cleanup_status=1
+        if [[ "${attempt}" != "5" ]]; then
+          sleep 1
+        fi
+      done
     fi
     if [[ "${build_lock_created}" == "1" ]]; then
       rmdir -- "${build_lock}" || cleanup_status=1
@@ -448,7 +461,8 @@ EOF
   export SOURCE_DATE_EPOCH=0
   export TZ=UTC
   export ZERO_AR_DATE=1
-  export PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  export PATH
   unset NIMBLE_DIR
   export ALOPEX_NIM_BIN="${nim_bin_arg}"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
@@ -525,14 +539,14 @@ EOF
         static_flags+=(--passL:-s)
         ;;
       x86_64-apple-darwin|aarch64-apple-darwin)
-        static_flags+=(--passL:-Wl,-x)
+        static_flags+=("--passL:-Wl,-x")
         ;;
       x86_64-pc-windows-msvc)
         static_flags+=(
           --passL:-static
           --passL:-static-libgcc
           --passL:-s
-          --passL:-Wl,--no-insert-timestamp
+          "--passL:-Wl,--no-insert-timestamp"
         )
         # MSVC has no -fPIC (all code is position independent there) and
         # rejects the flag, so the Windows branch replaces it outright.

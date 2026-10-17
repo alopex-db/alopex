@@ -26,6 +26,7 @@ fn ddl_nodes_carry_spans() {
 
     let idx = CreateIndex {
         if_not_exists: false,
+        unique: false,
         name: "idx".into(),
         table: "t".into(),
         column: "c".into(),

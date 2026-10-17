@@ -2151,7 +2151,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             stmt.name.clone(),
             stmt.table.clone(),
             vec![stmt.column.clone()],
-        );
+        )
+        .with_unique(stmt.unique);
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);
@@ -6334,7 +6335,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         let mut clauses = Vec::with_capacity(stmt.clauses.len());
         for clause in &stmt.clauses {
-            let condition = clause.condition.as_ref().map(&infer).transpose()?;
+            let condition = clause.condition.as_ref().map(infer).transpose()?;
             if let (Some(expression), Some(typed)) = (&clause.condition, &condition)
                 && typed.resolved_type != ResolvedType::Boolean
             {
