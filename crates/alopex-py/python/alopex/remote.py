@@ -761,6 +761,15 @@ class RemoteTransaction:
     def delete(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.delete", _KV_REASON)
 
+    def scan_prefix(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_prefix", _KV_REASON)
+
+    def scan_range(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_range", _KV_REASON)
+
+    def search_keys(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.search_keys", _KV_REASON)
+
     def upsert_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.upsert_vector", _KV_REASON)
 

@@ -1,8 +1,10 @@
 # KV key search
 
-KV key search is an additive, bounded API over opaque key bytes. Existing
-`get`, `scan_prefix`, and `scan_range` behavior is unchanged, and `/` has no
-separator, hierarchy, normalization, or canonicalization meaning.
+KV key search is a bounded API over opaque key bytes. `/` has no separator,
+hierarchy, normalization, or canonicalization meaning. Raw Rust and HTTP KV
+operations retain their existing visibility. Python embedded enumeration now
+defaults to user-visible keys and bounded pages; exact `get`/`put`/`delete`
+remain unchanged.
 
 ## Contract summary
 
@@ -46,6 +48,68 @@ an empty follow-up page; this avoids an unbounded look-ahead scan.
 Rust callers use `KeySearchRequest` with `KVTransaction::search_keys`,
 `OwnedKVTransaction::search_keys`, or `AsyncKVTransaction::async_search_keys`.
 Embedded callers use `Transaction::search_keys`.
+
+Python embedded callers use `Transaction.scan_prefix`, `Transaction.scan_range`,
+and `Transaction.search_keys`. The scan methods collect one bounded page when called and
+return iterators of `(key, value)` byte pairs. `scan_range` includes `start` and
+excludes `end`. `search_keys` returns a page dictionary with `entries`, `next_cursor`,
+and `scanned`. All three calls use the transaction's current view, including its
+uncommitted writes:
+
+```python
+from alopex import Database, TxnMode
+
+db = Database.new()
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.put(b"cart:42:open", b"item")
+    assert list(txn.scan_prefix(b"cart:42:")) == [(b"cart:42:open", b"item")]
+    assert list(txn.scan_range(b"cart:42:", b"cart:43:")) == [
+        (b"cart:42:open", b"item")
+    ]
+
+    page = txn.search_keys(b"cart:*", limit=100)
+    assert page["entries"] == [(b"cart:42:open", b"item")]
+    # Pass page["next_cursor"] as cursor= to resume when it is not None.
+
+    regex_page = txn.search_keys(r"^cart:[0-9]+:", mode="regex", limit=100)
+    assert regex_page["entries"] == [(b"cart:42:open", b"item")]
+db.close()
+```
+
+Glob patterns are `bytes`; regex patterns are `str`. Python defaults to a
+100-entry page, a 10,000-candidate scan budget, and the shared 16 MiB response
+budget; callers can lower or raise these within the contract limits. These defaults
+also apply to `scan_prefix` and `scan_range`, whose bounds are keyword-only.
+This changes the former unbounded Python scan behavior: to enumerate more than
+100 entries, pass the last returned key as `cursor` and repeat until a page is
+empty. Each page captures the transaction view at the time of that call and
+remains readable after transaction completion. Mutating the transaction between
+pages can change later pages. `AsyncTransaction` accepts the same options.
+
+```python
+cursor = None
+while True:
+    entries = list(txn.scan_prefix(b"cart:", limit=100, cursor=cursor))
+    if not entries:
+        break
+    for key, value in entries:
+        consume(key, value)
+    cursor = entries[-1][0]
+```
+
+Python scans and searches exclude SQL rows/indexes/catalogs/sequences, columnar
+storage, HNSW metadata/nodes, vector registries/segments, and transaction/range
+metadata by default. Filtering happens before the result limit; hidden keys
+still consume scan and byte budgets. `include_internal=True` restores raw
+enumeration (the page budgets still apply). Existing user keys that share an
+internal namespace are hidden by default too: this is a visibility convention,
+not access control or a data migration. Exact `get` still addresses those keys.
+Ordinary prefixes such as `vector:` and `columnar:` are not reserved wholesale.
+
+The byte limit counts raw keys and values, not total process memory: a cursor
+may decode one candidate and backend buffers before its size is checked. The
+page never materializes the whole range, and a budget failure closes its cursor
+without returning a partial page or invalidating the transaction.
 
 HTTP accepts `POST /kv/search`:
 

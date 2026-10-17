@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -24,6 +25,57 @@ enum TxnState {
 pub(crate) struct PyTransactionInner {
     pub(crate) txn: Mutex<Option<alopex_embedded::OwnedEmbeddedTransaction>>,
     state: Mutex<TxnState>,
+}
+
+/// Borrow the existing transaction for one scan without holding the Python GIL.
+fn with_prepared_transaction<T: Send>(
+    py: Python<'_>,
+    inner: &Arc<PyTransactionInner>,
+    executing: bool,
+    operation: impl FnOnce(&mut alopex_embedded::OwnedEmbeddedTransaction) -> alopex_embedded::Result<T>
+        + Send,
+) -> PyResult<T> {
+    enum CallError {
+        StateLock,
+        TransactionLock,
+        Closed,
+        StreamActive,
+        MustAbort,
+        Native(alopex_embedded::Error),
+    }
+    let result = py.detach(|| {
+        let state = inner.state.lock().map_err(|_| CallError::StateLock)?;
+        if *state != TxnState::Active {
+            return Err(CallError::Closed);
+        }
+        let mut guard = inner.txn.lock().map_err(|_| CallError::TransactionLock)?;
+        let txn = guard.as_mut().ok_or(CallError::Closed)?;
+        if executing {
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CallError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CallError::MustAbort);
+                }
+                _ => {}
+            }
+        }
+        operation(txn).map_err(CallError::Native)
+    });
+    result.map_err(|err| match err {
+        CallError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CallError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CallError::Closed => error::to_py_err("transaction is closed"),
+        CallError::StreamActive => {
+            error::stream_error("stream_active", "transaction stream is active")
+        }
+        CallError::MustAbort => error::stream_error(
+            "stream_abort_required",
+            "transaction stream requires rollback",
+        ),
+        CallError::Native(err) => error::embedded_err(err),
+    })
 }
 
 #[pyclass(name = "Transaction")]
@@ -193,6 +245,118 @@ impl PyTransaction {
 
     fn delete(&self, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete(key))
+    }
+
+    #[pyo3(signature = (prefix, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_prefix(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = alopex_embedded::KeyScanOptions {
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+        };
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_prefix_page(prefix, &options)
+        })?;
+        let entries = page
+            .entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value));
+        Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
+    }
+
+    #[pyo3(signature = (start, end, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_range(
+        &self,
+        py: Python<'_>,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = alopex_embedded::KeyScanOptions {
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+        };
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_range_page(start, end, &options)
+        })?;
+        let entries = page
+            .entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value));
+        Ok(PyList::new(py, entries)?.call_method0("__iter__")?.unbind())
+    }
+
+    #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, *, include_internal = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_keys(
+        &self,
+        py: Python<'_>,
+        pattern: Bound<'_, PyAny>,
+        mode: &str,
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+    ) -> PyResult<Py<PyDict>> {
+        let pattern = match mode {
+            "glob" => alopex_embedded::KeyPattern::glob(pattern.extract::<Vec<u8>>()?),
+            "regex" => alopex_embedded::KeyPattern::regex(pattern.extract::<String>()?),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "mode must be either 'glob' or 'regex'",
+                ));
+            }
+        };
+        let request = alopex_embedded::KeySearchRequest {
+            pattern,
+            cursor,
+            limit,
+            scan_budget,
+            max_bytes,
+        };
+        self.control.ensure_open()?;
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.search_keys_visible(&request, include_internal)
+        })?;
+        let alopex_embedded::KeySearchPage {
+            entries,
+            next_cursor,
+            scanned,
+        } = page;
+        let response = PyDict::new(py);
+        response.set_item(
+            "entries",
+            entries
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect::<Vec<_>>(),
+        )?;
+        response.set_item("next_cursor", next_cursor)?;
+        response.set_item("scanned", scanned)?;
+        Ok(response.unbind())
     }
 
     fn upsert_vector(
