@@ -13,12 +13,79 @@ use common::{
     begin_op, selected_storage_modes, slo_presets, ExecutionModel, Lane, SloConfig,
     StressStorageMode, StressTestConfig, StressTestHarness, WorkloadConfig, WorkloadGenerator,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::task::JoinSet;
 
 const MAX_RETRIES: usize = 20;
+
+// All hot-key retries share the existing 60-second scenario budget. The
+// harness's separate five-second setting detects lack of global progress;
+// it is not a five-second guarantee for each logical write. A finite retry
+// count can expire while durable writers still make progress. Count every
+// conflict and stop starting attempts when the shared scenario budget expires.
+const SAME_KEY_SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn same_key_retry_delay(worker: usize, retry: usize, elapsed: Duration) -> Option<Duration> {
+    let remaining = SAME_KEY_SCENARIO_TIMEOUT.checked_sub(elapsed)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    let ceiling_us = 250_u64 << retry.saturating_sub(1).min(6);
+    // Distribute the whole interval rather than clustering later retries in
+    // the first few milliseconds. The seed is deterministic for reproduction.
+    let mut mixed = (worker as u64).wrapping_add((retry as u64).wrapping_mul(0x9e3779b97f4a7c15));
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d049bb133111eb);
+    mixed ^= mixed >> 31;
+    Some(Duration::from_micros(1 + mixed % ceiling_us).min(remaining))
+}
+
+#[test]
+fn same_key_retry_stops_at_deadline() {
+    assert_eq!(same_key_retry_delay(0, 20, SAME_KEY_SCENARIO_TIMEOUT), None);
+    assert_eq!(
+        same_key_retry_delay(0, 1, SAME_KEY_SCENARIO_TIMEOUT + Duration::from_nanos(1)),
+        None
+    );
+    assert_eq!(
+        same_key_retry_delay(0, 20, SAME_KEY_SCENARIO_TIMEOUT - Duration::from_nanos(1)),
+        Some(Duration::from_nanos(1))
+    );
+}
+
+#[test]
+fn same_key_retry_spreads_workers_across_the_late_window() {
+    let delays: std::collections::HashSet<_> = (0..100)
+        .map(|worker| same_key_retry_delay(worker, 20, Duration::ZERO).unwrap())
+        .collect();
+    assert!(delays.len() > 90);
+    assert!(delays.iter().any(|delay| *delay < Duration::from_millis(8)));
+    assert!(delays
+        .iter()
+        .any(|delay| *delay > Duration::from_millis(14)));
+}
+
+proptest::proptest! {
+    #[test]
+    fn same_key_retry_delays_are_bounded(
+        worker in proptest::prelude::any::<usize>(),
+        retry in proptest::prelude::any::<usize>(),
+        elapsed_ns in 0_u64..61_000_000_000,
+    ) {
+        let elapsed = Duration::from_nanos(elapsed_ns);
+        match same_key_retry_delay(worker, retry, elapsed) {
+            Some(delay) => {
+                proptest::prop_assert!(!delay.is_zero());
+                proptest::prop_assert!(delay <= Duration::from_millis(16));
+                proptest::prop_assert!(elapsed + delay <= SAME_KEY_SCENARIO_TIMEOUT);
+            }
+            None => proptest::prop_assert!(elapsed >= SAME_KEY_SCENARIO_TIMEOUT),
+        }
+    }
+}
 
 fn concurrency_config(
     name: &str,
@@ -27,7 +94,13 @@ fn concurrency_config(
     mode: StressStorageMode,
 ) -> StressTestConfig {
     let slo = if mode == StressStorageMode::Disk {
-        None
+        (name == "same_key").then_some(SloConfig {
+            max_error_ratio: Some(0.0),
+            p9999_max_latency: Some(SAME_KEY_SCENARIO_TIMEOUT),
+            // The scenario already has a 60-second budget for 2,000 writes.
+            min_throughput: Some(2000.0 / 60.0),
+            ..SloConfig::default()
+        })
     } else {
         match model {
             ExecutionModel::SyncSingle => Some(SloConfig {
@@ -54,11 +127,46 @@ fn concurrency_config(
         lane: Lane::Nightly,
         execution_model: model,
         concurrency,
-        scenario_timeout: Duration::from_secs(60),
+        scenario_timeout: SAME_KEY_SCENARIO_TIMEOUT,
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
         slo,
+    }
+}
+
+#[test]
+fn same_key_disk_rejects_incomplete_or_slow_results() {
+    let config = concurrency_config(
+        "same_key",
+        ExecutionModel::SyncMulti,
+        100,
+        StressStorageMode::Disk,
+    );
+    let slo = config
+        .slo
+        .expect("disk same-key workload requires an acceptance contract");
+    for case in ["success", "error", "latency", "throughput"] {
+        let metrics = common::MetricsCollector::new();
+        for index in 0..2000 {
+            if case == "error" && index == 1999 {
+                metrics.record_error();
+            } else {
+                metrics.record_success();
+            }
+            metrics.record_latency(if case == "latency" && index == 1999 {
+                SAME_KEY_SCENARIO_TIMEOUT + Duration::from_nanos(1)
+            } else {
+                Duration::from_millis(1)
+            });
+        }
+        let window = if case == "throughput" {
+            Duration::from_secs(61)
+        } else {
+            Duration::from_secs(60)
+        };
+        let result = metrics.verify_slo(&slo, &metrics.summary(window));
+        assert_eq!(result.passed, case == "success", "{case}");
     }
 }
 
@@ -89,38 +197,62 @@ fn run_same_key(model: ExecutionModel, mode: StressStorageMode) {
     let cfg = concurrency_config("same_key", model, 100, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
     let (store, _store_guard) = new_shared_store(mode).unwrap();
+    let conflicts = Arc::new(AtomicU64::new(0));
+    let scenario_started = Instant::now();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
+            let conflicts_async = conflicts.clone();
             harness.run_async(move |ctx| {
                 let store = store_async.clone();
                 let metrics = ctx.metrics.clone();
                 let watchdog = ctx.watchdog.clone();
+                let conflicts = conflicts_async.clone();
                 async move {
                     let mut set = JoinSet::new();
                     for tid in 0..100 {
                         let metrics = metrics.clone();
                         let watchdog = watchdog.clone();
                         let store = store.clone();
+                        let conflicts = conflicts.clone();
                         set.spawn(async move {
                             for _ in 0..20 {
+                                let started = Instant::now();
                                 let mut attempts = 0;
                                 loop {
+                                    if scenario_started.elapsed() >= SAME_KEY_SCENARIO_TIMEOUT {
+                                        metrics.record_latency(started.elapsed());
+                                        metrics.record_error();
+                                        break;
+                                    }
                                     let _op = watchdog.begin_operation();
                                     let mut txn = store.begin(TxnMode::ReadWrite)?;
                                     let value = format!("v{tid}").into_bytes();
                                     txn.put(b"shared".to_vec(), value.clone())?;
                                     match txn.commit_self() {
                                         Ok(_) => {
+                                            metrics.record_latency(started.elapsed());
                                             metrics.record_success();
                                             break;
                                         }
-                                        Err(CoreError::TxnConflict) if attempts < MAX_RETRIES => {
+                                        Err(CoreError::TxnConflict)
+                                            if scenario_started.elapsed()
+                                                < SAME_KEY_SCENARIO_TIMEOUT =>
+                                        {
+                                            conflicts.fetch_add(1, Ordering::Relaxed);
                                             attempts += 1;
-                                            tokio::task::yield_now().await;
+                                            if let Some(delay) = same_key_retry_delay(
+                                                tid,
+                                                attempts,
+                                                scenario_started.elapsed(),
+                                            ) {
+                                                tokio::time::sleep(delay).await;
+                                            }
                                             continue;
                                         }
                                         Err(CoreError::TxnConflict) => {
+                                            conflicts.fetch_add(1, Ordering::Relaxed);
+                                            metrics.record_latency(started.elapsed());
                                             metrics.record_error();
                                             break;
                                         }
@@ -144,26 +276,43 @@ fn run_same_key(model: ExecutionModel, mode: StressStorageMode) {
         }
         _ => {
             let store_sync = store.clone();
+            let conflicts_sync = conflicts.clone();
             harness.run_concurrent(move |tid, ctx| {
                 for _ in 0..20 {
+                    let started = Instant::now();
                     let store = store_sync.clone();
                     let mut attempts = 0;
                     loop {
+                        if scenario_started.elapsed() >= SAME_KEY_SCENARIO_TIMEOUT {
+                            ctx.metrics.record_latency(started.elapsed());
+                            ctx.metrics.record_error();
+                            break;
+                        }
                         let _op = begin_op(ctx);
                         let mut txn = store.begin(TxnMode::ReadWrite)?;
                         let value = format!("v{tid}").into_bytes();
                         txn.put(b"shared".to_vec(), value.clone())?;
                         match txn.commit_self() {
                             Ok(_) => {
+                                ctx.metrics.record_latency(started.elapsed());
                                 ctx.metrics.record_success();
                                 break;
                             }
-                            Err(CoreError::TxnConflict) if attempts < MAX_RETRIES => {
+                            Err(CoreError::TxnConflict)
+                                if scenario_started.elapsed() < SAME_KEY_SCENARIO_TIMEOUT =>
+                            {
+                                conflicts_sync.fetch_add(1, Ordering::Relaxed);
                                 attempts += 1;
-                                std::thread::yield_now();
+                                if let Some(delay) =
+                                    same_key_retry_delay(tid, attempts, scenario_started.elapsed())
+                                {
+                                    std::thread::sleep(delay);
+                                }
                                 continue;
                             }
                             Err(CoreError::TxnConflict) => {
+                                conflicts_sync.fetch_add(1, Ordering::Relaxed);
+                                ctx.metrics.record_latency(started.elapsed());
                                 ctx.metrics.record_error();
                                 break;
                             }
@@ -176,6 +325,23 @@ fn run_same_key(model: ExecutionModel, mode: StressStorageMode) {
             })
         }
     };
+    eprintln!(
+        "same_key mode={} model={model:?} conflicts={} exhausted={} successes={} latency_samples={} error={:?}",
+        mode.as_str(),
+        conflicts.load(Ordering::Relaxed),
+        result.metrics.errors,
+        result.metrics.successes,
+        result.metrics.sample_count,
+        result.error,
+    );
+    if !result.skipped {
+        assert_eq!(result.metrics.successes + result.metrics.errors, 100 * 20);
+        assert_eq!(result.metrics.sample_count, 100 * 20);
+        assert_eq!(
+            result.metrics.errors, 0,
+            "same-key writes exceeded their retry deadline"
+        );
+    }
     assert!(
         result.is_success(),
         "same_key {:?}: {:?}",
