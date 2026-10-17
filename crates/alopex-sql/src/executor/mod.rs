@@ -1378,7 +1378,9 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 operation: "CatalogPersistence".into(),
                 reason: e.to_string(),
             },
-            CatalogError::InvalidKey(reason) => ExecutorError::InvalidOperation {
+            CatalogError::InvalidKey(reason)
+            | CatalogError::InvalidMetadata(reason)
+            | CatalogError::IndexRecovery(reason) => ExecutorError::InvalidOperation {
                 operation: "CatalogPersistence".into(),
                 reason,
             },

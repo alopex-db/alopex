@@ -46,6 +46,19 @@ pub enum CatalogError {
 
     #[error("invalid catalog key: {0}")]
     InvalidKey(String),
+
+    #[error("invalid catalog metadata: {0}")]
+    InvalidMetadata(String),
+
+    #[error("index recovery failed: {0}")]
+    IndexRecovery(String),
+}
+
+struct IndexRepair {
+    table: TableMetadata,
+    index: IndexMetadata,
+    key: Vec<u8>,
+    original: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -451,8 +464,7 @@ impl From<PersistedColumnMeta> for ColumnMetadata {
     }
 }
 
-// v0.8.4 persisted columns ended after `unique`.  The generated-sequence
-// fields added later cannot use serde defaults with bincode's positional layout.
+// v0.8.4 columns ended after `unique`; bincode cannot default fields added later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistedColumnMetaV2 {
     name: String,
@@ -538,15 +550,47 @@ impl From<PersistedTableMetaV2> for PersistedTableMeta {
     }
 }
 
-impl From<&TableMetadata> for PersistedTableMeta {
-    fn from(value: &TableMetadata) -> Self {
+fn encode_table_property<T: Serialize + serde::de::DeserializeOwned>(
+    table: &str,
+    property: &str,
+    value: &T,
+) -> Result<String, CatalogError> {
+    let invalid = |err| CatalogError::InvalidMetadata(format!("table {table}, {property}: {err}"));
+    let json = serde_json::to_string(value).map_err(invalid)?;
+    // JSON can encode non-finite numbers as null. Reject such a lossy payload
+    // before it replaces the last readable catalog entry.
+    let _: T = serde_json::from_str(&json).map_err(invalid)?;
+    Ok(json)
+}
+
+fn take_table_property<T: serde::de::DeserializeOwned + Default>(
+    table: &str,
+    properties: &mut HashMap<String, String>,
+    property: &str,
+) -> Result<T, CatalogError> {
+    match properties.remove(property) {
+        Some(json) => serde_json::from_str(&json).map_err(|err| {
+            CatalogError::InvalidMetadata(format!("table {table}, {property}: {err}"))
+        }),
+        None => Ok(T::default()),
+    }
+}
+
+impl TryFrom<&TableMetadata> for PersistedTableMeta {
+    type Error = CatalogError;
+
+    fn try_from(value: &TableMetadata) -> Result<Self, Self::Error> {
         let mut properties = value.properties.clone();
         properties.remove(COLUMN_DEFAULTS_PROPERTY);
+        properties.remove(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY);
         if !value.constraints.is_empty() {
             properties.insert(
                 crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY.to_string(),
-                serde_json::to_string(&value.constraints)
-                    .expect("relational constraints must serialize"),
+                encode_table_property(
+                    &value.name,
+                    crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY,
+                    &value.constraints,
+                )?,
             );
         }
         let defaults: HashMap<_, _> = value
@@ -556,16 +600,16 @@ impl From<&TableMetadata> for PersistedTableMeta {
                 column
                     .default
                     .as_ref()
-                    .map(|default| (column.name.clone(), default))
+                    .map(|default| (column.name.clone(), default.clone()))
             })
             .collect();
         if !defaults.is_empty() {
             properties.insert(
                 COLUMN_DEFAULTS_PROPERTY.to_string(),
-                serde_json::to_string(&defaults).expect("column defaults must serialize"),
+                encode_table_property(&value.name, COLUMN_DEFAULTS_PROPERTY, &defaults)?,
             );
         }
-        Self {
+        Ok(Self {
             table_id: value.table_id,
             name: value.name.clone(),
             catalog_name: value.catalog_name.clone(),
@@ -582,17 +626,21 @@ impl From<&TableMetadata> for PersistedTableMeta {
             storage_location: value.storage_location.clone(),
             comment: value.comment.clone(),
             properties,
-        }
+        })
     }
 }
 
-impl From<PersistedTableMeta> for TableMetadata {
-    fn from(value: PersistedTableMeta) -> Self {
-        let defaults: HashMap<String, crate::ast::expr::Expr> = value
-            .properties
-            .get(COLUMN_DEFAULTS_PROPERTY)
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+impl TryFrom<PersistedTableMeta> for TableMetadata {
+    type Error = CatalogError;
+
+    fn try_from(mut value: PersistedTableMeta) -> Result<Self, Self::Error> {
+        let defaults: HashMap<String, crate::ast::expr::Expr> =
+            take_table_property(&value.name, &mut value.properties, COLUMN_DEFAULTS_PROPERTY)?;
+        let constraints = take_table_property(
+            &value.name,
+            &mut value.properties,
+            crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY,
+        )?;
         let mut table = TableMetadata::new(
             value.name,
             value
@@ -611,17 +659,25 @@ impl From<PersistedTableMeta> for TableMetadata {
         table.storage_location = value.storage_location;
         table.comment = value.comment;
         table.properties = value.properties;
-        table.constraints = table
-            .properties
-            .get(crate::catalog::RELATIONAL_CONSTRAINTS_PROPERTY)
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        table.constraints = constraints;
+        for name in defaults.keys() {
+            if !table
+                .columns
+                .iter()
+                .any(|column| column.name.as_str() == name.as_str())
+            {
+                return Err(CatalogError::InvalidMetadata(format!(
+                    "table {}, {COLUMN_DEFAULTS_PROPERTY}: unknown column '{name}'",
+                    table.name
+                )));
+            }
+        }
         for column in &mut table.columns {
             if let Some(default) = defaults.get(&column.name) {
                 column.default = Some(default.clone());
             }
         }
-        table
+        Ok(table)
     }
 }
 
@@ -1017,6 +1073,10 @@ impl<'a, S: KVStore> Catalog for TxnCatalogView<'a, S> {
             .filter(|idx| {
                 idx.catalog_name == table_meta.catalog_name
                     && idx.namespace_name == table_meta.namespace_name
+                    && !self
+                        .overlay
+                        .added_indexes
+                        .contains_key(&IndexFqn::from(*idx))
                     && !self.catalog.index_hidden_by_overlay(idx, self.overlay)
             })
             .collect();
@@ -1196,10 +1256,11 @@ impl<S: KVStore> PersistentCatalog<S> {
             if persisted.table_type == TableType::Temporary {
                 continue;
             }
-            let table: TableMetadata = persisted.into();
+            let table = TableMetadata::try_from(persisted)?;
             inner.insert_table_unchecked(table);
         }
 
+        let mut index_repairs = Vec::new();
         for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
             let suffix = key_suffix(INDEXES_PREFIX, &key)?;
             let fqn = parse_index_key_suffix(&suffix)?;
@@ -1226,6 +1287,42 @@ impl<S: KVStore> PersistentCatalog<S> {
                     index.catalog_name = table.catalog_name.clone();
                     index.namespace_name = table.namespace_name.clone();
                 }
+                if index.columns.is_empty() {
+                    return Err(CatalogError::IndexRecovery(format!(
+                        "index '{}' must reference existing columns",
+                        index.name
+                    )));
+                }
+                let resolved = index
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        table.get_column_index(column).ok_or_else(|| {
+                            CatalogError::IndexRecovery(format!(
+                                "index '{}' refers to missing column '{}'",
+                                index.name, column
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if resolved != index.column_indices {
+                    if fqn.catalog != table.catalog_name
+                        || fqn.namespace != table.namespace_name
+                        || fqn.table != table.name
+                    {
+                        return Err(CatalogError::IndexRecovery(format!(
+                            "ambiguous table for index '{}'",
+                            index.name
+                        )));
+                    }
+                    index.column_indices = resolved;
+                    index_repairs.push(IndexRepair {
+                        table: table.clone(),
+                        index: index.clone(),
+                        key,
+                        original: value,
+                    });
+                }
                 inner.insert_index_unchecked(index);
             }
         }
@@ -1240,7 +1337,20 @@ impl<S: KVStore> PersistentCatalog<S> {
         }
         inner.set_counters(table_id_counter, index_id_counter);
 
+        let mut expected_tables = HashMap::new();
+        for repair in &index_repairs {
+            let table = &repair.table;
+            let key = table_key(&table.catalog_name, &table.namespace_name, &table.name);
+            let value = txn.get(&key)?.ok_or_else(|| {
+                CatalogError::IndexRecovery(format!("missing table '{}'", table.name))
+            })?;
+            expected_tables.insert(key, value);
+        }
         txn.rollback_self()?;
+
+        if !index_repairs.is_empty() {
+            Self::repair_indexes(&store, &index_repairs, &expected_tables)?;
+        }
 
         Ok(Self {
             inner,
@@ -1248,6 +1358,50 @@ impl<S: KVStore> PersistentCatalog<S> {
             catalogs,
             namespaces,
         })
+    }
+
+    fn repair_indexes(
+        store: &Arc<S>,
+        repairs: &[IndexRepair],
+        expected_tables: &HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<(), CatalogError> {
+        use crate::executor::ddl::recover_index::rebuild_index;
+        use crate::storage::TxnBridge;
+
+        let bridge = TxnBridge::new(store.clone());
+        let mut txn = bridge
+            .begin_write()
+            .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+        let result = (|| {
+            // A changed schema between detection and repair must not be overwritten.
+            // All checks precede every deletion, rebuild and metadata write.
+            for (key, expected) in expected_tables {
+                if txn.inner_mut().get(key)?.as_ref() != Some(expected) {
+                    return Err(CatalogError::IndexRecovery(
+                        "table metadata changed during recovery".into(),
+                    ));
+                }
+            }
+            for repair in repairs {
+                if txn.inner_mut().get(&repair.key)?.as_ref() != Some(&repair.original) {
+                    return Err(CatalogError::IndexRecovery(
+                        "index metadata changed during recovery".into(),
+                    ));
+                }
+            }
+            for repair in repairs {
+                rebuild_index(&mut txn, &repair.table, &repair.index)
+                    .map_err(|error| CatalogError::IndexRecovery(error.to_string()))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            txn.rollback()
+                .map_err(|rollback| CatalogError::IndexRecovery(format!("{error}; {rollback}")))?;
+            return Err(error);
+        }
+        txn.commit()
+            .map_err(|error| CatalogError::IndexRecovery(error.to_string()))
     }
 
     fn migrate_v1_to_v2(store: &Arc<S>) -> Result<(), CatalogError> {
@@ -1644,7 +1798,7 @@ impl<S: KVStore> PersistentCatalog<S> {
         txn: &mut S::Transaction<'_>,
         table: &TableMetadata,
     ) -> Result<(), CatalogError> {
-        let persisted = PersistedTableMeta::from(table);
+        let persisted = PersistedTableMeta::try_from(table)?;
         let value = bincode::serialize(&persisted)?;
         txn.put(
             table_key(&table.catalog_name, &table.namespace_name, &table.name),
