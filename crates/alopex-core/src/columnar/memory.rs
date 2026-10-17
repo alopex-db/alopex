@@ -73,7 +73,8 @@ impl InMemorySegmentStore {
             .clone();
         drop(guard);
         let reader =
-            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?
+                .with_legacy_row_group_metadata(&segment.meta.row_groups)?;
         reader.read_columns(columns)
     }
 
