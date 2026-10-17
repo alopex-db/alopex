@@ -226,8 +226,9 @@ fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
                 {
                     continue;
                 }
-                let score = score_row(&row, vector_idx, pattern)?;
-                entries.push(HeapEntry::new(score, row, higher_is_better));
+                if let Some(score) = score_row(&row, vector_idx, pattern)? {
+                    entries.push(HeapEntry::new(score, row, higher_is_better));
+                }
             }
         }
         if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
@@ -278,10 +279,11 @@ fn execute_heap_scan<'txn, S: KVStore + 'txn>(
             continue;
         }
 
-        let score = score_row(&row, vector_idx, pattern)?;
-        heap.push(HeapEntry::new(score, row, higher_is_better));
-        if heap.len() > k {
-            heap.pop();
+        if let Some(score) = score_row(&row, vector_idx, pattern)? {
+            heap.push(HeapEntry::new(score, row, higher_is_better));
+            if heap.len() > k {
+                heap.pop();
+            }
         }
     }
 
@@ -316,13 +318,14 @@ fn columnar_rows<'txn, S: KVStore + 'txn>(
     columnar_scan::execute_columnar_scan(txn, table_meta, &scan)
 }
 
-fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> {
+fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<Option<f64>> {
     let value = row.values.get(vector_idx).ok_or(ExecutorError::Evaluation(
         crate::executor::EvaluationError::InvalidColumnRef { index: vector_idx },
     ))?;
 
     let vector = match value {
         SqlValue::Vector(v) => v,
+        SqlValue::Null => return Ok(None),
         other => {
             return Err(ExecutorError::Evaluation(
                 crate::executor::EvaluationError::TypeMismatch {
@@ -345,7 +348,9 @@ fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> 
             pattern.metric,
         ),
     };
-    score.map_err(|e| ExecutorError::Evaluation(e.into()))
+    score
+        .map(Some)
+        .map_err(|e| ExecutorError::Evaluation(e.into()))
 }
 
 fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {

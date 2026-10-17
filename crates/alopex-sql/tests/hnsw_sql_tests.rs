@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::HnswIndex;
@@ -163,6 +164,162 @@ fn dml_changes_are_reflected_in_hnsw_index() {
         results
             .iter()
             .all(|res| res.key != 2u64.to_be_bytes().to_vec())
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn null_vectors_are_skipped_by_distance_and_hnsw() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         INSERT INTO items VALUES (1, [0.0, 0.0]), (2, NULL), (3, [2.0, 0.0]);",
+    );
+
+    let rows = run_sql(
+        &mut executor,
+        &catalog,
+        "SELECT vector_distance(embedding, [0.0, 0.0], 'l2') FROM items WHERE id = 2;",
+    );
+    let ExecutionResult::Query(result) = rows.last().expect("query result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(result.rows, vec![vec![alopex_sql::storage::SqlValue::Null]]);
+
+    let rows = run_sql(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM items
+         ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC;",
+    );
+    let ExecutionResult::Query(result) = rows.last().expect("query result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![alopex_sql::storage::SqlValue::Integer(1)],
+            vec![alopex_sql::storage::SqlValue::Integer(3)],
+            vec![alopex_sql::storage::SqlValue::Integer(2)],
+        ]
+    );
+
+    let rows = run_sql(
+        &mut executor,
+        &catalog,
+        "SELECT id FROM items
+         ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2;",
+    );
+    let ExecutionResult::Query(result) = rows.last().expect("query result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![alopex_sql::storage::SqlValue::Integer(1)],
+            vec![alopex_sql::storage::SqlValue::Integer(3)],
+        ]
+    );
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;",
+    );
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+    let (hits, _) = index.search(&[0.0, 0.0], 2, Some(10)).unwrap();
+    assert_eq!(
+        hits.into_iter().map(|hit| hit.key).collect::<Vec<_>>(),
+        vec![1u64.to_be_bytes().to_vec(), 3u64.to_be_bytes().to_vec()]
+    );
+    txn.commit_self().unwrap();
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "INSERT INTO items VALUES (4, NULL);
+         UPDATE items SET embedding = [1.0, 0.0] WHERE id = 2;",
+    );
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+    assert_eq!(index.search(&[0.0, 0.0], 3, Some(10)).unwrap().0.len(), 3);
+    txn.commit_self().unwrap();
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "UPDATE items SET embedding = NULL WHERE id = 2;",
+    );
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut txn).unwrap();
+    let (hits, _) = index.search(&[0.0, 0.0], 3, Some(10)).unwrap();
+    assert_eq!(
+        hits.into_iter().map(|hit| hit.key).collect::<Vec<_>>(),
+        vec![1u64.to_be_bytes().to_vec(), 3u64.to_be_bytes().to_vec()]
+    );
+    txn.commit_self().unwrap();
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_knn_hnsw_path_skips_null_vectors() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store, catalog.clone());
+    let tail = ", 0.0".repeat(1_023);
+    let query_vector = format!("[0{tail}]");
+    let knn_sql = format!(
+        "SELECT id FROM items ORDER BY vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 1;"
+    );
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(1024, L2));
+         INSERT INTO items VALUES (0, NULL);",
+    );
+    for id in 1..=1_024 {
+        let mut sql = String::from("INSERT INTO items VALUES (");
+        write!(&mut sql, "{id}, [{}{tail}]);", id - 1).unwrap();
+        run_sql(&mut executor, &catalog, &sql);
+    }
+
+    let exact = run_sql(&mut executor, &catalog, &knn_sql);
+    let ExecutionResult::Query(result) = exact.last().expect("query result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![vec![alopex_sql::storage::SqlValue::Integer(1)]]
+    );
+
+    run_sql(
+        &mut executor,
+        &catalog,
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search = 1024);",
+    );
+    let explained = run_sql(&mut executor, &catalog, &format!("EXPLAIN {knn_sql}"));
+    let ExecutionResult::Query(result) = explained.last().expect("explain result") else {
+        panic!("expected explain result");
+    };
+    let alopex_sql::storage::SqlValue::Text(plan) = &result.rows[0][0] else {
+        panic!("expected explain text");
+    };
+    assert!(plan.starts_with("HnswSearch"), "{plan}");
+
+    let indexed = run_sql(&mut executor, &catalog, &knn_sql);
+    let ExecutionResult::Query(result) = indexed.last().expect("query result") else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![vec![alopex_sql::storage::SqlValue::Integer(1)]]
     );
 }
 

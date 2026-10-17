@@ -41,8 +41,9 @@ impl HnswBridge {
             let mut entries = Vec::new();
             for entry in storage.range_scan(0, u64::MAX)? {
                 let (row_id, row) = entry.map_err(ExecutorError::Storage)?;
-                let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
-                entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                    entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                }
             }
             entries
         };
@@ -80,8 +81,12 @@ impl HnswBridge {
         let (column, col_idx) = vector_column(table, index)?;
         let mut owned_entries = Vec::with_capacity(rows.len());
         for (row_id, row) in rows {
-            let vector = required_vector(row_id, &table.name, column, &row[col_idx])?;
-            owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            }
+        }
+        if owned_entries.is_empty() {
+            return Ok(());
         }
         let entries: Vec<_> = owned_entries
             .iter()
@@ -135,7 +140,10 @@ impl HnswBridge {
             return Ok(());
         }
 
-        let vector = required_vector(&row_id, &table.name, column, &new_row[col_idx])?;
+        let new_vector = extract_vector(&new_row[col_idx], column)?;
+        let Some(vector) = new_vector else {
+            return Self::on_delete(txn, index, row_id);
+        };
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
@@ -283,24 +291,6 @@ fn extract_vector(value: &SqlValue, column: &ColumnMetadata) -> Result<Option<Ve
             column: column.name.clone(),
             expected: format!("VECTOR (got {})", other.type_name()),
         })),
-    }
-}
-
-fn required_vector(
-    row_id: &u64,
-    table: &str,
-    column: &ColumnMetadata,
-    value: &SqlValue,
-) -> Result<Vec<f32>> {
-    match extract_vector(value, column)? {
-        Some(vec) => Ok(vec),
-        None => Err(ExecutorError::InvalidOperation {
-            operation: "HNSW index".into(),
-            reason: format!(
-                "テーブル {table} の HNSW インデックス対象カラム {} に NULL が含まれています (RowID={row_id})",
-                column.name
-            ),
-        }),
     }
 }
 
