@@ -214,8 +214,83 @@ fn issue585_old_producer_catalog_upgrade() {
                 .is_ok()
             );
         }
+        // Exercise #471 against indexes recovered from immutable v0.8.15 bytes.
+        // Reopen first so resolution uses persisted constraint metadata.
+        let recovered = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+        let target = match name {
+            "named" => "ON CONSTRAINT uq_a",
+            "composite" | "nullable" => "(b, a)",
+            _ => "(a)",
+        };
+        let mut expected_rows = query_rows(run_sql_in_txn(
+            store.clone(),
+            recovered.clone(),
+            TxnMode::ReadOnly,
+            "SELECT id,a,b FROM items ORDER BY id",
+        ));
+        attempt_sql(
+            store.clone(),
+            recovered.clone(),
+            &format!("INSERT INTO items VALUES (90,10,20) ON CONFLICT {target} DO NOTHING"),
+        )
+        .unwrap();
+        assert_eq!(
+            query_rows(run_sql_in_txn(
+                store.clone(),
+                recovered.clone(),
+                TxnMode::ReadOnly,
+                "SELECT id,a,b FROM items ORDER BY id"
+            )),
+            expected_rows
+        );
+        attempt_sql(
+            store.clone(),
+            recovered.clone(),
+            &format!(
+                "INSERT INTO items VALUES (90,10,20) ON CONFLICT {target} DO UPDATE SET id=42"
+            ),
+        )
+        .unwrap();
+        let original_id = if name == "nullable" { 5 } else { 1 };
+        expected_rows
+            .iter_mut()
+            .find(|row| row[0] == Some(original_id))
+            .unwrap()[0] = Some(42);
+        expected_rows.sort_by_key(|row| row[0]);
+        let before_rejection = snapshot(&store, b"");
+        assert!(matches!(
+            attempt_sql(
+                store.clone(),
+                recovered.clone(),
+                &format!(
+                    "INSERT INTO items VALUES (91,10,20),(92,10,20) ON CONFLICT {target} DO UPDATE SET id=43"
+                )
+            ),
+            Err(ExecutorError::ConstraintViolation(
+                ConstraintViolation::Unique { .. }
+            ))
+        ));
+        assert_eq!(snapshot(&store, b""), before_rejection);
+        assert!(matches!(
+            attempt_sql(
+                store.clone(),
+                recovered,
+                "INSERT INTO items VALUES (93,11,21) ON CONFLICT (id,a) DO NOTHING"
+            ),
+            Err(ExecutorError::InvalidOperation { .. })
+        ));
+        assert_eq!(snapshot(&store, b""), before_rejection);
         let after = snapshot(&store, b"");
-        PersistentCatalog::load(store.clone()).unwrap();
+        let reopened = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
         assert_eq!(snapshot(&store, b""), after);
+        assert_eq!(
+            query_rows(run_sql_in_txn(
+                store.clone(),
+                reopened,
+                TxnMode::ReadOnly,
+                "SELECT id,a,b FROM items ORDER BY id"
+            )),
+            expected_rows
+        );
     }
 }

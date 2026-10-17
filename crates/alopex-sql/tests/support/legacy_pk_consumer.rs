@@ -276,9 +276,32 @@ fn check_old_producer_case(selected: &str) {
             vec![Some(7), Some(70)]
         ]
     );
+    // Both explicit and targetless #471 resolution must see the normalized PK,
+    // including the old producer's UNIQUE-before-PRIMARY-KEY declaration order.
+    let reopened = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    for sql in [
+        "INSERT INTO items VALUES (1,13) ON CONFLICT (id) DO UPDATE SET value=13",
+        "INSERT INTO items VALUES (2,21) ON CONFLICT DO UPDATE SET value=21",
+    ] {
+        attempt_sql(store.clone(), reopened.clone(), sql).unwrap();
+    }
     let after = snapshot(&store, b"");
-    PersistentCatalog::load(store.clone()).unwrap();
+    let reopened = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
     assert_eq!(snapshot(&store, b""), after);
+    assert_eq!(
+        query(run_sql_in_txn(
+            store.clone(),
+            reopened,
+            TxnMode::ReadOnly,
+            "SELECT id,value FROM items ORDER BY id"
+        )),
+        vec![
+            vec![Some(1), Some(13)],
+            vec![Some(2), Some(21)],
+            vec![Some(3), Some(30)],
+            vec![Some(7), Some(70)]
+        ]
+    );
 }
 
 #[test]
