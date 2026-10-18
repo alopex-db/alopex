@@ -624,3 +624,103 @@ fn delete_marks_node_and_compact_removes_it() {
     assert_eq!(stats.node_count, 2);
     assert_eq!(stats.deleted_count, 0);
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn upper_layer_routes_reach_nearest_in_another_basin() {
+    for max_level in [1, 2] {
+        let mut graph = make_graph();
+        let root = graph.insert(b"root", &[10.0, 0.0], b"").unwrap();
+        let local = graph.insert(b"local", &[1.0, 0.0], b"").unwrap();
+        let alternate = graph.insert(b"alternate", &[2.0, 0.0], b"").unwrap();
+        let nearest = graph.insert(b"nearest", &[0.0, 0.0], b"answer").unwrap();
+        graph.entry_point = Some(root);
+        graph.max_level = max_level;
+        for id in [root, local, alternate] {
+            let mut layers = vec![vec![]];
+            for _ in 0..max_level {
+                layers.push(
+                    [root, local, alternate]
+                        .into_iter()
+                        .filter(|n| *n != id)
+                        .collect(),
+                );
+            }
+            graph.nodes[id as usize].as_mut().unwrap().neighbors = layers;
+        }
+        graph.nodes[alternate as usize].as_mut().unwrap().neighbors[0] = vec![nearest];
+        graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+        // The nearest upper-layer node has no base route to the answer. The
+        // slightly farther upper candidate is the only route, and must survive
+        // every layer transition. The original root's base route is empty.
+        let (hits, stats, ef) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 4).unwrap();
+        assert_eq!(ef, 4);
+        assert_eq!(hits[0].key, b"nearest");
+        assert_eq!(hits[0].distance, 0.0);
+        assert_eq!(hits[0].metadata, b"answer");
+        assert_eq!(stats.nodes_visited, stats.distance_computations);
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn cost_fixture_recall_survives_upper_layer_local_minima() {
+    let mut graph = HnswGraph::new(
+        base_config()
+            .with_dimension(128)
+            .with_metric(Metric::Cosine),
+    )
+    .unwrap();
+    let mut hint = None;
+    let mut reference = Vec::new();
+    let mut query = vec![0.0; 128];
+    query[0] = 1.0;
+    for id in 0_usize..40_000 {
+        if id % 128 == 0 {
+            hint = None;
+        }
+        let vector = (0..128)
+            .map(|d| ((id * (d + 17) + d * 31) % 65_521) as f32)
+            .collect::<Vec<_>>();
+        // Independent f64 cosine math for the unit-axis query.
+        let squared_norm = vector.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+        reference.push((f64::from(vector[0]) / squared_norm.sqrt(), id as u64 + 1));
+        hint = Some(
+            graph
+                .insert_unpruned(&(id as u64 + 1).to_be_bytes(), &vector, &[], hint)
+                .unwrap(),
+        );
+        if id % 128 == 127 {
+            graph.prune_overfull_neighbors();
+        }
+        let rows = id + 1;
+        if ![9_600, 16_000, 20_000, 40_000].contains(&rows) {
+            continue;
+        }
+        // Finalize a partial batch without changing the next scale's graph.
+        let mut snapshot = graph.clone();
+        snapshot.prune_overfull_neighbors();
+        let mut expected = reference.clone();
+        expected.sort_by(|a, b| b.0.total_cmp(&a.0));
+        assert!(
+            expected[9].0 - expected[10].0 > 1e-7,
+            "unique cutoff at {rows}"
+        );
+        let expected = expected[..10]
+            .iter()
+            .map(|x| x.1)
+            .collect::<std::collections::BTreeSet<_>>();
+        let (hits, stats, ef) = snapshot.search_with_effective_ef(&query, 10, 64).unwrap();
+        let actual = hits
+            .iter()
+            .map(|h| u64::from_be_bytes(h.key.as_slice().try_into().unwrap()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(hits.len(), 10);
+        assert_eq!(actual, expected, "independent top-k at {rows} rows");
+        assert_eq!(ef, 64, "retain the requested base search breadth");
+        assert!(
+            stats.distance_computations < rows as u64 / 2,
+            "avoid an exhaustive scan at {rows}"
+        );
+    }
+}

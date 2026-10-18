@@ -337,13 +337,6 @@ impl HnswGraph {
         };
 
         let original_entry = enter_point;
-        // Greedy descent from the top layer to level 1.
-        if max_level > 0 {
-            for l in (1..=max_level).rev() {
-                enter_point = self.greedy_search_with_stats(query, enter_point, l, &mut stats);
-            }
-        }
-
         let active_count = usize::try_from(self.active_count).unwrap_or(usize::MAX);
         let ef = ef_search.max(k).min(active_count);
         #[cfg(test)]
@@ -351,7 +344,16 @@ impl HnswGraph {
             stats.effective_ef_search = ef;
         }
 
-        let mut candidates = self.search_layer(query, enter_point, 0, ef, &[], Some(&mut stats));
+        let upper_entries = self.search_upper_layers(query, enter_point, max_level, ef, &mut stats);
+        enter_point = upper_entries[0];
+        let mut candidates = self.search_layer(
+            query,
+            enter_point,
+            0,
+            ef,
+            &upper_entries[1..],
+            Some(&mut stats),
+        );
         // Upper-layer descent can miss a better base-layer basin. Preserve the
         // original search before considering another route: adding a seed to
         // its heap could evict a useful entry before that entry is expanded.
@@ -519,6 +521,36 @@ impl HnswGraph {
         let r = (f64::from(crc32fast::hash(key)) + 1.0) / (f64::from(u32::MAX) + 2.0);
         let ml = 1.0_f64 / (self.config.m as f64).ln();
         (-r.ln() * ml).floor() as usize
+    }
+
+    /// Keep alternative routes through upper layers. A single locally best
+    /// entry can have a worse base-layer basin than another upper candidate.
+    /// Like an HNSW upper beam, this retains at most min(m, effective ef) live
+    /// entries per layer; it does not enlarge the requested base search heap.
+    fn search_upper_layers(
+        &self,
+        query: PreparedQuery<'_>,
+        mut entry: u32,
+        max_level: usize,
+        ef: usize,
+        stats: &mut SearchStats,
+    ) -> Vec<u32> {
+        let width = self.config.m.min(ef);
+        if width == 1 {
+            for level in (1..=max_level).rev() {
+                entry = self.greedy_search_with_stats(query, entry, level, stats);
+            }
+            return vec![entry];
+        }
+        let mut entries = vec![entry];
+        for level in (1..=max_level).rev() {
+            entries = self
+                .search_layer(query, entries[0], level, width, &entries[1..], Some(stats))
+                .into_iter()
+                .map(|candidate| candidate.node_id)
+                .collect();
+        }
+        entries
     }
 
     fn greedy_search(&self, target: PreparedQuery<'_>, start: u32, level: usize) -> u32 {
