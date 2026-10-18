@@ -176,6 +176,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -229,6 +230,7 @@ jobs:
         if: runner.environment != 'self-hosted'
 
       - name: Set up Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -454,6 +456,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
