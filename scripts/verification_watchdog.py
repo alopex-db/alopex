@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -23,8 +24,15 @@ def keep_watchdog_alive(heartbeat):
             if time.monotonic() - last_change > 20:
                 print('OS watchdog: parent heartbeat expired', file=sys.stderr, flush=True)
                 return
-            subprocess.run(['systemd-notify', '--no-block', 'WATCHDOG=1'],
-                           check=True, timeout=2)
+            address = os.environ.get('NOTIFY_SOCKET')
+            if not address:
+                raise OSError('notification socket unavailable')
+            if address.startswith('@'):
+                address = '\0' + address[1:]
+            # The persistent worker remains attributable after notification delivery.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notification:
+                notification.settimeout(2)
+                notification.sendto(b'WATCHDOG=1', address)
         except (OSError, subprocess.SubprocessError) as error:
             print('OS watchdog: notification failed: ' + type(error).__name__,
                   file=sys.stderr, flush=True)

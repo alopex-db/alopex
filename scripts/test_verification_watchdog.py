@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,39 @@ class Observations:
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_heartbeat_is_sent_by_the_persistent_worker(self):
+        for abstract in (False, True):
+            with self.subTest(abstract=abstract), tempfile.TemporaryDirectory(prefix='notify-worker-') as directory:
+                heartbeat = Path(directory) / 'heartbeat'
+                heartbeat.touch()
+                address = ('\0notify-worker-' + str(os.getpid()) + '-' + str(time.time_ns())
+                           if abstract else str(Path(directory) / 'notify.sock'))
+                with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+                    receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                    receiver.settimeout(3)
+                    receiver.bind(address)
+                    environment = dict(os.environ, NOTIFY_SOCKET=(
+                        '@' + address[1:] if abstract else address))
+                    code = ('from pathlib import Path; import sys; '
+                            'from verification_watchdog import keep_watchdog_alive; '
+                            'keep_watchdog_alive(Path(sys.argv[1]))')
+                    worker = subprocess.Popen([sys.executable, '-B', '-c', code, str(heartbeat)],
+                                              env=environment, stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL)
+                    try:
+                        payload, credentials, _, _ = receiver.recvmsg(
+                            1024, socket.CMSG_SPACE(struct.calcsize('3i')))
+                        sender_pid = next(struct.unpack('3i', data)[0]
+                                          for level, kind, data in credentials
+                                          if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS)
+                        self.assertEqual(payload, b'WATCHDOG=1')
+                        self.assertEqual(sender_pid, worker.pid,
+                                         'watchdog notification must come from the persistent worker')
+                        self.assertIsNone(worker.poll())
+                    finally:
+                        worker.terminate()
+                        worker.wait(timeout=3)
+
     def test_host_fresh_responses_do_not_accumulate_cross_clock_drift(self):
         monitor = HostMonitor()
         monitor.process = Mock()
@@ -95,25 +130,39 @@ class WatchdogTests(unittest.TestCase):
         heartbeat.stat.return_value.st_mtime_ns = 1
         with patch('verification_watchdog.time.monotonic', side_effect=[0, 0, 6, 21]), \
              patch('verification_watchdog.time.sleep'), \
-             patch('verification_watchdog.subprocess.run') as notify:
+             patch.dict(os.environ, NOTIFY_SOCKET='@watchdog-test'), \
+             patch('verification_watchdog.socket.socket') as sockets:
             keep_watchdog_alive(heartbeat)
+        notify = sockets.return_value.__enter__.return_value.sendto
         self.assertEqual(notify.call_count, 2)
-        self.assertTrue(all('--no-block' in call.args[0] for call in notify.call_args_list))
+        self.assertTrue(all(call.args == (b'WATCHDOG=1', '\0watchdog-test')
+                            for call in notify.call_args_list))
 
     def test_heartbeat_progress_resets_deadline(self):
         heartbeat = Mock()
         heartbeat.stat.side_effect = [Mock(st_mtime_ns=value) for value in [1, 1, 2, 2, 2]]
         with patch('verification_watchdog.time.monotonic', side_effect=[0, 0, 18, 18, 35, 39]), \
              patch('verification_watchdog.time.sleep'), \
-             patch('verification_watchdog.subprocess.run') as notify:
+             patch.dict(os.environ, NOTIFY_SOCKET='@watchdog-test'), \
+             patch('verification_watchdog.socket.socket') as sockets:
             keep_watchdog_alive(heartbeat)
+        notify = sockets.return_value.__enter__.return_value.sendto
         self.assertEqual(notify.call_count, 3)
 
     def test_notification_failure_stops_heartbeats(self):
         heartbeat = Mock()
-        with patch('verification_watchdog.subprocess.run', side_effect=OSError('unavailable')) as notify:
+        with patch.dict(os.environ, NOTIFY_SOCKET='@watchdog-test'), \
+             patch('verification_watchdog.socket.socket') as sockets:
+            notify = sockets.return_value.__enter__.return_value.sendto
+            notify.side_effect = OSError('unavailable')
             keep_watchdog_alive(heartbeat)
         self.assertEqual(notify.call_count, 1)
+
+    def test_missing_notification_socket_stops_heartbeats(self):
+        with patch.dict(os.environ, clear=True), \
+             patch('verification_watchdog.socket.socket') as sockets:
+            keep_watchdog_alive(Mock())
+        sockets.assert_not_called()
 
     def test_host_initialization_grace_preserves_runtime_deadline(self):
         monitor = HostMonitor()
