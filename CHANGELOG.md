@@ -18,6 +18,9 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
+- Python SQL calls now reject parameterized batches containing multiple
+  statements. Run each statement separately; the old SQL-text expansion could
+  lose Decimal precision in later results (#582).
 - Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
   Keep a backup created before upgrading if rollback to v0.8.15 is required;
   reopening newly written segments with v0.8.15 fails with a decoding error

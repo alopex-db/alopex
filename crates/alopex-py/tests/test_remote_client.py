@@ -317,6 +317,36 @@ def test_placeholder_expansion_reuses_the_embedded_binder(stub):
     assert stub.requests[-1]["body"]["sql"] == _bind_sql_params(sql, params)
 
 
+def test_parameterized_multiple_statements_fail_before_remote_request(stub):
+    from decimal import Decimal
+
+    with RemoteDatabase(stub.url) as db:
+        with pytest.raises(ValueError, match="複数 SQL 文") as error:
+            db.execute_sql(
+                "SELECT ? AS amount; SELECT ? AS amount",
+                [Decimal("12345678901234567.89")] * 2,
+            )
+        assert error.value.code == "ALOPEX-PY019"
+        assert stub.requests == []
+
+
+def test_remote_decimal_binding_preserves_digits_and_rejects_containers(stub):
+    from collections import UserDict
+    from decimal import Decimal
+    from types import MappingProxyType
+
+    with RemoteDatabase(stub.url) as db:
+        db.execute_sql("SELECT -? AS amount", [Decimal("12345678901234567.89")])
+        assert stub.requests[-1]["body"]["sql"] == (
+            "SELECT -DECIMAL '12345678901234567.89' AS amount"
+        )
+        before = len(stub.requests)
+        for invalid in (UserDict({1: "x"}), MappingProxyType({1: "x"}), {1}):
+            with pytest.raises(TypeError):
+                db.execute_sql("SELECT ? AS amount", [invalid])
+        assert len(stub.requests) == before
+
+
 def test_binder_errors_are_raised_before_any_request(stub):
     with RemoteDatabase(stub.url) as db:
         with pytest.raises(ValueError):
@@ -760,6 +790,8 @@ def test_thread_mode_is_refused_with_a_reason():
 
 
 UNSUPPORTED_TRANSACTION_CALLS = [
+    ("prepare", ("SELECT ?",)),
+    ("execute_many", ("INSERT INTO t VALUES (?)", [[1]])),
     ("savepoint", ("local_only",)),
     ("rollback_to", ("local_only",)),
     ("release", ("local_only",)),
@@ -789,6 +821,10 @@ def test_unsupported_transaction_methods_raise_with_a_reason(stub, name, args):
         with pytest.raises(NotImplementedError) as raised:
             getattr(txn, name)(*args)
     assert raised.value.code == "ALOPEX-PY204"
+    if name == "prepare":
+        assert "prepared statement handles" in str(raised.value)
+    elif name == "execute_many":
+        assert "atomic parameter batch endpoint" in str(raised.value)
 
 
 def _public_methods(cls):

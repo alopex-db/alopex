@@ -754,6 +754,18 @@ class RemoteTransaction:
 
     # -- explicit refusals ---------------------------------------------------
 
+    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.prepare",
+            "the server session API does not expose prepared statement handles",
+        )
+
+    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.execute_many",
+            "the server session API has no atomic parameter batch endpoint",
+        )
+
     def savepoint(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.savepoint", _SAVEPOINT_REASON)
 
@@ -768,12 +780,6 @@ class RemoteTransaction:
 
     def query_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.query_stream", _STREAM_REASON)
-
-    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise _unsupported("Transaction.prepare", _PREPARED_REASON)
-
-    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise _unsupported("Transaction.execute_many", _PREPARED_REASON)
 
     def get(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get", _KV_REASON)
