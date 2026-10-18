@@ -202,18 +202,20 @@ fn knn_query_options_reject_non_knn_query() {
 fn knn_query_options_reject_unsafe_ef_search_before_execution() {
     let (_executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
-    let stmt = Parser::parse_sql(
-        &AlopexDialect,
-        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (ef_search = 10000000000000)",
-    )
-    .expect("parse SQL")
-    .pop()
-    .expect("one statement");
+    for ef_search in ["0", "10000000000000"] {
+        let stmt = Parser::parse_sql(
+            &AlopexDialect,
+            &format!("SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (ef_search = {ef_search})"),
+        )
+        .expect("parse SQL")
+        .pop()
+        .expect("one statement");
 
-    let error = Planner::new(&*catalog.read().expect("catalog lock"))
-        .plan(&stmt)
-        .expect_err("unsafe ef_search must be rejected before HNSW execution");
-    assert!(error.to_string().contains("ef_search"), "{error}");
+        let error = Planner::new(&*catalog.read().expect("catalog lock"))
+            .plan(&stmt)
+            .expect_err("unsafe ef_search must be rejected before HNSW execution");
+        assert!(error.to_string().contains("ef_search"), "{error}");
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -248,6 +250,10 @@ fn enable_hnsw_true_forces_hnsw_plan_below_cost_threshold() {
     assert!(analyzed.contains("HnswSearch"), "{analyzed}");
     assert!(analyzed.contains("nodes_visited="), "{analyzed}");
     assert!(!analyzed.contains("nodes_visited=0"), "{analyzed}");
+    assert!(
+        analyzed.contains("ef_search=50 fallback=none"),
+        "missing query and index ef_search must use the default: {analyzed}"
+    );
 
     let filtered_plan = explain_text(
         &mut executor,
@@ -358,29 +364,31 @@ fn hnsw_index_accepts_search_ef_default() {
 fn hnsw_index_rejects_unsafe_ef_search_without_leaving_catalog_state() {
     let (mut executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
-    let stmt = Parser::parse_sql(
-        &AlopexDialect,
-        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search=10000000000000)",
-    )
-    .expect("parse DDL")
-    .pop()
-    .expect("one statement");
-    let plan = Planner::new(&*catalog.read().expect("catalog lock"))
-        .plan(&stmt)
-        .expect("plan DDL");
+    for ef_search in ["0", "10000000000000"] {
+        let stmt = Parser::parse_sql(
+            &AlopexDialect,
+            &format!("CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search={ef_search})"),
+        )
+        .expect("parse DDL")
+        .pop()
+        .expect("one statement");
+        let plan = Planner::new(&*catalog.read().expect("catalog lock"))
+            .plan(&stmt)
+            .expect("plan DDL");
 
-    let error = executor
-        .execute(plan)
-        .expect_err("unsafe HNSW index ef_search must be rejected");
-    assert!(error.to_string().contains("ef_search"), "{error}");
-    assert!(
-        catalog
-            .read()
-            .expect("catalog lock")
-            .get_index("idx_items_embedding")
-            .is_none(),
-        "failed CREATE INDEX must not leave an index in the catalog"
-    );
+        let error = executor
+            .execute(plan)
+            .expect_err("unsafe HNSW index ef_search must be rejected");
+        assert!(error.to_string().contains("ef_search"), "{error}");
+        assert!(
+            catalog
+                .read()
+                .expect("catalog lock")
+                .get_index("idx_items_embedding")
+                .is_none(),
+            "failed CREATE INDEX must not leave an index in the catalog"
+        );
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -621,10 +629,17 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    for start in (1..=ROWS).step_by(BATCH_SIZE as usize) {
-        let end = (start + BATCH_SIZE - 1).min(ROWS);
+    // A one-axis data set gives an independent strict distance ordering:
+    // the zero query's nearest rows are IDs 1..=10, without tie-breaking assumptions.
+    let row_vector = |id: u64| {
+        let mut components = vec!["0.0".to_owned(); DIMENSIONS];
+        components[0] = id.to_string();
+        format!("[{}]", components.join(", "))
+    };
+    for start in (1..ROWS).step_by(BATCH_SIZE as usize) {
+        let end = (start + BATCH_SIZE - 1).min(ROWS - 1);
         let values = (start..=end)
-            .map(|id| format!("({id}, {vector})"))
+            .map(|id| format!("({id}, {})", row_vector(id)))
             .collect::<Vec<_>>()
             .join(", ");
         execute_sql(
@@ -642,6 +657,18 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     let query = format!(
         "SELECT id FROM items ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
     );
+    let at_threshold = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(at_threshold.starts_with("ExactKnnScan"), "{at_threshold}");
+    let expected: Vec<i32> = (1..=10).collect();
+    assert_eq!(query_ids(&mut executor, &catalog, &query), expected);
+    execute_sql(
+        &mut executor,
+        &catalog,
+        &format!(
+            "INSERT INTO items (id, embedding) VALUES ({ROWS}, {})",
+            row_vector(ROWS)
+        ),
+    );
     let indexed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
     assert!(
         indexed.contains("HnswSearch index=idx_items_embedding k=10\n    nodes_visited="),
@@ -651,6 +678,28 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     assert!(indexed.contains("search_time_us="), "{indexed}");
     assert!(indexed.contains("ef_search=64 fallback=none"), "{indexed}");
     assert!(!indexed.contains("nodes_visited=0"), "{indexed}");
+    assert_eq!(query_ids(&mut executor, &catalog, &query), expected);
+
+    let no_fallback_query = format!(
+        "SELECT id FROM items WHERE id >= 1 ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
+    let no_fallback = explain_text(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {no_fallback_query}"),
+    );
+    assert!(
+        no_fallback.contains("HnswSearchPostFilter"),
+        "{no_fallback}"
+    );
+    assert!(
+        no_fallback.contains("ef_search=64 fallback=none"),
+        "{no_fallback}"
+    );
+    assert_eq!(
+        query_ids(&mut executor, &catalog, &no_fallback_query),
+        expected
+    );
 
     let post_filter_without_fallback = explain_text(
         &mut executor,
@@ -691,12 +740,19 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     );
     assert!(forced_exact.starts_with("ExactKnnScan\n"), "{forced_exact}");
 
+    // The farthest row is outside the initial ANN candidates; fallback must
+    // retrieve it, so returning an empty result cannot satisfy this regression.
+    let fallback_query = format!(
+        "SELECT id FROM items WHERE id = {ROWS} ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
+    );
     let post_filter = explain_text(
         &mut executor,
         &catalog,
-        &format!(
-            "EXPLAIN ANALYZE SELECT id FROM items WHERE id = 0 ORDER BY vector_distance(embedding, {vector}, 'l2') ASC LIMIT 10"
-        ),
+        &format!("EXPLAIN ANALYZE {fallback_query}"),
+    );
+    assert_eq!(
+        query_ids(&mut executor, &catalog, &fallback_query),
+        vec![ROWS as i32]
     );
     assert!(
         post_filter.contains(
@@ -712,6 +768,7 @@ fn explain_analyze_reports_hnsw_search_statistics_and_fallback() {
     execute_sql(&mut executor, &catalog, "DROP INDEX idx_items_embedding;");
     let exact = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
     assert!(exact.starts_with("ExactKnnScan\n"), "{exact}");
+    assert_eq!(query_ids(&mut executor, &catalog, &query), expected);
     assert!(
         exact.contains(
             "nodes_visited=0 distance_computations=0 search_time_us=0 ef_search=none fallback=none"

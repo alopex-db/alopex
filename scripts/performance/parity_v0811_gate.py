@@ -6,13 +6,13 @@ import json
 import math
 from pathlib import Path
 
-
 THROUGHPUT_METRICS = {
     "rows_per_second",
     "steady_state_rows_per_second",
     "queries_per_second",
 }
 RESOURCE_METRICS = {"peak_rss_bytes", "index_size_bytes"}
+MEMORY_TOTAL_TOLERANCE_BYTES = 16 * 1024 * 1024
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -23,10 +23,10 @@ def percentile(values: list[float], quantile: float) -> float:
 
 
 def _ratio(subject: object, reference: object, label: str, errors: list[str]) -> float | None:
-    if not isinstance(subject, (int, float)) or not math.isfinite(subject):
-        errors.append(f"{label}: subject metric must be finite")
+    if type(subject) not in (int, float) or not math.isfinite(subject) or subject < 0:
+        errors.append(f"{label}: subject metric must be finite and nonnegative")
         return None
-    if not isinstance(reference, (int, float)) or not math.isfinite(reference) or reference <= 0:
+    if type(reference) not in (int, float) or not math.isfinite(reference) or reference <= 0:
         errors.append(f"{label}: reference metric must be finite and positive")
         return None
     return float(subject) / float(reference)
@@ -54,11 +54,15 @@ def evaluate(name: str, contract: dict[str, object], measurement: dict[str, obje
         if metric == "recall_at_10":
             value = subject[metric]
             reference_value = reference[metric]
-            if not isinstance(value, (int, float)) or not math.isfinite(value):
-                errors.append(f"{name}: subject recall_at_10 must be finite")
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                errors.append(f"{name}: subject recall_at_10 must be finite and between zero and one")
                 continue
-            if not isinstance(reference_value, (int, float)) or not math.isfinite(reference_value):
-                errors.append(f"{name}: reference recall_at_10 must be finite")
+            if (
+                type(reference_value) not in (int, float)
+                or not math.isfinite(reference_value)
+                or not 0 <= reference_value <= 1
+            ):
+                errors.append(f"{name}: reference recall_at_10 must be finite and between zero and one")
                 continue
             if value < thresholds["min_recall"]:
                 errors.append(f"{name}: recall_at_10 is below min_recall")
@@ -107,12 +111,21 @@ def validate_document(
         "cpu_model",
         "logical_cpu_count",
         "cpu_affinity",
-        "memory_bytes",
         "build_profile",
         "thread_count",
     ):
         if environment.get(field) != profile.get(field):
             errors.append(f"environment: {field} does not match the runner profile")
+    expected_memory = profile.get("memory_bytes")
+    observed_memory = environment.get("memory_bytes")
+    if (
+        type(expected_memory) is not int
+        or type(observed_memory) is not int
+        or expected_memory <= 0
+        or observed_memory <= 0
+        or abs(observed_memory - expected_memory) > MEMORY_TOTAL_TOLERANCE_BYTES
+    ):
+        errors.append("environment: memory_bytes does not match the runner profile")
     for field in (
         "alopex_version",
         "alopex_revision",
@@ -123,7 +136,12 @@ def validate_document(
         if not environment.get(field):
             errors.append(f"environment: missing {field}")
     results = measurements.get("results", [])
-    indexed = {(row.get("contract"), row.get("evidence_id")): row for row in results}
+    indexed = {}
+    for row in results:
+        key = (row.get("contract"), row.get("evidence_id"))
+        if key in indexed:
+            errors.append(f"{key[0]}: duplicate evidence {key[1]}")
+        indexed[key] = row
     for name, contract in contracts.get("contracts", {}).items():
         evidence_ids = contract.get("evidence_ids", [])
         required = evidence_ids if suite == "full" else evidence_ids[:1]

@@ -64,6 +64,27 @@ fn raw_record_validator_requires_counterbalanced_sample_identity() {
         SIZES.len() * TRIAL_ORDERS.len() * 2 * RUNS
     );
 
+    for (field, invalid) in [
+        (
+            "source_commit",
+            serde_json::json!(format!("wrong-{source_commit}")),
+        ),
+        ("run_id", serde_json::json!(format!("wrong-{run_id}"))),
+        ("metric", serde_json::json!("L2")),
+        ("dimension", serde_json::json!(DIMENSION + 1)),
+        ("arm_order", serde_json::json!(2)),
+        ("elapsed_ns", serde_json::json!(0)),
+    ] {
+        let mut altered = lines.clone();
+        let mut record: serde_json::Value = serde_json::from_str(&altered[0]).unwrap();
+        record[field] = invalid;
+        altered[0] = record.to_string();
+        assert!(
+            std::panic::catch_unwind(|| validate_raw_records(&altered.join("\n"))).is_err(),
+            "validator must reject incorrect {field}"
+        );
+    }
+
     let duplicate = records.replacen("\"sample_index\":0", "\"sample_index\":1", 1);
     assert!(
         std::panic::catch_unwind(|| validate_raw_records(&duplicate)).is_err(),
@@ -353,8 +374,16 @@ fn sql_knn_hnsw_cost_process_worker() {
     let query = query(&table);
     if arm == "hnsw" {
         assert_hnsw_path(&db, &query);
+        assert_live_hnsw_path(&db, &query);
     }
-    db.execute_sql(&query).expect("warm query");
+    let ExecutionResult::Query(warm_result) = db.execute_sql(&query).expect("warm query") else {
+        panic!("kNN must return rows");
+    };
+    assert_eq!(
+        warm_result.rows.len(),
+        K,
+        "kNN must return all requested rows"
+    );
     for (sample_index, elapsed_ms) in elapsed_millis(&db, &query).into_iter().enumerate() {
         append_raw_sample(
             &raw_path,
@@ -439,7 +468,12 @@ fn seed(db: &Database, table: &str, rows: usize, hnsw: bool) {
                 if dimension != 0 {
                     sql.push(',');
                 }
-                write!(&mut sql, "{}", (row_id + dimension) % 997).expect("write vector");
+                write!(
+                    &mut sql,
+                    "{}",
+                    (row_id * (dimension + 17) + dimension * 31) % 65_521
+                )
+                .expect("write vector");
             }
             sql.push_str("]) ");
         }
@@ -472,12 +506,52 @@ fn assert_hnsw_path(db: &Database, query: &str) {
     );
 }
 
+fn assert_live_hnsw_path(db: &Database, query: &str) {
+    let ExecutionResult::Query(result) = db
+        .execute_sql(&format!("EXPLAIN ANALYZE {query}"))
+        .expect("analyze hnsw query")
+    else {
+        panic!("EXPLAIN ANALYZE must return a query result");
+    };
+    let alopex_sql::SqlValue::Text(plan) = &result.rows[0][0] else {
+        panic!("EXPLAIN ANALYZE must return text");
+    };
+    assert!(plan.contains("HnswSearch"), "live HNSW path: {plan}");
+    assert!(
+        !plan.contains("nodes_visited=0"),
+        "empty HNSW search: {plan}"
+    );
+    assert!(
+        plan.contains("fallback=none"),
+        "unexpected fallback: {plan}"
+    );
+    assert!(
+        plan.contains(&format!("rows={K}")),
+        "incomplete kNN rows: {plan}"
+    );
+}
+
 fn elapsed_millis(db: &Database, query: &str) -> Vec<f64> {
     let mut elapsed = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let start = Instant::now();
-        db.execute_sql(query).expect("execute query");
+        let result = db.execute_sql(query).expect("execute query");
         elapsed.push(start.elapsed().as_secs_f64() * 1_000.0);
+        // Validate every timed result outside the timer: an empty/duplicate
+        // result must never become an apparently faster measurement.
+        let ExecutionResult::Query(result) = result else {
+            panic!("kNN must return rows");
+        };
+        assert_eq!(result.rows.len(), K, "timed kNN result count");
+        let ids = result
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(alopex_sql::SqlValue::Integer(id)) => *id,
+                value => panic!("expected integer id, got {value:?}"),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), K, "timed kNN IDs must be unique");
     }
     elapsed
 }

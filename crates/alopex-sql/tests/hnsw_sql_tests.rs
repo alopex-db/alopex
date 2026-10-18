@@ -374,7 +374,7 @@ fn sql_knn_hnsw_path_skips_null_vectors() {
     );
     // The cost gate requires strictly more than 1,024 indexed vectors here;
     // the NULL row does not count toward the HNSW index's node count.
-    for id in 1..=1_025 {
+    for id in 1..=1_024 {
         let mut sql = String::from("INSERT INTO items VALUES (");
         write!(&mut sql, "{id}, [{}{tail}]);", id - 1).unwrap();
         run_sql(&mut executor, &catalog, &sql);
@@ -394,6 +394,25 @@ fn sql_knn_hnsw_path_skips_null_vectors() {
         &mut executor,
         &catalog,
         "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW WITH (ef_search = 1024);",
+    );
+    // 1,024 indexed vectors plus a NULL row still select exact scan.
+    let explained = run_sql(
+        &mut executor,
+        &catalog,
+        &format!("EXPLAIN ANALYZE {knn_sql}"),
+    );
+    let ExecutionResult::Query(result) = explained.last().expect("explain result") else {
+        panic!("expected explain result");
+    };
+    let alopex_sql::storage::SqlValue::Text(plan) = &result.rows[0][0] else {
+        panic!("expected explain text");
+    };
+    assert!(plan.starts_with("ExactKnnScan"), "{plan}");
+    assert_query_ids(&mut executor, &catalog, &knn_sql, &[1]);
+    run_sql(
+        &mut executor,
+        &catalog,
+        &format!("INSERT INTO items VALUES (1025, [1024{tail}]);"),
     );
     let explained = run_sql(&mut executor, &catalog, &format!("EXPLAIN {knn_sql}"));
     let ExecutionResult::Query(result) = explained.last().expect("explain result") else {
