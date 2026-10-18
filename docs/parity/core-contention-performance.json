@@ -1,0 +1,128 @@
+{
+  "scope": "Disk same-key stress accounting and bounded retry policy; no engine implementation change",
+  "references": [
+    {
+      "project": "facebook/rocksdb",
+      "version": "v10.10.1",
+      "commit": "4595a5e95ae8525c42e172a054435782b3479c57",
+      "source": [
+        "utilities/transactions/optimistic_transaction.cc#CommitWithParallelValidate",
+        "db/write_thread.cc#LinkOne",
+        "db/write_thread.cc#ExitAsMemTableWriter"
+      ],
+      "test": [
+        "utilities/transactions/optimistic_transaction_test.cc#WriteConflictTest",
+        "db/db_write_test.cc#WriteThreadWaitNanosCounter"
+      ],
+      "relationship": "alopex-native",
+      "application": "Retain the engine TxnConflict contract and its locked commit validation. A failed optimistic commit must be retried with a fresh transaction. Proposed queue/precheck changes are excluded from this PR because they did not resolve the measured tail condition.",
+      "intentional_difference": "Alopex retains its global commit serialization; RocksDB parallel validation uses ordered lock buckets. No claim of identical concurrency protocol.",
+      "license": "GPL-2.0 or Apache-2.0; consulted design, no code copied.",
+      "alopex_tests": [
+        "crates/alopex-core/src/lsm/mod.rs#detects_write_conflict",
+        "crates/alopex-core/src/lsm/mod.rs#detects_read_write_conflict_after_get"
+      ],
+      "test_classification": "existing handwritten regression; no new reference fixture copied"
+    },
+    {
+      "project": "sqlite/sqlite",
+      "version": "3.51.0",
+      "commit": "c2aa8e3875907d84540af7624534e326b26b82ee",
+      "source": "src/main.c#sqliteDefaultBusyCallback",
+      "test": [
+        "test/busy.test#busy-1.2",
+        "test/busy2.test"
+      ],
+      "relationship": "alopex-native",
+      "application": "Retry fresh transactions within the existing shared 60-second scenario budget. Preserve the existing five-second lack-of-progress watchdog. Require 2000 successes, 2000 logical latency samples and zero exhausted writes; record all conflicts and all retry waiting in latency.",
+      "intentional_difference": "SQLite waits on locks up to a busy timeout; Alopex must create a fresh transaction after TxnConflict. Delay policy is a workload policy, not an engine-level guarantee.",
+      "license": "Public domain; inspected, no test code copied.",
+      "alopex_tests": [
+        "crates/alopex-core/tests/stress_concurrent.rs#same_key_retry_stops_at_deadline",
+        "crates/alopex-core/tests/stress_concurrent.rs#same_key_retry_spreads_workers_across_the_late_window",
+        "crates/alopex-core/tests/stress_concurrent.rs#same_key_retry_delays_are_bounded",
+        "crates/alopex-core/tests/stress_concurrent.rs#test_concurrent_same_key_write"
+      ]
+    },
+    {
+      "project": "aws/aws-sdk-go-v2",
+      "version": "v1.39.3",
+      "commit": "b9b0c6553b80f99603b4f8356b88f5baf1328deb",
+      "source": "aws/retry/jitter_backoff.go#BackoffDelay",
+      "test": "aws/retry/jitter_backoff_test.go#TestExponentialJitterBackoff_AttemptDelay",
+      "design": "https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/",
+      "application": "Full Jitter over a 16ms maximum interval (the same cap as the prior 20-retry candidate) with a deterministic mixer. Stop retries at the shared scenario deadline; preserve the core fsync/TxnConflict behavior.",
+      "intentional_difference": "The SDK code uses crypto randomness and returns a fixed maximum above its attempt cap. This reproducible stress workload uses a deterministic mixer, a positive microsecond floor, and retains jitter at the cap as in the Full Jitter design; the shared 60-second scenario deadline is separate. This is not a production SDK port.",
+      "license": "Apache-2.0; consulted implementation and tests, no source copied."
+    }
+  ],
+  "verification": {
+    "correctness": "Exact focused checkout: 394 alopex-core all-feature library tests passed (one child-process helper ignored for direct invocation); four retry/accounting tests passed; actual stress test ran all eight memory/disk x execution-model cases, each 2000 successes and zero failures (16000 operations total), with nightly lane explicitly enabled.",
+    "lint": "cargo fmt and all-targets/all-features alopex-core Clippy passed before push.",
+    "mutation": "cargo-mutants did not select integration-test helpers; two hand-seeded behavioral mutations (accept one failed write; retry at an expired deadline) were both detected. Source restored and four tests rerun successfully. Production-core mutation experiments belonged to rejected engine changes and are not final-patch coverage.",
+    "strengthening": "Deadline boundary regression, bounded-delay proptest, failing error/latency/throughput contract cases, and eight executed stress cases.",
+    "benchmark": {
+      "design": "36 independent processes: 4 execution-model labels x 3 policy arms x 3 alternating trials. Same original-engine binary in all arms; 100 workers x 20 writes. Different completed-work counts are not evidence of a throughput speedup.",
+      "engine_base": "02d30d1e20fb914149245f3e23018d6e56f009fa; its commit_write_set implementation matches the focused PR parent f8739720. Exact PR checkout was separately exercised by the eight-case repository stress test.",
+      "hardware": "Apple M5 Pro, 18 logical CPUs, 48 GiB RAM, macOS 27.0.1 arm64; Rust release opt-level=3, LTO, one codegen unit.",
+      "fixed_successes": 24000,
+      "fixed_errors": 0,
+      "max_logical_latency_ms": 6059.497167,
+      "max_process_rss_mib": 11.0625,
+      "max_scenario_seconds": 9.221914167,
+      "per_model": {
+        "SyncSingle": {
+          "yield_20_errors": 1412,
+          "previous_backoff_20_errors": 1167,
+          "fixed_errors": 0,
+          "fixed_median_seconds": 6.503040917,
+          "fixed_p99_ms": 1739.086583,
+          "fixed_max_latency_ms": 3391.663458,
+          "fixed_cpu_seconds": 8.1313,
+          "fixed_max_rss_mib": 10.1875
+        },
+        "SyncMulti": {
+          "yield_20_errors": 2642,
+          "previous_backoff_20_errors": 1693,
+          "fixed_errors": 0,
+          "fixed_median_seconds": 7.044799208,
+          "fixed_p99_ms": 2247.640833,
+          "fixed_max_latency_ms": 4683.691542,
+          "fixed_cpu_seconds": 4.403849999999999,
+          "fixed_max_rss_mib": 10.109375
+        },
+        "AsyncSingle": {
+          "yield_20_errors": 0,
+          "previous_backoff_20_errors": 0,
+          "fixed_errors": 0,
+          "fixed_median_seconds": 6.276802375,
+          "fixed_p99_ms": 4.478917,
+          "fixed_max_latency_ms": 10.992792,
+          "fixed_cpu_seconds": 0.20041599999999998,
+          "fixed_max_rss_mib": 7.84375
+        },
+        "AsyncMulti": {
+          "yield_20_errors": 75,
+          "previous_backoff_20_errors": 1208,
+          "fixed_errors": 0,
+          "fixed_median_seconds": 7.098826083,
+          "fixed_p99_ms": 2490.99725,
+          "fixed_max_latency_ms": 6059.497167,
+          "fixed_cpu_seconds": 4.443891,
+          "fixed_max_rss_mib": 11.0625
+        }
+      },
+      "limitations": "Both Sync labels use 100 OS threads. AsyncSingle runs synchronous commits on one runtime thread. These results establish completion/accounting for this fixture, not a five-second tail-latency guarantee or production-engine speedup."
+    },
+    "evidence": "/private/tmp/alopex-perf-repair-evidence-20261017",
+    "reproduce": "STRESS_LANE=nightly STRESS_STORAGE_MODE=both cargo test -p alopex-core --test stress_concurrent test_concurrent_same_key_write -- --ignored --nocapture",
+    "scope": "Local macOS arm64 verification, not a production five-second tail-latency guarantee. No runtime engine, fsync or conflict semantics changed.",
+    "source_sha256": "66f7ce9ad47717866dbe23f714c7512ab68b7f893e76277b2439203a500af507"
+  },
+  "rejected_experiments": [
+    "FIFO snapshot writer tickets increased deadline failures and were removed.",
+    "Checked and cancellation-aware writer queues did not eliminate five-second tails and were removed. No engine queue or early-precheck change is included.",
+    "Equal/Full Jitter trials with a 128ms cap and a five-second logical-operation deadline retained failures. Those raw results remain failed diagnostics."
+  ],
+  "contract_correction": "The pre-existing operation_timeout=5s in common/watchdog.rs evaluates time since global progress; it is not a per-logical-write latency guarantee. An agent-added five-second logical deadline was therefore an additional diagnostic, not the existing acceptance contract. Preserve its failures and report observed tails rather than claiming they were fixed."
+}
