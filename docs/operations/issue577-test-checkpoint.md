@@ -1,10 +1,94 @@
-# Issue #577: metadata consumption regression
+# Issue #577: Parquet metadata and IO regressions
 
-Codex records the READ_PARQUET regression and remaining acceptance work here.
-Codex has confirmed 95 focused tests on Mac arm64 for the local implementation.
-Codex has not completed the performance acceptance comparison for this source.
+Codex preserves the [complete 054521b8 comparison](https://github.com/alopex-db/alopex/issues/577#issuecomment-6248196985):
+30 measured cells, 630 timed samples, every row value verified, and two p50
+failures against the previous Alopex baseline. The finite-budget statistics
+ratio was 1.225903 and the finite-budget embedded Arrow ratio was 1.110182.
+Codex retains both failures and every real sample.
 
-## Source identity
+## Page-header read-ahead regression
+
+Codex reproduced a 21-byte header fetching 8192 bytes through the production
+`InputFile::get_read` entrypoint, using a real Parquet writer and file. Codex
+observed 12 passing Parquet units and one failing regression. Codex reduced the
+header reader buffer to 512 bytes and passed the same 13 units with zero
+failures or ignored tests. Codex also decoded a valid 32803-byte header by
+refilling the buffer and verified the following payload bytes and independent
+reader positions. The buffer controls read-ahead; it does not limit valid
+header sizes or change the product memory-policy limit.
+
+Codex verified input source SHA256
+`c9dad457d29bd4458d1018f051452714635540821518bd0352ea352d44fb5b4d`.
+Codex ran this identical focused target before and after the fix:
+
+```sh
+rtk cargo test --offline --locked -p alopex-sql --features tokio --lib --message-format=json-render-diagnostics executor::bulk::parquet:: -- --nocapture --test-threads=1
+```
+
+Codex preserves RED log SHA256
+`8674f81262c644eb07d33d0bf53c88285c7f738a9b8a8cc43188d22681eab0d5`
+and GREEN log SHA256
+`4802e15144029dbbc43c16c01395a33a8810eff4949b773e8459f8c7d2e2895d`.
+Codex removed each target's compiler-reported executable and matching depinfo,
+143870165 bytes after RED and 143869501 bytes after GREEN. Codex used one CPU
+and a 4 GiB process-memory maximum and observed zero OOM events.
+
+Codex preserves the [separate process and syscall diagnosis](https://github.com/alopex-db/alopex/issues/577#issuecomment-6248874685).
+Codex observed 1181499 versus 203040 syscalls, and 2.68 versus 1.69 process CPU
+seconds, for the before and after executables at 054521b8. Codex does not use
+traced latency or whole-process CPU cost as substitutes for the public SQL
+latency acceptance comparison.
+
+Codex additionally passed all 69 allocation/routing regressions on Linux and
+removed the compiler-reported executable and depinfo, 129054638 bytes. Codex
+preserves allocation log SHA256
+`d13a6337997b1b9c0b69716e0c07d48161e07fab0632ec44d657cff7f4191660`.
+
+Codex verified Mac public SQL and scoped warnings-denied lint against candidate
+`af3908fdccf7a164209d59f5990b24c5b4cf282b` composed with the issue's changes,
+tree `78ebb95f66b3aece9baf5ecc5d201584addd365a`. Codex confirmed byte-identical
+input and comparison-controller sources. Mac passed 16 public cases with one
+pre-existing ignored case, then explicitly ran that case in the same binary with
+`--ignored --exact read_parquet_maps_large_binary_to_blob` and passed it: 17
+unique cases executed, zero failures. Mac also passed format and scoped lint.
+Codex received the raw logs and verified their SHA256 values:
+
+- Public target: `643f70d172adc5b18a695382a3ff3a1695515a4be05ad78f0e3c532a05bb3fd7`.
+- Explicit ignored case: `51b04b8797044741f920428376ad56cd4544b9f87f8fcc779f3c624619e1555f`.
+- Scoped lint: `eba5a4a79f6a5d7a18d5e866d0658dff9b85e981e2b5faf7ad38531063648537`.
+
+Codex preserves each invocation's result separately; Codex does not convert an
+ignored case into a normal-run pass. Codex verified these exact Mac commands:
+
+```sh
+cargo test --offline --locked -p alopex-sql --features tokio --test read_parquet -- --test-threads=1
+cargo clippy --offline --locked -p alopex-sql --features tokio --lib --test read_parquet_allocation --test read_parquet -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Host storage boundary
+
+Codex reproduced acceptance of an invalid 42 GB operating limit, then changed
+the comparison controller to reject limits above 40 GB. Codex passed nine
+focused tests covering 42 GB rejection, stopping at 40 GB, comparison CPU
+qualification, memory reserves, profile changes, capacity reasons and
+interrupted-attempt retention. Codex retains the original 42 GB bundles and
+measurements; subsequent bundles use the host's 40 GB stop boundary.
+
+```sh
+rtk proxy env PYTHONPATH=scripts/performance:scripts python3 -B -m unittest test_issue577_matrix
+```
+
+Codex preserves RED log SHA256
+`52830d509e9e57fc827ac0f0787b47a7163f32e2b5158e172e932e79bd368a05`
+and GREEN log SHA256
+`47ba5070cb63e61a589b0af562b43eb1220f264b2409314e14022086f7195286`.
+Codex uses constant-cost filesystem counters and labels project size as an
+estimate. Codex removes temporary test fixtures and generates no Python bytecode.
+
+## Earlier metadata consumption fix
+
+### Original source identity
 
 Codex used base HEAD `52c00ff91040222dcc45174a22ca90c950dc0a38` on
 `fix/v0816-parquet-row-budget`. The implementation change is in
@@ -15,7 +99,7 @@ Codex transferred that exact source to Mac worktree
 Codex keeps the acceptance record in
 [Issue #577](https://github.com/alopex-db/alopex/issues/577#issuecomment-6165324212).
 
-## Contract and results
+### Contract and results
 
 Codex changed capacity-zero metadata readers to consume opaque payloads in
 256-byte stack chunks while preserving shared reservations, Take boundaries
@@ -39,7 +123,7 @@ schema/type changes, nulls, value preservation and shared COPY callers.
 Codex used one build job and one test thread. Codex verified native parser
 exported contract 0.27.0 before the tests.
 
-## Exact commands
+### Exact commands
 
 Codex reproduced RED with:
 
@@ -61,7 +145,7 @@ Codex's focused lint command is:
 cargo clippy --offline --locked -p alopex-sql --features tokio --lib --test read_parquet_allocation --test read_parquet --message-format=json-render-diagnostics -- -D warnings
 ```
 
-## Evidence and cleanup
+### Evidence and cleanup
 
 | Run | Log SHA256 |
 | --- | --- |

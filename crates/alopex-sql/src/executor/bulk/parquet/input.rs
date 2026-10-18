@@ -34,10 +34,15 @@ impl ChunkReader for InputFile {
     type T = BufReader<PositionedRead>;
 
     fn get_read(&self, start: u64) -> Result<Self::T> {
-        Ok(BufReader::new(PositionedRead {
-            file: Arc::clone(&self.0),
-            position: start,
-        }))
+        // Some PageReader paths inspect only headers. Keep their read-ahead small;
+        // larger valid headers refill the buffer without a size restriction.
+        Ok(BufReader::with_capacity(
+            512,
+            PositionedRead {
+                file: Arc::clone(&self.0),
+                position: start,
+            },
+        ))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes> {
@@ -92,6 +97,95 @@ mod tests {
     use parquet::file::reader::{ChunkReader, Length};
 
     use super::InputFile;
+
+    #[test]
+    fn page_header_reads_do_not_prefetch_large_payloads() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        use parquet::basic::{Repetition, Type};
+        use parquet::data_type::{ByteArray, ByteArrayType};
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::format::PageHeader;
+        use parquet::schema::types;
+        use parquet::thrift::TSerializable;
+        use thrift::protocol::TCompactInputProtocol;
+
+        for statistics in [EnabledStatistics::None, EnabledStatistics::Page] {
+            let field = Arc::new(
+                types::Type::primitive_type_builder("value", Type::BYTE_ARRAY)
+                    .with_repetition(Repetition::REQUIRED)
+                    .build()
+                    .unwrap(),
+            );
+            let schema = Arc::new(
+                types::Type::group_type_builder("fixture")
+                    .with_fields(vec![field])
+                    .build()
+                    .unwrap(),
+            );
+            let properties = WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(statistics)
+                .set_max_statistics_size(64 * 1024)
+                .set_statistics_truncate_length(None)
+                .build();
+            let mut bytes = Vec::new();
+            let mut writer =
+                SerializedFileWriter::new(&mut bytes, schema, Arc::new(properties)).unwrap();
+            let mut group = writer.next_row_group().unwrap();
+            let mut column = group.next_column().unwrap().unwrap();
+            column
+                .typed::<ByteArrayType>()
+                .write_batch(&[ByteArray::from(vec![b'x'; 16 * 1024])], None, None)
+                .unwrap();
+            column.close().unwrap();
+            group.close().unwrap();
+            let footer = writer.close().unwrap();
+            let start = footer.row_groups[0].columns[0]
+                .meta_data
+                .as_ref()
+                .unwrap()
+                .data_page_offset as usize;
+            let mut cursor = Cursor::new(&bytes[start..]);
+            let expected =
+                PageHeader::read_from_in_protocol(&mut TCompactInputProtocol::new(&mut cursor))
+                    .unwrap();
+            let header_size = cursor.position() as usize;
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(&bytes).unwrap();
+            let source = InputFile::from(file);
+            let mut input = source.get_read(start as u64).unwrap();
+            let actual =
+                PageHeader::read_from_in_protocol(&mut TCompactInputProtocol::new(&mut input))
+                    .unwrap();
+            assert_eq!(actual, expected);
+            let fetched = input.get_ref().position - start as u64;
+            println!(
+                "statistics={statistics:?} header_bytes={header_size} fetched_bytes={}",
+                fetched
+            );
+            if statistics == EnabledStatistics::None {
+                assert!(header_size < 128);
+                assert!(
+                    fetched <= 1024,
+                    "header-only reads must avoid fetching a whole data payload"
+                );
+            } else {
+                assert!(
+                    header_size > 16 * 1024,
+                    "large valid headers must refill the buffer"
+                );
+            }
+            let mut payload = [0; 16];
+            input.read_exact(&mut payload).unwrap();
+            assert_eq!(
+                &payload,
+                &bytes[start + header_size..start + header_size + 16]
+            );
+        }
+    }
 
     #[test]
     fn positioned_ranges_preserve_independent_offsets() {

@@ -38,7 +38,7 @@ class ComparisonAdmissionTests(unittest.TestCase):
     def test_generated_output_growth_has_a_budget(self):
         config = {"project_baseline_bytes": 1 << 30,
                   "filesystem_used_at_baseline": 10 << 30,
-                  "operating_limit_bytes": 42_000_000_000,
+                  "operating_limit_bytes": 40_000_000_000,
                   "planned_growth_bytes": 1 << 30}
         usage = type(shutil.disk_usage(Path.cwd()))
         with patch('issue577_matrix.shutil.disk_usage', side_effect=[
@@ -46,6 +46,27 @@ class ComparisonAdmissionTests(unittest.TestCase):
                 usage(100 << 30, (11 << 30) + 1, (89 << 30) - 1)]):
             budget = GeneratedOutputBudget(Path.cwd(), config)
             self.assertIsNotNone(budget.reason())
+
+    def test_oversized_host_operating_limit_is_rejected(self):
+        config = {"project_baseline_bytes": 1 << 30,
+                  "filesystem_used_at_baseline": 10 << 30,
+                  "operating_limit_bytes": 42_000_000_000,
+                  "planned_growth_bytes": 1 << 30}
+        with self.assertRaises(ValueError):
+            GeneratedOutputBudget(Path.cwd(), config)
+
+    def test_host_operating_limit_stops_at_40gb(self):
+        config = {"project_baseline_bytes": 39_000_000_000,
+                  "filesystem_used_at_baseline": 10_000_000_000,
+                  "operating_limit_bytes": 40_000_000_000,
+                  "planned_growth_bytes": 500_000_000}
+        usage = type(shutil.disk_usage(Path.cwd()))
+        with patch('issue577_matrix.shutil.disk_usage', side_effect=[
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 11_000_000_000, 89_000_000_000)]):
+            budget = GeneratedOutputBudget(Path.cwd(), config)
+            self.assertEqual(budget.reason(), 'project output operating reserve')
+            self.assertEqual(budget.latest['project_estimate_bytes'], 40_000_000_000)
 
     def test_admission_capacity_failure_preserves_the_reason(self):
         sample = self.sample(0.1)
@@ -87,7 +108,7 @@ class MatrixLifecycleTests(unittest.TestCase):
         self.binaries.write_text(json.dumps({'engines': binaries, 'storage': {
             'project_baseline_bytes': 1 << 30,
             'filesystem_used_at_baseline': shutil.disk_usage(self.root).used,
-            'operating_limit_bytes': 42_000_000_000,
+            'operating_limit_bytes': 40_000_000_000,
             'planned_growth_bytes': 1 << 30}}))
         self.output = self.root / 'output'
         self.arguments = ['issue577_matrix.py', str(self.profile), str(self.root),

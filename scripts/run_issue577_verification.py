@@ -5,7 +5,6 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import time
 import threading
 
 from verification_results import cargo_result

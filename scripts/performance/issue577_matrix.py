@@ -19,7 +19,8 @@ class GeneratedOutputBudget:
         self.root, self.config = root, config
         assert 0 < config['planned_growth_bytes'] <= 8_000_000_000
         assert config['project_baseline_bytes'] + config['planned_growth_bytes'] < config['operating_limit_bytes']
-        assert config['operating_limit_bytes'] <= 42_000_000_000
+        if config['operating_limit_bytes'] > 40_000_000_000:
+            raise ValueError('host operating limit must not exceed 40 GB')
         self.starting_used = shutil.disk_usage(root).used
 
     def reason(self):
