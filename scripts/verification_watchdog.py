@@ -115,7 +115,7 @@ def run_guarded(launch, unit, output_base, monitor, policy):
                               for path in (Path(__file__),
                                            Path(__file__).with_name('host_resources.py'),
                                            Path(__file__).with_name('windows_host_observer.ps1'),
-                                           Path(__file__).with_name('run_issue577_verification.py'))})
+                                           Path(__file__).with_name('output_budget.py'))})
         observation = monitor.read()
         record('sample', phase='preflight', observation=observation)
         reason = policy.reason(observation, starting=True)

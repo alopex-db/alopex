@@ -53,7 +53,10 @@ class WatchdogTests(unittest.TestCase):
                     receiver.settimeout(3)
                     receiver.bind(address)
                     environment = dict(os.environ, NOTIFY_SOCKET=(
-                        '@' + address[1:] if abstract else address))
+                        '@' + address[1:] if abstract else address),
+                        PYTHONPATH=os.pathsep.join(filter(None, (
+                            str(Path(__file__).resolve().parent),
+                            os.environ.get('PYTHONPATH')))))
                     code = ('from pathlib import Path; import sys; '
                             'from verification_watchdog import keep_watchdog_alive; '
                             'keep_watchdog_alive(Path(sys.argv[1]))')

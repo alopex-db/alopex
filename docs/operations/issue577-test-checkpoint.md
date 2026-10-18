@@ -282,3 +282,57 @@ Codex removed the unit tests temporary directories automatically and generated
 no executable or bytecode cache. Codex retains raw real measurements and current
 shared dependencies. The lifecycle tests use valueless command artifacts and
 injected host observations; Codex does not use them as performance measurements.
+
+## Uniform descriptor rejection and host budget follow-up (2026-10-18)
+
+The issue's explicit replacement-rejection condition also applies when the
+executing transaction has no path policy. `ParquetReadSource::read` now always
+checks the retained descriptor against a newly opened identity handle, using
+capability roots when a policy is present. Unix and Windows use the same
+rejection decision; decoding continues through the retained descriptor.
+The public replacement regression requires `PathValidationFailed` rather than
+accepting a successful read from the original descriptor.
+
+On the candidate composition based on `d7bb3318`, 19 public SQL regressions
+passed (17 existing plus two planned-file tests). The existing ignored
+large-binary test was not rerun in this delta; its explicit passing result on
+`d7bb3318` remains historical evidence. Allocation, codec and root-race code
+was unchanged, so their earlier 69/13/5 passing results are retained rather
+than regenerated. Windows native execution and new performance qualification
+remain outstanding.
+
+Target: alopex-sql/executor/bulk/input_file.rs::authorize_planned_input.
+Mutation check: one `Ok(())` replacement, caught by the strict public test;
+zero survivors, unviable mutants or timeouts. The function was restored and
+its bytes checked against the source snapshot. The mutation tool's build
+stage compiled every package test because the target selection reached only
+its test stage. This exceeded the phase's additional 2 GB allocation by about
+0.21 GB at the final sample (12.73 GB total host storage). No further build was
+started until 75 generated test executables (1.70 GB logical) were removed.
+Future focused runs must pass test-target selection through `--cargo-arg` to
+both stages. The user-mandated 40 GB stop and 50,000,000,000 B host maximum
+were not approached.
+
+Strengthening: strict public regression; no new unsafe code. The previous
+scoped coupling analysis still covers these existing module edges. Native
+Windows runtime verification remains separate from Mac success.
+
+The comparison runner now requires explicit counters for the worktree and all
+WSL-mounted Windows drives. Positive growth is summed per volume; shrinkage
+cannot cancel growth elsewhere. A complete baseline inventory must include
+external toolchains/caches. Constant-cost monitoring avoids recursive `du`
+races with compiler temporary files. Thirteen focused matrix tests, the
+retired-entrypoint refusal test and Python E9/F lint passed on Mac.
+
+The attempted `d7bb3318` Linux SDK build stopped when its old recursive `du`
+monitor encountered a removed compiler temporary file. Its owned systemd unit
+was confirmed stopped; no performance cells were measured. Preserve the
+failed-attempt logs, previous performance failures, and exact source identities.
+The next comparison reuses the existing asdf toolchain/registry and shared
+release target after a fresh Windows+WSL inventory. No release approval is
+implied by this checkpoint.
+
+| Evidence | SHA256 |
+| --- | --- |
+| public-green.log | a1eb4c8d7a573b5e2fbd6c6bcd18ca89b71c79649a0f365c5d1e211b1772b00d |
+| strict-mutant.log | 8abde87e265037064bbc46ef82754a8a73c1082cad15b502d3958f8ecbdf014a |

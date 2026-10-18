@@ -1,18 +1,32 @@
 # Verification watchdog
 
-`run_issue577_verification.py` is retired and always exits with status 125.
-Its repository-only `du` measurement omitted external caches, temporary outputs
-and Windows storage on the same physical host. Historical commands must not
-start a build through that launcher, including with `CODEX_RESOURCE_CHILD=1`.
+The READ_PARQUET comparison controller uses the host-monitoring watchdog:
 
-A run owner using `verification_watchdog.run_guarded` must first inventory all
-Alopex storage on the execution host, including linked worktrees, external tools,
-temporary outputs and caches. Windows and WSL on one physical machine count
-together. Use one shared Cargo target, serialize builds, enforce the 40 GB stop
-threshold within the 50 GB hard limit, and record the command, output location,
-peak growth bound and cleanup timing. The watchdog's CPU/RAM observations alone
-do not establish this storage preflight. Existing compact logs remain evidence
-of their recorded source and run; retirement does not retroactively qualify them.
+```sh
+rtk proxy python3 -B scripts/performance/issue577_matrix.py PROFILE FIXTURES BUNDLE OUTPUT
+```
+
+The bundle must contain a fresh inventory baseline for the execution host and
+explicit filesystem counters in `storage.filesystems`, each with `path` and
+`used_at_baseline`. The baseline includes project worktrees, build outputs,
+known external temporary directories and caches. WSL and native Windows project
+outputs count toward the same physical host budget. Another machine has its own
+budget. The controller requires the worktree filesystem and all Windows drive
+mounts exposed under `/mnt`; missing coverage and old scalar-only bundles fail
+before a case starts.
+
+`output_budget.py` checks constant-cost filesystem counters during admission and
+execution. The estimate adds positive growth on each volume to the inventory;
+a shrink on one volume cannot hide growth on another. Backing-volume overlap
+may conservatively overestimate growth. The controller stops at 40,000,000,000 B,
+keeps at least 16 GiB free on every monitored volume, and enforces the declared
+per-run output allowance. The 50 GB (50,000,000,000 B) policy remains an emergency maximum. The
+monitor performs no recursive scans or deletion.
+
+The historical `run_issue577_verification.py` launcher now exits 125 before
+launching a child because its repository-only inventory omitted host outputs.
+Callers must use the host-budgeted controller or supply the same inventory,
+resource policy, bounded command and owned-output cleanup to `run_guarded`.
 
 Resource boundaries are separate:
 
@@ -148,12 +162,12 @@ descendant cleanup, successful/nonzero exits, launch failure and deadline expiry
 Their dependencies are the Python standard library and the existing systemd user
 manager. Their temporary-output budget is 10 MiB; the checks remove their own
 temporary directories and units. Historical probes are retained as evidence,
-and direct run owners use this watchdog only after the storage preflight above.
+while current comparison commands use this watchdog for controlled launches.
 
 | Owner/file | Responsibility and lifecycle | Verification |
 | --- | --- | --- |
-| `run_issue577_verification.py` | Retired: refuses every invocation before creating outputs or launching a build. | `python3 -B -m unittest discover -s scripts -p test_issue577_retired_entrypoint.py` |
+| `run_issue577_verification.py` | Reject historical invocations before launch. | CLI exit 125. |
+| `output_budget.py`, `performance/issue577_matrix.py` | Monitor per-host filesystem growth and reject incomplete coverage before a measured case. | Cross-volume growth, missing coverage, reserve stops and matrix lifecycle. |
 | `verification_watchdog.py` | The watchdog owns policy decisions, unit stops, durable records and observer cleanup. | Small success, failure, pressure, interruption and heartbeat cases. |
 | `host_resources.py`, `windows_host_observer.ps1` | The observer owns host facts and exits on input closure or missing heartbeat. | Real host sampling and delayed-reader freshness. |
 | Per-run events, receipts and logs | The run artifacts retain both failed and passing runs for review. | Readback, source/log digests and explicit final status. |
-| Legacy local entrypoint | Any redirect to the retired tracked runner also refuses execution. | The tracked entrypoint refusal check includes the former child environment. |

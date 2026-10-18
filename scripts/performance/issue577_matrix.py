@@ -8,35 +8,9 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from host_resources import HostMonitor
+from output_budget import GeneratedOutputBudget
 from verification_watchdog import ResourcePolicy, run_guarded
 from issue577_cases import CaseRunner, digest, save
-
-
-class GeneratedOutputBudget:
-    """Estimate storage reserve with filesystem counters, without a workspace walk."""
-
-    def __init__(self, root, config):
-        self.root, self.config = root, config
-        assert 0 < config['planned_growth_bytes'] <= 8_000_000_000
-        assert config['project_baseline_bytes'] + config['planned_growth_bytes'] < config['operating_limit_bytes']
-        if config['operating_limit_bytes'] > 40_000_000_000:
-            raise ValueError('host operating limit must not exceed 40 GB')
-        self.starting_used = shutil.disk_usage(root).used
-
-    def reason(self):
-        usage = shutil.disk_usage(self.root)
-        estimate = (self.config['project_baseline_bytes']
-                    + max(0, usage.used - self.config['filesystem_used_at_baseline']))
-        self.latest = {'project_estimate_bytes': estimate,
-                       'filesystem_free_bytes': usage.free,
-                       'filesystem_growth_bytes': usage.used - self.starting_used}
-        if usage.free < 16 * 1024**3:
-            return 'filesystem free-space reserve'
-        if estimate >= self.config['operating_limit_bytes']:
-            return 'project output operating reserve'
-        if usage.used - self.starting_used > self.config['planned_growth_bytes']:
-            return 'planned generated-output reserve'
-        return None
 
 
 class ComparisonPolicy(ResourcePolicy):

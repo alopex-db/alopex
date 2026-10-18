@@ -11,6 +11,11 @@ from issue577_cases import digest
 
 
 class ComparisonAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.paths = patch("output_budget.required_filesystem_paths", return_value=[Path.cwd()])
+        self.paths.start()
+        self.addCleanup(self.paths.stop)
+
     def policy(self):
         return ComparisonPolicy(0.30, 0.50, Mock(reason=Mock(return_value=None)))
 
@@ -37,6 +42,7 @@ class ComparisonAdmissionTests(unittest.TestCase):
 
     def test_generated_output_growth_has_a_budget(self):
         config = {"project_baseline_bytes": 1 << 30,
+                  "filesystems": [{"path": str(Path.cwd()), "used_at_baseline": 10 << 30}],
                   "filesystem_used_at_baseline": 10 << 30,
                   "operating_limit_bytes": 40_000_000_000,
                   "planned_growth_bytes": 1 << 30}
@@ -49,6 +55,7 @@ class ComparisonAdmissionTests(unittest.TestCase):
 
     def test_oversized_host_operating_limit_is_rejected(self):
         config = {"project_baseline_bytes": 1 << 30,
+                  "filesystems": [{"path": str(Path.cwd()), "used_at_baseline": 10 << 30}],
                   "filesystem_used_at_baseline": 10 << 30,
                   "operating_limit_bytes": 42_000_000_000,
                   "planned_growth_bytes": 1 << 30}
@@ -57,6 +64,7 @@ class ComparisonAdmissionTests(unittest.TestCase):
 
     def test_host_operating_limit_stops_at_40gb(self):
         config = {"project_baseline_bytes": 39_000_000_000,
+                  "filesystems": [{"path": str(Path.cwd()), "used_at_baseline": 10_000_000_000}],
                   "filesystem_used_at_baseline": 10_000_000_000,
                   "operating_limit_bytes": 40_000_000_000,
                   "planned_growth_bytes": 500_000_000}
@@ -65,6 +73,63 @@ class ComparisonAdmissionTests(unittest.TestCase):
                 usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
                 usage(100_000_000_000, 11_000_000_000, 89_000_000_000)]):
             budget = GeneratedOutputBudget(Path.cwd(), config)
+            self.assertEqual(budget.reason(), 'project output operating reserve')
+            self.assertEqual(budget.latest['project_estimate_bytes'], 40_000_000_000)
+
+    def test_legacy_single_filesystem_budget_is_rejected(self):
+        config = {"project_baseline_bytes": 1 << 30,
+                  "filesystem_used_at_baseline": 10 << 30,
+                  "operating_limit_bytes": 40_000_000_000,
+                  "planned_growth_bytes": 1 << 30}
+        with self.assertRaises(ValueError):
+            GeneratedOutputBudget(Path.cwd(), config)
+
+    def test_growth_on_another_host_filesystem_stops_the_run(self):
+        root = Path.cwd()
+        config = {"project_baseline_bytes": 39_000_000_000,
+                  "operating_limit_bytes": 40_000_000_000,
+                  "planned_growth_bytes": 500_000_000,
+                  "filesystems": [
+                      {"path": str(root), "used_at_baseline": 10_000_000_000},
+                      {"path": str(root / "host-native-drive"),
+                       "used_at_baseline": 10_000_000_000}]}
+        usage = type(shutil.disk_usage(root))
+        with patch('issue577_matrix.shutil.disk_usage', side_effect=[
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 11_000_000_000, 89_000_000_000)]):
+            budget = GeneratedOutputBudget(root, config)
+            self.assertEqual(budget.reason(), 'project output operating reserve')
+            self.assertEqual(budget.latest['project_estimate_bytes'], 40_000_000_000)
+
+    def test_missing_native_host_volume_is_rejected(self):
+        root = Path.cwd()
+        config = {"project_baseline_bytes": 1 << 30,
+                  "operating_limit_bytes": 40_000_000_000,
+                  "planned_growth_bytes": 1 << 30,
+                  "filesystems": [{"path": str(root), "used_at_baseline": 10 << 30}]}
+        with patch('output_budget.required_filesystem_paths',
+                   return_value=[root, root / 'host-native-drive']):
+            with self.assertRaisesRegex(ValueError, 'coverage is incomplete'):
+                GeneratedOutputBudget(root, config)
+
+    def test_one_volume_shrinking_cannot_hide_another_growing(self):
+        root = Path.cwd()
+        native = root / 'host-native-drive'
+        config = {"project_baseline_bytes": 39_000_000_000,
+                  "operating_limit_bytes": 40_000_000_000,
+                  "planned_growth_bytes": 500_000_000,
+                  "filesystems": [
+                      {"path": str(root), "used_at_baseline": 10_000_000_000},
+                      {"path": str(native), "used_at_baseline": 10_000_000_000}]}
+        usage = type(shutil.disk_usage(root))
+        with patch('issue577_matrix.shutil.disk_usage', side_effect=[
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 10_000_000_000, 90_000_000_000),
+                usage(100_000_000_000, 9_000_000_000, 91_000_000_000),
+                usage(100_000_000_000, 11_000_000_000, 89_000_000_000)]):
+            budget = GeneratedOutputBudget(root, config)
             self.assertEqual(budget.reason(), 'project output operating reserve')
             self.assertEqual(budget.latest['project_estimate_bytes'], 40_000_000_000)
 
@@ -89,6 +154,9 @@ class MatrixLifecycleTests(unittest.TestCase):
     """Command-lifecycle stubs contain no latency samples or performance evidence."""
 
     def setUp(self):
+        paths = patch("output_budget.required_filesystem_paths", return_value=[Path.cwd()])
+        paths.start()
+        self.addCleanup(paths.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -107,7 +175,7 @@ class MatrixLifecycleTests(unittest.TestCase):
         self.binaries = self.root / 'binaries.json'
         self.binaries.write_text(json.dumps({'engines': binaries, 'storage': {
             'project_baseline_bytes': 1 << 30,
-            'filesystem_used_at_baseline': shutil.disk_usage(self.root).used,
+            'filesystems': [{'path': str(Path.cwd()), 'used_at_baseline': shutil.disk_usage(Path.cwd()).used}],
             'operating_limit_bytes': 40_000_000_000,
             'planned_growth_bytes': 1 << 30}}))
         self.output = self.root / 'output'
