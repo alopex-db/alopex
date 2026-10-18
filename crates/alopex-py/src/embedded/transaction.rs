@@ -1202,6 +1202,37 @@ mod tests {
     }
 
     #[test]
+    fn execute_sql_guides_control_statements_before_running_a_prefix() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            for sql in [
+                "BEGIN",
+                "COMMIT",
+                "-- comment\nSAVEPOINT retry",
+                "ROLLBACK TO retry",
+                "INSERT INTO t (id) VALUES (99); COMMIT",
+            ] {
+                let error = txn
+                    .execute_sql(py, sql, None)
+                    .expect_err("SQL transaction control must use Python methods");
+                assert!(
+                    error.to_string().contains("Transaction.savepoint()"),
+                    "{sql} did not explain the Python transaction API: {error}"
+                );
+            }
+            txn.execute_sql(py, "SELECT id FROM t", None)
+                .expect("ordinary SQL remains available");
+            txn.commit(py).expect("guard did not fail transaction");
+        });
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
+    }
+
+    #[test]
     fn execute_sql_on_completed_transaction_is_error() {
         pyo3::Python::initialize();
         let db = Arc::new(alopex_embedded::Database::new());
