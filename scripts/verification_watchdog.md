@@ -1,8 +1,18 @@
-The READ_PARQUET verification entrypoint uses the host-monitoring watchdog:
+# Verification watchdog
 
-```sh
-rtk proxy python3 -B scripts/run_issue577_verification.py UNIQUE_RUN_ID issue577_
-```
+`run_issue577_verification.py` is retired and always exits with status 125.
+Its repository-only `du` measurement omitted external caches, temporary outputs
+and Windows storage on the same physical host. Historical commands must not
+start a build through that launcher, including with `CODEX_RESOURCE_CHILD=1`.
+
+A run owner using `verification_watchdog.run_guarded` must first inventory all
+Alopex storage on the execution host, including linked worktrees, external tools,
+temporary outputs and caches. Windows and WSL on one physical machine count
+together. Use one shared Cargo target, serialize builds, enforce the 40 GB stop
+threshold within the 50 GB hard limit, and record the command, output location,
+peak growth bound and cleanup timing. The watchdog's CPU/RAM observations alone
+do not establish this storage preflight. Existing compact logs remain evidence
+of their recorded source and run; retirement does not retroactively qualify them.
 
 Resource boundaries are separate:
 
@@ -138,12 +148,12 @@ descendant cleanup, successful/nonzero exits, launch failure and deadline expiry
 Their dependencies are the Python standard library and the existing systemd user
 manager. Their temporary-output budget is 10 MiB; the checks remove their own
 temporary directories and units. Historical probes are retained as evidence,
-while the existing entrypoint uses this watchdog as its sole normal launch path.
+and direct run owners use this watchdog only after the storage preflight above.
 
 | Owner/file | Responsibility and lifecycle | Verification |
 | --- | --- | --- |
-| `run_issue577_verification.py` | The existing runner keeps target selection and owned build-output cleanup; its former launch loop delegates to the watchdog. | One focused READ_PARQUET test through the entrypoint. |
+| `run_issue577_verification.py` | Retired: refuses every invocation before creating outputs or launching a build. | `python3 -B -m unittest discover -s scripts -p test_issue577_retired_entrypoint.py` |
 | `verification_watchdog.py` | The watchdog owns policy decisions, unit stops, durable records and observer cleanup. | Small success, failure, pressure, interruption and heartbeat cases. |
 | `host_resources.py`, `windows_host_observer.ps1` | The observer owns host facts and exits on input closure or missing heartbeat. | Real host sampling and delayed-reader freshness. |
 | Per-run events, receipts and logs | The run artifacts retain both failed and passing runs for review. | Readback, source/log digests and explicit final status. |
-| Legacy local entrypoint | The legacy entrypoint redirects to the tracked runner; it retains no separate launch implementation. | Its uncontrolled-launch refusal check. |
+| Legacy local entrypoint | Any redirect to the retired tracked runner also refuses execution. | The tracked entrypoint refusal check includes the former child environment. |
