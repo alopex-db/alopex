@@ -2645,6 +2645,10 @@ mod tests {
         let queries = [
             format!("SELECT (SELECT id FROM read_parquet('{path}'))"),
             format!("SELECT 1 = ANY (SELECT id FROM read_parquet('{path}'))"),
+            format!("SELECT COALESCE((SELECT id FROM read_parquet('{path}')), 0)"),
+            format!("SELECT IFNULL((SELECT id FROM read_parquet('{path}')), 0)"),
+            format!("SELECT -(SELECT id FROM read_parquet('{path}'))"),
+            format!("SELECT (SELECT id FROM read_parquet('{path}')) IS NULL"),
         ];
         let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
         let catalog = MemoryCatalog::new();

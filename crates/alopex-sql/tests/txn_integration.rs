@@ -372,6 +372,38 @@ fn execute_in_txn_readonly_rejects_dml() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn columnar_ctas_in_explicit_txn_rejects_before_catalog_mutation() {
+    let store = Arc::new(MemoryKV::new());
+    let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    let statement = Parser::parse_sql(&AlopexDialect, "CREATE TABLE copied AS SELECT 1 AS id")
+        .unwrap()
+        .remove(0);
+    let mut plan = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    let LogicalPlan::CreateTableAs { with_options, .. } = &mut plan else {
+        panic!("expected CTAS plan");
+    };
+    with_options.push(("storage".into(), "columnar".into()));
+
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut overlay = CatalogOverlay::new();
+    let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+    let error = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+    assert!(
+        matches!(error, ExecutorError::UnsupportedOperation(message) if message.contains("columnar"))
+    );
+    drop(borrowed);
+    assert!(
+        !catalog
+            .read()
+            .unwrap()
+            .table_exists_in_txn("copied", &overlay)
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn execute_in_txn_readonly_allows_select() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
