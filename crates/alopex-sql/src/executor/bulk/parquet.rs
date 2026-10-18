@@ -52,20 +52,7 @@ impl ParquetReadSource {
         // A plan prepared by a less restricted caller must still satisfy the
         // executing transaction's current policy. A capability-authorized handle
         // must identify the retained input, rather than merely a path replacement.
-        if let Some(config) = security {
-            super::input_file::authorize_planned_input(&self.0, path, config)?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let original = self.0.metadata().map_err(parquet_io_error)?;
-            let current = std::fs::metadata(path).map_err(parquet_io_error)?;
-            if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
-                return Err(ExecutorError::BulkLoad(
-                    "READ_PARQUET file changed after planning".into(),
-                ));
-            }
-        }
+        super::input_file::authorize_planned_input(&self.0, path, security)?;
         read_parquet_source(Arc::clone(&self.0), planned, memory)
     }
 }

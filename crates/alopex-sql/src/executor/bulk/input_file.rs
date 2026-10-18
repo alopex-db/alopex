@@ -14,12 +14,15 @@ pub(super) fn open_input_file(path: &str, config: &CopySecurityConfig) -> Result
 pub(super) fn authorize_planned_input(
     planned: &File,
     path: &str,
-    config: &CopySecurityConfig,
+    config: Option<&CopySecurityConfig>,
 ) -> Result<()> {
-    let authorized = open_input_file(path, config)?;
     let denied = || ExecutorError::PathValidationFailed {
         path: path.into(),
         reason: "path not in allowed directories".into(),
+    };
+    let authorized = match config {
+        Some(config) => open_input_file(path, config)?,
+        None => File::open(path).map_err(|_| denied())?,
     };
     if !same_open_file(planned, &authorized).map_err(|_| denied())? {
         return Err(denied());

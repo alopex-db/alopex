@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::storage::SqlValue;
@@ -61,17 +61,10 @@ fn planned_parquet_does_not_follow_same_schema_file_replacement() {
     };
     assert_eq!(fresh.rows, vec![vec![SqlValue::BigInt(99)]]);
 
-    // A retained descriptor may read its original file; explicit rejection is
-    // also safe. Silently reading the replacement violates the planned binding.
-    match executor.execute(plan) {
-        Ok(ExecutionResult::Query(result)) => assert_eq!(
-            result.rows,
-            vec![vec![SqlValue::BigInt(11)]],
-            "the old plan silently followed a different file with the same schema"
-        ),
-        Err(error) => eprintln!("planned file replacement rejected: {error}"),
-        Ok(_) => panic!("expected a query result or explicit replacement rejection"),
-    }
+    let error = executor
+        .execute(plan)
+        .expect_err("a planned input must reject a path replacement even without a runtime policy");
+    assert!(matches!(error, ExecutorError::PathValidationFailed { .. }));
 }
 
 #[test]
