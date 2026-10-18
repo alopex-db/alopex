@@ -210,6 +210,14 @@ pub(super) struct SchemaFooter {
 // Locate wire ranges without materializing row groups; the projected schema is budgeted next.
 pub(super) fn schema_footer(file: &mut File, limit: u64) -> Result<SchemaFooter> {
     let length = file.metadata().map_err(parquet_io_error)?.len();
+    schema_footer_reader(file, length, limit)
+}
+
+fn schema_footer_reader(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    limit: u64,
+) -> Result<SchemaFooter> {
     let trailer_start = length.checked_sub(8).ok_or_else(invalid_page)?;
     file.seek(SeekFrom::Start(trailer_start))
         .map_err(parquet_io_error)?;
@@ -228,7 +236,7 @@ pub(super) fn schema_footer(file: &mut File, limit: u64) -> Result<SchemaFooter>
         .map_err(parquet_io_error)?;
     let mut footer = CompactHeader {
         input: BufReader::with_capacity(
-            size.min(limit).min(4096) as usize,
+            size.min(limit).min(16 * 1024) as usize,
             (&mut *file).take(size),
         ),
         maximum: u64::MAX,
@@ -1524,6 +1532,54 @@ mod tests {
     use parquet::data_type::Int64Type;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use parquet::file::writer::SerializedFileWriter;
+
+    #[test]
+    fn issue577_schema_footer_buffers_metadata_reads() {
+        struct Counted {
+            bytes: std::io::Cursor<Vec<u8>>,
+            reads: usize,
+        }
+        impl Read for Counted {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                self.bytes.read(output)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.bytes.seek(position)
+            }
+        }
+        let schema = Arc::new(
+            parquet::schema::parser::parse_message_type(
+                "message fixture { REQUIRED INT64 value; }",
+            )
+            .unwrap(),
+        );
+        let mut bytes = Vec::new();
+        let properties = WriterProperties::builder()
+            .set_created_by("x".repeat(12 * 1024))
+            .build();
+        SerializedFileWriter::new(&mut bytes, schema, Arc::new(properties))
+            .unwrap()
+            .close()
+            .unwrap();
+        let length = bytes.len() as u64;
+        for limit in [16 * 1024, u64::MAX] {
+            let mut input = Counted {
+                bytes: std::io::Cursor::new(bytes.clone()),
+                reads: 0,
+            };
+            let footer = schema_footer_reader(&mut input, length, limit).unwrap();
+            assert!(footer.row_groups.end <= footer.start + footer.size);
+            assert_eq!(input.bytes.position(), 0);
+            println!("schema_footer limit={limit} reads={}", input.reads);
+            assert!(
+                input.reads <= 2,
+                "small footer metadata needs one buffered read after its trailer"
+            );
+        }
+    }
 
     fn field_id_fixture(id: Option<i32>) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();

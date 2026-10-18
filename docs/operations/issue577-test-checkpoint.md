@@ -30,7 +30,7 @@ and truncated-input errors. Codex did not change read-budget thresholds.
 | Mac public READ_PARQUET/shared COPY regressions after fix | PASS: 15 passed / 0 failed / 0 ignored |
 | Format | PASS: cargo fmt --all -- --check |
 | Scoped warnings-denied lint | PASS: exit 0; 0 compiler/clippy warnings or errors |
-| New-source three-way performance comparison | Not measured; acceptance incomplete |
+| fa3d10bf three-way performance comparison | 30 measured cells / 630 timed samples / all row values verified; five p50 acceptance failures |
 
 Codex's allocation target covers row-group, column, statistics and embedded
 Arrow metadata reservations, shared page/group budgets, DELTA expansion and
@@ -89,5 +89,42 @@ the local fix; Codex does not claim that the new source passed performance
 acceptance. The comparison report SHA256 is
 `f993bc00726eab803448a9723de587db028a632c8526c0e4bc2e6c08c4c65728`.
 
-Codex's next action is to perform the required before/after/reference
-performance comparison. #577 remains incomplete.
+Codex completed the [fa3d10bf comparison](https://github.com/alopex-db/alopex/issues/577#issuecomment-6246354290) with the same API boundary, shapes, settings, one CPU, warm cache, three warmups and 21 measurements per cell. Codex observed five acceptance failures: rows without a budget exceeded the reference by 1.095480; finite-budget row groups and columns exceeded the previous Alopex baseline by 1.120678 and 1.070767; embedded Arrow exceeded the previous baseline by 1.245856 without a budget and 1.025972 with a budget. Codex preserves every actual sample in the linked report. Codex must repair these failed performance contracts; #577 remains open.
+
+## Schema-footer IO regression
+
+Codex reproduced five underlying reads for a writer-produced footer containing
+12 KiB of opaque metadata. Codex changed the scanner buffer capacity to the
+minimum of the footer size, the configured limit and 16 KiB. Codex preserves
+the inner Take bound and drops the scanner before allocating the projected
+schema. The same regression then used two reads with both a 16 KiB limit and
+an unbounded policy. Codex preserves the schema-planning contract that avoids
+materializing row groups.
+
+Codex ran this exact regression before and after the implementation change:
+
+```sh
+cargo test --offline --locked -p alopex-sql --features tokio --lib --message-format=json-render-diagnostics executor::bulk::parquet::preflight::tests::issue577_schema_footer_buffers_metadata_reads -- --exact --nocapture --test-threads=1
+```
+
+Codex verified 12 Parquet units, 69 allocation/routing regressions and 15 public
+SQL regressions, all passing with zero failures or ignored tests, using the
+same focused commands above. Codex also passed the same warnings-denied
+scoped lint command. Codex verified source SHA256
+`2a96abdb20a6c52ab1f1fe28795dd5a679124ee5cb395111994e1fe67c42c4be`.
+
+| Run | Log SHA256 |
+| --- | --- |
+| Footer IO RED, five reads | fa8518bd32508dfd41c5e26aa474865bc12785744372c967a3b62ca0e117ed3a |
+| Footer IO GREEN, two reads | 1e8d4430df8fe2eff8b235df16870c5e5cb98e312c75dd1e562d8f744842a7e9 |
+| Parquet units, 12 PASS | bc4d774ad49f78aade1fb20061d26c1c821eaf2bbe6b14e5bea70860cb0a8fea |
+| Allocation/routing, 69 PASS | fdb6e62a7cf320591be1faef95d2e1f26c995f6c3e7fb9c1f2ccf41894f11104 |
+| Public SQL, 15 PASS | a0ddb3959daa512699f8ec2388daff61ac4a8bb8e78e5c36a919ec34b5756487 |
+| Scoped lint, exit 0 | f37773276736cb19152b20cb72063f69551ef25fb368ace10471379ffc892561 |
+
+Codex removed each produced test executable and its matching depinfo before
+starting the next target. The full-unit, allocation and public targets removed
+34,792,265 B, 32,090,122 B and 29,990,427 B respectively. Codex measured
+483,964,100,608 B of free filesystem space after lint. Codex used constant-cost
+filesystem counters and retained current dependencies, parser and raw evidence;
+Codex did not traverse the whole workspace for a fresh size audit.
