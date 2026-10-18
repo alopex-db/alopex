@@ -4,10 +4,12 @@
 //! new version identified by `(timestamp, sequence)`. Reads at a given `read_timestamp` return the
 //! latest version whose timestamp is `<= read_timestamp`.
 //!
-//! Internally, versions are stored in a single `BTreeMap` using a composite key:
-//! `user_key || 0x00 || (!timestamp as BE u64) || (!sequence as BE u64)`.
-//! This keeps versions for the same user key contiguous while ordering newer versions first.
+//! Internally, versions are stored in a single `BTreeMap`, ordered by the complete user key
+//! followed by descending timestamp and sequence. Keeping these fields separate prevents
+//! binary user keys (including NUL extensions) from interleaving with version metadata.
+//! This representation is memory-only; WAL and SSTable formats are unchanged.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::ops::Bound;
@@ -46,38 +48,27 @@ impl Default for MemTableConfig {
     }
 }
 
-fn encode_be_u64(v: u64) -> [u8; 8] {
-    v.to_be_bytes()
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InternalKey {
+    user_key: Key,
+    timestamp: Reverse<u64>,
+    sequence: Reverse<u64>,
 }
 
-fn invert_u64(v: u64) -> u64 {
-    u64::MAX - v
+fn internal_key_prefix(user_key: &[u8]) -> InternalKey {
+    internal_key(user_key, u64::MAX, u64::MAX)
 }
 
-fn internal_key_prefix(user_key: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(user_key.len() + 1);
-    out.extend_from_slice(user_key);
-    out.push(0);
-    out
+fn internal_key(user_key: &[u8], timestamp: u64, sequence: u64) -> InternalKey {
+    InternalKey {
+        user_key: user_key.to_vec(),
+        timestamp: Reverse(timestamp),
+        sequence: Reverse(sequence),
+    }
 }
 
-fn internal_key(user_key: &[u8], timestamp: u64, sequence: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(user_key.len() + 1 + 16);
-    out.extend_from_slice(user_key);
-    out.push(0);
-    out.extend_from_slice(&encode_be_u64(invert_u64(timestamp)));
-    out.extend_from_slice(&encode_be_u64(invert_u64(sequence)));
-    out
-}
-
-fn decode_user_key(internal_key: &[u8]) -> &[u8] {
-    // internal_key = user_key || 0x00 || inv_ts(8) || inv_seq(8)
-    // user_key length = len - 1 - 16
-    let user_len = internal_key
-        .len()
-        .checked_sub(1 + 16)
-        .expect("internal key has fixed trailer");
-    &internal_key[..user_len]
+fn decode_user_key(internal_key: &InternalKey) -> &[u8] {
+    &internal_key.user_key
 }
 
 fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -119,7 +110,7 @@ fn update_max(atom: &AtomicU64, v: u64) {
 #[derive(Debug)]
 pub struct MemTable {
     /// Data store mapping internal composite keys to a versioned entry.
-    data: RwLock<BTreeMap<Vec<u8>, MemTableEntry>>,
+    data: RwLock<BTreeMap<InternalKey, MemTableEntry>>,
     /// Current memory usage (approx bytes).
     memory_usage: AtomicUsize,
     /// Minimum MVCC timestamp observed.
@@ -173,14 +164,15 @@ impl MemTable {
     }
 
     fn insert_entry(&self, user_key: &[u8], entry: MemTableEntry) {
-        let ikey = internal_key(user_key, entry.timestamp, entry.sequence);
+        let timestamp = entry.timestamp;
+        let ikey = internal_key(user_key, timestamp, entry.sequence);
         let value_len = entry.value.as_ref().map(|v| v.len()).unwrap_or(0);
-        let approx_bytes = ikey.len().saturating_add(value_len);
+        let approx_bytes = user_key.len().saturating_add(16).saturating_add(value_len);
 
         let mut data = self.data.write().expect("memtable lock poisoned");
-        if let Some(old) = data.insert(ikey, entry.clone()) {
+        if let Some(old) = data.insert(ikey, entry) {
             let old_value_len = old.value.as_ref().map(|v| v.len()).unwrap_or(0);
-            let old_key_len = internal_key(user_key, old.timestamp, old.sequence).len();
+            let old_key_len = user_key.len().saturating_add(16);
             let old_bytes = old_key_len.saturating_add(old_value_len);
             self.memory_usage
                 .fetch_sub(old_bytes.min(self.memory_usage_bytes()), Ordering::Relaxed);
@@ -188,8 +180,8 @@ impl MemTable {
         self.memory_usage.fetch_add(approx_bytes, Ordering::Relaxed);
         drop(data);
 
-        update_min(&self.min_timestamp, entry.timestamp);
-        update_max(&self.max_timestamp, entry.timestamp);
+        update_min(&self.min_timestamp, timestamp);
+        update_max(&self.max_timestamp, timestamp);
     }
 
     /// Insert a Put (value may be empty).
@@ -218,15 +210,11 @@ impl MemTable {
 
     /// Get the latest visible entry for `key` at `read_timestamp`.
     pub fn get(&self, key: &[u8], read_timestamp: u64) -> Option<MemTableEntry> {
-        let prefix = internal_key_prefix(key);
         let start = internal_key(key, read_timestamp, u64::MAX);
-        let end = next_prefix(&prefix);
+        let end = internal_key(key, 0, 0);
 
         let data = self.data.read().expect("memtable lock poisoned");
-        let range = match end {
-            Some(end_key) => data.range((Included(start), Excluded(end_key))),
-            None => data.range((Included(start), Unbounded)),
-        };
+        let range = data.range((Included(start), Included(end)));
         for (k, entry) in range {
             if decode_user_key(k) != key {
                 break;
@@ -240,8 +228,8 @@ impl MemTable {
 
     fn collect_scan(
         &self,
-        start: Bound<Vec<u8>>,
-        end: Bound<Vec<u8>>,
+        start: Bound<InternalKey>,
+        end: Bound<InternalKey>,
         read_timestamp: u64,
     ) -> Vec<(Key, MemTableEntry)> {
         let data = self.data.read().expect("memtable lock poisoned");
@@ -269,7 +257,9 @@ impl MemTable {
         // Use internal key space boundary to avoid accidentally starting in the middle of the
         // version trailer region for a user key.
         let start = Included(internal_key_prefix(prefix));
-        let end = next_prefix(prefix).map(Excluded).unwrap_or(Unbounded);
+        let end = next_prefix(prefix)
+            .map(|key| Excluded(internal_key_prefix(&key)))
+            .unwrap_or(Unbounded);
         self.collect_scan(start, end, read_timestamp)
     }
 
@@ -281,8 +271,8 @@ impl MemTable {
         read_timestamp: u64,
     ) -> Vec<(Key, MemTableEntry)> {
         self.collect_scan(
-            Included(start.to_vec()),
-            Excluded(end.to_vec()),
+            Included(internal_key_prefix(start)),
+            Excluded(internal_key_prefix(end)),
             read_timestamp,
         )
     }
@@ -300,7 +290,7 @@ impl MemTable {
         prefix: Option<&[u8]>,
         read_timestamp: u64,
     ) -> Option<(Key, MemTableEntry)> {
-        let anchor = after.unwrap_or(start).to_vec();
+        let anchor = internal_key_prefix(after.unwrap_or(start));
         let data = self.data.read().expect("memtable lock poisoned");
         for (internal_key, entry) in data.range((Included(anchor), Unbounded)) {
             let user_key = decode_user_key(internal_key);
@@ -341,7 +331,7 @@ impl MemTable {
 /// Read-only MemTable snapshot.
 #[derive(Debug, Clone)]
 pub struct ImmutableMemTable {
-    data: Arc<BTreeMap<Vec<u8>, MemTableEntry>>,
+    data: Arc<BTreeMap<InternalKey, MemTableEntry>>,
     memory_usage: usize,
     min_timestamp: Option<u64>,
     max_timestamp: Option<u64>,
@@ -527,14 +517,10 @@ impl ImmutableMemTable {
 
     /// Get the latest visible entry for `key` at `read_timestamp`.
     pub fn get(&self, key: &[u8], read_timestamp: u64) -> Option<MemTableEntry> {
-        let prefix = internal_key_prefix(key);
         let start = internal_key(key, read_timestamp, u64::MAX);
-        let end = next_prefix(&prefix);
+        let end = internal_key(key, 0, 0);
 
-        let range = match end {
-            Some(end_key) => self.data.range((Included(start), Excluded(end_key))),
-            None => self.data.range((Included(start), Unbounded)),
-        };
+        let range = self.data.range((Included(start), Included(end)));
         for (k, entry) in range {
             if decode_user_key(k) != key {
                 break;
@@ -548,8 +534,8 @@ impl ImmutableMemTable {
 
     fn collect_scan(
         &self,
-        start: Bound<Vec<u8>>,
-        end: Bound<Vec<u8>>,
+        start: Bound<InternalKey>,
+        end: Bound<InternalKey>,
         read_timestamp: u64,
     ) -> Vec<(Key, MemTableEntry)> {
         let mut out = Vec::new();
@@ -571,7 +557,9 @@ impl ImmutableMemTable {
     /// Scan keys with the given prefix, returning at most one visible version per user key.
     pub fn scan_prefix(&self, prefix: &[u8], read_timestamp: u64) -> Vec<(Key, MemTableEntry)> {
         let start = Included(internal_key_prefix(prefix));
-        let end = next_prefix(prefix).map(Excluded).unwrap_or(Unbounded);
+        let end = next_prefix(prefix)
+            .map(|key| Excluded(internal_key_prefix(&key)))
+            .unwrap_or(Unbounded);
         self.collect_scan(start, end, read_timestamp)
     }
 
@@ -583,8 +571,8 @@ impl ImmutableMemTable {
         read_timestamp: u64,
     ) -> Vec<(Key, MemTableEntry)> {
         self.collect_scan(
-            Included(start.to_vec()),
-            Excluded(end.to_vec()),
+            Included(internal_key_prefix(start)),
+            Excluded(internal_key_prefix(end)),
             read_timestamp,
         )
     }
@@ -602,7 +590,7 @@ impl ImmutableMemTable {
         prefix: Option<&[u8]>,
         read_timestamp: u64,
     ) -> Option<(Key, MemTableEntry)> {
-        let anchor = after.unwrap_or(start).to_vec();
+        let anchor = internal_key_prefix(after.unwrap_or(start));
         for (internal_key, entry) in self.data.range((Included(anchor), Unbounded)) {
             let user_key = decode_user_key(internal_key);
             if after.is_some_and(|last| user_key <= last) || user_key < start {
@@ -627,6 +615,65 @@ impl ImmutableMemTable {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn binary_prefix_versions_match_reference(
+            prefix in proptest::collection::vec(any::<u8>(), 0..16),
+            timestamp in prop_oneof![Just(0), Just(u64::MAX - 1), 0u64..u64::MAX],
+        ) {
+            let mem = MemTable::new();
+            let mut history = BTreeMap::<Key, Vec<MemTableEntry>>::new();
+            for suffix in [b"".as_slice(), b"\0", b"\0\0", b"\x80", b"\xff"] {
+                let mut key = prefix.clone();
+                key.extend_from_slice(suffix);
+                for (ts, seq, value) in [
+                    (timestamp, 0, Some(b"old".to_vec())),
+                    (timestamp + 1, 0, Some(b"new".to_vec())),
+                    (timestamp + 1, u64::MAX, if suffix == b"\x80" { None } else { Some(b"winner".to_vec()) }),
+                ] {
+                    match &value {
+                        Some(value) => mem.put(key.clone(), value.clone(), ts, seq),
+                        None => mem.delete(key.clone(), ts, seq),
+                    }
+                    history.entry(key.clone()).or_default().push(MemTableEntry {
+                        value, timestamp: ts, sequence: seq,
+                    });
+                }
+            }
+            let mut end = prefix.clone();
+            end.extend_from_slice(b"\xff\0");
+            macro_rules! verify {
+                ($table:expr) => {
+                    for read_ts in [0, timestamp, timestamp + 1, u64::MAX] {
+                        let expected: Vec<_> = history.iter().filter_map(|(key, versions)| {
+                            versions.iter().filter(|v| v.timestamp <= read_ts)
+                                .max_by_key(|v| (v.timestamp, v.sequence))
+                                .map(|v| (key.clone(), v.clone()))
+                        }).collect();
+                        for (key, versions) in &history {
+                            let visible = versions.iter().filter(|v| v.timestamp <= read_ts)
+                                .max_by_key(|v| (v.timestamp, v.sequence)).cloned();
+                            prop_assert_eq!($table.get(key, read_ts), visible);
+                        }
+                        prop_assert_eq!($table.scan_prefix(&prefix, read_ts), expected.clone());
+                        prop_assert_eq!($table.scan_range(&prefix, &end, read_ts), expected.clone());
+                        let mut after: Option<Key> = None;
+                        for row in &expected {
+                            let found = $table.next_visible_after(after.as_deref(), &prefix, Some(&end), Some(&prefix), read_ts);
+                            prop_assert_eq!(found, Some(row.clone()));
+                            after = Some(row.0.clone());
+                        }
+                        prop_assert_eq!($table.next_visible_after(after.as_deref(), &prefix, Some(&end), Some(&prefix), read_ts), None);
+                    }
+                };
+            }
+            verify!(mem);
+            let frozen = mem.freeze();
+            verify!(frozen);
+        }
+    }
 
     #[test]
     fn get_obeys_read_timestamp_and_sequence() {
