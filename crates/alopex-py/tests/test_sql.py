@@ -89,6 +89,85 @@ def test_transaction_stream_rejects_unrepresentable_decimal_before_render(db, va
         txn.rollback()
 
 
+@pytest.fixture(
+    params=[
+        "native",
+        "mixed",
+        "stream",
+        "transaction",
+        "transaction_stream",
+        "prepared",
+    ]
+)
+def decimal_query(db, request):
+    """Exercise native bindings and both public SQL-rendering paths."""
+    api = request.param
+    txn = db.begin(TxnMode.READ_WRITE) if api.startswith("transaction") else None
+    statement = db.prepare("SELECT ? AS value") if api == "prepared" else None
+
+    def execute(value):
+        sql = "SELECT ? AS value"
+        if api == "mixed":
+            return db.execute_sql(
+                "SELECT ? AS value, ? AS at", [value, dt.datetime(2024, 1, 1)]
+            )[0]["value"]
+        if statement is not None:
+            statement.bind(1, value)
+            return statement.execute()[0]["value"]
+        owner = txn if txn is not None else db
+        if api.endswith("stream"):
+            rows = list(owner.execute_sql_stream(sql, [value]))
+            assert len(rows) == 1
+            return rows[0]["value"]
+        return owner.execute_sql(sql, [value])[0]["value"]
+
+    try:
+        yield execute
+    finally:
+        if statement is not None:
+            statement.finalize()
+        if txn is not None:
+            txn.rollback()
+
+
+@pytest.mark.parametrize("capitals", [0, 1])
+def test_decimal_paths_match_tuple_reference(decimal_query, capitals):
+    from decimal import localcontext
+
+    # Cover precision, scale, sign, zero, trailing zeros, and scientific notation.
+    # The oracle uses Decimal's tuple, independently of the Rust text parser.
+    with localcontext() as context:
+        context.capitals = capitals
+        for digits in ["0", "1", "10", "1000", "9" * 37, "9" * 38, "9" * 39]:
+            for exponent in [-1000000, -39, -38, -7, -6, -2, 0, 1, 37, 38, 1000000]:
+                for sign in [0, 1]:
+                    value = Decimal((sign, tuple(map(int, digits)), exponent))
+                    parts = value.as_tuple()
+                    width = len(parts.digits) + max(parts.exponent, 0)
+                    valid = -38 <= parts.exponent <= 38 and width <= 38
+                    if valid:
+                        result = decimal_query(value)
+                        assert result == value, (value, result)
+                        assert result.as_tuple().exponent == min(exponent, 0)
+                    else:
+                        with pytest.raises(ValueError, match="Decimal"):
+                            decimal_query(value)
+        for text in ["NaN", "-NaN123", "sNaN", "Infinity", "-Infinity"]:
+            with pytest.raises(ValueError, match="Decimal"):
+                decimal_query(Decimal(text))
+
+
+def test_decimal_subclass_keeps_formatting_contract(decimal_query):
+    class FormattedDecimal(Decimal):
+        def __str__(self):
+            raise AssertionError("subclasses must use their existing format hook")
+
+    value = FormattedDecimal("1.2300")
+    result = decimal_query(value)
+    assert result == Decimal("1.2300")
+    assert result.as_tuple().exponent == -4
+
+
 def test_parameter_binding_keeps_native_and_mixed_paths(db):
     db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
     assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1
@@ -137,7 +216,7 @@ def test_native_float_parameters_preserve_double_type(db):
 
 def test_exact_decimal_parameters_use_native_transaction_bindings(db):
     value = Decimal("12345678901234567.89")
-    boundary = Decimal("12345678901234567890123456789012345678")
+    boundary = Decimal(12345678901234567890123456789012345678)
     db.execute_sql("CREATE TABLE decimal_params (id INTEGER PRIMARY KEY, amount DECIMAL(30,2))")
     txn = db.begin(TxnMode.READ_WRITE)
     boundary_statement = txn.prepare("SELECT ? AS value")
@@ -166,7 +245,7 @@ def test_exact_decimal_parameters_use_native_transaction_bindings(db):
 @pytest.mark.parametrize(
     ("column_type", "value"),
     [
-        ("DECIMAL(38,0)", Decimal("-99999999999999999999999999999999999999")),
+        ("DECIMAL(38,0)", Decimal(-99999999999999999999999999999999999999)),
         ("DECIMAL(38,38)", Decimal("-1E-38")),
     ],
 )
