@@ -57,6 +57,15 @@ by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
 describes the current `0.27.0` surface and does not retroactively change them.
 
+CI compares public Nim AST declarations and MessagePack writers, the Rust AST,
+and the Rust wire decoder with the pull request base (or the preceding push).
+Changing those files requires a higher `PARSER_CONTRACT_VERSION`; the Rust
+consumer pin and parser asset manifest tool must declare that same version.
+Grammar-only changes can retain the version when the wire shape is unchanged;
+the versioned producer/consumer MessagePack fixtures still check their covered
+SQL forms. Run `scripts/ci/check_parser_wire_contract.py BASE HEAD` locally to
+see which wire files triggered the check.
+
 ### Input, Payload, and Resource Bounds
 
 These limits are part of the FFI contract and are enforced before unbounded
