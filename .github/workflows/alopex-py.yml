@@ -106,7 +106,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
-        if: ${{ !env.ACT }}
+        if: ${{ !env.ACT && runner.environment != 'self-hosted' }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}

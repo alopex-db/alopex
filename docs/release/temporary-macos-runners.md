@@ -11,7 +11,10 @@ per host, with only the dedicated label, and an admission hook outside the
 checkout. The hook must reject any repository, event, branch, workflow, job or
 exact commit outside the approved candidate. It writes the admitted commit to
 `ALOPEX_RUNNER_ADMITTED_SHA` and the host's single shared Cargo target path to
-`ALOPEX_RUNNER_SHARED_TARGET` through `GITHUB_ENV`.
+`ALOPEX_RUNNER_SHARED_TARGET` through `GITHUB_ENV`. It must also provide `ALOPEX_RUNNER_PYTHON`, an absolute
+path to a relocatable Python 3.11 executable in the task-owned directory.
+The preparation step checks its version and adds its bin directory to
+`GITHUB_PATH`; hosted jobs retain `actions/setup-python`.
 
 The operator must inventory all Alopex storage on each physical host, reserve
 the expected peak output, and run a watchdog that stops the runner and its
