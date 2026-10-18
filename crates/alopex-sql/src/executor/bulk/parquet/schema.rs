@@ -2,7 +2,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use arrow_schema::Schema;
-use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 
 use super::parquet_io_error;
 use super::preflight::{check_declared_bytes, check_schema_projection, schema_footer};
@@ -46,22 +47,211 @@ pub(super) fn read(file: &mut (impl Read + Seek), limit: Option<u64>) -> Result<
     let metadata = ParquetMetaDataReader::decode_metadata(&bytes).map_err(|error| {
         ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
     })?;
-    let file_metadata = metadata.file_metadata();
-    let has_arrow_schema = budgeted_arrow_schema.unwrap_or_else(|| {
-        file_metadata.key_value_metadata().is_some_and(|values| {
-            values.iter().any(|entry| {
-                entry.key == parquet::arrow::ARROW_SCHEMA_META_KEY && entry.value.is_some()
-            })
-        })
-    });
-    let key_values = if has_arrow_schema {
-        file_metadata.key_value_metadata()
-    } else {
-        None
-    };
-    let schema = parquet::arrow::parquet_to_arrow_schema(file_metadata.schema_descr(), key_values)
-        .map_err(|error| {
+    let reader_metadata =
+        reader_metadata(metadata, budgeted_arrow_schema == Some(false)).map_err(|error| {
             ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
         })?;
-    Ok(Arc::new(schema))
+    Ok(Arc::clone(reader_metadata.schema()))
+}
+
+/// SQL exposes positional types and values, not Arrow's application metadata.
+/// Reuse Parquet's supplied-schema validation to avoid cloning those maps while
+/// it constructs field levels. Incompatible hints use its ordinary conversion.
+pub(super) fn reader_metadata(
+    metadata: ParquetMetaData,
+    skip_arrow_metadata: bool,
+) -> parquet::errors::Result<ArrowReaderMetadata> {
+    let metadata = Arc::new(metadata);
+    let options = ArrowReaderOptions::new().with_skip_arrow_metadata(skip_arrow_metadata);
+    if !skip_arrow_metadata {
+        let encoded = metadata
+            .file_metadata()
+            .key_value_metadata()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.key == parquet::arrow::ARROW_SCHEMA_META_KEY)
+            .filter_map(|entry| entry.value.as_deref())
+            .next_back();
+        if let Some(schema) = encoded.and_then(sql_arrow_hint)
+            && let Ok(reader) = ArrowReaderMetadata::try_new(
+                Arc::clone(&metadata),
+                options.clone().with_schema(Arc::new(schema)),
+            )
+        {
+            return Ok(reader);
+        }
+    }
+    ArrowReaderMetadata::try_new(metadata, options)
+}
+
+fn sql_arrow_hint(encoded: &str) -> Option<Schema> {
+    use base64::Engine;
+    // Match Parquet 53's continuation-marker and legacy raw-message handling.
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let bytes = if decoded.len() > 8 && decoded[..4] == [255; 4] {
+        &decoded[8..]
+    } else {
+        &decoded
+    };
+    let message = arrow_ipc::root_as_message(bytes).ok()?;
+    let ipc_schema = message.header_as_schema()?;
+    let schema = arrow_ipc::convert::fb_to_schema(ipc_schema);
+    let Schema { fields, metadata } = schema;
+    let reserved_metadata = |key: &str| key.starts_with("PARQUET:") || key.starts_with("ARROW:");
+    let metadata = metadata
+        .into_iter()
+        .filter(|(key, _)| reserved_metadata(key))
+        .collect();
+    // Drop the slice's references before consuming the fields, so stripping
+    // metadata does not first clone the HashMaps we intend to discard.
+    let owned = fields.iter().cloned().collect::<Vec<_>>();
+    drop(fields);
+    let fields = owned
+        .into_iter()
+        .map(|field| {
+            let field = Arc::unwrap_or_clone(field);
+            let metadata = field
+                .metadata()
+                .iter()
+                .filter(|(key, _)| reserved_metadata(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            field.with_metadata(metadata)
+        })
+        .collect::<Vec<_>>();
+    Some(Schema::new_with_metadata(fields, metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{ArrayRef, Int64Array, LargeBinaryArray, RecordBatch};
+    use arrow_schema::{DataType, Field};
+    use bytes::Bytes;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::FileMetaData;
+
+    fn fixture(binary: bool, entries: usize, field_id: bool) -> Bytes {
+        let mut metadata = (0..entries)
+            .map(|i| (format!("application{i}"), String::new()))
+            .collect::<std::collections::HashMap<_, _>>();
+        if field_id {
+            metadata.insert("PARQUET:field_id".into(), "7".into());
+            metadata.insert("ARROW:extension:name".into(), "example.type".into());
+        }
+        let (data_type, array): (_, ArrayRef) = if binary {
+            (
+                DataType::LargeBinary,
+                Arc::new(LargeBinaryArray::from(vec![Some(b"abc".as_slice()), None])),
+            )
+        } else {
+            (
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![Some(7), None])),
+            )
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", data_type, true).with_metadata(metadata),
+        ]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![array]).unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        bytes.into()
+    }
+
+    #[test]
+    fn sql_schema_discards_application_maps_without_changing_values() {
+        for binary in [false, true] {
+            let bytes = fixture(binary, 512, false);
+            let metadata = ParquetMetaDataReader::new()
+                .parse_and_finish(&bytes)
+                .unwrap();
+            let reference =
+                ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), Default::default())
+                    .unwrap();
+            let projected = reader_metadata(metadata, false).unwrap();
+            assert_eq!(reference.schema().field(0).metadata().len(), 512);
+            assert!(projected.schema().field(0).metadata().is_empty());
+            assert_eq!(
+                reference.schema().field(0).data_type(),
+                projected.schema().field(0).data_type()
+            );
+            let collect = |metadata| {
+                super::super::ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    bytes.clone(),
+                    metadata,
+                )
+                .build()
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+            };
+            let expected = collect(reference);
+            let actual = collect(projected);
+            assert_eq!(expected.len(), actual.len());
+            for (expected, actual) in expected.iter().zip(actual.iter()) {
+                assert_eq!(expected.columns(), actual.columns());
+            }
+            println!(
+                "SQL_ARROW_MAP binary={binary} reference_entries=512 projected_entries=0 values_equal=true"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_schema_preserves_field_ids_and_incompatible_hint_fallback() {
+        for incompatible_hint in [false, true] {
+            let bytes = fixture(false, 2, !incompatible_hint);
+            let mut metadata = ParquetMetaDataReader::new()
+                .parse_and_finish(&bytes)
+                .unwrap();
+            if incompatible_hint {
+                let hint_bytes = fixture(true, 2, false);
+                let hint = ParquetMetaDataReader::new()
+                    .parse_and_finish(&hint_bytes)
+                    .unwrap();
+                let physical = metadata.file_metadata();
+                let file = FileMetaData::new(
+                    physical.version(),
+                    physical.num_rows(),
+                    physical.created_by().map(str::to_owned),
+                    hint.file_metadata().key_value_metadata().cloned(),
+                    physical.schema_descr_ptr(),
+                    physical.column_orders().cloned(),
+                );
+                metadata = ParquetMetaData::new(file, metadata.row_groups().to_vec());
+            }
+            let reference =
+                ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), Default::default());
+            let actual = reader_metadata(metadata, false);
+            match (reference, actual) {
+                (Ok(reference), Ok(actual)) => {
+                    if incompatible_hint {
+                        assert_eq!(reference.schema(), actual.schema());
+                    } else {
+                        let field = actual.schema().field(0);
+                        assert_eq!(field.data_type(), reference.schema().field(0).data_type());
+                        assert_eq!(
+                            field.metadata().get("PARQUET:field_id").map(String::as_str),
+                            Some("7")
+                        );
+                        assert_eq!(
+                            field
+                                .metadata()
+                                .get("ARROW:extension:name")
+                                .map(String::as_str),
+                            Some("example.type")
+                        );
+                        assert_eq!(field.metadata().len(), 2);
+                    }
+                }
+                (Err(_), Err(_)) => {}
+                _ => panic!("SQL metadata projection changed physical-schema fallback"),
+            }
+        }
+    }
 }

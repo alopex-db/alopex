@@ -336,3 +336,61 @@ implied by this checkpoint.
 | --- | --- |
 | public-green.log | a1eb4c8d7a573b5e2fbd6c6bcd18ca89b71c79649a0f365c5d1e211b1772b00d |
 | strict-mutant.log | 8abde87e265037064bbc46ef82754a8a73c1082cad15b502d3958f8ecbdf014a |
+
+## Embedded Arrow map projection follow-up
+
+The fixed-source ffa26f2c comparison completed all 30 cells and 630 timed samples
+with every value checked. Host CPU medians were 9.37% before, 9.52% after and
+9.33% DuckDB. The two real failures were embedded Arrow p50 ratios 1.081808
+without a budget and 1.305826 with 268435456 B. Statistics improved to
+0.503500/0.661930. The complete samples, frozen profile and identities are in
+[the comparison record](https://github.com/alopex-db/alopex/issues/577#issuecomment-6250577907).
+The failed conditions remain open while the following optimization is measured.
+
+Arrow 53.4.1's `convert::fb_to_schema` constructs owned field metadata maps,
+and Parquet's `parquet_to_arrow_schema_and_fields` passes them through its
+field-level conversion. SQL exposes positional types and values, not these
+application maps. The new helper uses Parquet's public supplied-schema path,
+consumes the uniquely owned fields and removes application metadata before
+field-level conversion. `PARQUET:` and `ARROW:` reserved keys are preserved,
+as are all data types, nested fields and dictionary properties. If supplied
+hints do not match physical fields, the ordinary Parquet conversion remains
+the fallback. Existing preflight memory reservations remain conservative;
+this change does not remove or relax them.
+
+The first regression exposed loss of Field ID metadata in the initial draft.
+The corrected implementation retains reserved metadata. Two focused tests now
+compare Int64 and LargeBinary data with the reference reader, show 512 ordinary
+field metadata entries reduced to zero, and verify reserved metadata and
+incompatible-hint behavior. On that implementation, 20 public SQL cases,
+69 allocation/boundary cases and 15 Parquet units passed. The normally ignored
+LargeBinary case was explicitly executed in the same public-test binary.
+
+Target: alopex-sql/executor/bulk/parquet/schema.rs::sql_arrow_hint and the existing
+ParquetReader::from_shared_file boundary.
+Mutation check: one `sql_arrow_hint -> None` mutant caught, zero survivors,
+unviable mutants or timeouts. Both mutation build and test stages were scoped
+to `--lib`; the prior overly broad mutation build was not repeated.
+Strengthening: reference-value and reserved-metadata regressions; existing
+allocation tests cover simultaneous ownership and configured limits. No new
+unsafe path was added. The subsequent Clippy fix only collapsed equivalent
+nested `if let` expressions into a let-chain.
+Coupling: alopex-sql, changed since main, impact depth four, 126 modules,
+grade C, zero critical and 37 high findings. The existing parquet-to-schema
+edge now uses ArrowReaderMetadata; no dependency crate was added. Runtime
+allocation, identity and metadata semantics remain static-analysis blind spots.
+
+This checkpoint does not claim performance acceptance for the new helper.
+A new fixed-source comparison under the unchanged profile is required.
+
+| Evidence | SHA256 |
+| --- | --- |
+| schema-units.log | 53dfa9a9a8c1b54467cec6a165372a155a1590ea60d69e44b693f10eb6348952 |
+| schema-green.log | 4e8c78ae8236051a06989d29213c46e31bf99cc2088a31c4b5c4434087258737 |
+| public-allocation.log | 17f8917545a9354314bc800a7a4be670e87b7fed4416d90b4ff81565550ee289 |
+| explicit-ignored.log | 742521f6d01e72cebdba6fe0199b372f2fa5b87b956bb2e58581223548454698 |
+| parquet-units.log | 77b4abd209195792eb8555ebb551891b941398f41d9758ef846aefdc8d342580 |
+| map-mutant.log | bb1992eb7da0839f38f5cbd03dd579302c2fe38e6cdb093149b7e93038814ac5 |
+| clippy-green.log | 9f36832dcf2d4c901eabec7b2b8b2f4c99d3196bd439febe77d2027023af416e |
+
+Scoped Clippy with `-D warnings` passed after the equivalent let-chain fix.
