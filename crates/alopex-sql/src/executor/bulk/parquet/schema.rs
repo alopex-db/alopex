@@ -270,7 +270,11 @@ mod tests {
         use arrow_array::{DictionaryArray, Int32Array, UInt64Array, types::Int8Type};
         use std::collections::HashMap;
 
-        let dictionary: DictionaryArray<Int8Type> = [Some("a"), None].into_iter().collect();
+        let dictionary = DictionaryArray::<Int8Type>::try_new(
+            arrow_array::Int8Array::from(vec![Some(0), None]),
+            Arc::new(Int64Array::from(vec![19])),
+        )
+        .unwrap();
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![7, 8])),
             Arc::new(LargeBinaryArray::from(vec![Some(b"abc".as_slice()), None])),
