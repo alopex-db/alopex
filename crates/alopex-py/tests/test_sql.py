@@ -1250,13 +1250,26 @@ def test_all_null_hnsw_survives_updates_and_disk_reopen(tmp_path):
         "SELECT id FROM items "
         "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2"
     )
-    assert database.execute_sql(nearest) == []
+    def assert_null_completion(connection, non_null_id=None):
+        exact = connection.execute_sql(nearest + " WITH (enable_hnsw = false)")
+        indexed = connection.execute_sql(nearest + " WITH (enable_hnsw = true)")
+        for result in (exact, indexed):
+            assert len(result) == 2
+            assert len({row["id"] for row in result}) == 2
+            assert all(row["id"] in {1, 2, 3} for row in result)
+            if non_null_id is not None:
+                assert result[0] == {"id": non_null_id}
+        # NULL ties have no required order; both paths must retain LIMIT rows.
+
+    assert_null_completion(database)
     database.execute_sql("INSERT INTO items VALUES (3, NULL)")
     assert database.get_hnsw_stats("items_hnsw").node_count == 0
     database.execute_sql("UPDATE items SET embedding = [0.0, 0.0] WHERE id = 2")
-    assert database.execute_sql(nearest) == [{"id": 2}]
+    assert database.get_hnsw_stats("items_hnsw").node_count == 1
+    assert_null_completion(database, non_null_id=2)
     database.execute_sql("UPDATE items SET embedding = NULL WHERE id = 2")
-    assert database.execute_sql(nearest) == []
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    assert_null_completion(database)
     database.close()
 
     reopened = Database.open(path)
@@ -1266,16 +1279,18 @@ def test_all_null_hnsw_survives_updates_and_disk_reopen(tmp_path):
             {"id": 2, "embedding": None},
             {"id": 3, "embedding": None},
         ]
-        assert reopened.execute_sql(nearest) == []
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 0
+        assert_null_completion(reopened)
         reopened.execute_sql("UPDATE items SET embedding = [1.0, 0.0] WHERE id = 1")
-        assert reopened.execute_sql(nearest) == [{"id": 1}]
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 1
+        assert_null_completion(reopened, non_null_id=1)
     finally:
         reopened.close()
 
 
 def test_physical_hnsw_null_updates_match_exact_search(db):
-    # This head selects HNSW above 1,024 rows for 1,024-dimensional vectors.
-    # The smaller NULL regression alone does not prove this execution path.
+    # Force the indexed path independently of the evolving cost threshold.
+    # The smaller NULL regression alone does not prove physical index updates.
     tail = ", 0.0" * 1023
     query_vector = f"[-1.0{tail}]"
     db.execute_sql(
@@ -1293,23 +1308,26 @@ def test_physical_hnsw_null_updates_match_exact_search(db):
         "CREATE INDEX items_hnsw ON items (embedding) USING HNSW WITH (ef_search = 1024)"
     )
     assert db.get_hnsw_stats("items_hnsw").node_count == 1024
-    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
-    assert plan.startswith("HnswSearch"), plan
-    assert db.execute_sql(nearest) == [{"id": 1}, {"id": 2}]
+    indexed_query = nearest + " WITH (enable_hnsw = true)"
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
+    assert db.execute_sql(indexed_query) == [{"id": 1}, {"id": 2}]
 
     db.execute_sql(f"UPDATE items SET embedding = {query_vector} WHERE id = 0")
     db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 1")
-    assert db.execute_sql(nearest) == [{"id": 0}, {"id": 2}]
+    assert db.execute_sql(indexed_query) == [{"id": 0}, {"id": 2}]
     db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 0")
     expected = [{"id": 2}, {"id": 3}]
-    assert db.execute_sql(nearest) == expected
+    assert db.execute_sql(indexed_query) == expected
     assert db.execute_sql(
         f"SELECT vector_distance(embedding, {query_vector}, 'l2') AS distance, "
         f"vector_similarity(embedding, {query_vector}, 'l2') AS similarity "
         "FROM items WHERE id = 0"
     ) == [{"distance": None, "similarity": None}]
-    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
-    assert plan.startswith("HnswSearch"), plan
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
     db.execute_sql("DROP INDEX items_hnsw")
     plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
     assert not plan.startswith("HnswSearch"), plan
