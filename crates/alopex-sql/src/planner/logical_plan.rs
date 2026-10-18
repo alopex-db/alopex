@@ -324,6 +324,8 @@ pub enum LogicalPlan {
     TableFunction {
         /// Which function this node evaluates.
         function: TableFunctionKind,
+        /// Open input retained from planning through execution for READ_PARQUET.
+        parquet_source: Option<crate::executor::bulk::ParquetReadSource>,
         /// Argument expressions, evaluated against the outer row.
         args: Vec<TypedExpr>,
         /// Output schema.

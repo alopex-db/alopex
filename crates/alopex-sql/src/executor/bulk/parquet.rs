@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::sync::Arc;
 
 use alopex_core::sql::stream::ByteSized;
 use arrow_array::types::IntervalMonthDayNanoType;
@@ -30,6 +31,45 @@ use preflight::{check_footer, check_pages};
 const MAX_READ_PARQUET_ROWS: u64 = 100_000;
 const READ_PARQUET_BATCH_SIZE: usize = 1024;
 
+/// The file bound to a READ_PARQUET plan. Clones share its lifetime, not a cursor.
+#[derive(Clone)]
+pub struct ParquetReadSource(Arc<File>);
+
+impl std::fmt::Debug for ParquetReadSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ParquetReadSource { .. }")
+    }
+}
+
+impl ParquetReadSource {
+    pub(crate) fn read(
+        &self,
+        path: &str,
+        planned: &[ColumnMetadata],
+        security: Option<&CopySecurityConfig>,
+        memory: Option<&MemoryPolicy>,
+    ) -> Result<Vec<Vec<SqlValue>>> {
+        // A plan prepared by a less restricted caller must still satisfy the
+        // executing transaction's current policy. A capability-authorized handle
+        // must identify the retained input, rather than merely a path replacement.
+        if let Some(config) = security {
+            super::input_file::authorize_planned_input(&self.0, path, config)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let original = self.0.metadata().map_err(parquet_io_error)?;
+            let current = std::fs::metadata(path).map_err(parquet_io_error)?;
+            if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
+                return Err(ExecutorError::BulkLoad(
+                    "READ_PARQUET file changed after planning".into(),
+                ));
+            }
+        }
+        read_parquet_source(Arc::clone(&self.0), planned, memory)
+    }
+}
+
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
     schema: CopySchema,
@@ -52,16 +92,26 @@ impl ParquetReader {
     }
 
     fn from_file_with_memory(
-        mut file: File,
+        file: File,
         planned: &[ColumnMetadata],
         memory: Option<&MemoryPolicy>,
         validate_planned_schema: bool,
     ) -> Result<Self> {
+        Self::from_shared_file(Arc::new(file), planned, memory, validate_planned_schema)
+    }
+
+    fn from_shared_file(
+        file: Arc<File>,
+        planned: &[ColumnMetadata],
+        memory: Option<&MemoryPolicy>,
+        validate_planned_schema: bool,
+    ) -> Result<Self> {
+        let input = input::InputFile::from(Arc::clone(&file));
+        let mut cursor = input.cursor();
         let limit = memory.and_then(MemoryPolicy::limit_bytes);
         let footer = limit
-            .map(|limit| check_footer(&mut file, limit))
+            .map(|limit| check_footer(&mut cursor, limit))
             .transpose()?;
-        let input = input::InputFile::from(file.try_clone().map_err(parquet_io_error)?);
         // SQL exposes fields and rows; ordinary root KV need not be cloned into Arrow Schema.
         let options = ArrowReaderOptions::new().with_skip_arrow_metadata(
             footer
@@ -178,7 +228,7 @@ impl ParquetReader {
         }
         if let (Some(limit), Some(footer)) = (limit, footer) {
             reserved_bytes = check_pages(
-                &mut file,
+                &mut cursor,
                 builder.metadata(),
                 footer.start,
                 limit,
@@ -226,17 +276,25 @@ pub(crate) fn parquet_schema_with_read_options(
     security: Option<&CopySecurityConfig>,
     limit: Option<u64>,
 ) -> Result<CopySchema> {
-    let mut file = match security {
+    plan_parquet_source(path, security, limit).map(|(schema, _source)| schema)
+}
+
+pub(crate) fn plan_parquet_source(
+    path: &str,
+    security: Option<&CopySecurityConfig>,
+    limit: Option<u64>,
+) -> Result<(CopySchema, ParquetReadSource)> {
+    let file = Arc::new(match security {
         Some(config) => open_input_file(path, config)?,
         None => File::open(path)
             .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
-    };
-    // The reader checks all metadata before decoding; planning retains only the schema.
-    let schema = match schema::read(&mut file, limit) {
+    });
+    let input = input::InputFile::from(Arc::clone(&file));
+    let schema = match schema::read(&mut input.cursor(), limit) {
         Ok(schema) => schema,
         Err(error) if limit.is_some() => return Err(error),
         // Preserve the legacy decoder's broader grammar for unbounded planning.
-        Err(_) => ParquetRecordBatchReaderBuilder::try_new(file)
+        Err(_) => ParquetRecordBatchReaderBuilder::try_new(input)
             .map_err(|error| {
                 ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
             })?
@@ -253,11 +311,11 @@ pub(crate) fn parquet_schema_with_read_options(
             })
         })
         .collect::<Result<Vec<_>>>()
-        .map(|fields| CopySchema { fields })
+        .map(|fields| (CopySchema { fields }, ParquetReadSource(file)))
 }
 
 pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
-    let schema = parquet_schema(path)?;
+    let (schema, source) = plan_parquet_source(path, None, None)?;
     let columns = schema
         .fields
         .iter()
@@ -271,24 +329,18 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let rows = read_parquet_with_plan(path, &columns, None, None)?;
+    let rows = source.read(path, &columns, None, None)?;
     Ok((schema, rows))
 }
 
 /// Read against SQL's planned types, accounting for decoded payloads and retained
 /// row/value capacity, with footer and page declarations checked before decoding.
-pub(crate) fn read_parquet_with_plan(
-    path: &str,
+fn read_parquet_source(
+    file: Arc<File>,
     planned: &[ColumnMetadata],
-    security: Option<&CopySecurityConfig>,
     memory: Option<&MemoryPolicy>,
 ) -> Result<Vec<Vec<SqlValue>>> {
-    let file = match security {
-        Some(config) => open_input_file(path, config)?,
-        None => File::open(path)
-            .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
-    };
-    let mut reader = ParquetReader::from_file_with_memory(file, planned, memory, true)?;
+    let mut reader = ParquetReader::from_shared_file(file, planned, memory, true)?;
     let mut rows: Vec<Vec<SqlValue>> = Vec::new();
     let mut retained_bytes = 0_u64;
     let overflow = || ExecutorError::ResourceExhausted {

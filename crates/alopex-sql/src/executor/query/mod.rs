@@ -2077,6 +2077,7 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
         function,
         args,
         schema,
+        parquet_source,
     } = plan
     else {
         unreachable!("table function execution requires a table function plan");
@@ -2159,18 +2160,19 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     reason: "requires a TEXT path".into(),
                 });
             };
-            crate::executor::bulk::read_parquet_with_plan(
-                path,
-                schema,
-                context.copy_security.as_ref(),
-                memory,
-            )
-            .map(|rows| {
-                rows.into_iter()
-                    .enumerate()
-                    .map(|(index, values)| Row::new(index as u64, values))
-                    .collect()
-            })
+            parquet_source
+                .as_ref()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "READ_PARQUET".into(),
+                    reason: "planned input is missing".into(),
+                })?
+                .read(path, schema, context.copy_security.as_ref(), memory)
+                .map(|rows| {
+                    rows.into_iter()
+                        .enumerate()
+                        .map(|(index, values)| Row::new(index as u64, values))
+                        .collect()
+                })
         }
     }
 }

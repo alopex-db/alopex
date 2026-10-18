@@ -340,7 +340,7 @@ impl BoundedPages {
             if start < self.chunk_start || end > self.chunk_end {
                 return Err(invalid());
             }
-            let mut input = self.file.try_clone()?;
+            let mut input = super::super::input::InputFile::from(Arc::clone(&self.file)).cursor();
             let bytes = preflight::read_page_header_bytes(&mut input, start, end, self.limit)
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             let data = start.checked_add(bytes.len() as u64).ok_or_else(invalid)?;
@@ -413,7 +413,7 @@ impl BoundedPages {
         if compressed_size as u64 > self.limit || output_size as u64 > self.limit {
             return Err(invalid());
         }
-        let mut input = self.file.try_clone()?;
+        let mut input = super::super::input::InputFile::from(Arc::clone(&self.file)).cursor();
         input.seek(SeekFrom::Start(pending.data))?;
         let mut compressed = vec![0; compressed_size];
         input.read_exact(&mut compressed)?;

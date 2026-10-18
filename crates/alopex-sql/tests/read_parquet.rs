@@ -514,6 +514,56 @@ impl<'txn> SqlTxn<'txn, MemoryKV> for RestrictedTxn<'txn> {
 }
 
 #[test]
+fn issue577_runtime_policy_authorizes_the_retained_descriptor() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let allowed = root.join("allowed");
+    std::fs::create_dir(&allowed).unwrap();
+    let original = tempfile::NamedTempFile::new_in(&allowed).unwrap();
+    let replacement = tempfile::NamedTempFile::new_in(&root).unwrap();
+    for (file, value) in [(&original, 99), (&replacement, 11)] {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap();
+        write_parquet(file, schema, batch);
+    }
+    let catalog = MemoryCatalog::new();
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        &format!(
+            "SELECT * FROM read_parquet('{}')",
+            original.path().display()
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+
+    // The current allowed path now refers to a different file. Authorizing
+    // that path cannot authorize the descriptor retained by the old plan.
+    std::fs::rename(original.path(), root.join("moved-outside.parquet")).unwrap();
+    std::fs::rename(replacement.path(), original.path()).unwrap();
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let mut txn = RestrictedTxn {
+        inner: bridge.begin_write().unwrap(),
+        security: CopySecurityConfig {
+            allowed_base_dirs: Some(vec![allowed]),
+            allow_symlinks: false,
+        },
+    };
+    let error = execute_query_with_policy(&mut txn, &catalog, plan, None)
+        .expect_err("the allowed replacement must not authorize the retained descriptor");
+    assert!(
+        matches!(&error, ExecutorError::PathValidationFailed { reason, .. }
+            if reason == "path not in allowed directories"),
+        "expected the generic runtime path denial, got {error:?}"
+    );
+}
+
+#[test]
 fn issue577_read_parquet_inherits_restricted_transaction_policy() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

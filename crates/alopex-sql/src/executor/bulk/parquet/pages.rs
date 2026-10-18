@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +54,7 @@ pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
 }
 
 pub(super) fn reader(
-    file: File,
+    file: impl Into<InputFile>,
     metadata: Arc<ParquetMetaData>,
     schema: &Schema,
     batch_size: usize,
@@ -77,7 +78,7 @@ pub(super) fn reader(
         Some(schema.fields()),
     )?;
     let groups = FileRowGroups {
-        file: Arc::new(InputFile::from(file)),
+        file: Arc::new(file.into()),
         metadata,
         num_rows,
         limit,

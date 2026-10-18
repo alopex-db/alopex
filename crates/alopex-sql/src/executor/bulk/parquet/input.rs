@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -9,6 +9,13 @@ use parquet::file::reader::{ChunkReader, Length};
 pub(super) struct InputFile(Arc<File>);
 
 impl InputFile {
+    pub(super) fn cursor(&self) -> PositionedRead {
+        PositionedRead {
+            file: Arc::clone(&self.0),
+            position: 0,
+        }
+    }
+
     pub(super) fn raw_file(&self) -> &Arc<File> {
         &self.0
     }
@@ -21,6 +28,12 @@ impl InputFile {
 impl From<File> for InputFile {
     fn from(file: File) -> Self {
         Self(Arc::new(file))
+    }
+}
+
+impl From<Arc<File>> for InputFile {
+    fn from(file: Arc<File>) -> Self {
+        Self(file)
     }
 }
 
@@ -59,6 +72,21 @@ impl ChunkReader for InputFile {
 pub(super) struct PositionedRead {
     file: Arc<File>,
     position: u64,
+}
+
+impl Seek for PositionedRead {
+    fn seek(&mut self, offset: SeekFrom) -> io::Result<u64> {
+        let position = match offset {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+            SeekFrom::End(delta) => self.file.metadata()?.len().checked_add_signed(delta),
+        }
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid parquet input offset")
+        })?;
+        self.position = position;
+        Ok(position)
+    }
 }
 
 impl Read for PositionedRead {

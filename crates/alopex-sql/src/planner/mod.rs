@@ -4141,6 +4141,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
             function = TableFunctionKind::UnnestWithOrdinality;
         }
+        let mut parquet_source = None;
         let (typed_args, mut schema) = match function {
             TableFunctionKind::Unnest | TableFunctionKind::UnnestWithOrdinality => {
                 if args.len() != 1 {
@@ -4318,7 +4319,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         "READ_PARQUET requires a string literal path",
                     ));
                 };
-                let schema = crate::executor::bulk::parquet_schema_with_read_options(
+                let (source_schema, source) = crate::executor::bulk::plan_parquet_source(
                     path,
                     self.copy_security.as_ref(),
                     self.read_memory_limit,
@@ -4328,20 +4329,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         PlannerError::ResourceExhausted { message }
                     }
                     other => PlannerError::invalid_expression(other.to_string()),
-                })?
-                .fields
-                .into_iter()
-                .map(|field| {
-                    Ok(ColumnMetadata::new(
-                        field.name.ok_or_else(|| {
-                            PlannerError::invalid_expression("missing parquet field name")
-                        })?,
-                        field.data_type.ok_or_else(|| {
-                            PlannerError::invalid_expression("missing parquet field type")
-                        })?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, PlannerError>>()?;
+                })?;
+                parquet_source = Some(source);
+                let schema = source_schema
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        Ok(ColumnMetadata::new(
+                            field.name.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field name")
+                            })?,
+                            field.data_type.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field type")
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?;
                 (vec![typed], schema)
             }
         };
@@ -4378,6 +4381,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             plan: LogicalPlan::TableFunction {
                 function,
                 args: typed_args,
+                parquet_source,
                 schema: schema.clone(),
             },
             schema: schema.clone(),

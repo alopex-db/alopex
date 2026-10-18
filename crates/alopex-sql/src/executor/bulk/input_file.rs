@@ -9,6 +9,56 @@ pub(super) fn open_input_file(path: &str, config: &CopySecurityConfig) -> Result
     open_input_file_with_after_validation(path, config, || {})
 }
 
+/// Authorize the retained input through the current capability roots. The new
+/// handle is used only for identity checking; decoding keeps the planned handle.
+pub(super) fn authorize_planned_input(
+    planned: &File,
+    path: &str,
+    config: &CopySecurityConfig,
+) -> Result<()> {
+    let authorized = open_input_file(path, config)?;
+    let denied = || ExecutorError::PathValidationFailed {
+        path: path.into(),
+        reason: "path not in allowed directories".into(),
+    };
+    if !same_open_file(planned, &authorized).map_err(|_| denied())? {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_open_file(left: &File, right: &File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let left = left.metadata()?;
+    let right = right.metadata()?;
+    Ok((left.dev(), left.ino()) == (right.dev(), right.ino()))
+}
+
+#[cfg(windows)]
+fn same_open_file(left: &File, right: &File) -> std::io::Result<bool> {
+    use cap_primitives::fs::{_WindowsByHandle, Metadata};
+    let left = Metadata::from_file(left)?;
+    let right = Metadata::from_file(right)?;
+    // Use the same by-handle identity fields as cap-primitives' reopen check.
+    // Missing identifiers must never compare equal and authorize an input.
+    match (
+        _WindowsByHandle::volume_serial_number(&left),
+        _WindowsByHandle::file_index(&left),
+        _WindowsByHandle::volume_serial_number(&right),
+        _WindowsByHandle::file_index(&right),
+    ) {
+        (Some(lv), Some(li), Some(rv), Some(ri)) => Ok((lv, li) == (rv, ri)),
+        _ => Ok(false),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_open_file(_left: &File, _right: &File) -> std::io::Result<bool> {
+    // Unknown platforms cannot establish authorization for a retained handle.
+    Ok(false)
+}
+
 pub(super) fn open_input_file_with_after_validation(
     path: &str,
     config: &CopySecurityConfig,

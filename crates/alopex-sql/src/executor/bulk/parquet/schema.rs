@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -11,7 +10,7 @@ use crate::executor::{ExecutorError, Result};
 
 /// Budget only metadata retained by schema planning before owned decoding.
 /// The data reader retains responsibility for decoding and validating row groups.
-pub(super) fn read(file: &mut File, limit: Option<u64>) -> Result<Arc<Schema>> {
+pub(super) fn read(file: &mut (impl Read + Seek), limit: Option<u64>) -> Result<Arc<Schema>> {
     let footer = schema_footer(file, limit.unwrap_or(u64::MAX))?;
     let invalid = || ExecutorError::BulkLoad("invalid parquet schema projection".into());
     let groups = &footer.row_groups;

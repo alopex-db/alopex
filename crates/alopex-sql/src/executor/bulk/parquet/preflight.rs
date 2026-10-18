@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -208,8 +209,8 @@ pub(super) struct SchemaFooter {
 }
 
 // Locate wire ranges without materializing row groups; the projected schema is budgeted next.
-pub(super) fn schema_footer(file: &mut File, limit: u64) -> Result<SchemaFooter> {
-    let length = file.metadata().map_err(parquet_io_error)?.len();
+pub(super) fn schema_footer(file: &mut (impl Read + Seek), limit: u64) -> Result<SchemaFooter> {
+    let length = file.seek(SeekFrom::End(0)).map_err(parquet_io_error)?;
     schema_footer_reader(file, length, limit)
 }
 
@@ -283,8 +284,8 @@ fn schema_footer_reader(
     })
 }
 
-pub(super) fn check_footer(file: &mut File, limit: u64) -> Result<FooterReservation> {
-    let length = file.metadata().map_err(parquet_io_error)?.len();
+pub(super) fn check_footer(file: &mut (impl Read + Seek), limit: u64) -> Result<FooterReservation> {
+    let length = file.seek(SeekFrom::End(0)).map_err(parquet_io_error)?;
     let trailer_start = length.checked_sub(8).ok_or_else(invalid_page)?;
     file.seek(SeekFrom::Start(trailer_start))
         .map_err(parquet_io_error)?;
@@ -490,7 +491,7 @@ pub(super) fn check_pages(
 }
 
 pub(super) fn read_page_header_bytes(
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     start: u64,
     end: u64,
     limit: u64,
