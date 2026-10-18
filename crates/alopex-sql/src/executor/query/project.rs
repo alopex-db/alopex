@@ -31,25 +31,40 @@ pub fn project_row_values(
 ) -> Result<Vec<SqlValue>> {
     match projection {
         Projection::All(names) if names.len() == schema.len() => Ok(row.values.clone()),
-        Projection::All(names) => names
-            .iter()
-            .map(|name| {
+        Projection::All(names) => {
+            let mut values = Vec::with_capacity(names.len());
+            for name in names {
                 let index = schema
                     .iter()
                     .position(|column| &column.name == name)
                     .ok_or_else(|| crate::executor::ExecutorError::ColumnNotFound(name.clone()))?;
-                row.values.get(index).cloned().ok_or_else(|| {
+                values.push(row.values.get(index).cloned().ok_or_else(|| {
                     crate::executor::ExecutorError::InvalidOperation {
                         operation: "project".into(),
                         reason: format!("row is missing projected column '{name}'"),
                     }
-                })
-            })
-            .collect(),
-        Projection::Columns(columns) => columns
-            .iter()
-            .map(|column| eval_expr(&column.expr, row))
-            .collect(),
+                })?);
+            }
+            Ok(values)
+        }
+        Projection::Columns(columns) => {
+            let mut values = Vec::with_capacity(columns.len());
+            for column in columns {
+                values.push(eval_expr(&column.expr, row)?);
+            }
+            Ok(values)
+        }
+    }
+}
+
+fn project_owned_row_values(
+    row: Row,
+    projection: &Projection,
+    schema: &[ColumnMetadata],
+) -> Result<Vec<SqlValue>> {
+    match projection {
+        Projection::All(names) if names.len() == schema.len() => Ok(row.values),
+        _ => project_row_values(&row, projection, schema),
     }
 }
 
@@ -73,8 +88,8 @@ fn project_all(
     let projection = Projection::All(names.to_vec());
     let columns = projected_columns(&projection, schema)?;
     let projected_rows = rows
-        .iter()
-        .map(|row| project_row_values(row, &projection, schema))
+        .into_iter()
+        .map(|row| project_owned_row_values(row, &projection, schema))
         .collect::<Result<Vec<_>>>()?;
     Ok(crate::executor::QueryResult::new(columns, projected_rows))
 }
@@ -86,8 +101,8 @@ fn project_columns(
     let projection = Projection::Columns(cols.to_vec());
     let columns = projected_columns(&projection, &[])?;
     let projected_rows = rows
-        .iter()
-        .map(|row| project_row_values(row, &projection, &[]))
+        .into_iter()
+        .map(|row| project_owned_row_values(row, &projection, &[]))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(crate::executor::QueryResult::new(columns, projected_rows))
