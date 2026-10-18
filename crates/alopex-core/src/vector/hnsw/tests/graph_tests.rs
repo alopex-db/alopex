@@ -254,7 +254,7 @@ fn cosine_search_prepares_query_norm_once() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn cosine_search_preserves_remainder_dimensions_and_self_distance() {
-    for dimension in [1, 3, 5, 7, 9, 129] {
+    for dimension in [1, 2, 3, 4, 5, 7, 8, 9, 128, 129] {
         let mut graph = HnswGraph::new(
             base_config()
                 .with_dimension(dimension)

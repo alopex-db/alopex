@@ -364,6 +364,10 @@ impl ColumnPages {
             .and_then(|bytes| bytes.checked_add(bitmap_capacity / 2))
             .and_then(|bytes| bytes.checked_add(level_buffers))
             .ok_or_else(invalid_delta)?;
+        #[allow(
+            deprecated,
+            reason = "Release builds use Rust 1.90; try_update requires 1.95"
+        )]
         self.reserved_bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 let used = used.checked_add(capacity)?;

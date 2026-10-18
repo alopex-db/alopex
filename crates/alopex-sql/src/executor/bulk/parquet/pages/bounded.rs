@@ -36,6 +36,7 @@ struct ScratchReservation<'a> {
 
 impl<'a> ScratchReservation<'a> {
     fn new(reserved: &'a AtomicU64, bytes: u64, limit: u64, codec: &str) -> Result<Self> {
+        #[allow(deprecated, reason = "Release builds use Rust 1.90; try_update requires 1.95")]
         reserved
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(bytes).filter(|&used| used <= limit)
@@ -117,6 +118,10 @@ where
             if let Some(bytes) = bytes.filter(|&bytes| bytes as u64 <= self.limit) {
                 let prepaid = self.pre_reserved.get().min(bytes as u64);
                 let additional = bytes as u64 - prepaid;
+                #[allow(
+                    deprecated,
+                    reason = "Release builds use Rust 1.90; try_update requires 1.95"
+                )]
                 match self
                     .reserved
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
