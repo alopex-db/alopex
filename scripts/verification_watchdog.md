@@ -1,8 +1,30 @@
-The READ_PARQUET verification entrypoint uses the host-monitoring watchdog:
+The READ_PARQUET comparison controller uses the host-monitoring watchdog:
 
 ```sh
-rtk proxy python3 -B scripts/run_issue577_verification.py UNIQUE_RUN_ID issue577_
+rtk proxy python3 -B scripts/performance/issue577_matrix.py PROFILE FIXTURES BUNDLE OUTPUT
 ```
+
+The bundle must contain a fresh inventory baseline for the execution host and
+explicit filesystem counters in `storage.filesystems`, each with `path` and
+`used_at_baseline`. The baseline includes project worktrees, build outputs,
+known external temporary directories and caches. WSL and native Windows project
+outputs count toward the same physical host budget. Another machine has its own
+budget. The controller requires the worktree filesystem and all Windows drive
+mounts exposed under `/mnt`; missing coverage and old scalar-only bundles fail
+before a case starts.
+
+`output_budget.py` checks constant-cost filesystem counters during admission and
+execution. The estimate adds positive growth on each volume to the inventory;
+a shrink on one volume cannot hide growth on another. Backing-volume overlap
+may conservatively overestimate growth. The controller stops at 40,000,000,000 B,
+keeps at least 16 GiB free on every monitored volume, and enforces the declared
+per-run output allowance. The 50 GiB policy remains an emergency maximum. The
+monitor performs no recursive scans or deletion.
+
+The historical `run_issue577_verification.py` launcher now exits 125 before
+launching a child because its repository-only inventory omitted host outputs.
+Callers must use the host-budgeted controller or supply the same inventory,
+resource policy, bounded command and owned-output cleanup to `run_guarded`.
 
 Resource boundaries are separate:
 
@@ -138,12 +160,12 @@ descendant cleanup, successful/nonzero exits, launch failure and deadline expiry
 Their dependencies are the Python standard library and the existing systemd user
 manager. Their temporary-output budget is 10 MiB; the checks remove their own
 temporary directories and units. Historical probes are retained as evidence,
-while the existing entrypoint uses this watchdog as its sole normal launch path.
+while current comparison commands use this watchdog for controlled launches.
 
 | Owner/file | Responsibility and lifecycle | Verification |
 | --- | --- | --- |
-| `run_issue577_verification.py` | The existing runner keeps target selection and owned build-output cleanup; its former launch loop delegates to the watchdog. | One focused READ_PARQUET test through the entrypoint. |
+| `run_issue577_verification.py` | Reject historical invocations before launch. | CLI exit 125. |
+| `output_budget.py`, `performance/issue577_matrix.py` | Monitor per-host filesystem growth and reject incomplete coverage before a measured case. | Cross-volume growth, missing coverage, reserve stops and matrix lifecycle. |
 | `verification_watchdog.py` | The watchdog owns policy decisions, unit stops, durable records and observer cleanup. | Small success, failure, pressure, interruption and heartbeat cases. |
 | `host_resources.py`, `windows_host_observer.ps1` | The observer owns host facts and exits on input closure or missing heartbeat. | Real host sampling and delayed-reader freshness. |
 | Per-run events, receipts and logs | The run artifacts retain both failed and passing runs for review. | Readback, source/log digests and explicit final status. |
-| Legacy local entrypoint | The legacy entrypoint redirects to the tracked runner; it retains no separate launch implementation. | Its uncontrolled-launch refusal check. |

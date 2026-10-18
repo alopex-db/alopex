@@ -86,6 +86,42 @@ and GREEN log SHA256
 Codex uses constant-cost filesystem counters and labels project size as an
 estimate. Codex removes temporary test fixtures and generates no Python bytecode.
 
+### Coverage across the execution host
+
+Codex reproduced two further failures: the controller accepted a scalar-only
+filesystem baseline, and growth on a second host volume escaped the 40 GB stop.
+Codex moved the storage owner into `scripts/output_budget.py`. The owner requires
+explicit filesystem baselines, including native Windows drive mounts visible
+from WSL, and adds positive growth independently for every volume. A shrinking
+volume cannot cancel another volume's growth. The owner uses counters only;
+the producer owns the initial project inventory and owned-output cleanup.
+
+Codex passed 13 controller tests, including missing-volume rejection and
+cross-volume growth. Codex preserved RED log SHA256
+`d3e2418fc33bde9f71491ee1802c821b3b74a5888db1e6edb2694522798563e5`
+and sequential GREEN log SHA256
+`4bce5c0fdb1a280b74f292a075cd2a02c6a54e2ca7ad65cf51d91ee7eab4b222`.
+Codex classified an earlier overlapping lightweight test invocation as invalid
+and reran the controller target after the watchdog target exited.
+
+Codex also reproduced two watchdog test errors: subprocesses launched from the
+repository root lacked the scripts import path. Codex supplied that dependency
+explicitly to the test worker and passed all 19 watchdog lifecycle tests without
+changing deadlines or resource thresholds. Codex preserved failure log SHA256
+`a06c783ae36b2b41a7e4f5bcc7957c8ce3d007d3b2c41e3ff22e7453fde1bff2`
+and GREEN log SHA256
+`50110d60e64ce35f7f5cb99e101f86784a051478ba7e9ea6724eb368219e4628`.
+
+```sh
+rtk proxy python3 -B -m unittest discover -s scripts -p test_verification_watchdog.py
+```
+
+Codex adopted the retired launcher's pre-launch refusal (exit 125), replaced its
+obsolete runbook command, and records the active storage owner's source digest
+in watchdog provenance. Codex retained test logs and receipts; the test finalizers
+removed temporary directories and stopped their child workers. Codex created no
+Cargo build output for these Python checks.
+
 ## Earlier metadata consumption fix
 
 ### Original source identity
