@@ -36,7 +36,7 @@ def stop_child(pid):
 def check_process(path, expected):
     result = subprocess.run(
         [sys.executable, __file__, expected, path],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -79,7 +79,7 @@ def child_drop(path, finish):
             else:
                 del db
                 gc.collect()
-        except BaseException:
+        except BaseException:  # noqa: BLE001 - child must report every failure before _exit
             status = 1
         os._exit(status)
     try:

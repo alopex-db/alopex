@@ -9,6 +9,8 @@
 """
 
 import datetime as dt
+import gc
+import io
 import json
 from decimal import Decimal
 
@@ -1338,8 +1340,10 @@ def test_columnar_dml_rejects_writes_and_preserves_copied_rows(tmp_path):
         "UPDATE c SET price = 9.0 WHERE id = 999",
         "DELETE FROM c WHERE id = 2",
         "DELETE FROM c WHERE id = 999",
-        "MERGE INTO c USING source ON c.id = source.id "
-        "WHEN MATCHED THEN UPDATE SET price = source.price",
+        (
+            "MERGE INTO c USING source ON c.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET price = source.price"
+        ),
     ):
         with pytest.raises(AlopexError, match="not supported for columnar tables"):
             db.execute_sql(sql)

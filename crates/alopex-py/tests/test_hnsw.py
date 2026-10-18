@@ -1,5 +1,4 @@
 import pytest
-
 from alopex import Database, HnswConfig, Metric, TxnMode
 
 
@@ -182,8 +181,8 @@ def test_prepared_kv_hnsw_savepoint_commit_releases_storage(tmp_path):
 
 @pytest.mark.requires_numpy
 def test_hnsw_multithreaded_search_releases_gil():
-    import time
     import threading
+    import time
     from concurrent.futures import ThreadPoolExecutor
 
     import numpy as np

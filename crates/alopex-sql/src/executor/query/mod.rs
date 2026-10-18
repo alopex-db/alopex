@@ -1046,7 +1046,9 @@ fn build_iterator_pipeline_with_outer<
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
-                && let LogicalPlan::Scan { table, .. } = input.as_ref()
+                && let LogicalPlan::Scan {
+                    table, projection, ..
+                } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
                 && table_meta.storage_options.storage_type == StorageType::Row
                 && let Some((column, index_predicate)) = index_predicate(&predicate, table_meta)
