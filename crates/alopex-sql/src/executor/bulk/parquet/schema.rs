@@ -97,12 +97,75 @@ fn sql_arrow_hint(encoded: &str) -> Option<Schema> {
     };
     let message = arrow_ipc::root_as_message(bytes).ok()?;
     let ipc_schema = message.header_as_schema()?;
-    let schema = arrow_ipc::convert::fb_to_schema(ipc_schema);
+    if ipc_schema.endianness() != arrow_ipc::Endianness::Little {
+        // Keep the reference converter's endian handling, including Decimal.
+        return Some(strip_arrow_application_metadata(
+            arrow_ipc::convert::fb_to_schema(ipc_schema),
+        ));
+    }
+    let fields = ipc_schema
+        .fields()?
+        .iter()
+        .map(sql_arrow_field)
+        .collect::<Vec<_>>();
+    let metadata = sql_arrow_metadata(
+        ipc_schema
+            .custom_metadata()
+            .into_iter()
+            .flat_map(|values| values.iter()),
+    );
+    Some(Schema::new_with_metadata(fields, metadata))
+}
+
+fn sql_arrow_field(field: arrow_ipc::Field<'_>) -> arrow_schema::Field {
+    use arrow_schema::{DataType, Field};
+
+    // These common SQL scalars need no recursive or dictionary conversion.
+    // Keep the public reference converter for every other Arrow type.
+    let scalar = if field.dictionary().is_none() {
+        match field.type_type() {
+            arrow_ipc::Type::Int => field
+                .type_as_int()
+                .filter(|integer| integer.is_signed() && integer.bitWidth() == 64)
+                .map(|_| DataType::Int64),
+            arrow_ipc::Type::LargeBinary => Some(DataType::LargeBinary),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let arrow_field = match scalar {
+        Some(data_type) => Field::new(field.name().unwrap(), data_type, field.nullable()),
+        None => Field::from(field),
+    };
+    arrow_field.with_metadata(sql_arrow_metadata(
+        field
+            .custom_metadata()
+            .into_iter()
+            .flat_map(|values| values.iter()),
+    ))
+}
+
+fn sql_arrow_metadata<'a>(
+    values: impl Iterator<Item = arrow_ipc::KeyValue<'a>>,
+) -> std::collections::HashMap<String, String> {
+    values
+        .filter_map(|entry| {
+            let (key, value) = (entry.key()?, entry.value()?);
+            is_reserved_arrow_key(key).then(|| (key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn is_reserved_arrow_key(key: &str) -> bool {
+    key.starts_with("PARQUET:") || key.starts_with("ARROW:")
+}
+
+fn strip_arrow_application_metadata(schema: Schema) -> Schema {
     let Schema { fields, metadata } = schema;
-    let reserved_metadata = |key: &str| key.starts_with("PARQUET:") || key.starts_with("ARROW:");
     let metadata = metadata
         .into_iter()
-        .filter(|(key, _)| reserved_metadata(key))
+        .filter(|(key, _)| is_reserved_arrow_key(key))
         .collect();
     // Drop the slice's references before consuming the fields, so stripping
     // metadata does not first clone the HashMaps we intend to discard.
@@ -115,13 +178,13 @@ fn sql_arrow_hint(encoded: &str) -> Option<Schema> {
             let metadata = field
                 .metadata()
                 .iter()
-                .filter(|(key, _)| reserved_metadata(key))
+                .filter(|(key, _)| is_reserved_arrow_key(key))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
             field.with_metadata(metadata)
         })
         .collect::<Vec<_>>();
-    Some(Schema::new_with_metadata(fields, metadata))
+    Schema::new_with_metadata(fields, metadata)
 }
 
 #[cfg(test)]
@@ -199,6 +262,90 @@ mod tests {
             println!(
                 "SQL_ARROW_MAP binary={binary} reference_entries=512 projected_entries=0 values_equal=true"
             );
+        }
+    }
+
+    #[test]
+    fn sql_schema_mixed_fields_keep_order_nullability_and_dictionary_properties() {
+        use arrow_array::{DictionaryArray, Int32Array, UInt64Array, types::Int8Type};
+        use std::collections::HashMap;
+
+        let dictionary: DictionaryArray<Int8Type> = [Some("a"), None].into_iter().collect();
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![7, 8])),
+            Arc::new(LargeBinaryArray::from(vec![Some(b"abc".as_slice()), None])),
+            Arc::new(Int32Array::from(vec![-4, 5])),
+            Arc::new(UInt64Array::from(vec![Some(17), None])),
+            Arc::new(dictionary),
+        ];
+        let fields = arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                Field::new(
+                    format!("field{index}"),
+                    array.data_type().clone(),
+                    array.null_count() != 0,
+                )
+                .with_metadata(HashMap::from([
+                    ("PARQUET:field_id".into(), (index + 1).to_string()),
+                    ("ARROW:extension:name".into(), "example.type".into()),
+                    ("application".into(), "discarded".into()),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            HashMap::from([
+                ("ARROW:example".into(), "root".into()),
+                ("application".into(), "discarded".into()),
+            ]),
+        ));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let bytes = Bytes::from(buffer);
+        let metadata = ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes)
+            .unwrap();
+        let reference =
+            ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), Default::default()).unwrap();
+        let actual = reader_metadata(metadata, false).unwrap();
+        assert_eq!(actual.schema().fields().len(), 5);
+        for (index, (actual, expected)) in actual
+            .schema()
+            .fields()
+            .iter()
+            .zip(reference.schema().fields())
+            .enumerate()
+        {
+            let expected = expected.as_ref().clone().with_metadata(HashMap::from([
+                ("PARQUET:field_id".into(), (index + 1).to_string()),
+                ("ARROW:extension:name".into(), "example.type".into()),
+            ]));
+            assert_eq!(actual.as_ref(), &expected);
+        }
+        assert_eq!(
+            actual.schema().metadata(),
+            &HashMap::from([("ARROW:example".into(), "root".into())])
+        );
+        let collect = |metadata| {
+            super::super::ParquetRecordBatchReaderBuilder::new_with_metadata(
+                bytes.clone(),
+                metadata,
+            )
+            .build()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let actual = collect(actual);
+        let expected = collect(reference);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert_eq!(actual.columns(), expected.columns());
         }
     }
 

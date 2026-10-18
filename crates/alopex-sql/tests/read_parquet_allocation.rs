@@ -26,6 +26,7 @@ const DECLARED_PAGE_BYTES: i32 = 1024 * 1024;
 struct ObservedAllocator;
 thread_local! {
     static MAX_REQUEST: Cell<Option<usize>> = const { Cell::new(None) };
+    static ALLOCATION_REQUESTS: Cell<Option<usize>> = const { Cell::new(None) };
     static LIVE_ALLOCATIONS: RefCell<Option<LiveAllocations>> = const { RefCell::new(None) };
 }
 
@@ -83,6 +84,11 @@ fn observe_live(pointer: *mut u8, size: Option<usize>) {
 }
 
 fn observe(size: usize) {
+    let _ = ALLOCATION_REQUESTS.try_with(|requests| {
+        if let Some(previous) = requests.get() {
+            requests.set(Some(previous + 1));
+        }
+    });
     let _ = MAX_REQUEST.try_with(|maximum| {
         if let Some(previous) = maximum.get() {
             maximum.set(Some(previous.max(size)));
@@ -1111,6 +1117,42 @@ fn embedded_arrow_metadata_fixture(root: bool, entries: usize) -> tempfile::Name
     writer.write(&batch).unwrap();
     writer.close().unwrap();
     file
+}
+
+#[test]
+fn issue577_unused_arrow_metadata_does_not_create_per_entry_owners() {
+    const ENTRIES: usize = 400;
+    let mut failures = Vec::new();
+    for root in [false, true] {
+        for limit in [None, Some(LIMIT * 4)] {
+            let mut counts = Vec::new();
+            for entries in [0, ENTRIES] {
+                let file = embedded_arrow_metadata_fixture(root, entries);
+                ALLOCATION_REQUESTS.with(|requests| requests.set(Some(0)));
+                let (result, _) = execute_observed_with_alias(&file, "", limit, || {});
+                let count = ALLOCATION_REQUESTS.with(|requests| requests.replace(None).unwrap());
+                let ExecutionResult::Query(result) = result.unwrap() else {
+                    panic!("expected embedded Arrow rows");
+                };
+                assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]; 16]);
+                counts.push(count);
+            }
+            let added = counts[1].saturating_sub(counts[0]);
+            println!(
+                "unused_arrow_metadata root={root} limit={limit:?} empty_allocations={} populated_allocations={} added={added}",
+                counts[0], counts[1]
+            );
+            // Encoded metadata still has storage and validation costs, but SQL
+            // must not materialize an owned String for each discarded entry.
+            if added >= ENTRIES {
+                failures.push((root, limit, added));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "unused Arrow entries acquired per-entry owners: {failures:?}"
+    );
 }
 
 fn embedded_arrow_metadata_shared_budget(root: bool) {
