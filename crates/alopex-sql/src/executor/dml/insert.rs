@@ -11,7 +11,9 @@ use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::query::aggregate::encode_group_key;
 use crate::executor::query::{project_row_values, projected_columns};
-use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::executor::{
+    ConstraintViolation, EvaluationError, ExecutionResult, ExecutorError, Result,
+};
 use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
 use crate::planner::type_checker::TypeChecker;
 use crate::planner::typed_expr::Projection;
@@ -150,7 +152,25 @@ pub fn execute_insert_rows_with_plan<
     let ctx = EvalContext::new(&[]);
     let rows = values
         .into_iter()
-        .map(|row| build_row_from_values(catalog, &table, &columns, row, &ctx))
+        .enumerate()
+        .map(|(index, row)| {
+            build_row_from_values(catalog, &table, &columns, row, &ctx).map_err(|error| {
+                if let ExecutorError::Evaluation(EvaluationError::CastFailed {
+                    source_type,
+                    target,
+                    reason,
+                }) = error
+                {
+                    ExecutorError::Evaluation(EvaluationError::CastFailed {
+                        source_type,
+                        target,
+                        reason: format!("input row {}: {reason}", index + 1),
+                    })
+                } else {
+                    error
+                }
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
     insert_rows(
         txn,

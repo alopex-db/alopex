@@ -22,7 +22,7 @@ dependencies = []
 numpy = ["numpy>=1.20"]
 polars = ["polars>=0.20"]
 full = ["numpy>=1.20", "polars>=0.20"]
-dev = ["pytest>=7", "pytest-benchmark>=4", "numpy>=1.20", "polars>=0.20"]
+dev = ["pytest>=7", "pytest-benchmark>=4", "numpy>=1.20", "polars>=0.20", "pyarrow>=15"]
 
 [tool.maturin]
 bindings = "pyo3"
