@@ -12,10 +12,8 @@ use tempfile::tempdir;
 
 /// Environment variable the re-executed child reads to find the database.
 const CHILD_DIR_ENV: &str = "ALOPEX_LOCK_CHILD_DIR";
-/// Stable substring for other-process or unknown lock holders.
+/// Stable substring every `AlreadyOpen` rendering must contain.
 const LOCK_MESSAGE: &str = "already open by another process";
-
-const SAME_PROCESS_MESSAGE: &str = "already open in this process";
 
 /// Re-run this test binary as a genuinely separate process.
 fn respawn(test_name: &str, db_path: &Path) -> Command {
@@ -47,7 +45,7 @@ fn a_second_open_in_the_same_process_is_rejected() {
         .expect("second open must be rejected");
     let rendered = err.to_string();
     assert!(
-        rendered.contains(SAME_PROCESS_MESSAGE),
+        rendered.contains(LOCK_MESSAGE),
         "expected the stable lock message, got: {rendered}"
     );
     drop(first);
@@ -62,7 +60,7 @@ fn a_plain_directory_is_guarded_too() {
     let err = Database::open(&data_dir)
         .err()
         .expect("second open must be rejected");
-    assert!(err.to_string().contains(SAME_PROCESS_MESSAGE));
+    assert!(err.to_string().contains(LOCK_MESSAGE));
     drop(first);
 }
 

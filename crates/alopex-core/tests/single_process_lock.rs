@@ -40,8 +40,8 @@ fn assert_already_open(err: Error, expected_data_dir: &Path) {
     }
     let rendered = err.to_string();
     assert!(
-        rendered.contains("already open in this process"),
-        "{rendered}"
+        rendered.contains("already open by another process"),
+        "error message must carry the stable searchable string, got: {rendered}"
     );
 }
 

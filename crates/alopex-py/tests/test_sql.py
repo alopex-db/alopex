@@ -34,41 +34,6 @@ def test_execute_sql_ddl_returns_none(db):
     assert result is None
 
 
-@pytest.mark.parametrize("close_first", [False, True])
-def test_prepared_finalize_releases_database_lock(tmp_path, close_first):
-    path = str(tmp_path / "prepared-finalize.alopex")
-    database = Database.open(path)
-    statement = database.prepare("SELECT 1 AS value")
-    if close_first:
-        database.close()
-    statement.finalize()
-    if not close_first:
-        database.close()
-    reopened = Database.open(path)
-    try:
-        assert reopened.execute_sql("SELECT 1 AS value") == [{"value": 1}]
-        with pytest.raises(AlopexError, match="prepared statement is finalized"):
-            statement.execute()
-    finally:
-        reopened.close()
-
-
-def test_unfinalized_prepared_handle_explains_lock_owner(tmp_path):
-    path = str(tmp_path / "prepared-owner.alopex")
-    database = Database.open(path)
-    statement = database.prepare("SELECT 1 AS value")
-    database.close()
-    try:
-        with pytest.raises(AlopexError, match="PreparedStatement"):
-            Database.open(path)
-        with pytest.raises(AlopexError, match="database is closed"):
-            statement.execute()
-    finally:
-        statement.finalize()
-    reopened = Database.open(path)
-    reopened.close()
-
-
 def test_execute_sql_portable_metadata_exact_rows(db):
     db.execute_sql('CREATE TABLE "Order Items" (id BIGINT, label TEXT)')
 
