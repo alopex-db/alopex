@@ -31,9 +31,29 @@ const TIE_EPSILON: f64 = 1e-7;
 const MIN_RECALL: f64 = 0.95;
 
 #[test]
-fn result_oracle_rejects_empty_duplicate_and_wrong_neighbors() {
+fn cost_fixture_exact_results_match_independent_oracle() {
+    // Exercise the real fixture through SQL: testing oracle-derived IDs alone
+    // cannot detect drift between seed data and the independent reference math.
     let rows = SIZES[0];
-    let acceptable = acceptable_ids(rows);
+    let db = Database::open_in_memory().expect("open database");
+    seed(&db, "fixture_oracle", rows, false);
+    let exact = format!("{} WITH (enable_hnsw = false)", query("fixture_oracle"));
+    validate_analyzed_plan(&explain_analyze(&db, &exact), "exact");
+    validate_result(
+        &db.execute_sql(&exact).expect("query seeded fixture"),
+        rows,
+        &acceptable_ids(rows),
+    );
+}
+
+#[test]
+fn result_oracle_rejects_empty_duplicate_and_wrong_neighbors() {
+    // Explicit ties keep validation semantics independent of fixture ranking.
+    let rows = 32;
+    let acceptable = TopKOracle {
+        strict: (0..9).collect(),
+        boundary: (9..20).collect(),
+    };
     let valid = acceptable
         .strict
         .iter()
@@ -60,9 +80,7 @@ fn result_oracle_rejects_empty_duplicate_and_wrong_neighbors() {
         assert!(std::panic::catch_unwind(|| validate_ids(&invalid, rows, &acceptable)).is_err());
     }
     // Nine strictly better rows exist. Boundary ties cannot replace eight of them.
-    let missing_better = std::iter::once(996)
-        .chain((0..9).map(|index| 995 + index * 997))
-        .collect::<Vec<_>>();
+    let missing_better = std::iter::once(0).chain(9..18).collect::<Vec<_>>();
     assert!(std::panic::catch_unwind(|| validate_ids(&missing_better, rows, &acceptable)).is_err());
 }
 
@@ -560,15 +578,16 @@ struct TopKOracle {
 }
 
 fn acceptable_ids(rows: usize) -> TopKOracle {
-    // Independent f64 oracle for the existing integer fixture and unit-axis query.
-    // Neither SQL nor HNSW distance/top-k implementation is used here.
+    // Independent f64 oracle for seed's integer fixture and unit-axis query.
+    // Keep reference math separate from SQL/HNSW distance and top-k code; the
+    // ordinary fixture regression detects drift between these coordinates and seed.
     let similarities = (0..rows)
         .map(|id| {
             let norm_squared = (0..DIMENSION)
-                .map(|dimension| ((id + dimension) % 997) as f64)
+                .map(|dimension| ((id * (dimension + 17) + dimension * 31) % 65_521) as f64)
                 .map(|value| value * value)
                 .sum::<f64>();
-            (id % 997) as f64 / norm_squared.sqrt()
+            ((id * 17) % 65_521) as f64 / norm_squared.sqrt()
         })
         .collect::<Vec<_>>();
     let mut sorted = similarities.clone();
