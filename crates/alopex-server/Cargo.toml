@@ -56,7 +56,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 http-body-util = "0.1"
 rcgen = "0.12"
 tempfile = "3.10"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

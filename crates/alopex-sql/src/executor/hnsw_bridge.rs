@@ -9,6 +9,8 @@ use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTxn, SqlValue};
 
+type KnnSearchResult = (Vec<(u64, f32)>, SearchStats, usize);
+
 /// SQL と HNSW の橋渡しを行うユーティリティ。
 pub struct HnswBridge;
 
@@ -169,10 +171,10 @@ impl HnswBridge {
         query: &[f32],
         k: usize,
         ef_search: Option<usize>,
-    ) -> Result<(Vec<(u64, f32)>, SearchStats)> {
+    ) -> Result<KnnSearchResult> {
         let index = txn.hnsw_entry(index_name).map_err(ExecutorError::from)?;
-        let (results, stats) = index
-            .search(query, k, ef_search)
+        let (results, stats, effective_ef) = index
+            .search_with_effective_ef(query, k, ef_search)
             .map_err(ExecutorError::from)?;
         let results =
             results
@@ -187,7 +189,7 @@ impl HnswBridge {
                     Ok((u64::from_be_bytes(key), res.distance))
                 })
                 .collect::<Result<Vec<_>>>()?;
-        Ok((results, stats))
+        Ok((results, stats, effective_ef))
     }
 
     /// HNSW インデックスの存在確認。

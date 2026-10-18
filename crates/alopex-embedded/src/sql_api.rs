@@ -1004,7 +1004,9 @@ impl<'a> Transaction<'a> {
         let sql_catalog = self.db.sql_catalog.clone();
 
         let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
-        // Make direct graph writes visible to SQL before it loads the graph.
+        // SQL loads its graph from this transaction's KV state. Stage direct
+        // changes first, then discard the old graph so later direct operations
+        // reload any SQL updates instead of overwriting them at commit.
         for (index, state) in self.hnsw_indices.values_mut() {
             index.commit_staged(txn, state).map_err(Error::Core)?;
         }

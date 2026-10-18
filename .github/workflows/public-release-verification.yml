@@ -335,8 +335,8 @@ jobs:
           fi
           if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
             git fetch --force origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
-            existing="$(git show "refs/remotes/origin/${branch}:${report_path}.md")"
-            cmp -s "${REPORT_ROOT}/v${VERSION}.md" <(printf '%s' "${existing}") || {
+            git show "refs/remotes/origin/${branch}:${report_path}.md" > "${RUNNER_TEMP}/existing-report.md"
+            cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/existing-report.md" || {
               echo "refusing to overwrite immutable report: ${branch}" >&2
               exit 1
             }

@@ -38,8 +38,8 @@ pub enum SortDirection {
 pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
     let (sort_plan, k, options) = extract_limit(plan)?;
     let (order_expr, input_after_sort) = extract_sort(sort_plan)?;
-    // Both exact kNN and HNSW omit NULL vectors. NULLS FIRST ordering
-    // request must use the ordinary sort so those rows can lead the result.
+    // The kNN path places NULL scores last. NULLS FIRST must use the
+    // ordinary sort so those rows can lead the result.
     if order_expr.nulls_first {
         return None;
     }

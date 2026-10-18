@@ -40,6 +40,7 @@ skip = [
     { crate = "hashbrown@0.14.5", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "hashbrown@0.15.5", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "hashlink@0.8.4", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
+    { crate = "io-lifetimes@2.0.4", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "itertools@0.10.5", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "itertools@0.13.0", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "linux-raw-sys@0.4.15", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },

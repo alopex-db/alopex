@@ -76,6 +76,124 @@ fn attempt_sql(
 
 #[test]
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue572_targetless_uses_recovered_unique_and_primary_indexes() {
+    let (store, catalog) = fixture(
+        "CREATE TABLE items (obsolete INTEGER, id INTEGER PRIMARY KEY, value INTEGER, \
+         CONSTRAINT uq_value UNIQUE(value)); INSERT INTO items VALUES (0, 1, 10);",
+    );
+    let old_unique_id = {
+        let guard = catalog.read().unwrap();
+        assert_eq!(
+            guard.get_index("__pk_items").unwrap().column_indices,
+            vec![1]
+        );
+        let unique = guard.get_index("uq_value").unwrap();
+        assert_eq!(unique.column_indices, vec![2]);
+        assert_eq!(
+            snapshot(&store, &KeyEncoder::index_prefix(unique.index_id)).len(),
+            1
+        );
+        unique.index_id
+    };
+
+    // Synthetic old metadata: stale PK ordinal plus missing named UNIQUE.
+    // This is not an old-producer fixture or an execution of fixed ALTER DDL.
+    let table_id = legacy_drop(&store, &catalog, "items", 0);
+    remove_unique_indexes(&store);
+    let persisted: Vec<PersistedIndexMeta> = snapshot(&store, INDEXES_PREFIX)
+        .iter()
+        .map(|(_, bytes)| bincode::deserialize(bytes).unwrap())
+        .collect();
+    assert!(!persisted.iter().any(|index| index.name == "uq_value"));
+    assert_eq!(
+        persisted
+            .iter()
+            .find(|index| index.name == "__pk_items")
+            .unwrap()
+            .column_indices,
+        vec![1]
+    );
+    assert!(snapshot(&store, &KeyEncoder::index_prefix(old_unique_id)).is_empty());
+    let rows = snapshot(&store, &KeyEncoder::table_prefix(table_id));
+    let sequence = snapshot(&store, &KeyEncoder::sequence_key(table_id));
+    let before_load = snapshot(&store, b"");
+    let recovered = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert_ne!(
+        snapshot(&store, b""),
+        before_load,
+        "load must actually repair metadata"
+    );
+    {
+        let guard = recovered.read().unwrap();
+        let primary = guard.get_index("__pk_items").unwrap();
+        let unique = guard.get_index("uq_value").unwrap();
+        assert_eq!(primary.column_indices, vec![0]);
+        assert_eq!(unique.column_indices, vec![1]);
+        assert!(primary.unique && unique.unique);
+        assert_ne!(primary.index_id, unique.index_id);
+        assert_ne!(old_unique_id, unique.index_id);
+        let key = KeyEncoder::index_value_prefix(unique.index_id, &SqlValue::Integer(10)).unwrap();
+        assert_eq!(snapshot(&store, &key).len(), 1);
+    }
+    assert_eq!(snapshot(&store, &KeyEncoder::table_prefix(table_id)), rows);
+    assert_eq!(
+        snapshot(&store, &KeyEncoder::sequence_key(table_id)),
+        sequence
+    );
+
+    // Both successful skip operations commit: rollback cannot hide a write.
+    for sql in [
+        "INSERT INTO items VALUES (2, 10) ON CONFLICT DO NOTHING",
+        "INSERT INTO items VALUES (1, 20) ON CONFLICT DO NOTHING",
+    ] {
+        let before = snapshot(&store, b"");
+        let result = attempt_sql(store.clone(), recovered.clone(), sql);
+        assert!(
+            matches!(result, Ok(ExecutionResult::RowsAffected(0))),
+            "{sql}: {result:?}"
+        );
+        assert_eq!(
+            snapshot(&store, b""),
+            before,
+            "successful skip changed KV: {sql}"
+        );
+    }
+    let result = attempt_sql(
+        store.clone(),
+        recovered.clone(),
+        "INSERT INTO items VALUES (2, 20) ON CONFLICT DO NOTHING",
+    );
+    assert!(
+        matches!(result, Ok(ExecutionResult::RowsAffected(1))),
+        "{result:?}"
+    );
+    let expected = vec![
+        vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+        vec![SqlValue::Integer(2), SqlValue::Integer(20)],
+    ];
+    let before_reload = snapshot(&store, b"");
+    let reopened = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert_eq!(
+        snapshot(&store, b""),
+        before_reload,
+        "second load must not write"
+    );
+    for active in [recovered, reopened] {
+        let result = run_sql_in_txn(
+            store.clone(),
+            active,
+            TxnMode::ReadOnly,
+            "SELECT id, value FROM items ORDER BY id",
+        );
+        let ExecutionResult::Query(query) = result else {
+            panic!("expected rows");
+        };
+        assert_eq!(query.rows, expected);
+    }
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 fn issue585_missing_unique_backfills_rows_and_is_idempotent() {
     for definition in [
         "id INTEGER PRIMARY KEY, value INTEGER UNIQUE, tail INTEGER",
@@ -371,6 +489,308 @@ fn issue585_multiple_primary_key_declarations_are_rejected() {
     )
     .unwrap();
     assert!(Planner::new(&catalog).plan(&statement[0]).is_ok());
+}
+
+fn columnar_pk_recovery_fixture() -> (Arc<MemoryKV>, Arc<RwLock<PersistentCatalog<MemoryKV>>>) {
+    use std::io::Write;
+    let (store, catalog) = fixture(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER) WITH (storage='columnar')",
+    );
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(b"id,value\n1,10\n").unwrap();
+    file.flush().unwrap();
+    assert_eq!(
+        attempt_sql(
+            store.clone(),
+            catalog.clone(),
+            &format!(
+                "COPY items FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
+                file.path().to_str().unwrap().replace('\'', "''")
+            )
+        )
+        .unwrap(),
+        ExecutionResult::RowsAffected(1)
+    );
+    (store, catalog)
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue585_columnar_missing_primary_index_is_rejected_without_writes() {
+    let (store, catalog) = columnar_pk_recovery_fixture();
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let entries = txn.scan_prefix(INDEXES_PREFIX).unwrap().collect::<Vec<_>>();
+    let mut removed = 0;
+    for (key, bytes) in entries {
+        let index: PersistedIndexMeta = bincode::deserialize(&bytes).unwrap();
+        if index.table == "items" && index.name == "__pk_items" {
+            assert!(index.unique);
+            txn.delete(key).unwrap();
+            removed += 1;
+        }
+    }
+    assert_eq!(
+        removed, 1,
+        "fault injection must remove exactly the PK metadata"
+    );
+    txn.commit_self().unwrap();
+    drop(catalog);
+    let before = snapshot(&store, b"");
+    assert_recovery_error(
+        store.clone(),
+        "requires constraint index recovery unsupported for this storage",
+    );
+    assert_eq!(snapshot(&store, b""), before);
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue585_columnar_pk_normalization_is_rejected_without_writes() {
+    let (store, catalog) = columnar_pk_recovery_fixture();
+    let mut table = catalog.read().unwrap().get_table("items").unwrap().clone();
+    assert_eq!(
+        table.storage_options.storage_type,
+        alopex_sql::catalog::StorageType::Columnar
+    );
+    assert_eq!(table.primary_key, Some(vec!["id".to_string()]));
+    assert!(table.columns[0].not_null);
+    table.columns[0].not_null = false;
+    let indexes_before = snapshot(&store, INDEXES_PREFIX);
+    assert!(!indexes_before.is_empty());
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    catalog
+        .write()
+        .unwrap()
+        .persist_create_table(&mut txn, &table)
+        .unwrap();
+    txn.commit_self().unwrap();
+    drop(catalog);
+    assert_eq!(snapshot(&store, INDEXES_PREFIX), indexes_before);
+    let before = snapshot(&store, b"");
+    assert_recovery_error(
+        store.clone(),
+        "requires primary key recovery unsupported for this storage",
+    );
+    assert_eq!(snapshot(&store, b""), before);
+}
+
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue575_585_columnar_reload_copy_unique_preserves_all_bytes() {
+    use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
+    use alopex_sql::storage::SqlTxn;
+    use std::io::Write;
+
+    let (store, catalog) = fixture(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER, \
+         CONSTRAINT uq_value UNIQUE (value)) WITH (storage='columnar')",
+    );
+    let mut original = tempfile::NamedTempFile::new().unwrap();
+    original.write_all(b"id,value\n1,10\n").unwrap();
+    original.flush().unwrap();
+    assert_eq!(
+        attempt_sql(
+            store.clone(),
+            catalog.clone(),
+            &format!(
+                "COPY items FROM '{}' WITH (FORMAT CSV, HEADER true)",
+                original.path().to_str().unwrap().replace('\'', "''")
+            ),
+        )
+        .unwrap(),
+        ExecutionResult::RowsAffected(1),
+    );
+    drop(catalog);
+    let before_load = snapshot(&store, b"");
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert_eq!(
+        snapshot(&store, b""),
+        before_load,
+        "normal reload must not repair/write"
+    );
+    {
+        let guard = catalog.read().unwrap();
+        let table = guard.get_table("items").unwrap();
+        assert_eq!(
+            table.storage_options.storage_type,
+            alopex_sql::catalog::StorageType::Columnar
+        );
+        assert_eq!(
+            table.primary_key.as_deref(),
+            Some(["id".to_string()].as_slice())
+        );
+        let unique = guard.get_index("uq_value").unwrap();
+        assert!(unique.unique);
+        assert_eq!(unique.columns, vec!["value"]);
+        assert_eq!(unique.column_indices, vec![1]);
+    }
+
+    // The first input row is valid. The later value duplicates a real segment
+    // written before PersistentCatalog::load, not row-store index contents.
+    let mut duplicate = tempfile::NamedTempFile::new().unwrap();
+    duplicate.write_all(b"id,value\n3,30\n2,10\n").unwrap();
+    duplicate.flush().unwrap();
+    let bridge = TxnBridge::new(store.clone());
+    let mut txn = bridge.begin_write().unwrap();
+    let before = txn
+        .inner_mut()
+        .scan_prefix(&[])
+        .unwrap()
+        .collect::<Vec<_>>();
+    let result = execute_copy(
+        &mut txn,
+        &*catalog.read().unwrap(),
+        "items",
+        duplicate.path().to_str().unwrap(),
+        FileFormat::Csv,
+        CopyOptions { header: true },
+        &CopySecurityConfig::default(),
+    );
+    let after = txn
+        .inner_mut()
+        .scan_prefix(&[])
+        .unwrap()
+        .collect::<Vec<_>>();
+    // Do not use rollback to conceal partial writes by the rejected COPY.
+    let commit = txn.commit();
+    eprintln!(
+        "persistent reload COPY: {result:?}; unchanged={}; commit={commit:?}",
+        before == after
+    );
+    assert!(
+        matches!(&result,
+        Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, columns, .. }))
+        if index_name == "uq_value" && columns == &["value"]),
+        "{result:?}"
+    );
+    assert_eq!(after, before);
+    commit.unwrap();
+    assert_eq!(snapshot(&store, b""), before);
+    let ExecutionResult::Query(query) = run_sql_in_txn(
+        store,
+        catalog,
+        TxnMode::ReadOnly,
+        "SELECT id, value FROM items ORDER BY id",
+    ) else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]
+    );
+}
+// This row-storage regression does not validate columnar ALTER support.
+#[test]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+fn issue575_585_drop_column_preserves_unique_index_after_merge() {
+    let (store, catalog) = fixture(
+        "CREATE TABLE items (obsolete INTEGER, id INTEGER PRIMARY KEY, value INTEGER, \
+         CONSTRAINT uq_value UNIQUE(value)); \
+         INSERT INTO items VALUES (0, 1, 10);",
+    );
+    {
+        let guard = catalog.read().unwrap();
+        assert_eq!(
+            guard
+                .get_table("items")
+                .unwrap()
+                .storage_options
+                .storage_type,
+            alopex_sql::catalog::StorageType::Row
+        );
+        assert_eq!(
+            guard.get_index("__pk_items").unwrap().column_indices,
+            vec![1]
+        );
+        assert_eq!(guard.get_index("uq_value").unwrap().column_indices, vec![2]);
+    }
+
+    // The leading column forces both PK and UNIQUE ordinals to move.
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "ALTER TABLE items DROP COLUMN obsolete; INSERT INTO items VALUES (2, 20);",
+    );
+    {
+        let guard = catalog.read().unwrap();
+        assert_eq!(
+            guard.get_index("__pk_items").unwrap().column_indices,
+            vec![0]
+        );
+        assert_eq!(guard.get_index("uq_value").unwrap().column_indices, vec![1]);
+    }
+
+    for (sql, primary) in [
+        ("INSERT INTO items VALUES (1, 30)", true),
+        ("INSERT INTO items VALUES (3, 20)", false),
+    ] {
+        let before = snapshot(&store, b"");
+        let result = attempt_sql(store.clone(), catalog.clone(), sql);
+        if primary {
+            assert!(
+                matches!(&result,
+                    Err(ExecutorError::ConstraintViolation(ConstraintViolation::PrimaryKey { columns, .. }))
+                    if columns == &["id"]),
+                "{sql}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(&result,
+                    Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique { index_name, columns, .. }))
+                    if index_name == "uq_value" && columns == &["value"]),
+                "{sql}: {result:?}"
+            );
+        }
+        assert_eq!(snapshot(&store, b""), before);
+    }
+
+    // Observe the real executor's index choice before and after catalog reload.
+    // EXPLAIN ANALYZE executes the same indexed SELECT; plain rows alone could
+    // accidentally pass through a full-scan fallback.
+    for reopen in [false, true] {
+        let before_load = snapshot(&store, b"");
+        let active = if reopen {
+            Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()))
+        } else {
+            catalog.clone()
+        };
+        assert_eq!(snapshot(&store, b""), before_load);
+        {
+            let guard = active.read().unwrap();
+            assert_eq!(
+                guard.get_index("__pk_items").unwrap().column_indices,
+                vec![0]
+            );
+            let unique = guard.get_index("uq_value").unwrap();
+            assert!(unique.unique);
+            assert_eq!(unique.column_indices, vec![1]);
+        }
+        for (value, id) in [(10, 1), (20, 2)] {
+            let sql = format!("SELECT id FROM items WHERE value = {value}");
+            let ExecutionResult::Query(explain) = run_sql_in_txn(
+                store.clone(),
+                active.clone(),
+                TxnMode::ReadOnly,
+                &format!("EXPLAIN ANALYZE {sql}"),
+            ) else {
+                panic!("expected EXPLAIN ANALYZE rows");
+            };
+            let SqlValue::Text(plan) = &explain.rows[0][0] else {
+                panic!("expected EXPLAIN ANALYZE text");
+            };
+            assert!(
+                plan.contains("IndexScan index=uq_value table=items"),
+                "reopen={reopen}, {sql}: {plan}"
+            );
+            let ExecutionResult::Query(query) =
+                run_sql_in_txn(store.clone(), active.clone(), TxnMode::ReadOnly, &sql)
+            else {
+                panic!("expected indexed query rows");
+            };
+            assert_eq!(query.rows, vec![vec![SqlValue::Integer(id)]]);
+        }
+    }
 }
 
 // Synthetic persisted-index faults, NOT an old-producer compatibility fixture.

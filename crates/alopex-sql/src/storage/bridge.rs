@@ -237,6 +237,7 @@ fn replay_id(payload: &[RangeChangePayload]) -> CoreResult<String> {
 }
 
 pub trait SqlTxn<'txn, S: KVStore + 'txn> {
+    /// Existing execution memory policy, shared with statement staging.
     fn memory_policy(&self) -> Option<&crate::executor::MemoryPolicy> {
         None
     }

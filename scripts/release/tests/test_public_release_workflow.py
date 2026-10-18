@@ -99,15 +99,18 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         publish = self.text.split("  publish:\n", 1)[1].split(
             "  publish-vector-benchmark:\n", 1
         )[0]
-        self.assertIn("if: always()", publish)
+        self.assertIn("if: ${{ always() && needs.verify.result != 'cancelled' }}", publish)
         self.assertIn("report.py validate-report", publish)
         self.assertNotIn("validate-public", publish)
         self.assertNotIn("✅ 全ステップ成功", publish)
         self.assertIn("contents: write", publish)
         self.assertIn('if: ${{ always() && needs.verify.result != \'cancelled\' }}', publish)
         self.assertIn('report_path="reports/release-verification/v${version}"', publish)
-        self.assertIn('branch="report/verify-release-v${VERSION}"', publish)
-        self.assertNotIn("DOCS_REPO_TOKEN", publish)
+        self.assertIn('branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"', publish)
+        self.assertIn("event_type=release-verification-ready", publish)
+        self.assertIn("if: success() && steps.publish.outputs.branch", publish)
+        self.assertIn('"${RUNNER_TEMP}/existing-report.md"', publish)
+        self.assertNotIn("existing=", publish)
         self.assertNotIn("repository: alopex-db/docs", publish)
         self.assertIn("cmp -s", self.text)
         self.assertIn("?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", self.text)
@@ -128,7 +131,7 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("contents: read", verify)
         self.assertNotIn("contents: write", verify)
         self.assertIn("needs: verify", publish)
-        self.assertIn("if: always()", publish)
+        self.assertIn("if: ${{ always() && needs.verify.result != 'cancelled' }}", publish)
         self.assertIn("contents: write", publish)
         self.assertIn("actions/download-artifact@v4", publish)
         self.assertIn(
