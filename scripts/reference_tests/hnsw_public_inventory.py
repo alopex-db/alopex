@@ -29,6 +29,7 @@ EVIDENCE_BY_CLAIM = {
     "HnswStats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "SearchStats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "Embedded create/search/drop": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
+    "Embedded HNSW cache limit": "crates/alopex-embedded/src/lib.rs#hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget",
     "Embedded transaction upsert/delete/commit/rollback/reopen": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
     "Python.HnswConfig": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "Python.create/drop/get_hnsw_stats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
@@ -56,6 +57,14 @@ def rust_methods(source: str, predicate=lambda name: True) -> list[tuple[str, st
     return methods
 
 
+def python_hnsw_methods(source: str) -> set[str]:
+    """Collect methods exported by PyO3, excluding Rust helpers and test code."""
+    methods: set[str] = set()
+    for block in re.findall(r"(?ms)^#\[pymethods\]\nimpl \w+ \{(.*?)^}\s*$", source):
+        methods.update(re.findall(r"^    fn (\w*hnsw\w*)", block, re.MULTILINE))
+    return methods
+
+
 def row(surface: str, api: str, evidence: str) -> dict[str, object]:
     return {"surface": surface, "api": api}
 
@@ -74,6 +83,8 @@ def claim_for(row: dict[str, object]) -> str:
             "SQL.HNSW_DELETE_SYNC": "SQL HNSW DML/transaction synchronization",
         }[api]
     if surface == "embedded":
+        if api.endswith(".set_hnsw_cache_limit"):
+            return "Embedded HNSW cache limit"
         if "compact" in api:
             return "HnswIndex.compact"
         if "get_hnsw_stats" in api:
@@ -291,9 +302,7 @@ def inventory() -> list[dict[str, object]]:
         for name in stub_types
     )
     stub_methods = set(re.findall(r"^    def (\w*hnsw\w*)", pyi, re.MULTILINE))
-    runtime_methods = set(
-        re.findall(r"^    fn (\w*hnsw\w*)", py_source + "\n" + py_transaction, re.MULTILINE)
-    )
+    runtime_methods = python_hnsw_methods(py_source) | python_hnsw_methods(py_transaction)
     if stub_methods != runtime_methods:
         raise RuntimeError(
             f"Python HNSW runtime/.pyi mismatch: stub-only={sorted(stub_methods-runtime_methods)}, "
