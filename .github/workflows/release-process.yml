@@ -19,6 +19,20 @@ on:
       - 'crates/alopex-sql/nim-sql-parser/**'
       - 'formal/release-report/**'
 
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   contract:
     name: Delivery workflow contract
