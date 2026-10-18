@@ -86,14 +86,13 @@ def record(args: argparse.Namespace) -> None:
         for line in diagnostics
     ):
         status = "incomplete"
-    tail = lines[-60:]
-    excerpt = diagnostics + [line for line in tail if line not in diagnostics]
     payload["steps"].append(
         {
             "name": args.name,
             "status": status,
             "description": args.description,
-            "log_excerpt": excerpt,
+            "duration_ms": args.duration_ms,
+            "log_excerpt": lines,
             "diagnostics": diagnostics,
         }
     )
@@ -165,6 +164,9 @@ def render(args: argparse.Namespace) -> None:
                 "",
             ]
         )
+        duration_ms = step.get("duration_ms")
+        if duration_ms is not None:
+            lines.extend([f"> 実行時間: **{duration_ms / 1000:.3f} 秒**", ""])
         if step["log_excerpt"]:
             lines.extend(["```", *step["log_excerpt"], "```", ""])
     environment = payload["environment"]
@@ -285,6 +287,7 @@ def parser() -> argparse.ArgumentParser:
         "--status", choices=("success", "failure", "incomplete"), required=True
     )
     append.add_argument("--description", required=True)
+    append.add_argument("--duration-ms", type=int)
     append.add_argument("--log", type=Path, required=True)
     append.set_defaults(func=record)
 

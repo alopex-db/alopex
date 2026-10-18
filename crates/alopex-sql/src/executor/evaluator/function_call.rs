@@ -446,4 +446,19 @@ mod tests {
             other => panic!("unexpected error {other:?}"),
         }
     }
+    #[test]
+    fn evaluate_function_null_first_argument_returns_null() {
+        let col = TypedExpr::literal(Literal::Null, ResolvedType::Null, Span::empty());
+        let args = vec![
+            col,
+            make_vector_literal(vec![1.0, 2.0]),
+            make_metric_expr("cosine"),
+        ];
+        let row = vec![SqlValue::Null];
+        let ctx = EvalContext::new(&row);
+
+        let result =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap();
+        assert_eq!(result, SqlValue::Null);
+    }
 }

@@ -1430,6 +1430,9 @@ fn unsupported_generic_statement(statement: &Statement) -> PlannerError {
 }
 
 fn table_reference_access(statement: &Statement) -> Result<TableReferenceAccess, PlannerError> {
+    if let StatementKind::Explain { statement, .. } = &statement.kind {
+        return table_reference_access(statement);
+    }
     table_reference_access_for_classified(
         statement,
         classify_generic_host_statement(&statement.kind),
@@ -1922,11 +1925,31 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         // CTAS keeps only the output names and types. It does not implicitly
         // copy source defaults, generated columns, or constraints.
         let mut columns: Vec<ColumnMetadata> = match &source {
-            Some(source) => source
-                .schema
-                .iter()
-                .map(|column| ColumnMetadata::new(column.name.clone(), column.data_type.clone()))
-                .collect(),
+            Some(source) => {
+                let mut names = HashSet::new();
+                source
+                    .schema
+                    .iter()
+                    .map(|column| {
+                        if !names.insert(column.name.as_str()) {
+                            return Err(PlannerError::invalid_expression(format!(
+                                "duplicate CTAS output column '{}'",
+                                column.name
+                            )));
+                        }
+                        if column.data_type == ResolvedType::Null {
+                            return Err(PlannerError::invalid_expression(format!(
+                                "CTAS output column '{}' has no type; cast NULL explicitly",
+                                column.name
+                            )));
+                        }
+                        Ok(ColumnMetadata::new(
+                            column.name.clone(),
+                            column.data_type.clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?
+            }
             None => stmt.columns.iter().map(column_metadata_from_def).collect(),
         };
         for column in &mut columns {
@@ -1939,7 +1962,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Collect primary key from table constraints
-        let primary_key = Self::extract_primary_key(stmt);
+        let primary_key = Self::extract_primary_key(stmt)?;
+        if let Some(names) = &primary_key {
+            for column in &mut columns {
+                if names.contains(&column.name) {
+                    column.not_null = true;
+                }
+            }
+        }
 
         // Build table metadata
         // Note: table_id defaults to 0 as placeholder; Executor assigns the actual ID
@@ -1995,29 +2025,30 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     }
 
     /// Extract primary key columns from table constraints.
-    fn extract_primary_key(stmt: &CreateTable) -> Option<Vec<String>> {
+    fn extract_primary_key(stmt: &CreateTable) -> Result<Option<Vec<String>>, PlannerError> {
         use crate::ast::ddl::TableConstraint;
 
-        // First check table-level constraints
-        // Note: Currently only PrimaryKey variant exists; when more variants are added,
-        // this should iterate to find the first PrimaryKey constraint
-        if let Some(TableConstraint::PrimaryKey { columns, .. }) = stmt.constraints.first() {
-            return Some(columns.clone());
-        }
-
-        // Then check column-level PRIMARY KEY constraints
-        let pk_columns: Vec<String> = stmt
-            .columns
+        let mut declarations = stmt
+            .constraints
             .iter()
-            .filter(|col| col.constraints.iter().any(Self::is_primary_key_constraint))
-            .map(|col| col.name.clone())
-            .collect();
-
-        if pk_columns.is_empty() {
-            None
-        } else {
-            Some(pk_columns)
+            .filter_map(|constraint| match constraint {
+                TableConstraint::PrimaryKey { columns, .. } => Some(columns.clone()),
+                _ => None,
+            })
+            .chain(stmt.columns.iter().flat_map(|column| {
+                column
+                    .constraints
+                    .iter()
+                    .filter(|constraint| Self::is_primary_key_constraint(constraint))
+                    .map(|_| vec![column.name.clone()])
+            }));
+        let first = declarations.next();
+        if declarations.next().is_some() {
+            return Err(PlannerError::invalid_expression(
+                "multiple PRIMARY KEY declarations are not allowed",
+            ));
         }
+        Ok(first)
     }
 
     fn normalized_table_constraints(stmt: &CreateTable) -> Vec<crate::ast::ddl::TableConstraint> {
@@ -4697,6 +4728,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
         }
         let source = resolve_group_by_expression(expr, projection_aliases, projection)?;
+        if expr_contains_window(&source) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY cannot contain window functions".to_string(),
+            ));
+        }
         let typed = self.infer_expr_with_scope(&source, scope, ctes)?;
         if typed_expr_contains_aggregate(&typed) {
             return Err(PlannerError::invalid_expression(
@@ -6410,11 +6446,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "UPDATE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.from.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.from.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let assignments = stmt
                 .assignments
@@ -6425,14 +6469,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &assignment.column,
                         assignment.span,
                     )?;
-                    let value = self.type_checker.infer_type_with_scope(
-                        &assignment.value,
-                        &scope,
-                        &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        },
-                    )?;
+                    let value = self.infer_expr_with_scope(&assignment.value, &scope, &ctes)?;
                     self.validate_type_assignment(
                         &value,
                         &column_meta.data_type,
@@ -6453,11 +6490,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .selection
                 .as_ref()
                 .map(|expr| {
-                    self.type_checker
-                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        })
+                    let predicate = self.infer_expr_with_scope(expr, &scope, &ctes)?;
+                    if predicate.resolved_type != ResolvedType::Boolean {
+                        return Err(PlannerError::type_mismatch(
+                            "Boolean",
+                            predicate.resolved_type.to_string(),
+                            expr.span,
+                        ));
+                    }
+                    Ok(predicate)
                 })
                 .transpose()?;
             return Ok(LogicalPlan::Update {
@@ -6596,13 +6637,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             ScopedTable::new(target.clone(), 0),
             ScopedTable::new(source.clone(), target.column_count()),
         ];
-        let infer = |expr: &Expr| {
-            self.type_checker
-                .infer_type_with_scope(expr, &scope, &|statement, _| {
-                    let plan = Planner::new(self.catalog).plan(statement)?;
-                    Ok((plan, Vec::new()))
-                })
-        };
+        let ctes = CtePlans::default();
+        let infer = |expr: &Expr| self.infer_expr_with_scope(expr, &scope, &ctes);
 
         let on = infer(&stmt.on)?;
         if on.resolved_type != ResolvedType::Boolean {
@@ -6733,21 +6769,33 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let table = self.name_resolver.resolve_table(&stmt.table, stmt.span)?;
         Self::ensure_writable_table(table, "DELETE", stmt.span)?;
 
-        if let Some(crate::ast::dml::FromItem::Table { name, span, .. }) = stmt.using.first() {
+        if let Some(crate::ast::dml::FromItem::Table {
+            name, alias, span, ..
+        }) = stmt.using.first()
+        {
             let source = self.name_resolver.resolve_table(name, *span)?;
+            let mut source_scope = source.clone();
+            if let Some(alias) = alias {
+                source_scope.name = alias.clone();
+            }
+            let ctes = CtePlans::default();
             let scope = [
                 ScopedTable::new(table.clone(), 0),
-                ScopedTable::new(source.clone(), table.column_count()),
+                ScopedTable::new(source_scope, table.column_count()),
             ];
             let condition = stmt
                 .selection
                 .as_ref()
                 .map(|expr| {
-                    self.type_checker
-                        .infer_type_with_scope(expr, &scope, &|stmt, _| {
-                            let plan = Planner::new(self.catalog).plan(stmt)?;
-                            Ok((plan, Vec::new()))
-                        })
+                    let predicate = self.infer_expr_with_scope(expr, &scope, &ctes)?;
+                    if predicate.resolved_type != ResolvedType::Boolean {
+                        return Err(PlannerError::type_mismatch(
+                            "Boolean",
+                            predicate.resolved_type.to_string(),
+                            expr.span,
+                        ));
+                    }
+                    Ok(predicate)
                 })
                 .transpose()?;
             return Ok(LogicalPlan::Delete {
@@ -7044,6 +7092,21 @@ fn resolve_group_by_expression(
     projection_aliases: &HashMap<String, Expr>,
     projection: &[SelectItem],
 ) -> Result<Expr, PlannerError> {
+    if let ExprKind::UnaryOp {
+        op: crate::ast::expr::UnaryOp::Minus,
+        operand,
+    } = &expr.kind
+        && matches!(
+            &operand.kind,
+            ExprKind::Literal {
+                literal: Literal::Number(_)
+            }
+        )
+    {
+        return Err(PlannerError::invalid_expression(
+            "GROUP BY position must be a positive integer".to_string(),
+        ));
+    }
     let ExprKind::Literal {
         literal: Literal::Number(number),
     } = &expr.kind
@@ -7058,9 +7121,9 @@ fn resolve_group_by_expression(
             },
         );
     };
-    let Ok(position) = number.parse::<usize>() else {
-        return Ok(expr.clone());
-    };
+    let position = number.parse::<usize>().map_err(|_| {
+        PlannerError::invalid_expression("GROUP BY position must be a positive integer".to_string())
+    })?;
     let index = position.checked_sub(1).ok_or_else(|| {
         PlannerError::invalid_expression("GROUP BY position must be positive".to_string())
     })?;

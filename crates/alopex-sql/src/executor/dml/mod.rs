@@ -7,6 +7,7 @@ mod constraints;
 mod delete;
 mod insert;
 mod merge;
+pub(crate) mod statement_spool;
 mod update;
 
 use alopex_core::kv::KVStore;

@@ -2,7 +2,22 @@ name: CI
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
   pull_request:
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -23,6 +38,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify change scope classifier
+        run: bash scripts/ci/test_classify_change_scope.sh
       - name: Classify production and release-process changes
         id: classify
         shell: bash
@@ -39,21 +56,9 @@ jobs:
           elif [[ "${base_sha}" == "0000000000000000000000000000000000000000" ]]; then
             base_sha="$(git merge-base "origin/${DEFAULT_BRANCH}" "${GITHUB_SHA}")"
           fi
+          bash scripts/ci/classify-change-scope.sh "${base_sha}" "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
           python3 scripts/ci/check_parser_wire_contract.py "${base_sha}" "${GITHUB_SHA}"
-          production=false
-          changed=0
-          while IFS= read -r -d '' path; do
-            changed=$((changed + 1))
-            case "${path}" in
-              .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
-              *) production=true ;;
-            esac
-          done < <(git diff --name-only -z "${base_sha}" "${GITHUB_SHA}")
-          if [[ "${changed}" -eq 0 ]]; then
-            production=true
-          fi
-          echo "production=${production}" >> "${GITHUB_OUTPUT}"
 
   fmt:
     name: Rustfmt
@@ -609,7 +614,7 @@ jobs:
     name: CI Success
     needs: [scope, fmt, formal, clippy, clippy-beta, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |

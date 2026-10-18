@@ -2,6 +2,7 @@ name: alopex-py
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths:
       - ".github/workflows/alopex-py.yml"
       - "Cargo.toml"
@@ -9,6 +10,9 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -25,6 +29,9 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -33,6 +40,20 @@ on:
       # change on the server side has to re-run it.
       - "crates/alopex-server/**"
       - "crates/alopex-cluster/**"
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -216,6 +237,9 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
+      - name: Run HNSW management and commit GIL regressions
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        run: cargo test -p alopex-py --lib releases_gil -- --nocapture
       - name: Verify release wheel import and SQL API
         if: ${{ !env.ACT && matrix.numpy_runtime == 'with-numpy' }}
         run: |
@@ -244,7 +268,9 @@ jobs:
           "$smoke_python" -m pytest -q crates/alopex-py/tests/test_sql.py
       - name: Verify HNSW runtime and source inventory
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
-        run: python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
+        run: |
+          python -m unittest scripts.reference_tests.test_hnsw_public_inventory
+          python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
       - name: Verify vector APIs remain exported without NumPy installed
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'without-numpy' }}
         run: |
@@ -503,7 +529,7 @@ jobs:
 
   ci-success:
     name: ci-success
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs: [rust-check, test, polars-test, server-e2e, typecheck]
     runs-on: ubuntu-latest
     steps:

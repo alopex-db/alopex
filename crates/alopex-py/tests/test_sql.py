@@ -9,6 +9,8 @@
 """
 
 import datetime as dt
+import gc
+import io
 import json
 from decimal import Decimal
 
@@ -1211,3 +1213,173 @@ def test_execute_sql_placeholder_inside_comment_is_ignored(users_db):
 def test_execute_sql_nul_character_param_raises_value_error(users_db):
     with pytest.raises(ValueError):
         users_db.execute_sql("SELECT * FROM users WHERE name = ?", ["a\x00b"])
+
+
+def test_execute_sql_null_vector_is_sql_null_and_skipped_by_hnsw(db):
+    db.execute_sql(
+        "CREATE TABLE vector_items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    db.execute_sql(
+        "INSERT INTO vector_items VALUES (1, [0.0, 0.0]), (2, NULL)"
+    )
+    assert db.execute_sql(
+        "SELECT vector_distance(embedding, [0.0, 0.0], 'l2') AS distance, "
+        "vector_similarity(embedding, [0.0, 0.0], 'l2') AS similarity "
+        "FROM vector_items WHERE id = 2"
+    ) == [{"distance": None, "similarity": None}]
+
+    nearest = (
+        "SELECT id FROM vector_items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}]
+    db.execute_sql("CREATE INDEX vector_items_hnsw ON vector_items (embedding) USING HNSW")
+    assert db.execute_sql(nearest) == [{"id": 1}]
+
+
+def test_all_null_hnsw_survives_updates_and_disk_reopen(tmp_path):
+    path = str(tmp_path / "null-vectors.alopex")
+    database = Database.open(path)
+    database.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    database.execute_sql("INSERT INTO items VALUES (1, NULL), (2, NULL)")
+    database.execute_sql("CREATE INDEX items_hnsw ON items (embedding) USING HNSW")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    nearest = (
+        "SELECT id FROM items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2"
+    )
+    def assert_null_completion(connection, non_null_id=None):
+        exact = connection.execute_sql(nearest + " WITH (enable_hnsw = false)")
+        indexed = connection.execute_sql(nearest + " WITH (enable_hnsw = true)")
+        for result in (exact, indexed):
+            assert len(result) == 2
+            assert len({row["id"] for row in result}) == 2
+            assert all(row["id"] in {1, 2, 3} for row in result)
+            if non_null_id is not None:
+                assert result[0] == {"id": non_null_id}
+        # NULL ties have no required order; both paths must retain LIMIT rows.
+
+    assert_null_completion(database)
+    database.execute_sql("INSERT INTO items VALUES (3, NULL)")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    database.execute_sql("UPDATE items SET embedding = [0.0, 0.0] WHERE id = 2")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 1
+    assert_null_completion(database, non_null_id=2)
+    database.execute_sql("UPDATE items SET embedding = NULL WHERE id = 2")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    assert_null_completion(database)
+    database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id, embedding FROM items ORDER BY id") == [
+            {"id": 1, "embedding": None},
+            {"id": 2, "embedding": None},
+            {"id": 3, "embedding": None},
+        ]
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 0
+        assert_null_completion(reopened)
+        reopened.execute_sql("UPDATE items SET embedding = [1.0, 0.0] WHERE id = 1")
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 1
+        assert_null_completion(reopened, non_null_id=1)
+    finally:
+        reopened.close()
+
+
+def test_physical_hnsw_null_updates_match_exact_search(db):
+    # Force the indexed path independently of the evolving cost threshold.
+    # The smaller NULL regression alone does not prove physical index updates.
+    tail = ", 0.0" * 1023
+    query_vector = f"[-1.0{tail}]"
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(1024, L2))"
+    )
+    db.execute_sql("INSERT INTO items VALUES (0, NULL)")
+    for item_id in range(1, 1025):
+        db.execute_sql(f"INSERT INTO items VALUES ({item_id}, [{item_id - 1}.0{tail}])")
+    nearest = (
+        f"SELECT id FROM items ORDER BY "
+        f"vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 2"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}, {"id": 2}]
+    db.execute_sql(
+        "CREATE INDEX items_hnsw ON items (embedding) USING HNSW WITH (ef_search = 1024)"
+    )
+    assert db.get_hnsw_stats("items_hnsw").node_count == 1024
+    indexed_query = nearest + " WITH (enable_hnsw = true)"
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
+    assert db.execute_sql(indexed_query) == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql(f"UPDATE items SET embedding = {query_vector} WHERE id = 0")
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 1")
+    assert db.execute_sql(indexed_query) == [{"id": 0}, {"id": 2}]
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 0")
+    expected = [{"id": 2}, {"id": 3}]
+    assert db.execute_sql(indexed_query) == expected
+    assert db.execute_sql(
+        f"SELECT vector_distance(embedding, {query_vector}, 'l2') AS distance, "
+        f"vector_similarity(embedding, {query_vector}, 'l2') AS similarity "
+        "FROM items WHERE id = 0"
+    ) == [{"distance": None, "similarity": None}]
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
+    db.execute_sql("DROP INDEX items_hnsw")
+    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
+    assert not plan.startswith("HnswSearch"), plan
+    assert db.execute_sql(nearest) == expected
+
+
+def test_columnar_dml_rejects_writes_and_preserves_copied_rows(tmp_path):
+    path = tmp_path / "columnar.alopex"
+    db = Database.open(str(path))
+    db.execute_sql(
+        "CREATE TABLE c (id INTEGER PRIMARY KEY, t0 TEXT, price DOUBLE) "
+        "WITH (storage='columnar')"
+    )
+    assert db.copy_from_csv("c", io.BytesIO(b"1,a,1.0\n2,b,2.0\n"), False) == 2
+    db.execute_sql("CREATE TABLE source (id INTEGER PRIMARY KEY, price DOUBLE)")
+    db.execute_sql("INSERT INTO source VALUES (1, 9.0)")
+
+    select = "SELECT id, t0, price FROM c ORDER BY id"
+    copied = [
+        {"id": 1, "t0": "a", "price": 1.0},
+        {"id": 2, "t0": "b", "price": 2.0},
+    ]
+    assert db.execute_sql(select) == copied
+
+    for sql in (
+        "INSERT INTO c VALUES (3, 'c', 3.0)",
+        "UPDATE c SET price = 9.0 WHERE id = 1",
+        "UPDATE c SET price = 9.0 WHERE id = 999",
+        "DELETE FROM c WHERE id = 2",
+        "DELETE FROM c WHERE id = 999",
+        (
+            "MERGE INTO c USING source ON c.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET price = source.price"
+        ),
+    ):
+        with pytest.raises(AlopexError, match="not supported for columnar tables"):
+            db.execute_sql(sql)
+        assert db.execute_sql(select) == copied, sql
+
+    del db
+    gc.collect()
+    assert Database.open(str(path)).execute_sql(select) == copied
+
+
+def test_prepared_execute_many_keeps_400_vectors_out_of_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE batch_vectors (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    statement = db.prepare("INSERT INTO batch_vectors (id, embedding) VALUES (?, ?)")
+    batch = [[row, [0.25] * dimensions] for row in range(rows)]
+
+    assert statement.execute_many(batch) == [1] * rows
+    assert db.execute_sql("SELECT COUNT(*) AS n FROM batch_vectors") == [{"n": rows}]

@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_if, clippy::while_let_on_iterator)]
 
-use alopex_core::kv::KVStore;
+use alopex_core::kv::{KVStore, KVTransaction};
 
-use crate::ast::ddl::IndexMethod;
+use crate::ast::ddl::{IndexMethod, TableConstraint};
 use crate::ast::expr::Expr;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::Row;
@@ -18,7 +18,7 @@ use crate::planner::logical_plan::{OnConflictActionPlan, OnConflictPlan};
 use crate::planner::type_checker::TypeChecker;
 use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::{SqlTxn, SqlValue, StorageError};
+use crate::storage::{KeyEncoder, SqlTxn, SqlValue, StorageError};
 use std::collections::HashSet;
 
 /// Execute INSERT statements.
@@ -228,9 +228,17 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     returning: Option<Projection>,
 ) -> Result<ExecutionResult> {
     super::reject_columnar_dml(table, "INSERT")?;
-    if let Some(plan) = conflict {
-        reject_duplicate_conflict_keys(table, plan, &rows)?;
+    let do_nothing =
+        conflict.is_some_and(|plan| matches!(plan.action, OnConflictActionPlan::DoNothing));
+    let target = conflict
+        .map(|plan| ConflictTarget::resolve(catalog, table, plan))
+        .transpose()?;
+    if let (Some(plan), Some(ConflictTarget::Columns(indices))) =
+        (conflict.filter(|_| !do_nothing), target.as_ref())
+    {
+        reject_duplicate_conflict_keys(table, plan, indices, &rows)?;
     }
+    let mut pending_keys = HashSet::new();
     let mut insert_rows = Vec::with_capacity(rows.len());
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     for mut row in rows {
@@ -243,8 +251,35 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
                     normalize_assignment_value(SqlValue::BigInt(value), &column.data_type)?;
             }
         }
-        if let Some(plan) = conflict {
-            if let Some((row_id, old_row)) = find_conflict(txn, table, plan, &row)? {
+        let keys = if do_nothing {
+            // Input constraints apply even when a unique conflict will skip this
+            // row; foreign keys apply only after that decision. CHECK runs once.
+            txn.table_storage(table)
+                .validate_row(&row)
+                .map_err(|error| map_storage_error(table, error))?;
+            super::constraints::validate_checks(catalog, table, &row)?;
+            let keys = target.as_ref().expect("conflict target").keys(&row)?;
+            if keys.iter().any(|key| pending_keys.contains(key)) {
+                continue;
+            }
+            if matches!(target, Some(ConflictTarget::AllUnique(_))) {
+                let mut found = false;
+                for key in &keys {
+                    if txn.inner_mut().scan_prefix(key)?.next().is_some() {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    continue;
+                }
+            }
+            keys
+        } else {
+            Vec::new()
+        };
+        if let (Some(plan), Some(ConflictTarget::Columns(indices))) = (conflict, target.as_ref()) {
+            if let Some((row_id, old_row)) = find_conflict(txn, table, indices, &row)? {
                 match &plan.action {
                     OnConflictActionPlan::DoNothing => continue,
                     OnConflictActionPlan::DoUpdate {
@@ -287,7 +322,18 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
                 }
             }
         }
-        super::constraints::validate_row::<S, C, T>(txn, catalog, table, &row, &insert_rows)?;
+        if do_nothing {
+            super::constraints::validate_foreign_keys::<S, C, T>(
+                txn,
+                catalog,
+                table,
+                &row,
+                &insert_rows,
+            )?;
+        } else {
+            super::constraints::validate_row::<S, C, T>(txn, catalog, table, &row, &insert_rows)?;
+        }
+        pending_keys.extend(keys);
         insert_rows.push(row);
     }
     let indexes: Vec<IndexMetadata> = catalog
@@ -357,23 +403,119 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     }
 }
 
+// This distinction is internal: the public typed-plan construction API is unchanged.
+enum ConflictTarget {
+    AllUnique(Vec<IndexMetadata>),
+    Columns(Vec<usize>),
+}
+
+impl ConflictTarget {
+    fn resolve<C: Catalog + ?Sized>(
+        catalog: &C,
+        table: &TableMetadata,
+        plan: &OnConflictPlan,
+    ) -> Result<Self> {
+        if plan.columns.is_empty()
+            && plan.constraint.is_none()
+            && matches!(plan.action, OnConflictActionPlan::DoNothing)
+        {
+            return Ok(Self::AllUnique(
+                catalog
+                    .get_indexes_for_table(&table.name)
+                    .into_iter()
+                    .filter(|index| index.unique)
+                    .cloned()
+                    .collect(),
+            ));
+        }
+        let invalid_target = || ExecutorError::InvalidOperation {
+            operation: "ON CONFLICT".into(),
+            reason: "conflict target must match a PRIMARY KEY or UNIQUE constraint/index".into(),
+        };
+        let names = if let Some(name) = &plan.constraint {
+            table
+                .constraints
+                .iter()
+                .find_map(|constraint| match constraint {
+                    TableConstraint::PrimaryKey {
+                        name: Some(candidate),
+                        columns,
+                        ..
+                    }
+                    | TableConstraint::Unique {
+                        name: Some(candidate),
+                        columns,
+                        ..
+                    } if candidate == name => Some(columns.as_slice()),
+                    _ => None,
+                })
+                .ok_or_else(invalid_target)?
+        } else if plan.columns.is_empty() {
+            // Preserve the documented primary-key-only targetless DO UPDATE extension.
+            table.primary_key.as_deref().unwrap_or_default()
+        } else {
+            &plan.columns
+        };
+        let indices = names
+            .iter()
+            .map(|name| {
+                table
+                    .get_column_index(name)
+                    .ok_or_else(|| ExecutorError::ColumnNotFound(name.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Resolve against a real unique key before reading or changing rows.
+        // Key order does not matter, but a subset/superset is not that key.
+        if (!plan.columns.is_empty() || plan.constraint.is_some())
+            && !catalog
+                .get_indexes_for_table(&table.name)
+                .iter()
+                .any(|index| {
+                    index.unique
+                        && index.column_indices.len() == indices.len()
+                        && index
+                            .column_indices
+                            .iter()
+                            .all(|column| indices.contains(column))
+                })
+        {
+            return Err(invalid_target());
+        }
+        Ok(Self::Columns(indices))
+    }
+
+    fn keys(&self, row: &[SqlValue]) -> Result<Vec<Vec<u8>>> {
+        let key = |id, columns: &[usize]| -> Result<Option<Vec<u8>>> {
+            let values: Vec<_> = columns.iter().map(|&column| row[column].clone()).collect();
+            if values.is_empty() || values.iter().any(SqlValue::is_null) {
+                return Ok(None);
+            }
+            Ok(Some(KeyEncoder::composite_index_prefix(id, &values)?))
+        };
+        match self {
+            Self::AllUnique(indexes) => indexes
+                .iter()
+                .map(|index| key(index.index_id, &index.column_indices))
+                .filter_map(|result| result.transpose())
+                .collect(),
+            Self::Columns(columns) => Ok(key(0, columns)?.into_iter().collect()),
+        }
+    }
+}
+
 fn reject_duplicate_conflict_keys(
     table: &TableMetadata,
     plan: &OnConflictPlan,
+    indices: &[usize],
     rows: &[Vec<SqlValue>],
 ) -> Result<()> {
-    let columns = if plan.columns.is_empty() {
-        table.primary_key.clone().unwrap_or_default()
-    } else {
-        plan.columns.clone()
-    };
-    let indices = columns
-        .iter()
-        .filter_map(|column| table.get_column_index(column))
-        .collect::<Vec<_>>();
-    if columns.is_empty() || indices.len() != columns.len() {
+    if indices.is_empty() {
         return Ok(());
     }
+    let columns = indices
+        .iter()
+        .map(|&index| table.columns[index].name.clone())
+        .collect::<Vec<_>>();
 
     let mut seen = HashSet::with_capacity(rows.len());
     for row in rows {
@@ -409,22 +551,10 @@ fn reject_duplicate_conflict_keys(
 fn find_conflict<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     table: &TableMetadata,
-    plan: &OnConflictPlan,
+    indices: &[usize],
     row: &[SqlValue],
 ) -> Result<Option<(u64, Vec<SqlValue>)>> {
-    let names = if plan.columns.is_empty() {
-        table.primary_key.clone().unwrap_or_default()
-    } else {
-        plan.columns.clone()
-    };
-    if names.is_empty() {
-        return Ok(None);
-    }
-    let indices = names
-        .iter()
-        .filter_map(|name| table.get_column_index(name))
-        .collect::<Vec<_>>();
-    if indices.len() != names.len() {
+    if indices.is_empty() {
         return Ok(None);
     }
     let mut storage = txn.table_storage(table);

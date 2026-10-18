@@ -34,6 +34,24 @@ pub mod key_layout {
     /// Provisioned V08 range-addressable columnar segment objects.
     pub const PREFIX_COLUMN_SEGMENT_V08: u8 = 0x15;
 
+    /// Table-owned data keyspaces, excluding reserved table metadata.
+    /// Callers delete these prefixes through their existing transaction.
+    pub fn table_data_prefixes(table_id: u32) -> [[u8; 5]; 5] {
+        [
+            PREFIX_COLUMN_SEGMENT,
+            PREFIX_SEGMENT_INDEX,
+            PREFIX_STATISTICS,
+            PREFIX_ROW_GROUP,
+            PREFIX_COLUMN_SEGMENT_V08,
+        ]
+        .map(|kind| {
+            let mut prefix = [0; 5];
+            prefix[0] = kind;
+            prefix[1..].copy_from_slice(&table_id.to_le_bytes());
+            prefix
+        })
+    }
+
     const V08_OBJECT_HEADER: u8 = 0;
     const V08_OBJECT_SCHEMA: u8 = 1;
     const V08_OBJECT_DIRECTORY: u8 = 2;

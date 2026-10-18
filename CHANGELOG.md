@@ -21,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - Python SQL calls now reject parameterized batches containing multiple
   statements. Run each statement separately; the old SQL-text expansion could
   lose Decimal precision in later results (#582).
+- Catalog loading now rejects invalid DEFAULT or constraint metadata instead
+  of silently discarding it. Internal encoding properties no longer appear in
+  public table properties. Rust callers converting `PersistedTableMeta` and
+  `TableMetadata` must use `TryFrom` and handle conversion errors (#472).
 - Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
   Keep a backup created before upgrading if rollback to v0.8.15 is required;
   reopening newly written segments with v0.8.15 fails with a decoding error
@@ -28,6 +32,13 @@ All notable changes to this project will be documented in this file.
 - Upgrading cannot recover column DEFAULT expressions that v0.8.15 and older
   releases did not persist. Re-declare those defaults explicitly; the new
   persistence behavior preserves defaults recorded by v0.8.16 (#472).
+
+- Opening a database created by v0.8.15 or earlier now rebuilds missing UNIQUE
+  constraint indexes. If existing rows violate a UNIQUE constraint, opening
+  fails without changing the database. Keep a backup, remove the conflicting
+  rows with the prior version or a repair tool, then reopen with v0.8.16.
+  Table-level PRIMARY KEY declarations are recognized regardless of their
+  order among constraints; multiple declarations are rejected (#585).
 
 ## [0.8.15] — 2026-09-24
 

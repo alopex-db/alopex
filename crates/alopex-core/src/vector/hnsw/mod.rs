@@ -27,6 +27,14 @@ pub const MAX_HNSW_EF_SEARCH: usize = 1_000_000;
 type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
+fn vector_norm(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt()
+}
+
 /// Validates the public HNSW search-breadth contract.
 pub fn validate_ef_search(ef_search: usize) -> Result<()> {
     if !(1..=MAX_HNSW_EF_SEARCH).contains(&ef_search) {
@@ -125,9 +133,11 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             if all_new {
-                graph.insert_unpruned(key, vector, metadata)?;
+                previous_insert =
+                    Some(graph.insert_unpruned(key, vector, metadata, previous_insert)?);
                 if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
                     graph.prune_overfull_neighbors();
                 }
@@ -151,18 +161,36 @@ impl HnswIndex {
         k: usize,
         ef_search: Option<usize>,
     ) -> Result<(Vec<HnswSearchResult>, SearchStats)> {
+        self.search_with_effective_ef(query, k, ef_search)
+            .map(|(results, stats, _)| (results, stats))
+    }
+
+    /// Searches and returns the actual layer-zero breadth as the third value.
+    ///
+    /// The breadth is measured under the same graph read lock as the search.
+    /// It is zero when no layer-zero search runs. Explicit `ef_search` values
+    /// retain the public bounds; an omitted value is derived internally from
+    /// `k` and capped by the graph's active node count.
+    pub fn search_with_effective_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Result<(Vec<HnswSearchResult>, SearchStats, usize)> {
         let start = Instant::now();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ef) = ef_search {
+            validate_ef_search(ef)?;
+        }
         let ef = ef_search.unwrap_or(k.max(50));
-        validate_ef_search(ef)?;
-        let (results, mut stats) = graph.search(query, k, ef)?;
+        let (results, mut stats, effective_ef) = graph.search_with_effective_ef(query, k, ef)?;
         stats.search_time_us = start.elapsed().as_micros() as u64;
 
         if let Some(callback) = &self.on_search {
             callback(&stats);
         }
 
-        Ok((results, stats))
+        Ok((results, stats, effective_ef))
     }
 
     /// 指定キーを論理削除する。
@@ -271,10 +299,13 @@ impl HnswIndex {
         let all_new = entries
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
+        let mut previous_insert = None;
         for (position, (key, vector, metadata)) in entries.iter().enumerate() {
             let existed = graph.find_node_id(key).is_some();
             let node_id = if all_new {
-                graph.insert_unpruned(key, vector, metadata)?
+                let node_id = graph.insert_unpruned(key, vector, metadata, previous_insert)?;
+                previous_insert = Some(node_id);
+                node_id
             } else {
                 graph.upsert(key, vector, metadata)?
             };
@@ -440,7 +471,7 @@ impl HnswIndex {
                     total_bytes += (level_neighbors.len() * 4) as u64;
                     total_bytes += 24;
                 }
-                total_bytes += 104;
+                total_bytes += std::mem::size_of::<types::HnswNode>() as u64;
             }
         }
 

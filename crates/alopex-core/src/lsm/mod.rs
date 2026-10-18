@@ -2100,6 +2100,13 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         prepared.collect(|| self.next_search_entry(&mut state), request, cancellation)
     }
 
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        for key in self.write_set.keys() {
+            visitor(key);
+        }
+        true
+    }
+
     fn commit_self(mut self) -> Result<()> {
         if self.mode == TxnMode::ReadOnly || self.write_set.is_empty() {
             return Ok(());

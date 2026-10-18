@@ -1236,7 +1236,13 @@ mod tests {
 
     #[test]
     fn explicitly_excluded_scalar_and_vector_expressions_remain_local_only() {
-        for name in ["random", "json_valid", "date_add", "array_length"] {
+        for name in [
+            "random",
+            "json_valid",
+            "date_add",
+            "date_diff",
+            "array_length",
+        ] {
             let expression = TypedExpr::function_call(
                 name.to_string(),
                 vec![],

@@ -679,8 +679,19 @@ impl Database {
         //
         // commit_self は `txn` を消費するため、失敗時に rollback はできない。
         if mode == TxnMode::ReadWrite {
-            self.commit_with_hnsw_cache_update(
-                || txn.commit_self().map_err(Error::Core),
+            let catalog_deleted = overlay.has_deletions();
+            self.commit_with_hnsw_cache_changes(
+                || {
+                    // ponytail: deletions clear all graphs; track affected names if DDL cost matters.
+                    let changed = if catalog_deleted {
+                        None
+                    } else {
+                        self.hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor))
+                    };
+                    txn.commit_self()
+                        .map(|()| ((), changed))
+                        .map_err(Error::Core)
+                },
                 || {
                     let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
                     catalog.apply_overlay(overlay);
@@ -993,6 +1004,13 @@ impl<'a> Transaction<'a> {
         let sql_catalog = self.db.sql_catalog.clone();
 
         let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+        // SQL loads its graph from this transaction's KV state. Stage direct
+        // changes first, then discard the old graph so later direct operations
+        // reload any SQL updates instead of overwriting them at commit.
+        for (index, state) in self.hnsw_indices.values_mut() {
+            index.commit_staged(txn, state).map_err(Error::Core)?;
+        }
+        self.hnsw_indices.clear();
         let mode = txn.mode();
 
         let mut borrowed =
@@ -1093,6 +1111,189 @@ mod tests {
             db.begin_read_at_sql(point),
             Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
         ));
+    }
+
+    #[test]
+    fn auto_sql_commits_preserve_unmodified_hnsw_caches() {
+        let mut observations = Vec::new();
+        for persistent in [false, true] {
+            for indexed in [false, true] {
+                for api in ["single", "multi", "prepared"] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let db = warmed_sql_hnsw_indexes(if persistent {
+                        Database::open(directory.path()).unwrap()
+                    } else {
+                        Database::open_in_memory().unwrap()
+                    });
+                    let before = db.hnsw_cache.read().unwrap().clone();
+                    let (epoch, stale) = db.hnsw_cache_snapshot();
+                    let sql = if indexed {
+                        "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = 1"
+                    } else {
+                        "INSERT INTO cache_plain VALUES (1)"
+                    };
+                    match api {
+                        "single" => {
+                            db.execute_sql(sql).unwrap();
+                        }
+                        "multi" => {
+                            db.execute_sql_multi(&format!("{sql}; SELECT 1")).unwrap();
+                        }
+                        "prepared" => {
+                            let sql = if indexed {
+                                "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = ?"
+                            } else {
+                                "INSERT INTO cache_plain VALUES (?)"
+                            };
+                            let mut statement = db.prepare(sql).unwrap();
+                            statement.bind(1, SqlValue::Integer(1)).unwrap();
+                            statement.execute().unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    let retained = {
+                        let after = db.hnsw_cache.read().unwrap();
+                        ["cache_sql_a", "cache_sql_b"].map(|name| {
+                            after
+                                .get(name)
+                                .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                        })
+                    };
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch + 1
+                    );
+                    db.hnsw_cache_insert_if_current(epoch, stale);
+                    for (name, distance) in [
+                        ("cache_sql_a", if indexed { 9.0 } else { 0.0 }),
+                        ("cache_sql_b", 0.0),
+                    ] {
+                        let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].distance, distance);
+                    }
+                    let ExecutionResult::Query(rows) = db.execute_sql(if indexed {
+                        "SELECT id FROM cache_items_a ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') LIMIT 1"
+                    } else {
+                        "SELECT id FROM cache_plain"
+                    }).unwrap() else { panic!("expected query rows"); };
+                    assert_eq!(
+                        rows.rows,
+                        vec![vec![SqlValue::Integer(if indexed { 2 } else { 1 })]]
+                    );
+                    if indexed {
+                        let ExecutionResult::Query(rows) = db
+                            .execute_sql("SELECT embedding FROM cache_items_a WHERE id = 1")
+                            .unwrap()
+                        else {
+                            panic!("expected stored vector");
+                        };
+                        assert_eq!(rows.rows, vec![vec![SqlValue::Vector(vec![20.0, 0.0])]]);
+                    }
+                    eprintln!("auto SQL persistent={persistent} indexed={indexed} api={api}: retained={retained:?}; epoch/storage/search verified");
+                    observations.push((retained, [!indexed, true]));
+                }
+            }
+        }
+        for (actual, expected) in observations {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn warmed_sql_hnsw_indexes(database: Database) -> Arc<Database> {
+        let db = Arc::new(database);
+        db.execute_sql("CREATE TABLE cache_plain (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        for suffix in ["a", "b"] {
+            db.execute_sql(&format!(
+                "CREATE TABLE cache_items_{suffix} (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2));\
+                 CREATE INDEX cache_sql_{suffix} ON cache_items_{suffix} (embedding) USING HNSW;\
+                 INSERT INTO cache_items_{suffix} VALUES (1, [0.0, 0.0]), (2, [9.0, 0.0]);"
+            )).unwrap();
+        }
+        for name in ["cache_sql_a", "cache_sql_b"] {
+            let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].distance, 0.0);
+        }
+        db
+    }
+
+    #[test]
+    fn auto_sql_failed_write_and_catalog_deletion_preserve_cache_contracts() {
+        for persistent in [false, true] {
+            for operation in ["failed_multi", "drop_index", "drop_table"] {
+                let directory = tempfile::tempdir().unwrap();
+                let db = warmed_sql_hnsw_indexes(if persistent {
+                    Database::open(directory.path()).unwrap()
+                } else {
+                    Database::open_in_memory().unwrap()
+                });
+                let before = db.hnsw_cache.read().unwrap().clone();
+                let (epoch, stale) = db.hnsw_cache_snapshot();
+                if operation == "failed_multi" {
+                    assert!(db
+                        .execute_sql_multi(
+                            "UPDATE cache_items_a SET embedding = [20.0, 0.0] WHERE id = 1;\
+                         INSERT INTO cache_items_a VALUES (1, [30.0, 0.0]);"
+                        )
+                        .is_err());
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch
+                    );
+                    for name in ["cache_sql_a", "cache_sql_b"] {
+                        assert!(Arc::ptr_eq(
+                            &db.hnsw_cache.read().unwrap()[name],
+                            &before[name]
+                        ));
+                        assert_eq!(
+                            db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap().0[0].distance,
+                            0.0
+                        );
+                    }
+                    let ExecutionResult::Query(rows) = db.execute_sql(
+                        "SELECT id FROM cache_items_a ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') LIMIT 1"
+                    ).unwrap() else { panic!("expected query rows"); };
+                    assert_eq!(rows.rows, vec![vec![SqlValue::Integer(1)]]);
+                    let ExecutionResult::Query(rows) = db
+                        .execute_sql("SELECT embedding FROM cache_items_a WHERE id = 1")
+                        .unwrap()
+                    else {
+                        panic!("expected stored vector");
+                    };
+                    assert_eq!(rows.rows, vec![vec![SqlValue::Vector(vec![0.0, 0.0])]]);
+                } else {
+                    db.execute_sql(if operation == "drop_index" {
+                        "DROP INDEX cache_sql_a"
+                    } else {
+                        "DROP TABLE cache_items_a"
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        db.hnsw_cache_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        epoch + 1
+                    );
+                    assert!(db.hnsw_cache.read().unwrap().is_empty());
+                    db.hnsw_cache_insert_if_current(epoch, stale);
+                    assert!(db.hnsw_cache.read().unwrap().is_empty());
+                    assert!(db
+                        .search_hnsw("cache_sql_a", &[0.0, 0.0], 1, Some(8))
+                        .is_err());
+                    assert_eq!(
+                        db.search_hnsw("cache_sql_b", &[0.0, 0.0], 1, Some(8))
+                            .unwrap()
+                            .0[0]
+                            .distance,
+                        0.0
+                    );
+                }
+                eprintln!("auto SQL control persistent={persistent} operation={operation}: PASS");
+            }
+        }
     }
 
     #[test]
@@ -1295,6 +1496,560 @@ mod tests {
             .cloned()
             .expect("a failed commit must retain the prior HNSW cache entry");
         assert!(Arc::ptr_eq(&cached, &retained));
+    }
+
+    fn two_warmed_direct_hnsw_indexes() -> Arc<Database> {
+        warm_direct_hnsw_indexes(Database::open_in_memory().unwrap())
+    }
+
+    fn warm_direct_hnsw_indexes(database: Database) -> Arc<Database> {
+        let db = Arc::new(database);
+        let config = alopex_core::HnswConfig::default()
+            .with_dimension(2)
+            .with_metric(alopex_core::Metric::L2)
+            .with_m(8)
+            .with_ef_construction(32);
+        for name in ["cache_a", "cache_b"] {
+            db.create_hnsw_index(name, config.clone()).unwrap();
+        }
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        for name in ["cache_a", "cache_b"] {
+            txn.upsert_to_hnsw(name, b"key", &[0.0, 0.0], b"seed")
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        for name in ["cache_a", "cache_b"] {
+            let (rows, stats) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].key, b"key");
+            assert_eq!(rows[0].distance, 0.0);
+            assert!(stats.nodes_visited > 0);
+            assert!(db.hnsw_cache.read().unwrap().contains_key(name));
+        }
+        db
+    }
+
+    #[test]
+    fn direct_hnsw_lifecycle_preserves_unrelated_cached_graphs() {
+        let mut retained = Vec::new();
+        for persistent in [false, true] {
+            for operation in ["create", "replace", "drop", "compact"] {
+                let directory = tempfile::tempdir().unwrap();
+                let db = warm_direct_hnsw_indexes(if persistent {
+                    Database::open(directory.path()).unwrap()
+                } else {
+                    Database::open_in_memory().unwrap()
+                });
+                if operation == "compact" {
+                    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                    txn.upsert_to_hnsw("cache_a", b"deleted", &[1.0, 0.0], b"")
+                        .unwrap();
+                    txn.commit().unwrap();
+                    let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                    assert!(txn.delete_from_hnsw("cache_a", b"deleted").unwrap());
+                    txn.commit().unwrap();
+                    db.search_hnsw("cache_b", &[0.0, 0.0], 1, Some(8)).unwrap();
+                }
+                let before = db.hnsw_cache.read().unwrap().clone();
+                let (epoch, stale) = db.hnsw_cache_snapshot();
+                let config = alopex_core::HnswConfig::default()
+                    .with_dimension(2)
+                    .with_metric(alopex_core::Metric::L2);
+                match operation {
+                    "create" => db.create_hnsw_index("cache_c", config).unwrap(),
+                    "replace" => db.create_hnsw_index("cache_a", config).unwrap(),
+                    "drop" => db.drop_hnsw_index("cache_a").unwrap(),
+                    "compact" => {
+                        assert_eq!(db.compact_hnsw_index("cache_a").unwrap().vectors_removed, 1);
+                    }
+                    _ => unreachable!(),
+                }
+                // Inspect before a search can hide an unnecessary graph reload.
+                let kept = db
+                    .hnsw_cache
+                    .read()
+                    .unwrap()
+                    .get("cache_b")
+                    .is_some_and(|index| Arc::ptr_eq(index, &before["cache_b"]));
+                retained.push(kept);
+                assert_eq!(
+                    db.hnsw_cache_epoch
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    epoch + 1
+                );
+                db.hnsw_cache_insert_if_current(epoch, stale);
+                if operation == "drop" {
+                    assert!(db.search_hnsw("cache_a", &[0.0, 0.0], 1, Some(8)).is_err());
+                } else {
+                    let name = if operation == "create" {
+                        "cache_c"
+                    } else {
+                        "cache_a"
+                    };
+                    let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+                    assert_eq!(rows.len(), usize::from(operation == "compact"));
+                }
+                // Bypass the cache to prove committed storage agrees with warm reads.
+                let mut read = db.store.begin(TxnMode::ReadOnly).unwrap();
+                for name in ["cache_a", "cache_b", "cache_c"] {
+                    let persisted = alopex_core::vector::hnsw::HnswIndex::load(name, &mut read);
+                    if (name == "cache_a" && operation == "drop")
+                        || (name == "cache_c" && operation != "create")
+                    {
+                        assert!(persisted.is_err());
+                    } else {
+                        let (rows, _) = persisted.unwrap().search(&[0.0, 0.0], 1, Some(8)).unwrap();
+                        let expected = usize::from(
+                            name == "cache_b" || (name == "cache_a" && operation != "replace"),
+                        );
+                        assert_eq!(rows.len(), expected);
+                        if expected == 1 {
+                            assert_eq!(rows[0].key, b"key");
+                            assert_eq!(rows[0].distance, 0.0);
+                        }
+                    }
+                }
+                read.rollback_self().unwrap();
+                eprintln!("persistent={persistent} lifecycle={operation} unrelated_cache_retained={kept}; storage/epoch verified");
+            }
+        }
+        assert_eq!(retained, vec![true; 8]);
+    }
+
+    #[test]
+    fn owned_lsm_conflict_preserves_hnsw_cache_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = warm_direct_hnsw_indexes(Database::open(directory.path()).unwrap());
+        let mut losing = Arc::clone(&db)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        losing.put(b"conflict", b"loser").unwrap();
+        losing
+            .upsert_to_hnsw("cache_a", b"key", &[9.0, 0.0], b"loser")
+            .unwrap();
+        let mut winning = db.begin(TxnMode::ReadWrite).unwrap();
+        winning.put(b"conflict", b"winner").unwrap();
+        winning.commit().unwrap();
+        let before = db.hnsw_cache.read().unwrap().clone();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(matches!(
+            losing.commit(),
+            Err(Error::Core(alopex_core::Error::TxnConflict))
+        ));
+        assert!(matches!(
+            losing.session().commit(),
+            Err(alopex_core::Error::TxnClosed)
+        ));
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch
+        );
+        for name in ["cache_a", "cache_b"] {
+            assert!(Arc::ptr_eq(
+                &db.hnsw_cache.read().unwrap()[name],
+                &before[name]
+            ));
+            let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            assert_eq!(rows[0].key, b"key");
+            assert_eq!(rows[0].distance, 0.0);
+        }
+        let mut read = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(read.get(b"conflict").unwrap(), Some(b"winner".to_vec()));
+        read.rollback().unwrap();
+    }
+
+    #[test]
+    fn unrelated_kv_commit_preserves_warmed_hnsw_cache() {
+        let mut observations = Vec::new();
+        for (owned, persistent) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = warm_direct_hnsw_indexes(if persistent {
+                Database::open(directory.path()).unwrap()
+            } else {
+                Database::open_in_memory().unwrap()
+            });
+            let before = db.hnsw_cache.read().unwrap().clone();
+            if owned {
+                let mut txn = Arc::clone(&db)
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.put(b"application:unrelated", b"committed").unwrap();
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.put(b"application:unrelated", b"committed").unwrap();
+                txn.commit().unwrap();
+            }
+            // Observe before a search can hide invalidation by repopulating the cache.
+            let retained = {
+                let after = db.hnsw_cache.read().unwrap();
+                ["cache_a", "cache_b"].map(|name| {
+                    after
+                        .get(name)
+                        .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                })
+            };
+            let mut read = db.begin(TxnMode::ReadOnly).unwrap();
+            assert_eq!(
+                read.get(b"application:unrelated").unwrap(),
+                Some(b"committed".to_vec())
+            );
+            read.rollback().unwrap();
+            for name in ["cache_a", "cache_b"] {
+                let (rows, _) = db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, b"key");
+                assert_eq!(rows[0].distance, 0.0);
+            }
+            eprintln!(
+                "unrelated KV commit owned={owned} persistent={persistent}: retained={retained:?}; committed value/search verified"
+            );
+            observations.push(retained);
+        }
+        // Both public transaction owners reach the oracle even on the old clear-all implementation.
+        assert_eq!(observations, vec![[true, true]; 4]);
+    }
+
+    #[test]
+    fn direct_hnsw_commit_invalidates_only_changed_index() {
+        let mut observations = Vec::new();
+        for (owned, persistent) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = warm_direct_hnsw_indexes(if persistent {
+                Database::open(directory.path()).unwrap()
+            } else {
+                Database::open_in_memory().unwrap()
+            });
+            let before = db.hnsw_cache.read().unwrap().clone();
+            if owned {
+                let mut txn = Arc::clone(&db)
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.upsert_to_hnsw("cache_a", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.upsert_to_hnsw("cache_a", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            }
+            let (stale_a_retained, untouched_b_retained) = {
+                let after = db.hnsw_cache.read().unwrap();
+                (
+                    after
+                        .get("cache_a")
+                        .is_some_and(|index| Arc::ptr_eq(index, &before["cache_a"])),
+                    after
+                        .get("cache_b")
+                        .is_some_and(|index| Arc::ptr_eq(index, &before["cache_b"])),
+                )
+            };
+            for (name, query) in [("cache_a", [9.0, 0.0]), ("cache_b", [0.0, 0.0])] {
+                let (rows, _) = db.search_hnsw(name, &query, 1, Some(8)).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, b"key");
+                assert_eq!(rows[0].distance, 0.0);
+            }
+            eprintln!(
+                "direct HNSW commit owned={owned} persistent={persistent}: stale_a={stale_a_retained}, retained_b={untouched_b_retained}; latest search verified"
+            );
+            observations.push((stale_a_retained, untouched_b_retained));
+        }
+        // A may be evicted or replaced; B must retain its already-loaded graph.
+        assert_eq!(observations, vec![(false, true); 4]);
+    }
+
+    #[test]
+    fn uncached_hnsw_commit_preserves_other_warmed_indexes() {
+        let mut observations = Vec::new();
+        for owned in [false, true] {
+            let db = two_warmed_direct_hnsw_indexes();
+            let config = alopex_core::HnswConfig::default()
+                .with_dimension(2)
+                .with_metric(alopex_core::Metric::L2)
+                .with_m(8)
+                .with_ef_construction(32);
+            db.create_hnsw_index("cache_c", config).unwrap();
+            let mut seed = db.begin(TxnMode::ReadWrite).unwrap();
+            seed.upsert_to_hnsw("cache_c", b"key", &[0.0, 0.0], b"seed")
+                .unwrap();
+            seed.commit().unwrap();
+            // Establish a cold C independently of transaction commit's cache publication.
+            db.hnsw_cache.write().unwrap().remove("cache_c");
+            for name in ["cache_a", "cache_b"] {
+                db.search_hnsw(name, &[0.0, 0.0], 1, Some(8)).unwrap();
+            }
+            let before = db.hnsw_cache.read().unwrap().clone();
+            assert!(!before.contains_key("cache_c"));
+            if owned {
+                let mut txn = Arc::clone(&db)
+                    .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+                    .unwrap();
+                txn.upsert_to_hnsw("cache_c", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            } else {
+                let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+                txn.upsert_to_hnsw("cache_c", b"key", &[9.0, 0.0], b"updated")
+                    .unwrap();
+                txn.commit().unwrap();
+            }
+            let retained = {
+                let after = db.hnsw_cache.read().unwrap();
+                ["cache_a", "cache_b"].map(|name| {
+                    after
+                        .get(name)
+                        .is_some_and(|index| Arc::ptr_eq(index, &before[name]))
+                })
+            };
+            for (name, query) in [
+                ("cache_a", [0.0, 0.0]),
+                ("cache_b", [0.0, 0.0]),
+                ("cache_c", [9.0, 0.0]),
+            ] {
+                let (rows, _) = db.search_hnsw(name, &query, 1, Some(8)).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].key, b"key");
+                assert_eq!(rows[0].distance, 0.0);
+            }
+            eprintln!(
+                "uncached HNSW commit owned={owned}: retained={retained:?}; latest search verified"
+            );
+            observations.push(retained);
+        }
+        assert_eq!(observations, vec![[true, true], [true, true]]);
+    }
+
+    #[test]
+    fn hnsw_cache_key_classification_preserves_storage_boundaries() {
+        let db = two_warmed_direct_hnsw_indexes();
+        // The encoding does not forbid colons in index names. A node/key write
+        // can match more than one cached prefix, so retain conservative matching.
+        {
+            let mut cache = db.hnsw_cache.write().unwrap();
+            let index = Arc::clone(&cache["cache_a"]);
+            cache.insert("cache_a:part".to_string(), index);
+        }
+        let cases: &[(&[u8], Option<&[&str]>)] = &[
+            (b"hnsw:meta:cache_c", Some(&[])),
+            (b"hnsw:meta:", Some(&[])),
+            (b"hnsw:node:cache_c:part:0", Some(&[])),
+            (b"hnsw:key:cache_c:\xff:\0", Some(&[])),
+            (b"hnsw:key::", Some(&[])),
+            (b"hnsw:node:cache_a_extra:0", Some(&[])),
+            (b"hnsw:meta:cache_a:part", Some(&["cache_a:part"])),
+            (
+                b"hnsw:node:cache_a:part:0",
+                Some(&["cache_a", "cache_a:part"]),
+            ),
+            (b"hnsw:key:cache_a:\xff:\0", Some(&["cache_a"])),
+            (b"hnsw:node:cache_c", None),
+            (b"hnsw:key:cache_c", None),
+            (b"hnsw:future-format:cache_c", None),
+        ];
+        for (key, expected) in cases {
+            let changed = db.hnsw_cache_changes(|visitor| {
+                visitor(key);
+                true
+            });
+            let expected =
+                expected.map(|names| names.iter().map(|name| (*name).to_string()).collect());
+            assert_eq!(changed, expected, "key={key:?}");
+        }
+    }
+
+    #[test]
+    fn raw_session_hnsw_write_invalidates_its_cached_graph() {
+        let db = two_warmed_direct_hnsw_indexes();
+        let before = db.hnsw_cache.read().unwrap().clone();
+        let mut txn = Arc::clone(&db)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        txn.session()
+            .with_transaction(|raw| {
+                let key = b"hnsw:meta:cache_a".to_vec();
+                let value = raw.get(&key)?.expect("real persisted HNSW metadata");
+                raw.put(key, value)
+            })
+            .unwrap();
+        txn.commit().unwrap();
+        {
+            let after = db.hnsw_cache.read().unwrap();
+            assert!(!after.contains_key("cache_a"));
+            assert!(Arc::ptr_eq(&before["cache_b"], &after["cache_b"]));
+        }
+        let (rows, _) = db.search_hnsw("cache_a", &[0.0, 0.0], 1, Some(8)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, b"key");
+        assert_eq!(rows[0].distance, 0.0);
+    }
+
+    #[test]
+    fn rolled_back_raw_hnsw_write_preserves_cached_graphs() {
+        let db = two_warmed_direct_hnsw_indexes();
+        let before = db.hnsw_cache.read().unwrap().clone();
+        let mut txn = Arc::clone(&db)
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let session = txn.session();
+        let savepoint = session.create_savepoint().unwrap();
+        session
+            .with_transaction(|raw| {
+                raw.put(b"hnsw:unknown:temporary".to_vec(), b"discarded".to_vec())
+            })
+            .unwrap();
+        session.rollback_to_savepoint(savepoint).unwrap();
+        txn.put(b"application:kept", b"committed").unwrap();
+        txn.commit().unwrap();
+        let after = db.hnsw_cache.read().unwrap();
+        for name in ["cache_a", "cache_b"] {
+            assert!(Arc::ptr_eq(&before[name], &after[name]));
+        }
+        drop(after);
+        let mut read = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(read.get(b"hnsw:unknown:temporary").unwrap(), None);
+        assert_eq!(
+            read.get(b"application:kept").unwrap(),
+            Some(b"committed".to_vec())
+        );
+        read.rollback().unwrap();
+    }
+
+    #[test]
+    fn unknown_pending_keys_conservatively_clear_cached_graphs() {
+        for complete in [false, true] {
+            let db = two_warmed_direct_hnsw_indexes();
+            let epoch = db
+                .hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            db.commit_with_hnsw_cache_changes(
+                || {
+                    let changes = db.hnsw_cache_changes(|visitor| {
+                        if complete {
+                            visitor(b"hnsw:future-format:cache_a");
+                        }
+                        complete
+                    });
+                    assert!(changes.is_none());
+                    Ok::<_, ()>(((), changes))
+                },
+                || {},
+            )
+            .unwrap();
+            assert!(db.hnsw_cache.read().unwrap().is_empty());
+            assert_eq!(
+                db.hnsw_cache_epoch
+                    .load(std::sync::atomic::Ordering::Acquire),
+                epoch + 1
+            );
+        }
+    }
+
+    #[test]
+    fn empty_hnsw_cache_skips_pending_key_visit() {
+        let db = Database::open_in_memory().unwrap();
+        let epoch = db
+            .hnsw_cache_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut committed = false;
+        let mut updated = false;
+        db.commit_with_hnsw_cache_changes(
+            || {
+                let changes =
+                    db.hnsw_cache_changes(|_| panic!("empty cache must not visit writes"));
+                assert_eq!(changes, Some(std::collections::HashSet::new()));
+                committed = true;
+                Ok::<_, ()>(((), changes))
+            },
+            || updated = true,
+        )
+        .unwrap();
+        assert!(committed && updated);
+        assert_eq!(
+            db.hnsw_cache_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch + 1
+        );
+    }
+
+    #[test]
+    fn cold_reader_publication_cannot_cross_selective_commit() {
+        use alopex_core::{HnswIndex, KVStore, KVTransaction};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let db = two_warmed_direct_hnsw_indexes();
+        db.hnsw_cache.write().unwrap().clear();
+        let (mut old_read, epoch) = {
+            let _gate = db.hnsw_cache_gate.read().unwrap();
+            (
+                db.store.begin(TxnMode::ReadOnly).unwrap(),
+                db.hnsw_cache_epoch
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        };
+        let old_graph = HnswIndex::load("cache_a", &mut old_read).unwrap();
+        old_read.rollback_self().unwrap();
+        let mut write = db.store.begin(TxnMode::ReadWrite).unwrap();
+        let mut changed_graph = HnswIndex::load("cache_a", &mut write).unwrap();
+        changed_graph
+            .upsert(b"key", &[9.0, 0.0], b"committed")
+            .unwrap();
+        changed_graph.save(&mut write).unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        *db.hnsw_cache_publication_progress.lock().unwrap() = Some(progress_tx);
+        let reader_db = Arc::clone(&db);
+        let reader = std::thread::spawn(move || -> std::result::Result<(), String> {
+            start_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())?;
+            reader_db.hnsw_cache_insert_if_current(epoch, vec![("cache_a".to_string(), old_graph)]);
+            Ok(())
+        });
+        let committed = db.commit_with_hnsw_cache_changes(
+            || -> std::result::Result<_, String> {
+                let mut visited = false;
+                let changes = db.hnsw_cache_changes(|_| {
+                    visited = true;
+                    true
+                });
+                if visited || changes != Some(std::collections::HashSet::new()) {
+                    return Err("cold cache classification was not empty".to_string());
+                }
+                start_tx.send(()).map_err(|error| error.to_string())?;
+                // A positive signal means the reader either completed publication (old
+                // implementation) or encountered the held write gate (fixed implementation).
+                // A timeout is an error, never permission to advance a successful test.
+                progress_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?;
+                write.commit_self().map_err(|error| error.to_string())?;
+                Ok(((), changes))
+            },
+            || {},
+        );
+        // The commit helper releases its gate even on timeout/error before we join.
+        let reader_result = reader.join();
+        *db.hnsw_cache_publication_progress.lock().unwrap() = None;
+        committed.expect("writer and reader must reach the controlled ordering");
+        reader_result
+            .unwrap()
+            .expect("reader must complete after gate release");
+        let stale_cached = db.hnsw_cache.read().unwrap().contains_key("cache_a");
+        let (rows, stats) = db.search_hnsw("cache_a", &[9.0, 0.0], 1, Some(8)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, b"key");
+        assert!(stats.nodes_visited > 0);
+        eprintln!(
+            "cold publication race: stale_cached={stale_cached}, latest_distance={}",
+            rows[0].distance
+        );
+        assert_eq!((stale_cached, rows[0].distance), (false, 0.0));
     }
 
     fn hnsw_cache_test_fixture() -> (Database, String, String, i32) {

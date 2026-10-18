@@ -805,6 +805,8 @@ class RemoteTransaction:
     def search_similar(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.search_similar", _KV_REASON)
 
+
+
     def get_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get_vector", _KV_REASON)
 

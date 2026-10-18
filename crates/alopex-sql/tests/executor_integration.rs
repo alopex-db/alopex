@@ -8,6 +8,304 @@ use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::{Catalog, Compression, ExplainFormat, StorageType};
 use std::sync::{Arc, RwLock};
 
+mod issue575_columnar_source {
+    use super::*;
+    use alopex_core::kv::{KVStore, KVTransaction};
+    use alopex_core::types::TxnMode;
+    use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog};
+    use alopex_sql::storage::{SqlValue, TxnBridge};
+    use alopex_sql::{AlopexDialect, Parser, Planner};
+    use std::io::Write;
+
+    type Engine = Executor<MemoryKV, PersistentCatalog<MemoryKV>>;
+    type Metadata = Arc<RwLock<PersistentCatalog<MemoryKV>>>;
+
+    fn plan(catalog: &Metadata, sql: &str) -> LogicalPlan {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        assert_eq!(statements.len(), 1);
+        Planner::new(&*catalog.read().unwrap())
+            .plan(&statements[0])
+            .unwrap()
+    }
+
+    fn run(engine: &mut Engine, catalog: &Metadata, sql: &str) -> ExecutionResult {
+        engine.execute(plan(catalog, sql)).unwrap()
+    }
+
+    fn values(result: ExecutionResult) -> Vec<Vec<SqlValue>> {
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected query rows")
+        };
+        result.rows
+    }
+
+    fn expected(rows: &[(i32, i32)]) -> Vec<Vec<SqlValue>> {
+        rows.iter()
+            .map(|&(id, value)| vec![SqlValue::Integer(id), SqlValue::Integer(value)])
+            .collect()
+    }
+
+    fn setup() -> (Arc<MemoryKV>, Metadata, Engine) {
+        let store = Arc::new(MemoryKV::new());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+        let mut engine = Executor::new(store.clone(), catalog.clone());
+        for table in ["target", "row_target"] {
+            run(
+                &mut engine,
+                &catalog,
+                &format!("CREATE TABLE {table} (id INT PRIMARY KEY, value INT)"),
+            );
+            run(
+                &mut engine,
+                &catalog,
+                &format!("INSERT INTO {table} VALUES (1,10),(2,20)"),
+            );
+        }
+        run(
+            &mut engine,
+            &catalog,
+            "CREATE TABLE row_source (id INT, value INT)",
+        );
+        run(
+            &mut engine,
+            &catalog,
+            "INSERT INTO row_source VALUES (1,100),(3,300)",
+        );
+        for table in ["column_source", "empty_source"] {
+            run(
+                &mut engine,
+                &catalog,
+                &format!(
+                    "CREATE TABLE {table} (id INT, value INT) WITH (storage='columnar', row_group_size=1000)"
+                ),
+            );
+        }
+        // Two real COPY operations exercise different persisted segments.
+        for csv in ["1,100\n", "3,300\n"] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(csv.as_bytes()).unwrap();
+            assert_eq!(
+                run(
+                    &mut engine,
+                    &catalog,
+                    &format!(
+                        "COPY column_source FROM '{}' WITH (FORMAT CSV)",
+                        file.path().display()
+                    )
+                ),
+                ExecutionResult::RowsAffected(1)
+            );
+        }
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM column_source ORDER BY id"
+            )),
+            expected(&[(1, 100), (3, 300)])
+        );
+        (store, catalog, engine)
+    }
+
+    fn statement(merge: bool, target: &str, source: &str) -> String {
+        if merge {
+            format!(
+                "MERGE INTO {target} USING {source} ON {target}.id = {source}.id WHEN MATCHED THEN UPDATE SET value = {source}.value WHEN NOT MATCHED THEN INSERT (id,value) VALUES ({source}.id,{source}.value)"
+            )
+        } else {
+            format!(
+                "UPDATE {target} SET value = {source}.value FROM {source} WHERE {target}.id = {source}.id"
+            )
+        }
+    }
+
+    fn result_rows(merge: bool) -> Vec<Vec<SqlValue>> {
+        if merge {
+            expected(&[(1, 100), (2, 20), (3, 300)])
+        } else {
+            expected(&[(1, 100), (2, 20)])
+        }
+    }
+
+    fn check_committed(merge: bool) {
+        let (_, catalog, mut engine) = setup();
+        // Same-responsibility row-storage control runs before the columnar assertion.
+        assert_eq!(
+            run(
+                &mut engine,
+                &catalog,
+                &statement(merge, "row_target", "row_source")
+            ),
+            ExecutionResult::RowsAffected(if merge { 2 } else { 1 })
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM row_target ORDER BY id"
+            )),
+            result_rows(merge)
+        );
+        assert_eq!(
+            run(
+                &mut engine,
+                &catalog,
+                &statement(merge, "target", "empty_source")
+            ),
+            ExecutionResult::RowsAffected(0)
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM target ORDER BY id"
+            )),
+            expected(&[(1, 10), (2, 20)])
+        );
+        assert_eq!(
+            run(
+                &mut engine,
+                &catalog,
+                &statement(merge, "target", "column_source")
+            ),
+            ExecutionResult::RowsAffected(if merge { 2 } else { 1 })
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM target ORDER BY id"
+            )),
+            result_rows(merge)
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM column_source ORDER BY id"
+            )),
+            expected(&[(1, 100), (3, 300)])
+        );
+    }
+
+    fn snapshot(store: &MemoryKV) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        txn.scan_prefix(&[]).unwrap().collect()
+    }
+
+    fn check_rollback(merge: bool) {
+        let (store, catalog, mut engine) = setup();
+        let before = snapshot(&store);
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let mut overlay = CatalogOverlay::new();
+        {
+            let mut borrowed =
+                TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+            assert_eq!(
+                engine
+                    .execute_in_txn(
+                        plan(&catalog, &statement(merge, "target", "column_source")),
+                        &mut borrowed
+                    )
+                    .unwrap(),
+                ExecutionResult::RowsAffected(if merge { 2 } else { 1 })
+            );
+            assert_eq!(
+                values(
+                    engine
+                        .execute_in_txn(
+                            plan(&catalog, "SELECT id,value FROM target ORDER BY id"),
+                            &mut borrowed
+                        )
+                        .unwrap()
+                ),
+                result_rows(merge)
+            );
+            assert_eq!(
+                values(
+                    engine
+                        .execute_in_txn(
+                            plan(&catalog, "SELECT id,value FROM column_source ORDER BY id"),
+                            &mut borrowed
+                        )
+                        .unwrap()
+                ),
+                expected(&[(1, 100), (3, 300)])
+            );
+        }
+        txn.rollback_self().unwrap();
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "rollback must restore every KV entry, including source segments and catalog"
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM target ORDER BY id"
+            )),
+            expected(&[(1, 10), (2, 20)])
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "lane_ci"), ignore)]
+    fn merge_reads_columnar_source() {
+        check_committed(true);
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "lane_ci"), ignore)]
+    fn update_from_reads_columnar_source() {
+        check_committed(false);
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "lane_ci"), ignore)]
+    fn update_from_columnar_source_evaluates_scalar_subquery() {
+        let (_, catalog, mut engine) = setup();
+        assert_eq!(
+            run(
+                &mut engine,
+                &catalog,
+                "UPDATE target SET value = column_source.value FROM column_source \
+                 WHERE target.id = column_source.id AND column_source.value = \
+                 (SELECT value FROM row_source WHERE id = 1)",
+            ),
+            ExecutionResult::RowsAffected(1)
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM target ORDER BY id",
+            )),
+            expected(&[(1, 100), (2, 20)])
+        );
+        assert_eq!(
+            values(run(
+                &mut engine,
+                &catalog,
+                "SELECT id,value FROM column_source ORDER BY id",
+            )),
+            expected(&[(1, 100), (3, 300)])
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "lane_ci"), ignore)]
+    fn merge_columnar_source_rollback_restores_all_bytes() {
+        check_rollback(true);
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "lane_ci"), ignore)]
+    fn update_from_columnar_source_rollback_restores_all_bytes() {
+        check_rollback(false);
+    }
+}
+
 #[path = "support/btree_read_counts.rs"]
 mod btree_read_counts;
 

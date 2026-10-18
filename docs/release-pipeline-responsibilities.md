@@ -12,6 +12,13 @@ Human-readable Markdown and GitHub summaries are views. They never authorize a
 transition. Stable Delivery never rebuilds, retests, or reinterprets software
 correctness.
 
+Development workflows check topic branches through pull requests. Push events
+run those workflows only for `main`, `integration/**`, and `release/**`, so a
+topic-branch update does not start the same checks twice. A topic branch without
+an open pull request receives its development checks when its pull request is
+opened. These event filters determine when checks start; acceptance and release
+evidence remain tied to the exact commit SHA.
+
 ## Failure ownership
 
 | Failure | Owner | Required response |

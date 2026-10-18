@@ -542,6 +542,70 @@ pub(crate) fn parse_interval(value: &str) -> Result<SqlValue> {
             .trim_end_matches('s')
             .to_ascii_lowercase()
             .to_string();
+        if unit == "year"
+            && parts
+                .get(index + 2)
+                .is_some_and(|part| part.eq_ignore_ascii_case("to"))
+            && parts
+                .get(index + 3)
+                .is_some_and(|part| part.eq_ignore_ascii_case("month"))
+        {
+            let raw = parts[index];
+            let (sign, unsigned) = if let Some(value) = raw.strip_prefix('-') {
+                (-1_i64, value)
+            } else {
+                (1_i64, raw.strip_prefix('+').unwrap_or(raw))
+            };
+            let total = if let Some((years, remainder)) = unsigned.split_once('-') {
+                if !years.bytes().all(|byte| byte.is_ascii_digit())
+                    || !remainder.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return cast_failure(
+                        "Text",
+                        &ResolvedType::Interval,
+                        "invalid year-month interval",
+                    );
+                }
+                let years = years.parse::<i64>().map_err(|_| {
+                    cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
+                })?;
+                let remainder = remainder.parse::<i64>().map_err(|_| {
+                    cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
+                })?;
+                if !(0..12).contains(&remainder) {
+                    return cast_failure(
+                        "Text",
+                        &ResolvedType::Interval,
+                        "invalid year-month interval",
+                    );
+                }
+                years
+                    .checked_mul(12)
+                    .and_then(|value| value.checked_add(remainder))
+            } else {
+                if !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return cast_failure(
+                        "Text",
+                        &ResolvedType::Interval,
+                        "invalid year-month interval",
+                    );
+                }
+                let years = unsigned.parse::<i64>().map_err(|_| {
+                    cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
+                })?;
+                years.checked_mul(12)
+            }
+            .and_then(|value| value.checked_mul(sign))
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            months = months
+                .checked_add(
+                    i32::try_from(total)
+                        .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                )
+                .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            index += 4;
+            continue;
+        }
         if unit == "second" {
             let seconds = parts[index].parse::<f64>().map_err(|_| {
                 cast_error_from("Text", &ResolvedType::Interval, "invalid interval text")
@@ -552,6 +616,21 @@ pub(crate) fn parse_interval(value: &str) -> Result<SqlValue> {
             }
             micros = micros
                 .checked_add(delta.round() as i64)
+                .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            index += 2;
+            continue;
+        }
+        if parts[index].contains('.') {
+            let (extra_months, extra_days, extra_micros) =
+                parse_fractional_interval_piece(parts[index], &unit)?;
+            months = months
+                .checked_add(extra_months)
+                .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            days = days
+                .checked_add(extra_days)
+                .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            micros = micros
+                .checked_add(extra_micros)
                 .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
             index += 2;
             continue;
@@ -641,6 +720,81 @@ pub(crate) fn parse_interval(value: &str) -> Result<SqlValue> {
         days,
         micros,
     })
+}
+
+fn parse_fractional_interval_piece(value: &str, unit: &str) -> Result<(i32, i32, i64)> {
+    let invalid = || cast_error_from("Text", &ResolvedType::Interval, "invalid interval text");
+    let overflow = || ExecutorError::Evaluation(EvaluationError::Overflow);
+    let (sign, unsigned) = if let Some(value) = value.strip_prefix('-') {
+        (-1_i128, value)
+    } else {
+        (1_i128, value.strip_prefix('+').unwrap_or(value))
+    };
+    let (whole, fraction) = unsigned.split_once('.').ok_or_else(invalid)?;
+    if !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_empty()
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 18
+    {
+        return Err(invalid());
+    }
+    let scale = 10_i128
+        .checked_pow(fraction.len() as u32)
+        .ok_or_else(overflow)?;
+    let amount = whole
+        .parse::<i128>()
+        .map_err(|_| invalid())?
+        .checked_mul(scale)
+        .and_then(|value| value.checked_add(fraction.parse::<i128>().ok()?))
+        .and_then(|value| value.checked_mul(sign))
+        .ok_or_else(overflow)?;
+    let (month_numerator, day_numerator, micro_numerator) = match unit {
+        "year" => (amount.checked_mul(12).ok_or_else(overflow)?, 0, 0),
+        "month" => (amount, 0, 0),
+        "week" => (0, amount.checked_mul(7).ok_or_else(overflow)?, 0),
+        "day" => (0, amount, 0),
+        "hour" => (
+            0,
+            0,
+            amount.checked_mul(3_600_000_000).ok_or_else(overflow)?,
+        ),
+        "minute" => (0, 0, amount.checked_mul(60_000_000).ok_or_else(overflow)?),
+        "millisecond" => (0, 0, amount.checked_mul(1_000).ok_or_else(overflow)?),
+        "microsecond" => (0, 0, amount),
+        _ => return cast_failure("Text", &ResolvedType::Interval, "invalid interval unit"),
+    };
+    let months = month_numerator / scale;
+    let day_numerator = day_numerator
+        .checked_add(
+            (month_numerator % scale)
+                .checked_mul(30)
+                .ok_or_else(overflow)?,
+        )
+        .ok_or_else(overflow)?;
+    let days = day_numerator / scale;
+    let micro_numerator = micro_numerator
+        .checked_add(
+            (day_numerator % scale)
+                .checked_mul(86_400_000_000)
+                .ok_or_else(overflow)?,
+        )
+        .ok_or_else(overflow)?;
+    let micros = if micro_numerator >= 0 {
+        micro_numerator
+            .checked_add(scale / 2)
+            .ok_or_else(overflow)?
+            / scale
+    } else {
+        micro_numerator
+            .checked_sub(scale / 2)
+            .ok_or_else(overflow)?
+            / scale
+    };
+    Ok((
+        i32::try_from(months).map_err(|_| overflow())?,
+        i32::try_from(days).map_err(|_| overflow())?,
+        i64::try_from(micros).map_err(|_| overflow())?,
+    ))
 }
 
 fn epoch_micros_from_float(value: f64, source: &str) -> Result<i64> {

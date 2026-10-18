@@ -28,7 +28,9 @@ pub mod join;
 mod knn;
 mod project;
 mod scan;
+pub(crate) mod statement_subqueries;
 pub mod subquery;
+mod subquery_plan;
 pub mod window;
 
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
@@ -286,6 +288,9 @@ struct RecursiveWorkingTable {
 struct QueryExecutionContext {
     recursive_tables: HashMap<String, RecursiveWorkingTable>,
     copy_security: Option<CopySecurityConfig>,
+    statement_subqueries:
+        Option<std::rc::Rc<std::cell::RefCell<statement_subqueries::StatementSubqueries>>>,
+    subquery_ids: HashMap<usize, usize>,
 }
 
 struct RecursiveCteExecution {
@@ -672,10 +677,12 @@ fn execute_recursive_cte_result<
                 schema: schema.clone(),
             },
         );
+        let cloned_term = recursive_term.clone();
+        let iteration_context = iteration_context.for_plan_clone(&recursive_term, &cloned_term);
         let recursive_result = execute_query_result_with_context(
             txn,
             catalog,
-            recursive_term.clone(),
+            cloned_term,
             outer,
             memory,
             &iteration_context,
@@ -887,6 +894,7 @@ fn build_iterator_pipeline_with_outer<
     Vec<crate::catalog::ColumnMetadata>,
 )> {
     if outer.is_none()
+        && (context.statement_subqueries.is_none() || !subquery::plan_contains_subquery(&plan))
         && let Some(result) = build_primary_key_ordered_limit(txn, catalog, &plan)?
     {
         return Ok(result);
@@ -986,7 +994,7 @@ fn build_iterator_pipeline_with_outer<
             Ok((Box::new(iterator), projection, schema))
         }
         LogicalPlan::Filter { input, predicate } => {
-            if let LogicalPlan::Scan { table, projection } = input.as_ref()
+            if let LogicalPlan::Scan { table, .. } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
                 && table_meta.storage_options.storage_type == StorageType::Columnar
             {
@@ -998,7 +1006,11 @@ fn build_iterator_pipeline_with_outer<
                 // over a scan widened to the local columns they read
                 // (issue #151, D15).
                 let evaluated_here = outer.is_some() || subquery::contains_subquery(&predicate);
-                let projection = projection.clone();
+                // Move boxed subqueries into the returned pipeline so their
+                // identities stay valid throughout projection evaluation.
+                let LogicalPlan::Scan { projection, .. } = *input else {
+                    unreachable!()
+                };
                 let schema = table_meta.columns.clone();
                 let columnar_scan = if evaluated_here {
                     columnar_scan::build_columnar_scan_for_external_filter(
@@ -1034,7 +1046,9 @@ fn build_iterator_pipeline_with_outer<
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
-                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let LogicalPlan::Scan {
+                    table, projection, ..
+                } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
                 && table_meta.storage_options.storage_type == StorageType::Row
                 && let Some((column, index_predicate)) = index_predicate(&predicate, table_meta)
@@ -1051,7 +1065,7 @@ fn build_iterator_pipeline_with_outer<
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
-                && let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let LogicalPlan::Scan { table, .. } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
                 && let Some(rows) = (crate::executor::dml::lookup_primary_key_equality(
                     txn, catalog, table_meta, &predicate,
@@ -1062,9 +1076,12 @@ fn build_iterator_pipeline_with_outer<
             {
                 let schema = table_meta.columns.clone();
                 let iter = iterator::VecIterator::new(rows, schema.clone());
+                let LogicalPlan::Scan { projection, .. } = *input else {
+                    unreachable!()
+                };
                 return Ok((
                     Box::new(FilterIterator::new(iter, predicate)),
-                    projection.clone(),
+                    projection,
                     schema,
                 ));
             }
@@ -1190,12 +1207,10 @@ fn build_iterator_pipeline_with_outer<
             let iter = iterator::VecIterator::new(rows, schema.clone());
             Ok((Box::new(iter), projection, schema))
         }
-        LogicalPlan::TableFunction {
-            function,
-            args,
-            schema,
-        } => {
-            let rows = execute_table_function(txn, catalog, function, &args, outer, context)?;
+        ref table_function @ LogicalPlan::TableFunction { ref schema, .. } => {
+            let rows =
+                execute_table_function(txn, catalog, table_function, outer, memory, context)?;
+            let schema = schema.clone();
             let projection =
                 Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             let iter = iterator::VecIterator::new(rows, schema.clone());
@@ -1971,13 +1986,15 @@ fn execute_lateral_join<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<
         // The correlated side reads the left row through the outer-row
         // convention shared with correlated subqueries.
         let eval_outer = combine_outer_for_eval(&left_row, outer);
+        let cloned_right = right.clone();
+        let right_context = context.for_plan_clone(right, &cloned_right);
         let right_result = execute_query_result_with_context(
             txn,
             catalog,
-            right.clone(),
+            cloned_right,
             Some(&eval_outer),
             memory,
-            context,
+            &right_context,
         )?;
         let mut matched = false;
         for right_values in right_result.rows {
@@ -2014,13 +2031,22 @@ fn execute_lateral_join<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<
 fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
-    function: crate::planner::TableFunctionKind,
-    args: &[crate::planner::typed_expr::TypedExpr],
+    plan: &LogicalPlan,
     outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
     context: &QueryExecutionContext,
 ) -> Result<Vec<Row>> {
     use crate::planner::TableFunctionKind;
 
+    let LogicalPlan::TableFunction {
+        function,
+        args,
+        schema,
+    } = plan
+    else {
+        unreachable!("table function execution requires a table function plan");
+    };
+    let function = *function;
     let empty = Row::new(0, Vec::new());
     let eval_row = combine_outer_for_eval(&empty, outer);
     let mut values = Vec::with_capacity(args.len());
@@ -2098,11 +2124,13 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     reason: "requires a TEXT path".into(),
                 });
             };
-            let result = match &context.copy_security {
-                Some(config) => crate::executor::bulk::read_parquet_with_security(path, config),
-                None => crate::executor::bulk::read_parquet(path),
-            };
-            result.map(|(_, rows)| {
+            crate::executor::bulk::read_parquet_with_plan(
+                path,
+                schema,
+                context.copy_security.as_ref(),
+                memory,
+            )
+            .map(|rows| {
                 rows.into_iter()
                     .enumerate()
                     .map(|(index, values)| Row::new(index as u64, values))
@@ -2645,6 +2673,10 @@ mod tests {
         let queries = [
             format!("SELECT (SELECT id FROM read_parquet('{path}'))"),
             format!("SELECT 1 = ANY (SELECT id FROM read_parquet('{path}'))"),
+            format!("SELECT COALESCE((SELECT id FROM read_parquet('{path}')), 0)"),
+            format!("SELECT IFNULL((SELECT id FROM read_parquet('{path}')), 0)"),
+            format!("SELECT -(SELECT id FROM read_parquet('{path}'))"),
+            format!("SELECT (SELECT id FROM read_parquet('{path}')) IS NULL"),
         ];
         let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
         let catalog = MemoryCatalog::new();

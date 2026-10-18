@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::{Arc, RwLock};
 
 use alopex_core::KVStore;
@@ -10,8 +11,11 @@ use alopex_sql::Parser;
 use alopex_sql::Planner;
 use alopex_sql::SqlValue;
 use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
-use alopex_sql::executor::{ExecutionResult, Executor};
-use alopex_sql::storage::TxnBridge;
+use alopex_sql::executor::{ConstraintViolation, ExecutionResult, Executor, ExecutorError};
+use alopex_sql::storage::{BorrowedSqlTransaction, SqlTxn, TxnBridge};
+
+#[path = "support/legacy_index_recovery.rs"]
+mod legacy_recovery;
 
 fn run_sql_in_txn(
     store: Arc<MemoryKV>,
@@ -52,6 +56,252 @@ fn run_sql_in_txn(
     }
 
     last
+}
+
+fn postload_unique_csv(contents: &str) -> (tempfile::NamedTempFile, String) {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(contents.as_bytes()).unwrap();
+    file.flush().unwrap();
+    let sql = format!(
+        "COPY events FROM '{}' WITH (FORMAT CSV, HEADER TRUE)",
+        file.path().to_str().unwrap().replace('\'', "''")
+    );
+    (file, sql)
+}
+
+fn postload_kv<'a>(txn: &mut impl KVTransaction<'a>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    txn.scan_prefix(&[]).unwrap().collect()
+}
+
+fn postload_execute_borrowed(
+    executor: &mut Executor<MemoryKV, PersistentCatalog<MemoryKV>>,
+    catalog: &Arc<RwLock<PersistentCatalog<MemoryKV>>>,
+    borrowed: &mut BorrowedSqlTransaction<'_, '_, '_, MemoryKV>,
+    sql: &str,
+) -> Result<ExecutionResult, ExecutorError> {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+    assert_eq!(statements.len(), 1);
+    let plan = {
+        let guard = catalog.read().unwrap();
+        let (_, overlay) = borrowed.split_parts();
+        Planner::new(&TxnCatalogView::new(&*guard, overlay))
+            .plan(&statements[0])
+            .unwrap()
+    };
+    executor.execute_in_txn(plan, borrowed)
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_columnar_unique_rejection_preserves_borrowed_prior_write() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE events (id INT) WITH (storage='columnar'); \
+         CREATE TABLE keeper (id INT PRIMARY KEY, note TEXT);",
+    );
+    let (_csv, copy_sql) = postload_unique_csv("id\n1\n1\n");
+    assert_eq!(
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            &copy_sql
+        ),
+        ExecutionResult::RowsAffected(2)
+    );
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let committed_before = postload_kv(&mut txn);
+    let mut overlay = CatalogOverlay::new();
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    let pending;
+    {
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        assert_eq!(
+            postload_execute_borrowed(
+                &mut executor,
+                &catalog,
+                &mut borrowed,
+                "INSERT INTO keeper VALUES (7, 'prior')",
+            )
+            .unwrap(),
+            ExecutionResult::RowsAffected(1)
+        );
+        pending = {
+            let (mut sql_txn, _) = borrowed.split_parts();
+            postload_kv(sql_txn.inner_mut())
+        };
+        assert_ne!(pending, committed_before, "prior write must be pending");
+        let result = postload_execute_borrowed(
+            &mut executor,
+            &catalog,
+            &mut borrowed,
+            "CREATE UNIQUE INDEX uq_events ON events(id)",
+        );
+        eprintln!("borrowed CREATE UNIQUE result={result:?}");
+        assert!(matches!(
+            &result,
+            Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique {
+                index_name, columns, ..
+            })) if index_name == "uq_events" && columns == &["id"]
+        ));
+        let (mut sql_txn, overlay) = borrowed.split_parts();
+        assert_eq!(postload_kv(sql_txn.inner_mut()), pending);
+        let guard = catalog.read().unwrap();
+        assert!(
+            TxnCatalogView::new(&*guard, overlay)
+                .get_index("uq_events")
+                .is_none()
+        );
+        assert!(guard.get_index("uq_events").is_none());
+    }
+    // The caller commits its earlier INSERT instead of rolling back the transaction.
+    txn.commit_self().unwrap();
+    catalog.write().unwrap().apply_overlay(overlay);
+    let reloaded = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    assert!(reloaded.read().unwrap().get_index("uq_events").is_none());
+    let mut read = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(postload_kv(&mut read), pending);
+    read.rollback_self().unwrap();
+    let ExecutionResult::Query(keeper) = run_sql_in_txn(
+        store.clone(),
+        reloaded.clone(),
+        TxnMode::ReadOnly,
+        "SELECT id, note FROM keeper ORDER BY id",
+    ) else {
+        panic!("expected committed prior write");
+    };
+    assert_eq!(
+        keeper.rows,
+        vec![vec![SqlValue::Integer(7), SqlValue::Text("prior".into())]]
+    );
+    let ExecutionResult::Query(events) = run_sql_in_txn(
+        store,
+        reloaded,
+        TxnMode::ReadOnly,
+        "SELECT id FROM events ORDER BY id",
+    ) else {
+        panic!("expected preserved columnar rows");
+    };
+    assert_eq!(
+        events.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_columnar_unique_reload_rejects_duplicate_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("columnar_unique.wal");
+    let expected_index_id = {
+        let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            "CREATE TABLE events (id INT) WITH (storage='columnar')",
+        );
+        let (_csv, copy_sql) = postload_unique_csv("id\n1\n2\n");
+        assert_eq!(
+            run_sql_in_txn(
+                store.clone(),
+                catalog.clone(),
+                TxnMode::ReadWrite,
+                &copy_sql
+            ),
+            ExecutionResult::RowsAffected(2)
+        );
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let mut overlay = CatalogOverlay::new();
+        let index_id;
+        {
+            let mut borrowed =
+                TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+            let mut executor = Executor::new(store.clone(), catalog.clone());
+            assert_eq!(
+                postload_execute_borrowed(
+                    &mut executor,
+                    &catalog,
+                    &mut borrowed,
+                    "CREATE UNIQUE INDEX uq_events ON events(id)",
+                )
+                .unwrap(),
+                ExecutionResult::Success
+            );
+            let guard = catalog.read().unwrap();
+            assert!(guard.get_index("uq_events").is_none());
+            let (_, overlay) = borrowed.split_parts();
+            let view = TxnCatalogView::new(&*guard, overlay);
+            let index = view.get_index("uq_events").unwrap();
+            assert!(index.unique);
+            index_id = index.index_id;
+        }
+        txn.commit_self().unwrap();
+        catalog.write().unwrap().apply_overlay(overlay);
+        index_id
+    };
+
+    // Reopen the real WAL and reconstruct catalog metadata; do not reuse its cache.
+    let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::load(store.clone()).unwrap()));
+    {
+        let guard = catalog.read().unwrap();
+        let index = guard.get_index("uq_events").unwrap();
+        assert!(index.unique);
+        assert_eq!(index.index_id, expected_index_id);
+        assert_eq!(index.table, "events");
+        assert_eq!(index.columns, vec!["id"]);
+        assert_eq!(index.column_indices, vec![0]);
+    }
+    let (_csv, copy_sql) = postload_unique_csv("id\n2\n3\n");
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let before = postload_kv(&mut txn);
+    let mut overlay = CatalogOverlay::new();
+    {
+        let mut borrowed =
+            TxnBridge::<MemoryKV>::wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let mut executor = Executor::new(store.clone(), catalog.clone());
+        let result = postload_execute_borrowed(&mut executor, &catalog, &mut borrowed, &copy_sql);
+        eprintln!("reloaded UNIQUE duplicate COPY result={result:?}");
+        assert!(matches!(
+            &result,
+            Err(ExecutorError::ConstraintViolation(ConstraintViolation::Unique {
+                index_name, columns, ..
+            })) if index_name == "uq_events" && columns == &["id"]
+        ));
+        let (mut sql_txn, overlay) = borrowed.split_parts();
+        assert_eq!(postload_kv(sql_txn.inner_mut()), before);
+        let guard = catalog.read().unwrap();
+        assert!(
+            TxnCatalogView::new(&*guard, overlay)
+                .get_index("uq_events")
+                .unwrap()
+                .unique
+        );
+    }
+    txn.commit_self().unwrap();
+    catalog.write().unwrap().apply_overlay(overlay);
+    let mut read = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(postload_kv(&mut read), before);
+    read.rollback_self().unwrap();
+    let ExecutionResult::Query(events) = run_sql_in_txn(
+        store,
+        catalog,
+        TxnMode::ReadOnly,
+        "SELECT id FROM events ORDER BY id",
+    ) else {
+        panic!("expected unchanged columnar rows after rejected COPY");
+    };
+    assert_eq!(
+        events.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -168,6 +418,157 @@ fn persistence_test_default_survives_restart() {
     assert_eq!(query.rows[1][1], SqlValue::Integer(0));
     assert!(matches!(query.rows[0][2], SqlValue::Timestamp(_)));
     assert!(matches!(query.rows[1][2], SqlValue::Timestamp(_)));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_metadata_properties_do_not_escape_after_reload() {
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7, CHECK (qty >= 0));",
+    );
+    let mut before = catalog.read().unwrap().get_table("items").unwrap().clone();
+    before
+        .properties
+        .insert("app.owner".to_owned(), "catalog-test".to_owned());
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    catalog
+        .write()
+        .unwrap()
+        .persist_create_table(&mut txn, &before)
+        .unwrap();
+    txn.commit_self().unwrap();
+    let loaded = PersistentCatalog::load(store).unwrap();
+    let after = loaded.get_table("items").unwrap();
+    assert_eq!(after.properties, before.properties);
+    assert_eq!(
+        serde_json::to_value(&after.constraints).unwrap(),
+        serde_json::to_value(&before.constraints).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&after.columns[1].default).unwrap(),
+        serde_json::to_value(&before.columns[1].default).unwrap()
+    );
+    assert!(after.columns[1].default.is_some());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_invalid_properties_fail_instead_of_losing_defaults() {
+    use alopex_core::storage::format::bincode_config;
+    use alopex_sql::ast::expr::{Expr, ExprKind, Literal};
+    use alopex_sql::catalog::RELATIONAL_CONSTRAINTS_PROPERTY;
+    use alopex_sql::catalog::persistent::{PersistedTableMeta, TABLES_PREFIX};
+    use bincode::Options;
+    use std::collections::HashMap;
+
+    // This is the JSON produced by the previous writer for a non-finite vector.
+    let non_finite_default = serde_json::to_string(&HashMap::from([(
+        "qty",
+        Expr::new(
+            ExprKind::VectorLiteral {
+                values: vec![f64::NAN],
+            },
+            Default::default(),
+        ),
+    )]))
+    .unwrap();
+    let unknown_column_default = serde_json::to_string(&HashMap::from([(
+        "removed_column",
+        Expr::new(
+            ExprKind::Literal {
+                literal: Literal::Number("7".into()),
+            },
+            Default::default(),
+        ),
+    )]))
+    .unwrap();
+    for (property, payload) in [
+        ("alopex.column.defaults", "not valid JSON".to_owned()),
+        ("alopex.column.defaults", non_finite_default),
+        ("alopex.column.defaults", unknown_column_default),
+        (RELATIONAL_CONSTRAINTS_PROPERTY, "not valid JSON".to_owned()),
+    ] {
+        let store = Arc::new(MemoryKV::new());
+        let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+        run_sql_in_txn(
+            store.clone(),
+            catalog.clone(),
+            TxnMode::ReadWrite,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7);",
+        );
+        let table = catalog.read().unwrap().get_table("items").unwrap().clone();
+        let mut persisted = PersistedTableMeta::try_from(&table).unwrap();
+        persisted.properties.insert(property.to_owned(), payload);
+        let mut key = TABLES_PREFIX.to_vec();
+        key.extend_from_slice(
+            format!(
+                "{}/{}/{}",
+                table.catalog_name, table.namespace_name, table.name
+            )
+            .as_bytes(),
+        );
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let original = bincode_config().serialize(&persisted).unwrap();
+        txn.put(key.clone(), original.clone()).unwrap();
+        txn.commit_self().unwrap();
+
+        assert!(
+            PersistentCatalog::load(store.clone()).is_err(),
+            "invalid {property} must not silently load a table with missing defaults/constraints"
+        );
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(txn.get(&key).unwrap(), Some(original));
+        txn.rollback_self().unwrap();
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn persistence_test_default_unrepresentable_expression_is_rejected_before_write() {
+    use alopex_sql::ast::expr::{Expr, ExprKind};
+    use alopex_sql::catalog::persistent::TABLES_PREFIX;
+
+    let store = Arc::new(MemoryKV::new());
+    let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
+    run_sql_in_txn(
+        store.clone(),
+        catalog.clone(),
+        TxnMode::ReadWrite,
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 7, v VECTOR(1));",
+    );
+    let mut table = catalog.read().unwrap().get_table("items").unwrap().clone();
+    table.columns[2].default = Some(Expr::new(
+        ExprKind::VectorLiteral {
+            values: vec![f64::NAN],
+        },
+        Default::default(),
+    ));
+    let mut key = TABLES_PREFIX.to_vec();
+    key.extend_from_slice(
+        format!(
+            "{}/{}/{}",
+            table.catalog_name, table.namespace_name, table.name
+        )
+        .as_bytes(),
+    );
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let before = txn.get(&key).unwrap();
+    assert!(before.is_some());
+    assert!(
+        catalog
+            .write()
+            .unwrap()
+            .persist_create_table(&mut txn, &table)
+            .is_err(),
+        "unrepresentable defaults must be rejected before replacing valid metadata"
+    );
+    assert_eq!(txn.get(&key).unwrap(), before);
+    txn.rollback_self().unwrap();
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

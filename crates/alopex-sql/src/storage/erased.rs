@@ -12,6 +12,7 @@ pub trait ErasedAsyncSqlTransaction: MaybeSend + 'static {
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>>;
     fn plan_for_routing<'a>(&'a self, sql: &'a str)
     -> BoxFuture<'a, Result<Vec<PlannedStatement>>>;
+    fn wait_for_idle(&self) -> BoxFuture<'_, Result<()>>;
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<()>>;
     fn rollback_boxed(self: Box<Self>) -> BoxFuture<'static, Result<()>>;
 }
@@ -40,6 +41,10 @@ where
         sql: &'a str,
     ) -> BoxFuture<'a, Result<Vec<PlannedStatement>>> {
         self.async_plan_for_routing(sql)
+    }
+
+    fn wait_for_idle(&self) -> BoxFuture<'_, Result<()>> {
+        self.async_wait_for_idle()
     }
 
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<()>> {

@@ -137,7 +137,7 @@ pub(crate) fn execute_knn_query_with_stats<'txn, S: KVStore + 'txn, C: Catalog +
             pattern,
             filter,
         )?;
-        order_entries(&mut entries, higher_is_better);
+        order_entries(&mut entries);
         let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
         let projected = project::execute_project(rows, projection, &table_meta.columns)?;
         return Ok((ExecutionResult::Query(projected), stats));
@@ -152,7 +152,7 @@ pub(crate) fn execute_knn_query_with_stats<'txn, S: KVStore + 'txn, C: Catalog +
         vector_idx,
         higher_is_better,
     )?;
-    order_entries(&mut entries, higher_is_better);
+    order_entries(&mut entries);
     let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
     let projected = project::execute_project(rows, projection, &table_meta.columns)?;
     Ok((
@@ -261,15 +261,16 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
     let mut effective_ef_search = 0;
 
     loop {
-        let ef_search = configured_ef_search.unwrap_or_else(|| requested.max(50));
-        effective_ef_search = effective_ef_search.max(ef_search);
-        let (hits, search_stats) = HnswBridge::search_knn(
+        let (hits, search_stats, actual_ef) = HnswBridge::search_knn(
             txn,
             &index.name,
             &pattern.query_vector,
             requested,
-            Some(ef_search),
+            configured_ef_search,
         )?;
+        // Report the largest breadth actually searched across retry attempts,
+        // not the configured value or the uncapped internal request.
+        effective_ef_search = effective_ef_search.max(actual_ef);
         hnsw_stats.nodes_visited = hnsw_stats
             .nodes_visited
             .saturating_add(search_stats.nodes_visited);
@@ -291,12 +292,17 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
                     continue;
                 }
                 if let Some(score) = score_row(&row, vector_idx, pattern)? {
-                    entries.push(HeapEntry::new(score, row, higher_is_better));
+                    entries.push(HeapEntry::new(Some(score), row, higher_is_better));
                 }
             }
         }
-        if filter.is_none() || entries.len() >= pattern.k as usize || exhausted {
-            if filter.is_some() && entries.len() < pattern.k as usize {
+        let next = requested.saturating_mul(2);
+        if filter.is_none() || entries.len() >= pattern.k as usize || exhausted || next == requested
+        {
+            // The index stores only non-NULL vectors. A short result must use
+            // the SQL scan to include eligible NULL rows after scored rows,
+            // even when this query has no WHERE predicate.
+            if entries.len() < pattern.k as usize {
                 let entries = execute_heap_scan(
                     txn,
                     table_meta,
@@ -315,19 +321,8 @@ fn execute_hnsw_search_with_stats<'txn, S: KVStore + 'txn>(
                     },
                 ));
             }
-            order_entries(&mut entries, higher_is_better);
+            order_entries(&mut entries);
             entries.truncate(pattern.k as usize);
-            return Ok((
-                entries,
-                KnnExecutionStats {
-                    hnsw_stats: Some(hnsw_stats),
-                    ef_search: Some(effective_ef_search),
-                    fallback: false,
-                },
-            ));
-        }
-        let next = requested.saturating_mul(2);
-        if next == requested {
             return Ok((
                 entries,
                 KnnExecutionStats {
@@ -395,11 +390,12 @@ fn collect_heap_entries(
             {
                 return Ok(None);
             }
-            score_row(&row, vector_idx, pattern)
+            let score = score_row(&row, vector_idx, pattern)?;
+            Ok(Some(HeapEntry::new(score, row, higher_is_better)))
         })();
         match score {
-            Ok(Some(score)) => {
-                retain_top_k(&mut heap, HeapEntry::new(score, row, higher_is_better), k);
+            Ok(Some(entry)) => {
+                retain_top_k(&mut heap, entry, k);
             }
             Ok(None) => {}
             Err(error) => evaluation_error = Some(error),
@@ -489,14 +485,8 @@ fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<Optio
         .map_err(|e| ExecutorError::Evaluation(e.into()))
 }
 
-fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {
-    entries.sort_by(|a, b| {
-        if higher_is_better {
-            b.score.total_cmp(&a.score)
-        } else {
-            a.score.total_cmp(&b.score)
-        }
-    });
+fn order_entries(entries: &mut [HeapEntry]) {
+    entries.sort();
 }
 
 fn materialize_rows_by_id<'txn, S: KVStore + 'txn>(
@@ -780,13 +770,13 @@ fn find_hnsw_index<C: Catalog + ?Sized>(
 
 #[derive(Debug)]
 struct HeapEntry {
-    score: f64,
+    score: Option<f64>,
     row: Row,
     higher_is_better: bool,
 }
 
 impl HeapEntry {
-    fn new(score: f64, row: Row, higher_is_better: bool) -> Self {
+    fn new(score: Option<f64>, row: Row, higher_is_better: bool) -> Self {
         Self {
             score,
             row,
@@ -797,8 +787,7 @@ impl HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.higher_is_better == other.higher_is_better
-            && self.score.total_cmp(&other.score) == Ordering::Equal
+        self.higher_is_better == other.higher_is_better && self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -812,10 +801,14 @@ impl PartialOrd for HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.higher_is_better {
-            other.score.total_cmp(&self.score)
-        } else {
-            self.score.total_cmp(&other.score)
+        // The max-heap root is the worst candidate; NULL is always last for
+        // this path. NULLS FIRST remains owned by the ordinary SQL sort.
+        match (self.score, other.score) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) if self.higher_is_better => right.total_cmp(&left),
+            (Some(left), Some(right)) => left.total_cmp(&right),
         }
     }
 }
@@ -961,8 +954,15 @@ mod tests {
                     .map(|entry| entry.row.row_id)
                     .collect::<Vec<_>>();
                 ids.sort();
-                assert_eq!(ids, vec![0, u64::MAX]);
-                assert!(entries.iter().all(|entry| entry.score == 1.0));
+                assert_eq!(ids, vec![0, 1, u64::MAX]);
+                assert!(entries.iter().all(|entry| {
+                    entry.score
+                        == if entry.row.row_id == 1 {
+                            None
+                        } else {
+                            Some(1.0)
+                        }
+                }));
             }
         }
     }

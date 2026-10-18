@@ -24,11 +24,10 @@ use uuid::Uuid;
 use crate::error::{Result, ServerError};
 use crate::http::sql::{
     execute_non_session_statement_with_routing, execute_session_statement_with_routing,
-    sync_catalog_to_store,
 };
 use crate::metrics::Metrics;
 use crate::ops::memory::MemoryControlPolicy;
-use crate::server::ServerState;
+use crate::server::{ServerState, SessionFinalizationAction};
 use crate::session::SessionId;
 use crate::tls;
 
@@ -377,7 +376,7 @@ impl AlopexService for AlopexServiceImpl {
                 }
             };
             let exec_result = execute_session_statement_with_routing(
-                &self.state,
+                self.state.clone(),
                 &session_id,
                 &req.sql,
                 &ctx.correlation_id,
@@ -395,7 +394,7 @@ impl AlopexService for AlopexServiceImpl {
             }
         } else {
             match execute_non_session_statement_with_routing(
-                &self.state,
+                self.state.clone(),
                 &req.sql,
                 &ctx.correlation_id,
                 self.state.config.query_timeout,
@@ -415,12 +414,6 @@ impl AlopexService for AlopexServiceImpl {
             self.state
                 .audit
                 .log_ddl(&req.sql, ctx.actor.as_deref(), &ctx.correlation_id);
-        }
-        if req.session_id.is_empty() {
-            if let Err(err) = sync_catalog_to_store(&self.state) {
-                self.state.metrics.record_query(start.elapsed(), false);
-                return Err(map_status(err, &ctx.correlation_id));
-            }
         }
         self.state.metrics.record_query(start.elapsed(), true);
         match exec_result {
@@ -454,7 +447,7 @@ impl AlopexService for AlopexServiceImpl {
                 }
             };
             let exec_result = execute_session_statement_with_routing(
-                &self.state,
+                self.state.clone(),
                 &session_id,
                 &req.sql,
                 &ctx.correlation_id,
@@ -472,7 +465,7 @@ impl AlopexService for AlopexServiceImpl {
             }
         } else {
             match execute_non_session_statement_with_routing(
-                &self.state,
+                self.state.clone(),
                 &req.sql,
                 &ctx.correlation_id,
                 self.state.config.query_timeout,
@@ -544,19 +537,10 @@ impl AlopexService for AlopexServiceImpl {
             .session_id
             .parse::<SessionId>()
             .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        let effects = self
-            .state
-            .session_manager
-            .commit(&session_id)
+        self.state
+            .finalize_session(&session_id, SessionFinalizationAction::Commit)
             .await
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        if !effects.is_empty() {
-            self.state
-                .apply_table_lifecycle_effects(effects)
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
-            sync_catalog_to_store(&self.state)
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        }
         Ok(Response::new(proto::CommitResponse { success: true }))
     }
 
@@ -571,14 +555,9 @@ impl AlopexService for AlopexServiceImpl {
             .session_id
             .parse::<SessionId>()
             .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        let effects = self
-            .state
-            .session_manager
-            .rollback(&session_id)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
         self.state
-            .apply_catalog_rollback_effects(effects)
+            .finalize_session(&session_id, SessionFinalizationAction::Rollback)
+            .await
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
         Ok(Response::new(proto::RollbackResponse { success: true }))
     }
@@ -875,9 +854,10 @@ impl SharedSessionGuard {
         let Some(session_id) = self.session_id.take() else {
             return;
         };
-        if let Ok(effects) = self.state.session_manager.rollback(&session_id).await {
-            let _ = self.state.apply_catalog_rollback_effects(effects);
-        }
+        let _ = self
+            .state
+            .finalize_session(&session_id, SessionFinalizationAction::Rollback)
+            .await;
     }
 }
 
@@ -887,11 +867,7 @@ impl Drop for SharedSessionGuard {
             return;
         };
         let state = self.state.clone();
-        tokio::spawn(async move {
-            if let Ok(effects) = state.session_manager.rollback(&session_id).await {
-                let _ = state.apply_catalog_rollback_effects(effects);
-            }
-        });
+        drop(state.finalize_session(&session_id, SessionFinalizationAction::Rollback));
     }
 }
 
@@ -1004,7 +980,7 @@ async fn execute_shared_request(
                                     .as_ref()
                                     .expect("shared session was opened");
                                 match execute_session_statement_with_routing(
-                                    &state,
+                                    state.clone(),
                                     session_id,
                                     &sql,
                                     correlation_id,
@@ -1028,7 +1004,7 @@ async fn execute_shared_request(
                 "commit barrier follows a successful commit barrier",
             ),
             ExecutionStepKind::CommitBarrier => {
-                let Some(session_id) = session.session_id.as_ref() else {
+                let Some(session_id) = session.session_id.clone() else {
                     let outcome = shared_step_error(
                         ExecutionStepErrorKind::Commit,
                         "commit barrier requires a transaction statement",
@@ -1045,9 +1021,12 @@ async fn execute_shared_request(
                 match shared_step_timeout(deadline, state.config.query_timeout) {
                     Err(message) => shared_step_error(ExecutionStepErrorKind::Commit, message),
                     Ok(timeout) => {
-                        let commit =
-                            tokio::time::timeout(timeout, state.session_manager.commit(session_id))
-                                .await;
+                        session.disarm();
+                        let commit = tokio::time::timeout(
+                            timeout,
+                            state.finalize_session(&session_id, SessionFinalizationAction::Commit),
+                        )
+                        .await;
                         match commit {
                             Err(_) => shared_step_error(
                                 ExecutionStepErrorKind::Commit,
@@ -1056,26 +1035,11 @@ async fn execute_shared_request(
                             Ok(Err(error)) => {
                                 shared_step_error(ExecutionStepErrorKind::Commit, error)
                             }
-                            Ok(Ok(effects)) => {
-                                session.disarm();
-                                let publish = if effects.is_empty() {
-                                    Ok(())
-                                } else {
-                                    state
-                                        .apply_table_lifecycle_effects(effects)
-                                        .and_then(|()| sync_catalog_to_store(&state))
-                                };
-                                match publish {
-                                    Ok(()) => {
-                                        committed = true;
-                                        ExecutionStepOutcome::Commit(CommitMetadata {
-                                            transaction_id: transaction_id.clone(),
-                                        })
-                                    }
-                                    Err(error) => {
-                                        shared_step_error(ExecutionStepErrorKind::Commit, error)
-                                    }
-                                }
+                            Ok(Ok(())) => {
+                                committed = true;
+                                ExecutionStepOutcome::Commit(CommitMetadata {
+                                    transaction_id: transaction_id.clone(),
+                                })
                             }
                         }
                     }
@@ -1094,7 +1058,7 @@ async fn execute_shared_request(
                         }
                         Ok(timeout) => {
                             match execute_non_session_statement_with_routing(
-                                &state,
+                                state.clone(),
                                 &sql,
                                 correlation_id,
                                 timeout,

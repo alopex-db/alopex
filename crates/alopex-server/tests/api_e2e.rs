@@ -395,7 +395,7 @@ async fn server_binary_exposes_all_http_apis() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = send_json(
+    let (status, body) = send_json(
         &client,
         Method::POST,
         &format!("{http_url}/vector/index/update"),
@@ -407,7 +407,7 @@ async fn server_binary_exposes_all_http_apis() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{body}");
     let (status, _) = send_json(
         &client,
         Method::POST,

@@ -34,6 +34,8 @@ lane_fuzz = []
 # Forward-compatible table-function coverage kept out of the v0.8.9 gate.
 generate_series = []
 [dependencies]
+cap-primitives = "=4.0.3"
+cap-fs-ext = { version = "=4.0.3", default-features = false }
 thiserror = "2.0"
 regex = "1.11"
 csv = "1.3"

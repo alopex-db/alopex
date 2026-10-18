@@ -1,5 +1,6 @@
 use std::fs::File;
 
+use alopex_core::sql::stream::ByteSized;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
@@ -10,12 +11,13 @@ use arrow_array::{
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
-use crate::catalog::TableMetadata;
+use crate::catalog::{ColumnMetadata, TableMetadata};
+use crate::executor::memory::{MemoryPolicy, map_core_memory_error};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::SqlValue;
 
-use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, validate_file_path};
+use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_file};
 
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
@@ -31,6 +33,10 @@ impl ParquetReader {
         let file = File::open(path)
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to open parquet: {e}")))?;
 
+        Self::from_file(file, table_meta)
+    }
+
+    fn from_file(file: File, table_meta: &TableMetadata) -> Result<Self> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
             ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
         })?;
@@ -70,6 +76,10 @@ impl ParquetReader {
 pub fn parquet_schema(path: &str) -> Result<CopySchema> {
     let file = File::open(path)
         .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?;
+    parquet_schema_from_file(file)
+}
+
+fn parquet_schema_from_file(file: File) -> Result<CopySchema> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
         ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
     })?;
@@ -91,8 +101,7 @@ pub(crate) fn parquet_schema_with_security(
     path: &str,
     config: &CopySecurityConfig,
 ) -> Result<CopySchema> {
-    validate_file_path(path, config)?;
-    parquet_schema(path)
+    parquet_schema_from_file(open_input_file(path, config)?)
 }
 
 pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
@@ -119,12 +128,60 @@ pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
     Ok((schema, rows))
 }
 
-pub(crate) fn read_parquet_with_security(
+/// Read against SQL's planned types, accounting for decoded value payloads.
+/// This does not bound Arrow decoding allocations or row/container overhead.
+pub(crate) fn read_parquet_with_plan(
     path: &str,
-    config: &CopySecurityConfig,
-) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
-    validate_file_path(path, config)?;
-    read_parquet(path)
+    planned: &[ColumnMetadata],
+    security: Option<&CopySecurityConfig>,
+    memory: Option<&MemoryPolicy>,
+) -> Result<Vec<Vec<SqlValue>>> {
+    let file = match security {
+        Some(config) => open_input_file(path, config)?,
+        None => File::open(path)
+            .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
+    };
+    let table = TableMetadata::new("read_parquet", planned.to_vec());
+    let mut reader = ParquetReader::from_file(file, &table)?;
+    let actual = reader.schema();
+    if actual.fields.len() != planned.len() {
+        return Err(ExecutorError::SchemaMismatch {
+            expected: planned.len(),
+            actual: actual.fields.len(),
+            reason: "READ_PARQUET column count changed after planning".into(),
+        });
+    }
+    for (position, (field, column)) in actual.fields.iter().zip(planned).enumerate() {
+        // SQL aliases change planned names, not the source's positional types.
+        if field.data_type.as_ref() != Some(&column.data_type) {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: planned.len(),
+                actual: actual.fields.len(),
+                reason: format!("READ_PARQUET column {position} type changed after planning"),
+            });
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut payload_bytes = 0_u64;
+    while let Some(batch) = reader.next_batch(1024)? {
+        for row in batch {
+            if let Some(policy) = memory {
+                for value in &row {
+                    payload_bytes = payload_bytes
+                        .checked_add(value.estimated_bytes())
+                        .ok_or_else(|| ExecutorError::ResourceExhausted {
+                            message: "READ_PARQUET payload size overflow".into(),
+                        })?;
+                }
+                policy
+                    .enforce(payload_bytes)
+                    .map_err(map_core_memory_error)?;
+            }
+            rows.push(row);
+        }
+    }
+    Ok(rows)
 }
 
 impl BulkReader for ParquetReader {

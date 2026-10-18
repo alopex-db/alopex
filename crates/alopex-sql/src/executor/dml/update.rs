@@ -3,14 +3,16 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
-use crate::executor::Row;
-use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
+use crate::catalog::{Catalog, IndexMetadata, StorageType, TableMetadata};
+use crate::executor::evaluator::coerce_value;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::query::subquery::evaluate_expr_with_subqueries;
+use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
+use crate::executor::query::statement_subqueries::DmlSubqueries;
+use crate::executor::query::subquery::contains_subquery;
 use crate::executor::query::{project_row_values, projected_columns};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::executor::{Row, RowIterator};
 use crate::planner::typed_expr::Projection;
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
 use crate::planner::types::ResolvedType;
@@ -49,15 +51,35 @@ pub fn execute_update_with_returning<
     super::reject_columnar_dml(&table, "UPDATE")?;
     let mut rows_affected = 0u64;
     let mut updated_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
-    let mut next_row_id = 0u64;
+    let mut next_row_id = Some(0u64);
     let mut primary_key_rows = match filter.as_ref() {
         Some(predicate) => super::lookup_primary_key_equality(txn, catalog, &table, predicate)?,
         None => None,
     };
     let primary_key_lookup = primary_key_rows.is_some();
     const BATCH: usize = 512;
+    // Subqueries and joined sources can read rows changed by an earlier
+    // batch. Evaluate the entire statement before applying those writes.
+    // Ordinary row-local UPDATE keeps its existing bounded batch path.
+    let mut staged = (_join_source.is_some()
+        || filter.as_ref().is_some_and(contains_subquery)
+        || assignments.iter().any(|a| contains_subquery(&a.value)))
+    .then(|| super::statement_spool::StatementSpool::new(txn.memory_policy()));
+    let subqueries = DmlSubqueries::new(
+        txn,
+        catalog,
+        assignments
+            .iter()
+            .map(|assignment| &assignment.value)
+            .chain(filter.iter())
+            .chain(
+                _join_source
+                    .iter()
+                    .filter_map(|source| source.condition.as_ref()),
+            ),
+    );
 
-    loop {
+    while let Some(start_row_id) = next_row_id {
         let batch = if primary_key_lookup {
             primary_key_rows
                 .take()
@@ -66,7 +88,7 @@ pub fn execute_update_with_returning<
                 .map(|row| (row.row_id, row.values))
                 .collect()
         } else {
-            fetch_batch(txn, &table, next_row_id, BATCH)?
+            fetch_batch(txn, &table, start_row_id, BATCH)?
         };
 
         if batch.is_empty() {
@@ -76,12 +98,20 @@ pub fn execute_update_with_returning<
         let mut changes = Vec::new();
 
         for (row_id, row) in batch {
-            next_row_id = row_id.saturating_add(1);
+            next_row_id = row_id.checked_add(1);
             let joined = if let Some(source) = &_join_source {
                 let source_table = catalog
                     .get_table(&source.table)
                     .ok_or_else(|| ExecutorError::TableNotFound(source.table.clone()))?;
-                find_join_row(txn, source_table, source.condition.as_ref(), &row)?
+                find_join_row(
+                    txn,
+                    catalog,
+                    &subqueries,
+                    source_table,
+                    source.condition.as_ref(),
+                    row_id,
+                    &row,
+                )?
             } else {
                 None
             };
@@ -96,7 +126,7 @@ pub fn execute_update_with_returning<
             if _join_source.is_some() && joined.is_none() {
                 continue;
             }
-            if !predicate_matches(txn, catalog, &filter, row_id, &eval_row)? {
+            if !predicate_matches(txn, catalog, &subqueries, &filter, row_id, &eval_row)? {
                 continue;
             }
 
@@ -104,8 +134,7 @@ pub fn execute_update_with_returning<
             let mut new_row = row.clone();
 
             for assignment in &assignments {
-                let mut value =
-                    evaluate_expr_with_subqueries(txn, catalog, &assignment.value, &eval_row)?;
+                let mut value = subqueries.evaluate(txn, catalog, &assignment.value, &eval_row)?;
                 let target_type = &table.columns[assignment.column_index].data_type;
                 let compatible_vector = matches!(
                     (target_type, &value),
@@ -132,12 +161,13 @@ pub fn execute_update_with_returning<
             continue;
         }
 
-        for (_, old_row, new_row) in &changes {
-            super::constraints::apply_parent_update::<S, C, T>(
-                txn, catalog, &table, old_row, new_row, 0,
-            )?;
+        if let Some(spool) = &mut staged {
+            for change in changes {
+                spool.push(&change)?;
+            }
+            continue;
         }
-        apply_changes(txn, catalog, &table, &changes)?;
+        apply_validated_changes(txn, catalog, &table, &changes)?;
 
         rows_affected += changes.len() as u64;
         if returning.is_some() {
@@ -146,6 +176,31 @@ pub fn execute_update_with_returning<
                     .into_iter()
                     .map(|(row_id, _, new_row)| (row_id, new_row)),
             );
+        }
+    }
+
+    subqueries.finish()?;
+    if let Some(spool) = staged {
+        let mut changes = Vec::with_capacity(BATCH);
+        let mut apply = |changes: &mut Vec<(u64, Vec<SqlValue>, Vec<SqlValue>)>| -> Result<()> {
+            apply_validated_changes(txn, catalog, &table, changes)?;
+            rows_affected += changes.len() as u64;
+            if returning.is_some() {
+                updated_rows.extend(changes.drain(..).map(|(id, _, row)| (id, row)));
+            } else {
+                changes.clear();
+            }
+            Ok(())
+        };
+        spool.replay(|change| {
+            changes.push(change);
+            if changes.len() == BATCH {
+                apply(&mut changes)?;
+            }
+            Ok(())
+        })?;
+        if !changes.is_empty() {
+            apply(&mut changes)?;
         }
     }
 
@@ -169,30 +224,83 @@ pub fn execute_update_with_returning<
     }
 }
 
-fn find_join_row<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+fn apply_validated_changes<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    for (_, old_row, new_row) in changes {
+        super::constraints::apply_parent_update::<S, C, T>(
+            txn, catalog, table, old_row, new_row, 0,
+        )?;
+    }
+    apply_changes(txn, catalog, table, changes)
+}
+
+fn find_join_row<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     source: &TableMetadata,
     condition: Option<&TypedExpr>,
+    target_row_id: u64,
     target: &[SqlValue],
 ) -> Result<Option<Vec<SqlValue>>> {
-    let mut storage = txn.table_storage(source);
-    let mut iter = storage.range_scan(0, u64::MAX)?;
-    while let Some(item) = iter.next() {
-        let (_, source_row) = item?;
-        let mut joined = target.to_vec();
-        joined.extend(source_row.clone());
-        let matches_condition = match condition {
-            None => true,
-            Some(expr) => matches!(
-                evaluate(expr, &EvalContext::new(&joined))?,
-                SqlValue::Boolean(true)
-            ),
-        };
-        if matches_condition {
-            return Ok(Some(source_row));
+    if source.storage_options.storage_type == StorageType::Columnar {
+        let scan = ColumnarScan::new(
+            source.table_id,
+            (0..source.column_count()).collect(),
+            None,
+            None,
+        );
+        // Construction releases the transaction borrow before subquery evaluation.
+        // The iterator preloads encoded segments, not all decoded rows.
+        let mut iterator = create_columnar_scan_iterator(txn, source, &scan)?;
+        while let Some(row) = iterator.next_row() {
+            let source_row = row?.values;
+            let mut joined = target.to_vec();
+            joined.extend_from_slice(&source_row);
+            let matches_condition = match condition {
+                None => true,
+                Some(expr) => matches!(
+                    subqueries.evaluate(txn, catalog, expr, &Row::new(target_row_id, joined))?,
+                    SqlValue::Boolean(true)
+                ),
+            };
+            if matches_condition {
+                return Ok(Some(source_row));
+            }
         }
+        return Ok(None);
     }
-    Ok(None)
+    let mut start = 0;
+    loop {
+        // Release the storage iterator's transaction borrow before subquery evaluation.
+        let batch = fetch_batch(txn, source, start, 512)?;
+        let Some((last_row_id, _)) = batch.last() else {
+            return Ok(None);
+        };
+        let next = last_row_id.checked_add(1);
+        for (_, source_row) in batch {
+            let mut joined = target.to_vec();
+            joined.extend_from_slice(&source_row);
+            let matches_condition = match condition {
+                None => true,
+                Some(expr) => matches!(
+                    subqueries.evaluate(txn, catalog, expr, &Row::new(target_row_id, joined))?,
+                    SqlValue::Boolean(true)
+                ),
+            };
+            if matches_condition {
+                return Ok(Some(source_row));
+            }
+        }
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        start = next;
+    }
 }
 
 pub(super) fn apply_changes<'txn, S, C, T>(
@@ -259,13 +367,13 @@ fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
 fn predicate_matches<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    subqueries: &DmlSubqueries<'_>,
     filter: &Option<TypedExpr>,
     row_id: u64,
     row: &[SqlValue],
 ) -> Result<bool> {
     if let Some(expr) = filter {
-        let value =
-            evaluate_expr_with_subqueries(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
+        let value = subqueries.evaluate(txn, catalog, expr, &Row::new(row_id, row.to_vec()))?;
         Ok(matches!(value, SqlValue::Boolean(true)))
     } else {
         Ok(true)
