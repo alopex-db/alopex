@@ -473,8 +473,8 @@ fn enable_hnsw_true_forces_hnsw_plan_below_cost_threshold() {
     assert!(analyzed.contains("nodes_visited="), "{analyzed}");
     assert!(!analyzed.contains("nodes_visited=0"), "{analyzed}");
     assert!(
-        analyzed.contains("ef_search=50 fallback=none"),
-        "missing query and index ef_search must use the default: {analyzed}"
+        analyzed.contains("ef_search=3 fallback=none"),
+        "effective ef_search must be capped to the three live rows: {analyzed}"
     );
 
     let filtered_plan = explain_text(
@@ -578,6 +578,27 @@ fn hnsw_index_accepts_search_ef_default() {
             .unwrap()
             .get_option("ef_search"),
         Some("256")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn hnsw_default_search_breadth_is_used_below_live_row_count() {
+    let rows = (0..64)
+        .map(|id| format!("({id}, [{id}.0, 0.0])"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (mut executor, catalog) = run_sql(&format!(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));
+         CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW;
+         INSERT INTO items VALUES {rows};"
+    ));
+    let query = "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2 WITH (enable_hnsw = true)";
+    assert_eq!(query_ids(&mut executor, &catalog, query), vec![0, 1]);
+    let analyzed = explain_text(&mut executor, &catalog, &format!("EXPLAIN ANALYZE {query}"));
+    assert!(
+        analyzed.contains("ef_search=50 fallback=none"),
+        "missing query and index ef_search must use the default: {analyzed}"
     );
 }
 
