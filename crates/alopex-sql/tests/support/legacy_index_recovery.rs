@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[path = "recovery_write_failure.rs"]
 mod write_failure;
 
+#[path = "missing_unique_recovery.rs"]
+mod missing_unique;
+
 fn snapshot(store: &MemoryKV, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
     let entries = txn.scan_prefix(prefix).unwrap().collect();
