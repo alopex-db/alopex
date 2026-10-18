@@ -128,3 +128,35 @@ starting the next target. The full-unit, allocation and public targets removed
 483,964,100,608 B of free filesystem space after lint. Codex used constant-cost
 filesystem counters and retained current dependencies, parser and raw evidence;
 Codex did not traverse the whole workspace for a fresh size audit.
+
+## Completed a2c40ad0 comparison and measurement qualification
+
+Codex completed [all 30 cells and 630 timed samples at a2c40ad0](https://github.com/alopex-db/alopex/issues/577#issuecomment-6247398882).
+Codex verified every row value and the numeric p50 comparator returned PASS.
+Codex rejected this run as acceptance evidence because background host CPU
+medians differed: after 24.1%, before 60.7%, reference 55.8%. Codex classifies
+measurement quality as invalid and keeps the performance acceptance gate blocked.
+Codex preserves this complete raw run and earlier performance failures.
+
+Codex reproduced missing comparison-load admission and runtime rejection with
+two failing tests, then reproduced profile adoption and output-budget failures
+with two more failing tests. Codex also reproduced the missing capacity-stop
+reason record. Codex fixed these contracts and passed seven focused tests:
+
+```sh
+rtk proxy env PYTHONPATH=scripts/performance:scripts python3 -B -m unittest test_issue577_matrix
+```
+
+Codex verified GREEN log SHA256
+`aae7a2e0a29330c865087ba9ecaf527de3b912b3a2cc8c00d4cbffb20a7b5dda`.
+Codex keeps benchmark result validation in CaseRunner and uses the existing
+PC-protection watchdog for each real case. Codex separates comparison admission
+from PC resource protection and separates operational storage budgets from the
+product performance profile. Codex records capacity with constant-cost filesystem
+counters and labels project size as an estimate. Codex introduces no total
+execution-time limit or attempt-count limit.
+
+Codex removed the unit tests temporary directories automatically and generated
+no executable or bytecode cache. Codex retains raw real measurements and current
+shared dependencies. The lifecycle tests use valueless command artifacts and
+injected host observations; Codex does not use them as performance measurements.
