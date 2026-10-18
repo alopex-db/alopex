@@ -1643,4 +1643,62 @@ mod tests {
             assert_eq!(code, "stream_closed");
         });
     }
+    #[test]
+    fn prepared_execute_many_python_vectors_commit_400_rows() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            let db = PyDatabase::new(None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let mut statement = db
+                .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+                .expect("prepare");
+            let batch = PyList::empty(py);
+            for row in 0..ROWS {
+                let params = PyList::empty(py);
+                params.append(row).expect("id");
+                params
+                    .append(PyList::new(py, vec![0.25f64; 128]).unwrap())
+                    .expect("vector");
+                batch.append(params).expect("row");
+            }
+            let results = statement.execute_many(py, batch.into_any()).expect("batch");
+            assert_eq!(results.bind(py).cast::<PyList>().unwrap().len(), ROWS);
+            let count = db
+                .execute_sql(py, "SELECT COUNT(*) AS n FROM items", None)
+                .expect("count");
+            let rows = count.bind(py).cast::<PyList>().expect("rows");
+            let first_row = rows.get_item(0).unwrap();
+            let row = first_row.cast::<PyDict>().unwrap();
+            assert_eq!(
+                row.get_item("n")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                ROWS
+            );
+        });
+    }
+    #[test]
+    fn execute_sql_reports_the_actual_sql_input_limit() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            let sql = format!("{}SELECT 1", " ".repeat(1_048_576));
+            let err = db.execute_sql(py, &sql, None).expect_err("oversized SQL");
+            let message = err.to_string();
+            assert!(
+                message.contains("SQL input at most 1048576 UTF-8 bytes"),
+                "{message}"
+            );
+            assert!(
+                message.contains("SQL input exceeds byte limit"),
+                "{message}"
+            );
+        });
+    }
 }
