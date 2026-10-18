@@ -128,6 +128,36 @@ inside a `Type=notify`, `NotifyAccess=all` unit with the existing OS watchdog.
 The wrapper renews that watchdog only while the parent's event stream advances
 and propagates the command's exit status.
 
+For a native Windows command, that unit runs
+`python3 -B scripts/windows_job_bridge.py SPEC.json`. The bridge keeps a control
+pipe open to `windows_job_runner.ps1`. The specification contains the executable,
+an argument array, working directory, environment overlay, command log and final
+receipt filenames. Logs and receipts must be new files. The caller still owns
+the host inventory, storage allowance and `run_guarded` admission policy.
+
+The Windows guardian creates the command suspended, assigns it to a Job, then
+resumes it. The Job limits aggregate committed memory to 4 GiB, CPU to one logical
+processor equivalent, and active processes to 128. The guardian reads the limits
+back before starting the command. A normal root exit also terminates descendants.
+EOF or a lost bridge heartbeat terminates the Job; closing the guardian's last
+Job handle gives kernel-enforced termination if the guardian itself exits.
+The command receives NUL input and cannot inherit the controlling input pipe.
+The guardian flushes its final receipt before publishing it by atomic rename.
+The heartbeat and cleanup deadlines do not impose a total build/test runtime.
+
+The focused Windows lifecycle target exercises real, small processes:
+
+```sh
+rtk proxy python3 -B scripts/windows_job_checks.py UNIQUE_OUTPUT_DIR
+```
+
+The caller runs this target inside the same host-budgeted watchdog unit. The
+six cases cover normal/nonzero exits, descendant cleanup, control EOF, bridge
+loss and guardian loss. The target checks process creation time as well as PID.
+The target requires existing Windows PowerShell/.NET, WSL interop and Python's
+standard library; it needs no Windows Python installation. The target retains
+compact specifications and receipts as evidence and leaves no running fixtures.
+
 The watchdog stops the entire unit, including
 its child processes. A failed cleanup is a failed run, not a successful stop.
 The unit's OS watchdog receives heartbeats only while the parent event stream
@@ -144,7 +174,7 @@ The watchdog fsyncs start, host/unit samples, stop decisions and final events to
 also saves a final `UNIQUE_RUN_ID-watch.json`, a unit log and the existing focused
 verification receipt. An absent final event means the run was incomplete; saved
 events remain evidence after a PC shutdown. The Windows observer exits when its
-input closes, with a 10-second heartbeat deadline as a fallback.
+input closes.
 
 The watchdog cannot prevent Windows Update, loss of power, or every hardware
 failure. CPU monitoring is not temperature monitoring. The watchdog does not
@@ -169,5 +199,6 @@ while current comparison commands use this watchdog for controlled launches.
 | `run_issue577_verification.py` | Reject historical invocations before launch. | CLI exit 125. |
 | `output_budget.py`, `performance/issue577_matrix.py` | Monitor per-host filesystem growth and reject incomplete coverage before a measured case. | Cross-volume growth, missing coverage, reserve stops and matrix lifecycle. |
 | `verification_watchdog.py` | The watchdog owns policy decisions, unit stops, durable records and observer cleanup. | Small success, failure, pressure, interruption and heartbeat cases. |
-| `host_resources.py`, `windows_host_observer.ps1` | The observer owns host facts and exits on input closure or missing heartbeat. | Real host sampling and delayed-reader freshness. |
+| `host_resources.py`, `windows_host_observer.ps1` | The observer owns host facts and exits on input closure. | Real host sampling and delayed-reader freshness. |
+| `windows_job_bridge.py`, `windows_job_runner.ps1` | The bridge owns the control pipe; the guardian owns the native Windows Job and atomic final receipt. | Real Windows exit, EOF, bridge-loss and guardian-loss cases in `windows_job_checks.py`. |
 | Per-run events, receipts and logs | The run artifacts retain both failed and passing runs for review. | Readback, source/log digests and explicit final status. |
