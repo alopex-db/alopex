@@ -473,12 +473,37 @@ fn execute_query_result_with_context<
     memory: Option<&MemoryPolicy>,
     context: &QueryExecutionContext,
 ) -> Result<QueryResult> {
+    if let LogicalPlan::TableFunction {
+        function: crate::planner::TableFunctionKind::ReadParquet,
+        schema,
+        ..
+    } = &plan
+    {
+        let rows = execute_table_function(txn, catalog, &plan, outer, memory, context)?;
+        let projection = Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+        return project::execute_project(rows, &projection, schema);
+    }
+    let plan = match plan {
+        LogicalPlan::Project {
+            input,
+            projection: Projection::All(names),
+        } if matches!(input.as_ref(), LogicalPlan::TableFunction {
+            function: crate::planner::TableFunctionKind::ReadParquet,
+            schema,
+            ..
+        } if names.iter().map(String::as_str).eq(schema.iter().map(|column| column.name.as_str()))) =>
+        {
+            return execute_query_result_with_context(txn, catalog, *input, outer, memory, context);
+        }
+        plan => plan,
+    };
     let (mut iter, projection, schema) =
         build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer, context)?;
     let mut rows = Vec::new();
     while let Some(result) = iter.next_row() {
         rows.push(result?);
     }
+    drop(iter);
     execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer, context)
 }
 
@@ -1109,12 +1134,21 @@ fn build_iterator_pipeline_with_outer<
         LogicalPlan::Project { input, projection } => {
             let input_result =
                 execute_query_result_with_context(txn, catalog, *input, outer, memory, context)?;
+            if let Projection::All(names) = &projection
+                && names.iter().map(String::as_str).eq(input_result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str()))
+            {
+                return Ok(materialize_query_result(input_result));
+            }
             let (mut input_iter, _input_projection, schema) =
                 materialize_query_result(input_result);
             let mut rows = Vec::new();
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
             }
+            drop(input_iter);
             let projected = execute_project_with_subqueries(
                 txn,
                 catalog,
@@ -1771,6 +1805,7 @@ fn build_streaming_pipeline_inner<
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
             }
+            drop(input_iter);
             let projected = project::execute_project(rows, &projection, &schema)?;
             let output_schema = projected
                 .columns
@@ -2042,6 +2077,7 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
         function,
         args,
         schema,
+        parquet_source,
     } = plan
     else {
         unreachable!("table function execution requires a table function plan");
@@ -2124,18 +2160,19 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     reason: "requires a TEXT path".into(),
                 });
             };
-            crate::executor::bulk::read_parquet_with_plan(
-                path,
-                schema,
-                context.copy_security.as_ref(),
-                memory,
-            )
-            .map(|rows| {
-                rows.into_iter()
-                    .enumerate()
-                    .map(|(index, values)| Row::new(index as u64, values))
-                    .collect()
-            })
+            parquet_source
+                .as_ref()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "READ_PARQUET".into(),
+                    reason: "planned input is missing".into(),
+                })?
+                .read(path, schema, context.copy_security.as_ref(), memory)
+                .map(|rows| {
+                    rows.into_iter()
+                        .enumerate()
+                        .map(|(index, values)| Row::new(index as u64, values))
+                        .collect()
+                })
         }
     }
 }

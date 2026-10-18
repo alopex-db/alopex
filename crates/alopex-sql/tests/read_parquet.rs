@@ -29,6 +29,208 @@ fn write_parquet(file: &tempfile::NamedTempFile, schema: Arc<Schema>, batch: Rec
 }
 
 #[test]
+fn issue577_primitive_and_text_rows_preserve_nulls_across_batches() {
+    use arrow_array::{BooleanArray, Float32Array, Float64Array, Int32Array};
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("integer", DataType::Int32, true),
+        Field::new("bigint", DataType::Int64, true),
+        Field::new("float", DataType::Float32, true),
+        Field::new("double", DataType::Float64, true),
+        Field::new("boolean", DataType::Boolean, true),
+        Field::new("text", DataType::Utf8, true),
+    ]));
+    let values = (0..2051)
+        .map(|i| (i % 7 != 0).then_some(i))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i - 1024))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i64::MAX - i64::from(i)))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float32Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i as f32 / 2.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| f64::from(i) / 2.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                values
+                    .iter()
+                    .map(|v| v.map(|i| i % 2 == 0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter(
+                values.iter().map(|v| v.map(|i| format!("row-{i}"))),
+            )),
+        ],
+    )
+    .unwrap();
+    let primitive_file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let primitive_batch = batch.project(&[0, 1, 2, 3, 4]).unwrap();
+    write_parquet(&primitive_file, primitive_batch.schema(), primitive_batch);
+    write_parquet(&file, schema, batch);
+    let expected = values
+        .into_iter()
+        .map(|value| match value {
+            None => vec![SqlValue::Null; 6],
+            Some(i) => vec![
+                SqlValue::Integer(i - 1024),
+                SqlValue::BigInt(i64::MAX - i64::from(i)),
+                SqlValue::Float(i as f32 / 2.0),
+                SqlValue::Double(f64::from(i) / 2.0),
+                SqlValue::Boolean(i % 2 == 0),
+                SqlValue::Text(format!("row-{i}")),
+            ],
+        })
+        .collect::<Vec<_>>();
+    let catalog = MemoryCatalog::new();
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let mut txn = bridge.begin_write().unwrap();
+    let finite = MemoryPolicy::new(Some(16 * 1024 * 1024), SpillPolicy::FailFast);
+    for (source, width) in [(&primitive_file, 5), (&file, 6)] {
+        let sql = format!("SELECT * FROM read_parquet('{}')", source.path().display());
+        let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+        let plan = Planner::new(&catalog).plan(&statement).unwrap();
+        let expected = expected
+            .iter()
+            .map(|row| row[..width].to_vec())
+            .collect::<Vec<_>>();
+        for policy in [None, Some(&finite)] {
+            let result =
+                execute_query_with_policy(&mut txn, &catalog, plan.clone(), policy).unwrap();
+            let ExecutionResult::Query(result) = result else {
+                panic!("expected rows");
+            };
+            assert_eq!(result.rows, expected);
+        }
+    }
+}
+
+#[test]
+fn issue577_identity_projection_preserves_schema_and_nonidentity_fallback() {
+    use alopex_sql::planner::logical_plan::LogicalPlan;
+    use alopex_sql::planner::typed_expr::Projection;
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("label", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![Some(7), None, Some(-1)])),
+            Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+        ],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), Arc::clone(&catalog));
+    let source = format!("read_parquet('{}')", file.path().display());
+    let sql = format!("SELECT * FROM {source}");
+    let baseline = run(&mut executor, &catalog, &sql).unwrap().unwrap();
+    assert_eq!(
+        baseline.rows,
+        vec![
+            vec![SqlValue::BigInt(7), SqlValue::Text("a".into())],
+            vec![SqlValue::Null, SqlValue::Text("b".into())],
+            vec![SqlValue::BigInt(-1), SqlValue::Null],
+        ]
+    );
+    for (query, names, rows) in [
+        (
+            format!("SELECT * FROM (SELECT * FROM {source}) AS nested"),
+            ["id", "label"],
+            baseline.rows.clone(),
+        ),
+        (
+            format!("SELECT * FROM (SELECT id AS item, label AS body FROM {source}) AS nested"),
+            ["item", "body"],
+            baseline.rows.clone(),
+        ),
+        (
+            format!("SELECT * FROM (SELECT * FROM {source} WHERE id > 100) AS nested"),
+            ["id", "label"],
+            Vec::new(),
+        ),
+    ] {
+        let result = run(&mut executor, &catalog, &query).unwrap().unwrap();
+        let mut columns = baseline.columns.clone();
+        for (column, name) in columns.iter_mut().zip(names) {
+            column.name = name.into();
+        }
+        assert_eq!(result.columns, columns);
+        assert_eq!(result.rows, rows);
+    }
+
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let input = Planner::new(&*catalog.read().unwrap())
+        .plan(&statement)
+        .unwrap();
+    for (names, indices) in [
+        (vec!["renamed_id", "renamed_label"], vec![0, 1]),
+        (vec!["label"], vec![1]),
+    ] {
+        let plan = LogicalPlan::Project {
+            input: Box::new(input.clone()),
+            projection: Projection::All(names.iter().map(|name| (*name).into()).collect()),
+        };
+        let ExecutionResult::Query(result) = executor.execute(plan).unwrap() else {
+            panic!("expected rows");
+        };
+        let expected_columns = names
+            .iter()
+            .zip(&indices)
+            .map(|(name, index)| {
+                let mut column = baseline.columns[*index].clone();
+                column.name = (*name).into();
+                column
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result.columns, expected_columns);
+        assert_eq!(
+            result.rows,
+            baseline
+                .rows
+                .iter()
+                .map(|row| {
+                    indices
+                        .iter()
+                        .map(|index| row[*index].clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    let invalid = LogicalPlan::Project {
+        input: Box::new(input),
+        projection: Projection::All(vec!["missing".into()]),
+    };
+    assert!(
+        matches!(executor.execute(invalid), Err(ExecutorError::ColumnNotFound(name)) if name == "missing")
+    );
+}
+
+#[test]
 fn parquet_columnar_bigint_boundaries_preserve_exact_rows() {
     // Deliberately unsorted; every expected value/comparison stays in native i64.
     let values = [
@@ -312,6 +514,56 @@ impl<'txn> SqlTxn<'txn, MemoryKV> for RestrictedTxn<'txn> {
 }
 
 #[test]
+fn issue577_runtime_policy_authorizes_the_retained_descriptor() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let allowed = root.join("allowed");
+    std::fs::create_dir(&allowed).unwrap();
+    let original = tempfile::NamedTempFile::new_in(&allowed).unwrap();
+    let replacement = tempfile::NamedTempFile::new_in(&root).unwrap();
+    for (file, value) in [(&original, 99), (&replacement, 11)] {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap();
+        write_parquet(file, schema, batch);
+    }
+    let catalog = MemoryCatalog::new();
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        &format!(
+            "SELECT * FROM read_parquet('{}')",
+            original.path().display()
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+
+    // The current allowed path now refers to a different file. Authorizing
+    // that path cannot authorize the descriptor retained by the old plan.
+    std::fs::rename(original.path(), root.join("moved-outside.parquet")).unwrap();
+    std::fs::rename(replacement.path(), original.path()).unwrap();
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let mut txn = RestrictedTxn {
+        inner: bridge.begin_write().unwrap(),
+        security: CopySecurityConfig {
+            allowed_base_dirs: Some(vec![allowed]),
+            allow_symlinks: false,
+        },
+    };
+    let error = execute_query_with_policy(&mut txn, &catalog, plan, None)
+        .expect_err("the allowed replacement must not authorize the retained descriptor");
+    assert!(
+        matches!(&error, ExecutorError::PathValidationFailed { reason, .. }
+            if reason == "path not in allowed directories"),
+        "expected the generic runtime path denial, got {error:?}"
+    );
+}
+
+#[test]
 fn issue577_read_parquet_inherits_restricted_transaction_policy() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -412,6 +664,110 @@ fn run(
 }
 
 #[test]
+fn issue577_parquet_metadata_budget_precedes_page_decode() {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let values = vec![11_i64, 22, 33, 44];
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(values.clone()))],
+    )
+    .unwrap();
+    write_parquet(&file, Arc::clone(&schema), batch);
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap()).unwrap();
+    assert_eq!(
+        builder.metadata().file_metadata().num_rows(),
+        values.len() as i64
+    );
+    let column = builder.metadata().row_group(0).column(0);
+    // The existing writer may emit a dictionary. Corrupt the first page,
+    // not just the later data page, so no earlier page decode is needed.
+    let page_offset = u64::try_from(
+        column
+            .dictionary_page_offset()
+            .unwrap_or(column.data_page_offset()),
+    )
+    .unwrap();
+    let decoded = builder.build().unwrap().next().unwrap().unwrap();
+    let ids = decoded
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(ids.values().as_ref(), values.as_slice());
+    drop(decoded);
+
+    let mut writable = std::fs::OpenOptions::new()
+        .write(true)
+        .open(file.path())
+        .unwrap();
+    writable.seek(SeekFrom::Start(page_offset)).unwrap();
+    // Thrift STOP before mandatory PageHeader fields produces a normal error.
+    // Footer, schema, row count and file length remain unchanged.
+    writable.write_all(&[0]).unwrap();
+    drop(writable);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(file.path()).unwrap())
+        .expect("fixture footer must remain valid");
+    assert_eq!(builder.schema().as_ref(), schema.as_ref());
+    assert_eq!(
+        builder.metadata().file_metadata().num_rows(),
+        values.len() as i64
+    );
+    assert!(builder.build().unwrap().next().unwrap().is_err());
+
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog)
+        .plan(&statement)
+        .expect("planning reads the valid footer, not the broken page");
+    let mut txn = bridge.begin_write().unwrap();
+    let minimum = (values.len()
+        * (std::mem::size_of::<Vec<SqlValue>>() + std::mem::size_of::<SqlValue>()))
+        as u64;
+    let row_data_only = minimum + (values.len() * std::mem::size_of::<i64>()) as u64;
+    let mut failures = Vec::new();
+    for (name, spill_policy) in [
+        ("fail_fast", SpillPolicy::FailFast),
+        (
+            "unsupported_spill",
+            SpillPolicy::SpillToDisk {
+                directory: spill.path().to_path_buf(),
+            },
+        ),
+    ] {
+        for (limit, budget_reject) in [
+            (Some(minimum - 1), true),
+            (Some(row_data_only), true),
+            (None, false),
+            (Some(1024 * 1024), false),
+        ] {
+            let policy = MemoryPolicy::new(limit, spill_policy.clone());
+            let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy));
+            let matched = if budget_reject {
+                matches!(&result, Err(ExecutorError::ResourceExhausted { .. }))
+            } else {
+                matches!(&result, Err(ExecutorError::BulkLoad(_)))
+            };
+            eprintln!(
+                "PARQUET_PREDECODE policy={name} limit={limit:?} budget_reject={budget_reject} matched={matched}"
+            );
+            if !matched {
+                failures.push(format!("{name} limit={limit:?}: {result:?}"));
+            }
+        }
+    }
+    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn issue577_memory_policy_reaches_read_parquet() {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let values = ["a".repeat(128), "b".repeat(128)];
@@ -432,7 +788,7 @@ fn issue577_memory_policy_reaches_read_parquet() {
     let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
     let plan = Planner::new(&catalog).plan(&statement).unwrap();
     let mut txn = bridge.begin_write().unwrap();
-    let sufficient = MemoryPolicy::new(Some(4096), SpillPolicy::FailFast);
+    let sufficient = MemoryPolicy::new(Some(1024 * 1024), SpillPolicy::FailFast);
     let result =
         execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&sufficient)).unwrap();
     let ExecutionResult::Query(result) = result else {
@@ -446,12 +802,137 @@ fn issue577_memory_policy_reaches_read_parquet() {
             .collect::<Vec<_>>()
     );
 
-    let insufficient = MemoryPolicy::new(Some(64), SpillPolicy::FailFast);
-    let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient))
-        .expect_err("READ_PARQUET must apply the supplied FailFast memory policy");
+    // Preserve the old bounds: neither includes enough space for all metadata.
+    for limit in [4096, 64] {
+        let insufficient = MemoryPolicy::new(Some(limit), SpillPolicy::FailFast);
+        let error =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&insufficient))
+                .expect_err("READ_PARQUET must apply the supplied FailFast memory policy");
+        assert!(
+            matches!(error, ExecutorError::ResourceExhausted { .. }),
+            "expected the memory-policy error, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn issue577_read_parquet_null_rows_consume_memory_budget() {
+    for row_count in [1024_usize, 1025] {
+        let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![None::<i64>; row_count]))],
+        )
+        .unwrap();
+        write_parquet(&file, schema, batch);
+
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+        let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+        let plan = Planner::new(&catalog).plan(&statement).unwrap();
+        let mut txn = bridge.begin_write().unwrap();
+        let sufficient = MemoryPolicy::new(Some(1024 * 1024), SpillPolicy::FailFast);
+        let result =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&sufficient)).unwrap();
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected a query result with sufficient memory");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Null]; row_count]);
+        drop(result);
+
+        let retained_bytes = (row_count.next_power_of_two() * std::mem::size_of::<Vec<SqlValue>>()
+            + row_count * std::mem::size_of::<SqlValue>()) as u64;
+        let row_slots_only = MemoryPolicy::new(Some(retained_bytes), SpillPolicy::FailFast);
+        let result =
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&row_slots_only));
+        eprintln!(
+            "PARQUET_NULL_BUDGET rows={row_count} budget={retained_bytes} budget_reject={}",
+            matches!(&result, Err(ExecutorError::ResourceExhausted { .. }))
+        );
+        assert!(matches!(
+            result,
+            Err(ExecutorError::ResourceExhausted { .. })
+        ));
+        let below = MemoryPolicy::new(Some(retained_bytes - 1), SpillPolicy::FailFast);
+        assert!(matches!(
+            execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&below)),
+            Err(ExecutorError::ResourceExhausted { .. })
+        ));
+
+        // NULL payloads are empty, but retaining rows and value slots still costs memory.
+        // Row slots alone exclude metadata; the supplied policy covers both owners.
+        let insufficient = MemoryPolicy::new(Some(64), SpillPolicy::FailFast);
+        let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient))
+            .expect_err("READ_PARQUET must account for retained NULL rows");
+        assert!(
+            matches!(error, ExecutorError::ResourceExhausted { .. }),
+            "expected the retained-row memory-policy error, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn issue577_read_parquet_unimplemented_spill_respects_memory_budget() {
+    let row_count = 4_usize;
+    let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(vec![None::<i64>; row_count]))],
+    )
+    .unwrap();
+    write_parquet(&file, schema, batch);
+
+    let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+    let catalog = MemoryCatalog::new();
+    let sql = format!("SELECT * FROM read_parquet('{}')", file.path().display());
+    let statement = Parser::parse_sql(&AlopexDialect, &sql).unwrap().remove(0);
+    let plan = Planner::new(&catalog).plan(&statement).unwrap();
+    let mut txn = bridge.begin_write().unwrap();
+    let retained_bytes = (row_count
+        * (std::mem::size_of::<Vec<SqlValue>>() + std::mem::size_of::<SqlValue>()))
+        as u64;
+    let spill_policy = SpillPolicy::SpillToDisk {
+        directory: spill.path().to_path_buf(),
+    };
+    for (limit, reject) in [
+        (None, false),
+        (Some(1024 * 1024), false),
+        (Some(4096), true),
+        (Some(retained_bytes), true),
+    ] {
+        let policy = MemoryPolicy::new(limit, spill_policy.clone());
+        let result = execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&policy));
+        if reject {
+            assert!(matches!(
+                result,
+                Err(ExecutorError::ResourceExhausted { .. })
+            ));
+            continue;
+        }
+        let result = result.unwrap();
+        let ExecutionResult::Query(result) = result else {
+            panic!("expected all NULL rows within the memory budget");
+        };
+        assert_eq!(result.rows, vec![vec![SqlValue::Null]; row_count]);
+    }
+    let fail_fast = MemoryPolicy::new(Some(retained_bytes - 1), SpillPolicy::FailFast);
+    assert!(matches!(
+        execute_query_with_policy(&mut txn, &catalog, plan.clone(), Some(&fail_fast)),
+        Err(ExecutorError::ResourceExhausted { .. })
+    ));
+
+    // Like window materialization, this operator cannot spill its retained rows.
+    // A spill policy must not silently permit it to exceed the finite budget.
+    let insufficient = MemoryPolicy::new(Some(retained_bytes - 1), spill_policy);
+    let result = execute_query_with_policy(&mut txn, &catalog, plan, Some(&insufficient));
+    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
     assert!(
-        matches!(error, ExecutorError::ResourceExhausted { .. }),
-        "expected the memory-policy error, got {error:?}"
+        matches!(result, Err(ExecutorError::ResourceExhausted { .. })),
+        "READ_PARQUET unsupported spill must reject retained rows above the finite budget"
     );
 }
 

@@ -392,14 +392,19 @@ version = "0.8.16"
 dependencies = [
  "alopex-core 0.8.16",
  "arrow-array",
+ "arrow-ipc",
  "arrow-schema",
  "base64 0.22.1",
  "bincode",
+ "brotli-decompressor",
+ "bytes",
  "cap-fs-ext",
  "cap-primitives",
  "chrono",
+ "crc32fast",
  "criterion",
  "csv",
+ "flate2",
  "futures",
  "futures-core",
  "hex",
@@ -415,8 +420,10 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.17",
+ "thrift",
  "tokio",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

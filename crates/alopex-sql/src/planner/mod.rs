@@ -761,18 +761,32 @@ pub fn plan_sql_for_routing<C: Catalog + ?Sized>(
 }
 
 #[cfg(feature = "tokio")]
-pub(crate) fn plan_sql_for_routing_with_copy_security<C: Catalog + ?Sized>(
+pub(crate) fn plan_sql_for_routing_with_read_options<C: Catalog + ?Sized>(
     catalog: &C,
     sql: &str,
-    copy_security: &crate::executor::bulk::CopySecurityConfig,
-) -> Result<Vec<PlannedStatement>, SqlError> {
-    let statements = Parser::parse_sql(&AlopexDialect, sql).map_err(SqlError::from)?;
+    copy_security: Option<&crate::executor::bulk::CopySecurityConfig>,
+    memory: Option<&crate::executor::MemoryPolicy>,
+) -> Result<Vec<PlannedStatement>, crate::executor::ExecutorError> {
+    let routing_error = |error: SqlError| crate::executor::ExecutorError::InvalidOperation {
+        operation: "async_plan_for_routing".into(),
+        reason: error.to_string(),
+    };
+    let statements = Parser::parse_sql(&AlopexDialect, sql)
+        .map_err(|error| routing_error(SqlError::from(error)))?;
     statements
         .iter()
         .map(|statement| {
-            let planner = Planner::with_copy_security(catalog, copy_security.clone());
-            let plan = planner.plan(statement).map_err(SqlError::from)?;
-            let routing_input = routing_input_for_plan(statement, &plan).map_err(SqlError::from)?;
+            let planner = match copy_security {
+                Some(config) => Planner::with_copy_security(catalog, config.clone()),
+                None => Planner::new(catalog),
+            }
+            .with_memory_policy(memory);
+            let plan = planner.plan(statement).map_err(|error| match error {
+                PlannerError::ResourceExhausted { .. } => error.into(),
+                other => routing_error(SqlError::from(other)),
+            })?;
+            let routing_input = routing_input_for_plan(statement, &plan)
+                .map_err(|error| routing_error(SqlError::from(error)))?;
             Ok(PlannedStatement {
                 plan,
                 routing_input,
@@ -1503,6 +1517,7 @@ pub struct Planner<'a, C: Catalog + ?Sized> {
     name_resolver: NameResolver<'a, C>,
     type_checker: TypeChecker<'a, C>,
     copy_security: Option<crate::executor::bulk::CopySecurityConfig>,
+    read_memory_limit: Option<u64>,
 }
 
 impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
@@ -1513,6 +1528,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog),
             copy_security: None,
+            read_memory_limit: None,
         }
     }
 
@@ -1526,6 +1542,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog),
             copy_security: Some(copy_security),
+            read_memory_limit: None,
         }
     }
 
@@ -1536,7 +1553,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             name_resolver: NameResolver::new(catalog),
             type_checker: TypeChecker::new(catalog).with_parameters(parameters),
             copy_security: None,
+            read_memory_limit: None,
         }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub(crate) fn with_memory_policy(
+        mut self,
+        memory: Option<&crate::executor::MemoryPolicy>,
+    ) -> Self {
+        self.read_memory_limit = memory.and_then(crate::executor::MemoryPolicy::limit_bytes);
+        self
     }
 
     /// Plan a SQL statement.
@@ -4114,6 +4141,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
             function = TableFunctionKind::UnnestWithOrdinality;
         }
+        let mut parquet_source = None;
         let (typed_args, mut schema) = match function {
             TableFunctionKind::Unnest | TableFunctionKind::UnnestWithOrdinality => {
                 if args.len() != 1 {
@@ -4291,26 +4319,32 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         "READ_PARQUET requires a string literal path",
                     ));
                 };
-                let schema = match &self.copy_security {
-                    Some(config) => {
-                        crate::executor::bulk::parquet_schema_with_security(path, config)
+                let (source_schema, source) = crate::executor::bulk::plan_parquet_source(
+                    path,
+                    self.copy_security.as_ref(),
+                    self.read_memory_limit,
+                )
+                .map_err(|error| match error {
+                    crate::executor::ExecutorError::ResourceExhausted { message } => {
+                        PlannerError::ResourceExhausted { message }
                     }
-                    None => crate::executor::bulk::parquet_schema(path),
-                }
-                .map_err(|error| PlannerError::invalid_expression(error.to_string()))?
-                .fields
-                .into_iter()
-                .map(|field| {
-                    Ok(ColumnMetadata::new(
-                        field.name.ok_or_else(|| {
-                            PlannerError::invalid_expression("missing parquet field name")
-                        })?,
-                        field.data_type.ok_or_else(|| {
-                            PlannerError::invalid_expression("missing parquet field type")
-                        })?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, PlannerError>>()?;
+                    other => PlannerError::invalid_expression(other.to_string()),
+                })?;
+                parquet_source = Some(source);
+                let schema = source_schema
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        Ok(ColumnMetadata::new(
+                            field.name.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field name")
+                            })?,
+                            field.data_type.ok_or_else(|| {
+                                PlannerError::invalid_expression("missing parquet field type")
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?;
                 (vec![typed], schema)
             }
         };
@@ -4347,6 +4381,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             plan: LogicalPlan::TableFunction {
                 function,
                 args: typed_args,
+                parquet_source,
                 schema: schema.clone(),
             },
             schema: schema.clone(),
