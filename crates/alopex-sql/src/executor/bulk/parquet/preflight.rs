@@ -947,6 +947,18 @@ impl<R: Read> CompactHeader<R> {
     }
 
     fn skip_bytes(&mut self, mut length: u64) -> Result<()> {
+        if self.input.capacity() == 0 {
+            // Schema projections already own their input; avoid per-byte reads without a buffer.
+            let mut bytes = [0; 256];
+            while length != 0 {
+                let count = length.min(bytes.len() as u64) as usize;
+                self.input
+                    .read_exact(&mut bytes[..count])
+                    .map_err(parquet_io_error)?;
+                length -= count as u64;
+            }
+            return Ok(());
+        }
         // Reuse the existing buffer rather than decoding opaque payloads byte by byte.
         while length != 0 {
             let buffered = self.input.buffer().len() as u64;
@@ -1597,6 +1609,60 @@ mod tests {
                 "Field ID map storage must enter the shared reservation before Arrow conversion"
             );
         }
+    }
+
+    #[test]
+    fn issue577_unbuffered_metadata_payload_uses_bounded_reads() {
+        struct Counted<'a> {
+            bytes: std::io::Cursor<Vec<u8>>,
+            reads: &'a std::cell::Cell<usize>,
+        }
+        impl Read for Counted<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.set(self.reads.get() + 1);
+                self.bytes.read(output)
+            }
+        }
+        let reads = std::cell::Cell::new(0);
+        let payload = 8193_u64;
+        let mut bytes = vec![0x81, 0x40];
+        bytes.resize(2 + payload as usize, b'x');
+        bytes.push(0x2a);
+        let length = bytes.len() as u64;
+        let mut input = CompactHeader {
+            input: BufReader::with_capacity(
+                0,
+                Counted {
+                    bytes: std::io::Cursor::new(bytes),
+                    reads: &reads,
+                }
+                .take(length),
+            ),
+            maximum: payload,
+            decoded_bytes: 0,
+            retained_key_values: 0,
+            retained_other_metadata: 0,
+            schema_path: Vec::new(),
+            schema_root_seen: false,
+            schema_leaves: 0,
+            has_arrow_schema: false,
+            arrow_schema: None,
+            file_key_values: 0,
+        };
+        assert_eq!(
+            input
+                .metadata_binary(MetadataContext::Unknown, false)
+                .unwrap(),
+            (payload, false)
+        );
+        assert_eq!(input.decoded_bytes, payload);
+        assert_eq!(input.remaining(), 1);
+        assert_eq!(input.byte().unwrap(), 0x2a);
+        println!("unbuffered_metadata_payload_reads={}", reads.get());
+        assert!(
+            reads.get() <= 64,
+            "opaque metadata must be consumed in chunks"
+        );
     }
 
     #[test]
