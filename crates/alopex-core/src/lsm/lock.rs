@@ -165,8 +165,8 @@ fn registry_unregister(key: &RegistryKey) {
 /// locks the same new inode` slip two writers through.
 #[derive(Debug)]
 pub(crate) struct DirectoryLock {
-    /// The lock file path observed by unit tests.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    /// The exact Windows registry key, also observed by unit tests.
+    #[cfg(all(any(test, windows), not(target_arch = "wasm32")))]
     path: Option<PathBuf>,
     /// The locked handle.
     ///
@@ -193,12 +193,22 @@ impl Drop for DirectoryLock {
         if self.owner_pid != std::process::id() {
             return;
         }
-        if let Some(file) = &self._file {
+        // Serialize Windows release with acquire until the handle is closed and
+        // its process-local registration has been removed.
+        #[cfg(windows)]
+        let mut local_locks = held_windows_locks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(file) = self._file.take() {
             // Best effort in Drop; closing the file remains the fallback.
             let _ = file.unlock();
         }
         if let Some(key) = &self.registry_key {
             registry_unregister(key);
+        }
+        #[cfg(windows)]
+        if let Some(path) = &self.path {
+            local_locks.remove(path);
         }
     }
 }
@@ -209,7 +219,7 @@ impl DirectoryLock {
     #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn disabled() -> Self {
         Self {
-            #[cfg(all(test, not(target_arch = "wasm32")))]
+            #[cfg(all(any(test, windows), not(target_arch = "wasm32")))]
             path: None,
             #[cfg(not(target_arch = "wasm32"))]
             _file: None,
@@ -356,7 +366,7 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
     local_locks.insert(lock_path.to_path_buf());
 
     Ok(DirectoryLock {
-        #[cfg(all(test, not(target_arch = "wasm32")))]
+        #[cfg(all(any(test, windows), not(target_arch = "wasm32")))]
         path: Some(lock_path.to_path_buf()),
         _file: Some(file),
         owner_pid,
@@ -617,14 +627,38 @@ mod tests {
         let data_dir = dir.path().join("db");
         let lock_path = data_dir.join(LOCK_FILE_NAME);
 
-        let held = acquire(&data_dir, &lock_path).unwrap();
-        drop(held);
-        let again = acquire(&data_dir, &lock_path).unwrap();
-        drop(again);
+        for _ in 0..3 {
+            let held = acquire(&data_dir, &lock_path).unwrap();
+            assert!(matches!(
+                acquire(&data_dir, &lock_path),
+                Err(Error::AlreadyOpen { .. })
+            ));
+            drop(held);
+        }
         assert!(
             lock_path.exists(),
             "the lock file is left behind on purpose (裁定 D8)"
         );
+    }
+
+    #[test]
+    fn releasing_one_lock_keeps_another_directory_locked() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let first_path = first.join(LOCK_FILE_NAME);
+        let second_path = second.join(LOCK_FILE_NAME);
+        let first_lock = acquire(&first, &first_path).unwrap();
+        let second_lock = acquire(&second, &second_path).unwrap();
+
+        drop(first_lock);
+        let _reopened_first = acquire(&first, &first_path).unwrap();
+        assert!(matches!(
+            acquire(&second, &second_path),
+            Err(Error::AlreadyOpen { .. })
+        ));
+        drop(second_lock);
+        let _reopened_second = acquire(&second, &second_path).unwrap();
     }
 
     #[cfg(unix)]
