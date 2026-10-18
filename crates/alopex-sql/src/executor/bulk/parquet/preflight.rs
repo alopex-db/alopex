@@ -733,6 +733,7 @@ impl<R: Read> CompactHeader<R> {
         values: impl Iterator<Item = arrow_ipc::KeyValue<'a>>,
     ) -> Result<u64> {
         let mut count = 0_u64;
+        let mut string_bytes = 0_u64;
         for value in values {
             if let (Some(key), Some(value)) = (value.key(), value.value()) {
                 count = count.checked_add(1).ok_or_else(invalid_page)?;
@@ -741,9 +742,17 @@ impl<R: Read> CompactHeader<R> {
                     .checked_add(value.len())
                     .and_then(|v| v.checked_mul(2))
                     .ok_or_else(invalid_page)?;
-                self.charge_metadata(bytes as u64, MetadataContext::RetainedMetadata)?;
+                string_bytes = string_bytes
+                    .checked_add(bytes as u64)
+                    .ok_or_else(invalid_page)?;
             }
         }
+        if count == 0 {
+            return Ok(0);
+        }
+        // The iterator borrows verified IPC strings. Charge their combined size
+        // before the reader allocates either owned strings or metadata maps.
+        self.charge_metadata(string_bytes, MetadataContext::RetainedMetadata)?;
         self.reserve_arrow_map(count)?;
         Ok(count)
     }
@@ -1533,6 +1542,89 @@ mod tests {
     use parquet::data_type::Int64Type;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use parquet::file::writer::SerializedFileWriter;
+
+    #[test]
+    fn issue577_arrow_key_values_preserve_shared_budget_boundaries() {
+        for count in [0_u64, 1, 3, 4, 7, 8] {
+            let empty = arrow_schema::Schema::empty();
+            let mut builder = arrow_ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&empty);
+            builder.reset();
+            let key = builder.create_string("key");
+            let value = builder.create_string("value");
+            let mut entries = Vec::new();
+            // Duplicate entries still require conservative reservations before
+            // conversion; missing keys or values are ignored by Arrow.
+            for _ in 0..count {
+                entries.push(arrow_ipc::KeyValue::create(
+                    &mut builder,
+                    &arrow_ipc::KeyValueArgs {
+                        key: Some(key),
+                        value: Some(value),
+                    },
+                ));
+            }
+            for (key, value) in [(None, Some(value)), (Some(key), None), (None, None)] {
+                entries.push(arrow_ipc::KeyValue::create(
+                    &mut builder,
+                    &arrow_ipc::KeyValueArgs { key, value },
+                ));
+            }
+            let metadata = builder.create_vector(&entries);
+            let schema = arrow_ipc::Schema::create(
+                &mut builder,
+                &arrow_ipc::SchemaArgs {
+                    custom_metadata: Some(metadata),
+                    ..Default::default()
+                },
+            );
+            builder.finish(schema, None);
+            let schema = arrow_ipc::root_as_schema(builder.finished_data()).unwrap();
+            let metadata = schema.custom_metadata().unwrap();
+            let buckets = match count {
+                0 => 0,
+                1..=3 => 4,
+                4..=7 => 8,
+                8 => 16,
+                _ => unreachable!(),
+            };
+            let table = if buckets == 0 {
+                0
+            } else {
+                buckets * (std::mem::size_of::<(String, String)>() as u64 + 1) + 16
+            };
+            let strings = count * 2 * ("key".len() + "value".len()) as u64;
+            let total = 37 + strings + 3 * table;
+            for limit in [total, total - 1] {
+                let mut header = CompactHeader {
+                    input: BufReader::new(std::io::Cursor::new(&[][..]).take(0)),
+                    maximum: limit,
+                    decoded_bytes: 37,
+                    retained_key_values: 7,
+                    retained_other_metadata: 11,
+                    schema_path: Vec::new(),
+                    schema_root_seen: false,
+                    schema_leaves: 0,
+                    has_arrow_schema: false,
+                    arrow_schema: None,
+                    file_key_values: 0,
+                };
+                let result = header.reserve_arrow_key_values(metadata.iter());
+                // Empty input is a no-op, including for a pre-existing state
+                // that the caller must have validated before reaching here.
+                if limit == total || count == 0 {
+                    assert_eq!(result.unwrap(), count);
+                    assert_eq!(header.decoded_bytes, total);
+                    assert_eq!(header.retained_other_metadata, 11 + strings + 2 * table);
+                    assert_eq!(header.retained_key_values, 7);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ExecutorError::ResourceExhausted { .. })
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn issue577_schema_footer_buffers_metadata_reads() {
