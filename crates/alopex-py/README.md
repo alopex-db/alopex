@@ -103,7 +103,7 @@ statement.reset()
 statement.finalize()
 ```
 
-組み込み`PreparedStatement.execute_many(rows)`は、`None` / bool / number / text /
+`Database.prepare`が返す`PreparedStatement.execute_many(rows)`は、`None` / bool / number / text /
 vector の行を1 transactionで実行します。各行は list または tuple にし、途中の行が
 失敗した場合は先行行も rollback されます。
 
@@ -111,6 +111,22 @@ vector の行を1 transactionで実行します。各行は list または tuple
 batch = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
 assert batch.execute_many([(3, "gamma"), (4, "delta")]) == [1, 1]
 ```
+
+`Transaction.prepare(sql)`も同じ`PreparedStatement`型を返します。handleは元の
+transactionで実行し、自動commitしません。`Transaction.execute_many(sql, rows)`は
+同じbatch経路の簡略形です。SQLは単一の非制御文、値はnative scalar/vectorに限ります。
+Decimal/datetimeの文字列展開へのfallbackは行いません。
+
+Transaction-owned batchの実行エラーはtransactionをfailedにします。呼出元は明示的に
+rollbackするか、呼出前に作成したsavepointへrollback_toしてください。batchだけを自動で
+巻き戻す保証はありません。commitを試してnative失敗した場合、handleはrolled_back状態へ
+移り、再rollbackは不要です。型・個数のpreflight拒否はSQL書込前に発生します。
+
+元transactionのcommit/rollback/dropまたはDatabase.close後は、prepared handleの
+bind/reset/parameter_count/execute/execute_manyも拒否されます。finalizeは終了後も可能で、
+自身のowner参照だけを解放します（2回目はエラー）。元transactionのdropは従来どおりrollback
+し、prepared handleが生きていてもtransactionを延命しません。active stream中の実行は拒否され、
+全消費後は再実行できます。途中closeしたstreamはrollbackを必要とします。
 
 | target | 結果 |
 | --- | --- |
