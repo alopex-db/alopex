@@ -977,17 +977,17 @@ fn cosine_similarity(left: &[f32], right: &[f32], left_norm: f64, right_norm: f6
         return 0.0;
     }
     let length = left.len().min(right.len());
-    let mut left_chunks = left[..length].chunks_exact(4);
-    let mut right_chunks = right[..length].chunks_exact(4);
+    let (left_chunks, left_remainder) = left[..length].as_chunks::<4>();
+    let (right_chunks, right_remainder) = right[..length].as_chunks::<4>();
     let (mut dot0, mut dot1, mut dot2, mut dot3) = (0.0, 0.0, 0.0, 0.0);
-    for (left, right) in left_chunks.by_ref().zip(right_chunks.by_ref()) {
+    for (left, right) in left_chunks.iter().zip(right_chunks) {
         dot0 += f64::from(left[0]) * f64::from(right[0]);
         dot1 += f64::from(left[1]) * f64::from(right[1]);
         dot2 += f64::from(left[2]) * f64::from(right[2]);
         dot3 += f64::from(left[3]) * f64::from(right[3]);
     }
     let mut dot = dot0 + dot1 + dot2 + dot3;
-    for (&a, &b) in left_chunks.remainder().iter().zip(right_chunks.remainder()) {
+    for (&a, &b) in left_remainder.iter().zip(right_remainder) {
         dot += f64::from(a) * f64::from(b);
     }
     (dot / (left_norm * right_norm)).clamp(-1.0, 1.0)

@@ -52,6 +52,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU32, Ordering};
