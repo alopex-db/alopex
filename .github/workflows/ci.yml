@@ -144,8 +144,9 @@ jobs:
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true'
-    runs-on: ${{ matrix.os }}
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
@@ -169,6 +170,11 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           timeout 120s sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -220,6 +226,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
 
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -427,8 +434,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true'
-    runs-on: ${{ matrix.os }}
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python
@@ -440,12 +448,18 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
 
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain

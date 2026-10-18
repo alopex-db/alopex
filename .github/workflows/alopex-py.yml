@@ -85,7 +85,8 @@ jobs:
 
   test:
     name: test ${{ matrix.numpy_runtime }} py${{ matrix.python }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +100,11 @@ jobs:
       - name: Checkout
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
         if: ${{ !env.ACT }}
         uses: actions/setup-python@v5
