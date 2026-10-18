@@ -2,6 +2,7 @@ name: Parity Harness Contract
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths:
       - 'scripts/parity/**'
       - 'scripts/reference_tests/**'

@@ -2,6 +2,7 @@ name: alopex-py
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths:
       - ".github/workflows/alopex-py.yml"
       - "Cargo.toml"
