@@ -27,26 +27,13 @@ def test_transaction_scans_and_search_include_uncommitted_writes():
         ]
 
         first = txn.search_keys(b"cart:*", limit=2)
-        assert first == {
-            "entries": [
-                (b"cart:42:closed", b"closed"),
-                (b"cart:42:open", b"open"),
-            ],
-            "next_cursor": b"cart:42:open",
-            "scanned": 2,
-        }
-        assert txn.search_keys(b"cart:*", limit=2, cursor=first["next_cursor"]) == {
-            "entries": [
-                (b"cart:43:open", b"next"),
-                (b"cart:99:open", b"other"),
-            ],
-            "next_cursor": b"cart:99:open",
-            "scanned": 2,
-        }
-        assert txn.search_keys(b"cart:*", limit=2, cursor=b"cart:99:open") == {
-            "entries": [],
-            "next_cursor": None,
-            "scanned": 0,
+        assert first["entries"] == [(b"cart:42:closed", b"closed"), (b"cart:42:open", b"open")]
+        assert first["has_more"] and first["scanned"] == 2
+        assert first["next_cursor"].startswith(b"alopex-scan-v1:")
+        second = txn.search_keys(b"cart:*", limit=2, cursor=first["next_cursor"])
+        assert second == {
+            "entries": [(b"cart:43:open", b"next"), (b"cart:99:open", b"other")],
+            "next_cursor": None, "scanned": 2, "has_more": False,
         }
         assert txn.search_keys(r"^cart:42:", mode="regex", limit=10)["entries"] == [
             (b"cart:42:closed", b"closed"),
@@ -134,5 +121,59 @@ def test_transaction_enumeration_reflects_uncommitted_put_and_delete():
         assert txn.search_keys(b"cart:42:*")["entries"] == expected
         assert txn.search_keys(r"^cart:42:", mode="regex")["entries"] == expected
         txn.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("thread_mode", ["single", "multi"])
+def test_complete_scans_pages_and_exact_budgets(thread_mode):
+    db = Database.new(thread_mode=thread_mode)
+    try:
+        with db.begin(TxnMode.READ_WRITE) as seed:
+            for n in range(250):
+                seed.put(f"p:{n:03}".encode(), b"v")
+            seed.commit()
+        with db.begin(TxnMode.READ_WRITE) as txn:
+            txn.delete(b"p:000")
+            txn.put(b"p:250", b"new")
+            expected = [(f"p:{n:03}".encode(), b"v") for n in range(1, 250)] + [(b"p:250", b"new")]
+            for method, args in [(txn.scan_prefix, (b"p:",)), (txn.scan_range, (b"p:", b"p;"))]:
+                assert list(method(*args)) == expected
+                assert list(method(*args, limit=None, page_size=7, scan_budget=3)) == expected
+                assert list(method(*args, limit=7)) == expected[:7]
+                assert list(method(*args, scan_budget=250, strict_budget=True)) == expected
+                with pytest.raises(AlopexError, match="budget"):
+                    list(method(*args, page_size=100, scan_budget=1, strict_budget=True))
+                with pytest.raises(AlopexError, match="response size"):
+                    method(*args, max_total_bytes=1)
+                with pytest.raises(ValueError, match="cursor"):
+                    method(*args, cursor=b"p:001")
+            for method, args in [(txn.scan_prefix_page, (b"p:",)), (txn.scan_range_page, (b"p:", b"p;"))]:
+                cursor = None
+                found = []
+                sizes = []
+                while True:
+                    page = method(*args, cursor=cursor)
+                    sizes.append(len(page["entries"]))
+                    found.extend(page["entries"])
+                    assert page["scanned"] <= 10_000
+                    if not page["has_more"]:
+                        assert page["next_cursor"] is None
+                        break
+                    cursor = page["next_cursor"]
+                    assert cursor.startswith(b"alopex-scan-v1:")
+                assert found == expected
+                assert sizes == [100, 100, 50]
+                # The deleted key still consumes one physical candidate.
+                with pytest.raises(AlopexError, match="budget"):
+                    method(*args, limit=300, scan_budget=250, strict_budget=True)
+                exact = method(*args, limit=300, scan_budget=251, strict_budget=True)
+                assert exact["entries"] == expected
+                assert exact["has_more"] is False
+                assert exact["scanned"] == 251
+            frozen = txn.scan_prefix(b"p:")
+            txn.put(b"p:251", b"later")
+            txn.commit()
+            assert list(frozen) == expected
     finally:
         db.close()

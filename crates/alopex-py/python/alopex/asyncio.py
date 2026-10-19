@@ -10,7 +10,7 @@ worker, while single-thread handles retain their documented owner-thread guard.
 from __future__ import annotations
 
 import asyncio as _asyncio
-from typing import Any, Iterator, Optional, Sequence, Tuple, Union
+from typing import Any, AsyncIterator, Iterator, Optional, Sequence, Tuple, Union
 
 from . import AlopexError, Database, LocalScan, ThreadMode, TxnMode
 
@@ -146,26 +146,110 @@ class AsyncTransaction(_AsyncLocalHandle):
         self._handle.delete(key)
 
     async def scan_prefix(
-        self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,
-        scan_budget: int = 10_000, max_bytes: int = 16_777_216,
-        include_internal: bool = False,
+        self, prefix: bytes, *, limit: Optional[int] = None, page_size: int = 100,
+        cursor: Optional[bytes] = None, scan_budget: int = 10_000,
+        max_bytes: int = 16_777_216, max_total_bytes: int = 104_857_600,
+        include_internal: bool = False, strict_budget: bool = False,
     ) -> Iterator[Tuple[bytes, bytes]]:
-        """Return one bounded snapshot page; resume after its last key with cursor."""
+        """Collect a complete snapshot, or fail on its total byte budget."""
         return self._handle.scan_prefix(
-            prefix, limit=limit, cursor=cursor, scan_budget=scan_budget,
-            max_bytes=max_bytes, include_internal=include_internal,
+            prefix, limit=limit, page_size=page_size, cursor=cursor,
+            scan_budget=scan_budget, max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes, include_internal=include_internal,
+            strict_budget=strict_budget,
         )
 
-    async def scan_range(
-        self, start: bytes, end: bytes, *, limit: int = 100,
+    async def scan_prefix_page(
+        self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,
+        scan_budget: int = 10_000, max_bytes: int = 16_777_216,
+        include_internal: bool = False, strict_budget: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch one bounded page on the handle's owner thread."""
+        await _asyncio.sleep(0)
+        return self._handle.scan_prefix_page(
+            prefix, limit=limit, cursor=cursor, scan_budget=scan_budget,
+            max_bytes=max_bytes, include_internal=include_internal,
+            strict_budget=strict_budget,
+        )
+
+    async def iter_prefix(
+        self, prefix: bytes, *, page_size: int = 100, limit: Optional[int] = None,
         cursor: Optional[bytes] = None, scan_budget: int = 10_000,
         max_bytes: int = 16_777_216, include_internal: bool = False,
+        strict_budget: bool = False,
+    ) -> AsyncIterator[Tuple[bytes, bytes]]:
+        """Read all pages, yielding event-loop control between bounded calls."""
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive or None")
+        returned = 0
+        while True:
+            page_limit = page_size if limit is None else min(page_size, limit - returned)
+            page = await self.scan_prefix_page(
+                prefix, limit=page_limit, cursor=cursor, scan_budget=scan_budget,
+                max_bytes=max_bytes, include_internal=include_internal,
+                strict_budget=strict_budget,
+            )
+            for entry in page["entries"]:
+                yield entry
+                returned += 1
+                if limit is not None and returned == limit:
+                    return
+            if not page["has_more"]:
+                return
+            cursor = page["next_cursor"]
+
+    async def scan_range(
+        self, start: bytes, end: bytes, *, limit: Optional[int] = None, page_size: int = 100,
+        cursor: Optional[bytes] = None, scan_budget: int = 10_000,
+        max_bytes: int = 16_777_216, max_total_bytes: int = 104_857_600,
+        include_internal: bool = False, strict_budget: bool = False,
     ) -> Iterator[Tuple[bytes, bytes]]:
-        """Return one bounded snapshot page for the half-open range."""
+        """Collect a complete snapshot, or fail on its total byte budget."""
         return self._handle.scan_range(
+            start, end, limit=limit, page_size=page_size, cursor=cursor,
+            scan_budget=scan_budget, max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes, include_internal=include_internal,
+            strict_budget=strict_budget,
+        )
+
+    async def scan_range_page(
+        self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,
+        scan_budget: int = 10_000, max_bytes: int = 16_777_216,
+        include_internal: bool = False, strict_budget: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch one bounded page on the handle's owner thread."""
+        await _asyncio.sleep(0)
+        return self._handle.scan_range_page(
             start, end, limit=limit, cursor=cursor, scan_budget=scan_budget,
             max_bytes=max_bytes, include_internal=include_internal,
+            strict_budget=strict_budget,
         )
+
+    async def iter_range(
+        self, start: bytes, end: bytes, *, page_size: int = 100, limit: Optional[int] = None,
+        cursor: Optional[bytes] = None, scan_budget: int = 10_000,
+        max_bytes: int = 16_777_216, include_internal: bool = False,
+        strict_budget: bool = False,
+    ) -> AsyncIterator[Tuple[bytes, bytes]]:
+        """Read all pages, yielding event-loop control between bounded calls."""
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive or None")
+        returned = 0
+        while True:
+            page_limit = page_size if limit is None else min(page_size, limit - returned)
+            page = await self.scan_range_page(
+                start, end, limit=page_limit, cursor=cursor, scan_budget=scan_budget,
+                max_bytes=max_bytes, include_internal=include_internal,
+                strict_budget=strict_budget,
+            )
+            for entry in page["entries"]:
+                yield entry
+                returned += 1
+                if limit is not None and returned == limit:
+                    return
+            if not page["has_more"]:
+                return
+            cursor = page["next_cursor"]
 
     async def search_keys(
         self,
@@ -177,6 +261,7 @@ class AsyncTransaction(_AsyncLocalHandle):
         max_bytes: int = 16_777_216,
         *,
         include_internal: bool = False,
+        strict_budget: bool = False,
     ) -> dict[str, Any]:
         """Return a bounded native key-search page with its continuation cursor."""
         return self._handle.search_keys(
@@ -187,6 +272,7 @@ class AsyncTransaction(_AsyncLocalHandle):
             scan_budget=scan_budget,
             max_bytes=max_bytes,
             include_internal=include_internal,
+            strict_budget=strict_budget,
         )
 
     async def execute_sql(

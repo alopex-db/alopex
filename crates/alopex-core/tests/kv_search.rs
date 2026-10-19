@@ -189,7 +189,9 @@ fn literal_wildcards_and_scan_budget_are_explicit() {
     );
 
     let error = txn
-        .search_keys(&KeySearchRequest::new(KeyPattern::glob(b"*missing"), 10, 2))
+        .search_keys(
+            &KeySearchRequest::new(KeyPattern::glob(b"*missing"), 10, 2).with_strict_budget(true),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("search scan budget exceeded"));
 
@@ -264,7 +266,9 @@ fn lsm_tombstones_consume_the_scan_budget() {
 
     let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
     let error = reader
-        .search_keys(&KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2))
+        .search_keys(
+            &KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2).with_strict_budget(true),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("search scan budget exceeded"));
 }
@@ -420,4 +424,79 @@ fn slashes_and_escaped_wildcards_are_ordinary_key_bytes() {
         ))
         .unwrap();
     assert_eq!(binary.entries[0].key, vec![0xff, b'/', b'k']);
+}
+
+#[test]
+fn sparse_budget_pages_resume_and_exact_terminal_budget_succeeds() {
+    let store = seeded_memory();
+    let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+    let mut request = KeySearchRequest::new(KeyPattern::glob(b"*missing"), 10, 2);
+    let mut total = 0;
+    loop {
+        let page = txn.search_keys(&request).unwrap();
+        assert!(page.entries.is_empty());
+        assert!(page.scanned <= 2);
+        total += page.scanned;
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        assert!(page.scanned > 0, "a continuation must advance");
+        assert!(page.next_cursor.is_some());
+        if let Some(previous) = &request.cursor {
+            assert!(page.next_cursor.as_ref().unwrap() > previous);
+        }
+        request.cursor = page.next_cursor;
+    }
+    assert_eq!(total, 10);
+    let page = txn
+        .search_keys(
+            &KeySearchRequest::new(KeyPattern::glob(b"*"), 100, 10).with_strict_budget(true),
+        )
+        .unwrap();
+    assert_eq!(page.entries.len(), 10);
+    assert_eq!(page.scanned, 10);
+    assert!(!page.has_more);
+    assert!(page.next_cursor.is_none());
+}
+
+proptest::proptest! {
+    #[test]
+    fn bounded_continuations_match_complete_reference(
+        matches in proptest::collection::vec(proptest::bool::ANY, 0..80),
+        limit in 1usize..12,
+        budget in 1usize..12,
+    ) {
+        let store = MemoryKV::new();
+        let mut writer = store.begin(TxnMode::ReadWrite).unwrap();
+        let mut expected = Vec::new();
+        for (n, matched) in matches.iter().enumerate() {
+            let key = format!("{n:03}:{}", if *matched { "hit" } else { "miss" }).into_bytes();
+            writer.put(key.clone(), b"value".to_vec()).unwrap();
+            if *matched { expected.push(key); }
+        }
+        writer.commit_self().unwrap();
+        let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+        let mut request = KeySearchRequest::new(KeyPattern::glob(b"*hit"), limit, budget);
+        let mut found = Vec::new();
+        let mut physical = 0;
+        loop {
+            let page = reader.search_keys(&request).unwrap();
+            proptest::prop_assert!(page.scanned <= budget);
+            proptest::prop_assert!(page.entries.len() <= limit);
+            physical += page.scanned;
+            found.extend(page.entries.into_iter().map(|entry| entry.key));
+            if !page.has_more {
+                proptest::prop_assert!(page.next_cursor.is_none());
+                break;
+            }
+            proptest::prop_assert!(page.scanned > 0);
+            if let Some(previous) = &request.cursor {
+                proptest::prop_assert!(page.next_cursor.as_ref().unwrap() > previous);
+            }
+            request.cursor = page.next_cursor;
+        }
+        proptest::prop_assert_eq!(found, expected);
+        proptest::prop_assert_eq!(physical, matches.len());
+    }
 }

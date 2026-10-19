@@ -19,7 +19,7 @@ def test_async_kv_scan_bounds_and_internal_visibility(thread_mode):
             await txn.put(b"user:1", b"one")
             await txn.put(b"user:2", b"two")
             assert list(await txn.scan_prefix(b"", limit=1)) == [(b"user:1", b"one")]
-            assert list(await txn.scan_range(b"user:", b"user;", limit=1, cursor=b"user:1")) == [(b"user:2", b"two")]
+            assert list(await txn.scan_range(b"user:", b"user;", limit=1, cursor=(await txn.scan_prefix_page(b"user:", limit=1))["next_cursor"])) == [(b"user:2", b"two")]
             assert (await txn.search_keys(b"*", limit=1))["entries"] == [(b"user:1", b"one")]
             assert dict(await txn.scan_prefix(b"__catalog__/", include_internal=True))[b"__catalog__/hidden"] == b"raw"
             assert dict((await txn.search_keys(b"__catalog__/*", include_internal=True))["entries"])[b"__catalog__/hidden"] == b"raw"
@@ -27,7 +27,7 @@ def test_async_kv_scan_bounds_and_internal_visibility(thread_mode):
                 with pytest.raises(AlopexError):
                     await method(*args, max_bytes=1)
                 with pytest.raises(AlopexError):
-                    await method(*args, scan_budget=1)
+                    await method(*args, scan_budget=1, strict_budget=True)
             await txn.rollback()
         finally:
             await db.close()
@@ -56,9 +56,10 @@ def test_async_kv_scans_preserve_transaction_visibility(thread_mode):
             assert list(await txn.scan_prefix(b"missing:")) == []
             assert (await txn.search_keys(b"cart:*"))["entries"] == expected
             assert (await txn.search_keys(r"^cart:", mode="regex"))["entries"] == expected
-            page = await txn.search_keys(b"cart:*", limit=1, cursor=b"cart:1")
+            page = await txn.search_keys(b"cart:*", limit=1, cursor=(await txn.scan_prefix_page(b"cart:", limit=1))["next_cursor"])
             assert page["entries"] == expected[1:]
-            assert page["next_cursor"] == b"cart:3"
+            assert page["next_cursor"] is None
+            assert not page["has_more"]
             await txn.put(b"cart:1", b"later")
             await txn.commit()
             assert list(prefix) == expected
@@ -78,22 +79,16 @@ def test_async_kv_search_preserves_pagination_and_limits(thread_mode):
             for suffix in (b"1", b"2", b"3"):
                 await txn.put(b"cart:" + suffix, suffix)
             first = await txn.search_keys(b"cart:*", limit=2)
-            assert first == {
-                "entries": [(b"cart:1", b"1"), (b"cart:2", b"2")],
-                "next_cursor": b"cart:2",
-                "scanned": 2,
-            }
+            assert first["entries"] == [(b"cart:1", b"1"), (b"cart:2", b"2")]
+            assert first["has_more"] and first["scanned"] == 2
             second = await txn.search_keys(b"cart:*", limit=2, cursor=first["next_cursor"])
             assert second["entries"] == [(b"cart:3", b"3")]
             assert second["next_cursor"] is None
             assert (await txn.search_keys(r"^cart:[13]$", mode="regex"))["entries"] == [
                 (b"cart:1", b"1"), (b"cart:3", b"3")
             ]
-            assert await txn.search_keys(b"cart:*", cursor=b"cart:3") == {
-                "entries": [], "next_cursor": None, "scanned": 0,
-            }
             with pytest.raises(AlopexError, match="budget"):
-                await txn.search_keys(b"cart:*", scan_budget=1)
+                await txn.search_keys(b"cart:*", scan_budget=1, strict_budget=True)
             with pytest.raises(AlopexError, match="response size"):
                 await txn.search_keys(b"cart:*", max_bytes=1)
             assert len((await txn.search_keys(b"cart:*", max_bytes=100))["entries"]) == 3
@@ -278,4 +273,32 @@ def test_async_transaction_savepoint_rolls_back_sql_work():
         finally:
             await db.close()
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("thread_mode", ["single", "multi"])
+def test_async_complete_scans_and_cooperative_pages(thread_mode):
+    async def scenario():
+        db = await AsyncDatabase.new(thread_mode=thread_mode)
+        try:
+            txn = await db.begin(TxnMode.READ_WRITE)
+            expected = [(f"p:{n:03}".encode(), b"v") for n in range(250)]
+            for key, value in expected:
+                await txn.put(key, value)
+            assert list(await txn.scan_prefix(b"p:", scan_budget=3)) == expected
+            assert list(await txn.scan_range(b"p:", b"p;", limit=None)) == expected
+            ticks = []
+            async def heartbeat():
+                for _ in range(20):
+                    ticks.append(1)
+                    await asyncio.sleep(0)
+            task = asyncio.create_task(heartbeat())
+            found = [entry async for entry in txn.iter_prefix(b"p:", page_size=7)]
+            assert found == expected
+            assert len(ticks) > 1
+            assert [entry async for entry in txn.iter_range(b"p:", b"p;", page_size=9, limit=17)] == expected[:17]
+            await task
+            await txn.rollback()
+        finally:
+            await db.close()
     asyncio.run(scenario())

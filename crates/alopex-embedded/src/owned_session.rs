@@ -238,6 +238,37 @@ impl OwnedEmbeddedTransaction {
             .map_err(Error::Core)
     }
 
+    /// Collect a prefix in one snapshot, with an explicit total response budget.
+    pub fn scan_prefix_all(
+        &mut self,
+        prefix: &[u8],
+        options: &crate::KeyScanOptions,
+        limit: Option<usize>,
+        max_total_bytes: usize,
+    ) -> Result<Vec<alopex_core::kv::KeySearchEntry>> {
+        self.session
+            .with_transaction(|txn| {
+                crate::kv_scan::prefix_all(txn, prefix, options, limit, max_total_bytes)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Collect `[start,end)` in one snapshot, with an explicit total budget.
+    pub fn scan_range_all(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        options: &crate::KeyScanOptions,
+        limit: Option<usize>,
+        max_total_bytes: usize,
+    ) -> Result<Vec<alopex_core::kv::KeySearchEntry>> {
+        self.session
+            .with_transaction(|txn| {
+                crate::kv_scan::range_all(txn, start, Some(end), options, limit, max_total_bytes)
+            })
+            .map_err(Error::Core)
+    }
+
     /// Search with bounded physical work and optional internal-namespace visibility.
     pub fn search_keys_visible(
         &mut self,

@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Python KV prefix/range scans return all matches by default; explicit `limit`
+  caps the total. New page APIs expose `has_more`, opaque cursors, and physical
+  work counts. Candidate-budget exhaustion is resumable unless `strict_budget`
+  is enabled; exact terminal boundaries succeed. Complete collection has a
+  configurable total raw-byte cap, and async iterators yield between pages (#670).
+
 - The Nim parser wire contract is `0.27.0`; JOIN nodes now carry their NATURAL
   attribute directly, and the contract covers UNIQUE indexes, CTAS, and
   unit-bearing INTERVAL literals. Incompatible parser/consumer versions are
