@@ -208,12 +208,15 @@ impl Error {
     }
 }
 
+pub use hnsw_cache::{HnswCacheIndexStats, HnswCacheStats};
+mod hnsw_cache;
+
 /// The main database object.
 pub struct Database {
     /// The underlying key-value store.
     pub(crate) store: Arc<AnyKV>,
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
-    pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
+    pub(crate) hnsw_cache: RwLock<hnsw_cache::HnswCacheState>,
     hnsw_cache_limit_bytes: AtomicU64,
     pub(crate) hnsw_cache_epoch: AtomicU64,
     pub(crate) hnsw_cache_gate: RwLock<()>,
@@ -448,7 +451,7 @@ impl Database {
         Self {
             store,
             sql_catalog,
-            hnsw_cache: RwLock::new(HashMap::new()),
+            hnsw_cache: RwLock::new(hnsw_cache::HnswCacheState::default()),
             hnsw_cache_limit_bytes: AtomicU64::new(DEFAULT_HNSW_CACHE_LIMIT_BYTES),
             hnsw_cache_epoch: AtomicU64::new(0),
             hnsw_cache_gate: RwLock::new(()),
@@ -547,13 +550,14 @@ impl Database {
     }
 
     fn hnsw_cache_insert_bounded(
-        cache: &mut HashMap<String, Arc<HnswIndex>>,
+        cache: &mut hnsw_cache::HnswCacheState,
         name: String,
         index: Arc<HnswIndex>,
         limit_bytes: u64,
     ) {
         let bytes = index.stats().memory_bytes;
         if bytes > limit_bytes || limit_bytes == 0 {
+            cache.counters.oversize(&name, bytes, limit_bytes);
             cache.remove(&name);
             return;
         }
@@ -562,41 +566,11 @@ impl Database {
     }
 
     fn trim_hnsw_cache(
-        cache: &mut HashMap<String, Arc<HnswIndex>>,
+        cache: &mut hnsw_cache::HnswCacheState,
         limit_bytes: u64,
         preserve: Option<&str>,
     ) {
-        if limit_bytes == 0 {
-            cache.clear();
-            return;
-        }
-        while cache.len() > HNSW_CACHE_MAX_ENTRIES
-            || cache.values().fold(0_u64, |sum, index| {
-                sum.saturating_add(index.stats().memory_bytes)
-            }) > limit_bytes
-        {
-            let victim = cache
-                .iter()
-                .filter(|(name, _)| Some(name.as_str()) != preserve)
-                .max_by(|(left_name, left), (right_name, right)| {
-                    left.stats()
-                        .memory_bytes
-                        .cmp(&right.stats().memory_bytes)
-                        .then_with(|| left_name.cmp(right_name))
-                })
-                .map(|(name, _)| name.clone());
-            match victim {
-                Some(name) => {
-                    cache.remove(&name);
-                }
-                None => {
-                    if let Some(name) = preserve {
-                        cache.remove(name);
-                    }
-                    break;
-                }
-            }
-        }
+        cache.trim(limit_bytes, preserve);
     }
 
     /// Sets the maximum estimated graph bytes retained by this database's HNSW cache.
@@ -605,13 +579,95 @@ impl Database {
     /// A zero limit disables caching. Evicted graphs remain usable by active readers.
     /// This bounds cache ownership, not temporary graph loads or active read handles.
     pub fn set_hnsw_cache_limit(&self, bytes: u64) {
+        self.set_hnsw_cache_limits(bytes, None)
+            .expect("unchanged entry limit is valid");
+    }
+
+    /// Set graph byte and optional entry limits; zero bytes disables retention.
+    /// Active calls may temporarily load a graph; transaction caches apply the
+    /// new retention budget on their next finite SQL call.
+    pub fn set_hnsw_cache_limits(&self, bytes: u64, entries: Option<usize>) -> Result<()> {
+        if entries == Some(0) {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "hnsw_cache_entries".into(),
+                reason: "must be positive".into(),
+            }));
+        }
         let _gate = self
             .hnsw_cache_gate
             .write()
             .expect("hnsw cache gate lock poisoned");
         self.hnsw_cache_limit_bytes.store(bytes, Ordering::Release);
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
-        Self::trim_hnsw_cache(&mut cache, bytes, None);
+        if let Some(entries) = entries {
+            cache.max_entries = entries;
+        }
+        cache.trim(bytes, None);
+        Ok(())
+    }
+
+    /// Return cumulative access counters and current globally retained entries.
+    pub fn hnsw_cache_stats(&self) -> HnswCacheStats {
+        let _gate = self
+            .hnsw_cache_gate
+            .read()
+            .expect("hnsw cache gate lock poisoned");
+        self.hnsw_cache
+            .read()
+            .expect("hnsw cache lock poisoned")
+            .stats(self.hnsw_cache_limit_bytes.load(Ordering::Acquire))
+    }
+
+    /// Warm one index and return its retained bytes, or zero if it cannot fit.
+    /// Missing/corrupt indexes return an error; oversize skips are counted/warned.
+    pub fn warm_hnsw_index(&self, name: &str) -> Result<u64> {
+        self.get_hnsw_stats(name)?;
+        Ok(self
+            .hnsw_cache
+            .read()
+            .expect("hnsw cache lock poisoned")
+            .iter()
+            .find(|(key, _)| key.as_str() == name)
+            .map_or(0, |(_, index)| index.stats().memory_bytes))
+    }
+
+    pub(crate) fn hnsw_cache_observer(&self) -> Arc<dyn alopex_sql::storage::HnswCacheObserver> {
+        self.hnsw_cache
+            .read()
+            .expect("hnsw cache lock poisoned")
+            .observer()
+    }
+
+    pub(crate) fn trim_sql_hnsw(
+        &self,
+        entries: &mut HashMap<String, alopex_sql::storage::HnswTxnEntry>,
+        observer: &dyn alopex_sql::storage::HnswCacheObserver,
+    ) {
+        let bytes = self.hnsw_cache_limit_bytes.load(Ordering::Acquire);
+        let count = self
+            .hnsw_cache
+            .read()
+            .expect("hnsw cache lock poisoned")
+            .max_entries;
+        alopex_sql::storage::trim_hnsw_transaction_cache(entries, bytes, count, Some(observer));
+    }
+
+    pub(crate) fn load_hnsw_timed<'a, T: KVTransaction<'a>>(
+        &self,
+        name: &str,
+        txn: &mut T,
+    ) -> alopex_core::Result<HnswIndex> {
+        let counters = self
+            .hnsw_cache
+            .read()
+            .expect("hnsw cache lock poisoned")
+            .counters
+            .clone();
+        counters.miss();
+        let started = std::time::Instant::now();
+        let result = HnswIndex::load(name, txn);
+        counters.loaded(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        result
     }
 
     pub(crate) fn hnsw_cache_snapshot(&self) -> (u64, Vec<(String, HnswIndex)>) {
@@ -1050,7 +1106,7 @@ impl Database {
     /// HNSW インデックスを削除する。
     pub fn drop_hnsw_index(&self, name: &str) -> Result<()> {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
-        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        let index = self.load_hnsw_timed(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
         self.commit_with_hnsw_cache_changes(
             || {
@@ -1080,7 +1136,7 @@ impl Database {
                 self.hnsw_cache_epoch.load(Ordering::Acquire),
             )
         };
-        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        let index = self.load_hnsw_timed(name, &mut txn).map_err(Error::Core)?;
         let stats = index.stats();
         self.hnsw_cache_insert_if_current(epoch, vec![(name.to_string(), index)]);
         Ok(stats)
@@ -1089,7 +1145,7 @@ impl Database {
     /// HNSW インデックスをコンパクションし、結果を返す。
     pub fn compact_hnsw_index(&self, name: &str) -> Result<alopex_core::vector::CompactionResult> {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
-        let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        let mut index = self.load_hnsw_timed(name, &mut txn).map_err(Error::Core)?;
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
         self.commit_with_hnsw_cache_changes(
@@ -1160,7 +1216,7 @@ impl Database {
                 self.hnsw_cache_epoch.load(Ordering::Acquire),
             )
         };
-        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        let index = self.load_hnsw_timed(name, &mut txn).map_err(Error::Core)?;
         let load_time = load_start.map(|start| start.elapsed());
         let cached_index = index.clone_for_read();
         self.hnsw_cache_insert_if_current(epoch, vec![(name.to_string(), cached_index)]);
@@ -1229,7 +1285,15 @@ impl Database {
 
     /// Begins a new transaction.
     pub fn begin(&self, mode: TxnMode) -> Result<Transaction<'_>> {
-        let mut txn = self.store.begin(mode).map_err(Error::Core)?;
+        let (mut txn, cached, observer) = {
+            let _gate = self
+                .hnsw_cache_gate
+                .read()
+                .expect("hnsw cache gate lock poisoned");
+            let txn = self.store.begin(mode).map_err(Error::Core)?;
+            let (_, cached) = self.hnsw_cache_snapshot();
+            (txn, cached, self.hnsw_cache_observer())
+        };
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == RangeChangeJournalCapability::Supported
@@ -1246,6 +1310,11 @@ impl Database {
             inner: Some(txn),
             db: self,
             hnsw_indices: HashMap::new(),
+            sql_hnsw: cached
+                .into_iter()
+                .map(|(name, index)| (name, alopex_sql::storage::HnswTxnEntry::cached_read(index)))
+                .collect(),
+            sql_hnsw_observer: observer,
             overlay: alopex_sql::catalog::CatalogOverlay::new(),
             vector_cache_updates: HashMap::new(),
             vector_cache_deletes: Vec::new(),
@@ -1269,6 +1338,8 @@ pub struct Transaction<'a> {
     inner: Option<AnyKVTransaction<'a>>,
     db: &'a Database,
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
+    pub(crate) sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
+    pub(crate) sql_hnsw_observer: Arc<dyn alopex_sql::storage::HnswCacheObserver>,
     overlay: alopex_sql::catalog::CatalogOverlay,
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
@@ -1344,6 +1415,9 @@ impl<'a> Transaction<'a> {
 
     /// Sets a value for a given key.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        if key.starts_with(b"hnsw:") {
+            self.sql_hnsw.clear();
+        }
         self.vector_cache_invalidated = true;
         self.vector_cache_updates.clear();
         self.vector_cache_deletes.clear();
@@ -1354,6 +1428,9 @@ impl<'a> Transaction<'a> {
 
     /// Deletes a key-value pair.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        if key.starts_with(b"hnsw:") {
+            self.sql_hnsw.clear();
+        }
         self.vector_cache_deletes.push(key.to_vec());
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
     }
@@ -1887,6 +1964,7 @@ impl<'a> Transaction<'a> {
             let _ = index.rollback(state);
         }
         self.hnsw_indices.clear();
+        self.sql_hnsw.clear();
         self.overlay = alopex_sql::catalog::CatalogOverlay::default();
         self.inner = None;
         Ok(())
@@ -1899,6 +1977,7 @@ impl<'a> Transaction<'a> {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
+            self.sql_hnsw.clear();
             txn.rollback_self().map_err(Error::Core)
         } else {
             Err(Error::TxnCompleted)
@@ -2203,6 +2282,7 @@ impl<'a> Drop for Transaction<'a> {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
+            self.sql_hnsw.clear();
             let _ = txn.rollback_self();
         }
     }
@@ -2551,6 +2631,51 @@ mod tests {
         .unwrap();
         index.upsert(b"row", &vec![1.0; dimension], b"").unwrap();
         index
+    }
+
+    #[test]
+    fn hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes() {
+        let db = Database::new();
+        db.set_hnsw_cache_limits(u64::MAX, Some(3)).unwrap();
+        for (name, dim) in [("a", 1024), ("b", 2), ("c", 2)] {
+            db.hnsw_cache_insert(name, cached_test_index(name, dim));
+        }
+        let before = db.hnsw_cache_stats();
+        assert!(
+            before.indexes.iter().find(|e| e.name == "a").unwrap().bytes
+                > before.indexes.iter().find(|e| e.name == "b").unwrap().bytes
+        );
+        db.hnsw_cache_get("a").unwrap();
+        db.hnsw_cache_insert("d", cached_test_index("d", 2));
+        let after = db.hnsw_cache_stats();
+        assert_eq!(
+            after
+                .indexes
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "d"]
+        );
+        assert_eq!(
+            after.used_bytes,
+            after.indexes.iter().map(|e| e.bytes).sum::<u64>()
+        );
+        assert_eq!(after.evictions, before.evictions + 1);
+        assert_eq!(after.hits, before.hits + 1);
+        db.set_hnsw_cache_limits(u64::MAX, Some(1)).unwrap();
+        assert_eq!(db.hnsw_cache_stats().indexes[0].name, "d");
+    }
+
+    #[test]
+    fn hnsw_cache_old_observer_never_touches_replacement_entry() {
+        let db = Database::new();
+        db.hnsw_cache_insert("a", cached_test_index("a", 2));
+        let old = db.hnsw_cache_observer();
+        db.hnsw_cache_insert("a", cached_test_index("a", 2));
+        old.hit("a", true);
+        let stats = db.hnsw_cache_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.indexes[0].hits, 0);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Instant;
 
 use alopex_core::kv::{
     KVStore, KVTransaction, RangeChangePayload, RangeChangeRecord, ReadAtPoint, ReadAtResult,
@@ -236,6 +238,66 @@ fn replay_id(payload: &[RangeChangePayload]) -> CoreResult<String> {
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
+/// Observes actual graph use; merely seeding a snapshot is not a hit.
+pub trait HnswCacheObserver: Send + Sync {
+    fn hit(&self, name: &str, shared: bool);
+    fn miss(&self);
+    fn loaded(&self, elapsed_ns: u64);
+    fn oversize(&self, name: &str, bytes: u64, limit: u64);
+}
+
+/// Cache ownership stays with the external transaction across finite SQL calls.
+enum HnswEntries<'a> {
+    Owned(HashMap<String, HnswTxnEntry>),
+    Borrowed(&'a mut HashMap<String, HnswTxnEntry>),
+}
+impl Deref for HnswEntries<'_> {
+    type Target = HashMap<String, HnswTxnEntry>;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(map) => map,
+            Self::Borrowed(map) => map,
+        }
+    }
+}
+impl DerefMut for HnswEntries<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Owned(map) => map,
+            Self::Borrowed(map) => map,
+        }
+    }
+}
+
+/// Bound clean transaction-local graph retention. Dirty staged graphs must be
+/// flushed before eviction so a later load sees the transaction's own writes.
+pub fn trim_hnsw_transaction_cache(
+    entries: &mut HashMap<String, HnswTxnEntry>,
+    bytes: u64,
+    count: usize,
+    observer: Option<&dyn HnswCacheObserver>,
+) {
+    let mut used = entries.values().fold(0_u64, |sum, entry| {
+        sum.saturating_add(entry.index.stats().memory_bytes)
+    });
+    while used > bytes || entries.len() > count {
+        let victim = entries
+            .iter()
+            .filter(|(_, entry)| !entry.dirty)
+            .min_by_key(|(_, entry)| entry.last_access)
+            .map(|(name, _)| name.clone());
+        let Some(name) = victim else {
+            break;
+        };
+        let entry = entries.remove(&name).expect("selected entry exists");
+        let size = entry.index.stats().memory_bytes;
+        if let (true, Some(observer)) = (size > bytes, observer) {
+            observer.oversize(&name, size, bytes);
+        }
+        used = used.saturating_sub(size);
+    }
+}
+
 pub trait SqlTxn<'txn, S: KVStore + 'txn> {
     /// Existing execution memory policy, shared with statement staging.
     fn memory_policy(&self) -> Option<&crate::executor::MemoryPolicy> {
@@ -252,6 +314,11 @@ pub trait SqlTxn<'txn, S: KVStore + 'txn> {
     fn ensure_write_txn(&self) -> CoreResult<()>;
 
     fn inner_mut(&mut self) -> &mut S::Transaction<'txn>;
+
+    /// Cost estimation does not deserialize graph nodes.
+    fn hnsw_node_count(&mut self, name: &str) -> CoreResult<u64> {
+        HnswIndex::load_node_count(name, self.inner_mut())
+    }
 
     fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex>;
 
@@ -383,7 +450,25 @@ impl<S: KVStore> TxnBridge<S> {
             inner: txn,
             mode,
             overlay,
-            hnsw_indices: HashMap::new(),
+            hnsw_indices: HnswEntries::Owned(HashMap::new()),
+            observer: None,
+        }
+    }
+
+    /// Borrow the transaction owner's cache without changing terminal ownership.
+    pub fn wrap_external_with_hnsw<'a, 'b, 'c>(
+        txn: &'a mut S::Transaction<'b>,
+        mode: TxnMode,
+        overlay: &'c mut CatalogOverlay,
+        entries: &'c mut HashMap<String, HnswTxnEntry>,
+        observer: Option<Arc<dyn HnswCacheObserver>>,
+    ) -> BorrowedSqlTransaction<'a, 'b, 'c, S> {
+        BorrowedSqlTransaction {
+            inner: txn,
+            mode,
+            overlay,
+            hnsw_indices: HnswEntries::Borrowed(entries),
+            observer,
         }
     }
 
@@ -450,6 +535,7 @@ pub struct HnswTxnEntry {
     pub state: HnswTransactionState,
     pub dirty: bool,
     pub(crate) cached_read: bool,
+    last_access: Instant,
 }
 
 impl HnswTxnEntry {
@@ -459,15 +545,18 @@ impl HnswTxnEntry {
             state: HnswTransactionState::default(),
             dirty: false,
             cached_read: false,
+            last_access: Instant::now(),
         }
     }
 
-    pub(crate) fn cached_read(index: HnswIndex) -> Self {
+    /// A shared immutable graph; the first mutation forks independent state.
+    pub fn cached_read(index: HnswIndex) -> Self {
         Self {
             index,
             state: HnswTransactionState::default(),
             dirty: false,
             cached_read: true,
+            last_access: Instant::now(),
         }
     }
 }
@@ -654,6 +743,13 @@ impl<'a, S: KVStore + 'a> SqlTxn<'a, S> for SqlTransaction<'a, S> {
         self.inner_mut()
     }
 
+    fn hnsw_node_count(&mut self, name: &str) -> CoreResult<u64> {
+        if let Some(entry) = self.hnsw_indices.get(name) {
+            return Ok(entry.index.stats().node_count);
+        }
+        HnswIndex::load_node_count(name, &mut self.inner)
+    }
+
     fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
         self.hnsw_entry(name)
     }
@@ -679,7 +775,8 @@ pub struct BorrowedSqlTransaction<'a, 'b, 'c, S: KVStore + 'b> {
     inner: &'a mut S::Transaction<'b>,
     mode: TxnMode,
     overlay: &'c mut CatalogOverlay,
-    hnsw_indices: HashMap<String, HnswTxnEntry>,
+    hnsw_indices: HnswEntries<'c>,
+    observer: Option<Arc<dyn HnswCacheObserver>>,
 }
 
 impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
@@ -693,9 +790,22 @@ impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
                 inner: self.inner,
                 mode: self.mode,
                 hnsw_indices: &mut self.hnsw_indices,
+                observer: self.observer.as_deref(),
             },
             self.overlay,
         )
+    }
+
+    /// Attach counters for graph use without changing transaction ownership.
+    pub fn observe_hnsw_cache(&mut self, observer: Arc<dyn HnswCacheObserver>) {
+        self.observer = Some(observer);
+    }
+
+    /// Discard clean cached graph identities after a completed catalog change.
+    /// Call only after the executor has flushed staged graph writes.
+    pub fn reset_hnsw_cache_after_ddl(&mut self) {
+        debug_assert!(self.hnsw_indices.values().all(|entry| !entry.dirty));
+        self.hnsw_indices.clear();
     }
 
     pub fn seed_hnsw_read_cache(&mut self, entries: Vec<(String, HnswIndex)>) {
@@ -709,6 +819,7 @@ impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
     pub fn cloned_hnsw_entries(&self) -> Vec<(String, HnswIndex)> {
         self.hnsw_indices
             .iter()
+            .filter(|(_, entry)| !entry.cached_read)
             .map(|(name, entry)| (name.clone(), entry.index.clone_for_read()))
             .collect()
     }
@@ -719,10 +830,10 @@ impl<'a, 'b, 'c, S: KVStore + 'b> Drop for BorrowedSqlTransaction<'a, 'b, 'c, S>
         for entry in self.hnsw_indices.values_mut() {
             if entry.dirty {
                 let _ = entry.index.rollback(&mut entry.state);
-                entry.dirty = false;
             }
         }
-        self.hnsw_indices.clear();
+        // The owner retains clean graphs. Failed dirty work is never retained.
+        self.hnsw_indices.retain(|_, entry| !entry.dirty);
     }
 }
 
@@ -730,6 +841,7 @@ pub struct BorrowedSqlTxn<'a, 'b, S: KVStore + 'b> {
     inner: &'a mut S::Transaction<'b>,
     mode: TxnMode,
     hnsw_indices: &'a mut HashMap<String, HnswTxnEntry>,
+    observer: Option<&'a dyn HnswCacheObserver>,
 }
 
 impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
@@ -748,29 +860,42 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
         self.inner
     }
 
+    fn hnsw_node_count(&mut self, name: &str) -> CoreResult<u64> {
+        if let Some(entry) = self.hnsw_indices.get(name) {
+            return Ok(entry.index.stats().node_count);
+        }
+        HnswIndex::load_node_count(name, self.inner)
+    }
+
     fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
-        if !self.hnsw_indices.contains_key(name) {
-            let index = HnswIndex::load(name, self.inner)?;
+        if let Some(entry) = self.hnsw_indices.get_mut(name) {
+            entry.last_access = Instant::now();
+            if let Some(observer) = self.observer {
+                observer.hit(name, entry.cached_read);
+            }
+        } else {
+            if let Some(observer) = self.observer {
+                observer.miss();
+            }
+            let started = Instant::now();
+            let loaded = HnswIndex::load(name, self.inner);
+            if let Some(observer) = self.observer {
+                observer.loaded(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            }
             self.hnsw_indices
-                .insert(name.to_string(), HnswTxnEntry::loaded(index));
+                .insert(name.to_string(), HnswTxnEntry::loaded(loaded?));
         }
         Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
     }
 
     fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
-        if self
-            .hnsw_indices
-            .get(name)
-            .is_some_and(|entry| entry.cached_read)
-        {
-            self.hnsw_indices.remove(name);
+        self.hnsw_entry(name)?;
+        let entry = self.hnsw_indices.get_mut(name).expect("loaded above");
+        if entry.cached_read {
+            entry.index = entry.index.fork_owned();
+            entry.cached_read = false;
         }
-        if !self.hnsw_indices.contains_key(name) {
-            let index = HnswIndex::load(name, self.inner)?;
-            self.hnsw_indices
-                .insert(name.to_string(), HnswTxnEntry::loaded(index));
-        }
-        Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
+        Ok(entry)
     }
 
     fn flush_hnsw(&mut self) -> Result<()> {
@@ -780,7 +905,6 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
                 entry.dirty = false;
             }
         }
-        self.hnsw_indices.clear();
         Ok(())
     }
 
@@ -834,7 +958,6 @@ mod tests {
     use alopex_core::kv::{KVStore, decode_range_change, journal_key};
     use alopex_core::types::TxnMode;
     use alopex_core::vector::hnsw::{HnswConfig, HnswIndex};
-    use std::sync::Arc;
 
     fn sample_table_meta() -> TableMetadata {
         TableMetadata::new(

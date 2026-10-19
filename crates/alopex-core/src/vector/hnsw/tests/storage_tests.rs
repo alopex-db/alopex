@@ -539,3 +539,43 @@ fn free_list_and_key_map_reconstructed_after_compaction() {
     assert!(loaded.key_to_node.contains_key(b"c".as_slice()));
     assert!(!loaded.key_to_node.contains_key(b"b".as_slice()));
 }
+
+#[test]
+fn node_count_metadata_tracks_active_nodes_without_reading_corrupt_graph_nodes() {
+    let store = MemoryKV::new();
+    let mut index = HnswIndex::create("metadata_count", base_config()).unwrap();
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    for key in [b"a", b"b", b"c"] {
+        index.upsert(key, &[1.0, 2.0], b"").unwrap();
+        index.save(&mut txn).unwrap();
+        assert_eq!(
+            HnswIndex::load_node_count("metadata_count", &mut txn).unwrap(),
+            index.stats().node_count
+        );
+    }
+    index.delete(b"b").unwrap();
+    index.save(&mut txn).unwrap();
+    assert_eq!(
+        HnswIndex::load_node_count("metadata_count", &mut txn).unwrap(),
+        2
+    );
+    txn.put(b"hnsw:node:metadata_count:0".to_vec(), b"corrupt".to_vec())
+        .unwrap();
+    assert_eq!(
+        HnswIndex::load_node_count("metadata_count", &mut txn).unwrap(),
+        2
+    );
+    assert!(HnswIndex::load("metadata_count", &mut txn).is_err());
+}
+
+#[test]
+fn fork_owned_never_mutates_shared_reader_graph() {
+    let mut index = HnswIndex::create("fork", base_config()).unwrap();
+    index.upsert(b"a", &[1.0, 2.0], b"").unwrap();
+    let shared = index.clone_for_read();
+    let mut fork = shared.fork_owned();
+    fork.upsert(b"b", &[0.0, 0.0], b"").unwrap();
+    assert_eq!(fork.stats().node_count, 2);
+    assert_eq!(shared.stats().node_count, 1);
+    assert_eq!(shared.search(&[0.0, 0.0], 2, None).unwrap().0.len(), 1);
+}

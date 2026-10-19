@@ -324,6 +324,37 @@ results, stats = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 1
 print(stats.nodes_visited, stats.distance_computations, stats.search_time_us)
 ```
 
+### HNSW キャッシュ
+
+```python
+db = Database.open("app.alopex", hnsw_cache_bytes=512 * 1024 * 1024,
+                   hnsw_cache_entries=128)
+retained_bytes = db.warm_hnsw_index("idx")
+print(db.hnsw_cache_stats())
+db.set_hnsw_cache_limit(256 * 1024 * 1024, entries=64)
+```
+
+`new`、`open_in_memory`、`EmbeddedConfig` でも同じ設定を指定できます。
+件数は正の整数です。バイト数を0にすると保持を無効にします。
+上限は推定グラフ容量で、プロセスのRSS、一時ロード中のグラフ、実行中の読み手の保持分は含みません。
+LRUで最終アクセスが古い索引から追い出します。上限を超える索引でも検索はでき、
+`oversize_skips` を加算し、索引ごとに一度警告します。ウォームアップは保持できた容量を返し、
+保持できなければ0、索引がない場合や破損している場合はエラーを返します。
+
+統計には上限・使用量・件数、累積の `hits`、実際のグラフロード試行数 `misses`、
+`evictions`、`oversize_skips`、`invalidations`、`load_ns_total`、保持中の索引一覧を含みます。
+索引別の `hits` と `last_access_ns` は共有グラフのアクセスを示します。
+`last_access_ns` はキャッシュ初期化からの経過ナノ秒です。
+
+`db.begin()` は開始時の共有グラフだけを自身のKVスナップショットと一緒に取得し、
+SQL呼び出し間で再利用します。キャッシュにないグラフはそのトランザクションのKVから読み、
+共有キャッシュへ公開しません。最初の書き込み時は独立したグラフへコピーします。
+保持上限の変更は、明示トランザクションの次のSQL呼び出しでも適用します。
+書き込み開始時のジャーナル準備と最初のグラフコピーのコストは別途かかります。
+
+`alopex.asyncio.AsyncDatabase` にも同じ設定と3メソッドがあります。
+有限のネイティブ処理を所有スレッドで実行するため、ウォームアップ中はイベントループをブロックします。
+
 ### Catalog API（polars 必須）
 
 ```python

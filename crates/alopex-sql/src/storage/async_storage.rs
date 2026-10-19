@@ -1317,6 +1317,13 @@ impl<'ctx, S: KVStore + 'ctx> crate::storage::bridge::SqlTxn<'ctx, S>
         &mut self.inner
     }
 
+    fn hnsw_node_count(&mut self, name: &str) -> alopex_core::Result<u64> {
+        match self.hnsw_indices.get(name) {
+            Some(entry) => Ok(entry.index.stats().node_count),
+            None => HnswIndex::load_node_count(name, &mut self.inner),
+        }
+    }
+
     fn hnsw_entry(&mut self, name: &str) -> alopex_core::Result<&HnswIndex> {
         if !self.hnsw_indices.contains_key(name) {
             let index = HnswIndex::load(name, &mut self.inner)?;

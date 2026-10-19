@@ -197,7 +197,7 @@ fn selected_hnsw_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
     let dimension = vector_dimension(table, &pattern.column).unwrap_or(HNSW_BASE_DIMENSIONS);
     let threshold = hnsw_row_threshold(pattern.k as usize, dimension);
-    let indexed_rows = txn.hnsw_entry(&index.name)?.stats().node_count;
+    let indexed_rows = txn.hnsw_node_count(&index.name)?;
     Ok((indexed_rows > threshold as u64).then_some(index))
 }
 

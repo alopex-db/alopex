@@ -47,6 +47,8 @@ fn columnar_roundtrip_disk_mode() {
         path: Some(dir.path().join("wal.log")),
         storage_mode: StorageMode::Disk,
         memory_limit: None,
+        hnsw_cache_bytes: None,
+        hnsw_cache_entries: None,
         segment_config: Default::default(),
     })
     .unwrap();

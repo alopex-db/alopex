@@ -78,6 +78,25 @@ impl HnswIndex {
         Ok(Self::from_parts(name, storage, graph))
     }
 
+    /// Read the active node count from the persistent header without loading nodes.
+    /// The full graph checksum is verified by `load`, not by this metadata-only read.
+    pub fn load_node_count<'a, T: KVTransaction<'a>>(name: &str, txn: &mut T) -> Result<u64> {
+        HnswStorage::new(name)
+            .load_metadata(txn)
+            .map(|metadata| metadata.node_count)
+    }
+
+    /// Clone an independent mutable graph without rereading persistent nodes.
+    /// Used for the first write through a shared, immutable cache handle.
+    pub fn fork_owned(&self) -> Self {
+        let graph = self
+            .graph
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        Self::from_parts(&self.name, self.storage.clone(), graph)
+    }
+
     /// インデックス名を返す。
     pub fn name(&self) -> &str {
         &self.name
@@ -86,7 +105,7 @@ impl HnswIndex {
     /// Creates a read-only handle that shares the immutable graph state.
     ///
     /// Callers must not stage writes through the returned handle. Write
-    /// transactions load an owned index so an uncommitted graph cannot leak
+    /// transactions must fork an owned graph so an uncommitted graph cannot leak
     /// into a shared query cache.
     pub fn clone_for_read(&self) -> Self {
         Self {

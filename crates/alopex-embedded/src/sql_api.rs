@@ -261,7 +261,13 @@ where
     let db = Arc::clone(&transaction.db);
     let session = transaction.session.clone();
     let overlay = &mut transaction.overlay;
+    transaction.db.trim_sql_hnsw(
+        &mut transaction.sql_hnsw,
+        transaction.sql_hnsw_observer.as_ref(),
+    );
     let catalog_modified = &mut transaction.catalog_modified;
+    let hnsw_entries = &mut transaction.sql_hnsw;
+    let observer = transaction.sql_hnsw_observer.clone();
     let mut outcome: Result<Vec<SqlResult>> = Ok(Vec::new());
 
     let session_result = session
@@ -269,8 +275,13 @@ where
             outcome = (|| {
                 let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
                 let mode = raw.mode();
-                let mut borrowed =
-                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let mut borrowed = TxnBridge::<alopex_core::kv::AnyKV>::wrap_external_with_hnsw(
+                    &mut raw,
+                    mode,
+                    overlay,
+                    hnsw_entries,
+                    Some(observer.clone()),
+                );
                 let mut executor: Executor<_, _> =
                     Executor::new(db.store.clone(), db.sql_catalog.clone());
                 let results = executor.execute_hnsw_batch_in_txn(
@@ -305,6 +316,7 @@ where
                 )?;
                 if stmt_changes_catalog(statement) {
                     *catalog_modified = true;
+                    borrowed.reset_hnsw_cache_after_ddl();
                 }
                 Ok(results)
             })();
@@ -317,6 +329,9 @@ where
     }
     if outcome.is_err() {
         transaction.failed = true;
+        transaction.sql_hnsw.clear();
+    } else {
+        db.trim_sql_hnsw(&mut transaction.sql_hnsw, observer.as_ref());
     }
     outcome
 }
@@ -343,7 +358,13 @@ fn execute_statements_owned(
     let db = Arc::clone(&transaction.db);
     let session = transaction.session.clone();
     let overlay = &mut transaction.overlay;
+    transaction.db.trim_sql_hnsw(
+        &mut transaction.sql_hnsw,
+        transaction.sql_hnsw_observer.as_ref(),
+    );
     let catalog_modified = &mut transaction.catalog_modified;
+    let hnsw_entries = &mut transaction.sql_hnsw;
+    let observer = transaction.sql_hnsw_observer.clone();
     let mut outcome = Ok(alopex_sql::ExecutionResult::Success);
 
     let session_result = session
@@ -351,8 +372,13 @@ fn execute_statements_owned(
             outcome = (|| {
                 let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
                 let mode = raw.mode();
-                let mut borrowed =
-                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let mut borrowed = TxnBridge::<alopex_core::kv::AnyKV>::wrap_external_with_hnsw(
+                    &mut raw,
+                    mode,
+                    overlay,
+                    hnsw_entries,
+                    Some(observer.clone()),
+                );
                 let mut executor: Executor<_, _> =
                     Executor::new(db.store.clone(), db.sql_catalog.clone());
                 let mut last = alopex_sql::ExecutionResult::Success;
@@ -374,6 +400,9 @@ fn execute_statements_owned(
                     last = executor
                         .execute_in_txn(plan, &mut borrowed)
                         .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))?;
+                    if stmt_changes_catalog(stmt) {
+                        borrowed.reset_hnsw_cache_after_ddl();
+                    }
                 }
 
                 if statements.iter().any(stmt_changes_catalog) {
@@ -390,6 +419,9 @@ fn execute_statements_owned(
     }
     if outcome.is_err() {
         transaction.failed = true;
+        transaction.sql_hnsw.clear();
+    } else {
+        db.trim_sql_hnsw(&mut transaction.sql_hnsw, observer.as_ref());
     }
     outcome
 }
@@ -590,22 +622,17 @@ impl Database {
         // for the storage snapshot that supplied them. Keep the read gate
         // through read transaction start, cache snapshot, planning, and
         // execution so a committed DDL writer cannot split those views.
-        let cache_gate = if mode == TxnMode::ReadOnly {
-            Some(
-                self.hnsw_cache_gate
-                    .read()
-                    .expect("hnsw cache gate lock poisoned"),
-            )
-        } else {
-            None
-        };
+        let mut cache_gate = Some(
+            self.hnsw_cache_gate
+                .read()
+                .expect("hnsw cache gate lock poisoned"),
+        );
         let mut txn = self.store.begin(mode).map_err(Error::Core)?;
-        let (hnsw_cache_epoch, cached_hnsw_entries) = if mode == TxnMode::ReadOnly {
-            let (epoch, cached) = self.hnsw_cache_snapshot();
-            (Some(epoch), cached)
-        } else {
-            (None, Vec::new())
-        };
+        let (epoch, cached_hnsw_entries) = self.hnsw_cache_snapshot();
+        let hnsw_cache_epoch = Some(epoch);
+        if mode == TxnMode::ReadWrite {
+            drop(cache_gate.take());
+        }
         let journal = if mode == TxnMode::ReadWrite
             && stmts.iter().any(stmt_changes_user_data)
             && self.store.range_change_journal_capability()
@@ -622,6 +649,7 @@ impl Database {
         let mut overlay = CatalogOverlay::new();
         let mut borrowed =
             TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+        borrowed.observe_hnsw_cache(self.hnsw_cache_observer());
         if hnsw_cache_epoch.is_some() {
             borrowed.seed_hnsw_read_cache(cached_hnsw_entries);
         }
@@ -648,6 +676,9 @@ impl Database {
                     .execute_in_txn(plan, &mut borrowed)
                     .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
             );
+            if stmt_changes_catalog(stmt) {
+                borrowed.reset_hnsw_cache_after_ddl();
+            }
             #[cfg(test)]
             if mode == TxnMode::ReadOnly {
                 if let Some(barrier) = self
@@ -767,6 +798,7 @@ impl Database {
             let mut overlay = CatalogOverlay::new();
             let mut borrowed =
                 TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+            borrowed.observe_hnsw_cache(self.hnsw_cache_observer());
 
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
@@ -914,6 +946,7 @@ impl Database {
             let mut overlay = CatalogOverlay::new();
             let mut borrowed =
                 TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
+            borrowed.observe_hnsw_cache(self.hnsw_cache_observer());
 
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
@@ -1007,14 +1040,25 @@ impl<'a> Transaction<'a> {
         // SQL loads its graph from this transaction's KV state. Stage direct
         // changes first, then discard the old graph so later direct operations
         // reload any SQL updates instead of overwriting them at commit.
+        let direct_graphs = !self.hnsw_indices.is_empty();
         for (index, state) in self.hnsw_indices.values_mut() {
             index.commit_staged(txn, state).map_err(Error::Core)?;
         }
         self.hnsw_indices.clear();
+        if direct_graphs {
+            self.sql_hnsw.clear();
+        }
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         let mode = txn.mode();
 
-        let mut borrowed =
-            TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(txn, mode, &mut self.overlay);
+        let mut borrowed = TxnBridge::<alopex_core::kv::AnyKV>::wrap_external_with_hnsw(
+            txn,
+            mode,
+            &mut self.overlay,
+            &mut self.sql_hnsw,
+            Some(self.sql_hnsw_observer.clone()),
+        );
         let mut executor: Executor<_, _> = Executor::new(store, sql_catalog.clone());
 
         let mut last = alopex_sql::ExecutionResult::Success;
@@ -1035,11 +1079,17 @@ impl<'a> Transaction<'a> {
             last = executor
                 .execute_in_txn(plan, &mut borrowed)
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
+            if stmt_changes_catalog(stmt) {
+                borrowed.reset_hnsw_cache_after_ddl();
+            }
         }
 
         if stmts.iter().any(stmt_changes_catalog) {
             self.catalog_modified = true;
         }
+        drop(borrowed);
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         Ok(last)
     }
 }
@@ -1307,8 +1357,8 @@ mod tests {
         .unwrap();
         assert!(db.hnsw_cache.read().unwrap().is_empty());
 
-        let query = "EXPLAIN SELECT id FROM items \
-            ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1";
+        let query = "SELECT id FROM items \
+            ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1 WITH (enable_hnsw = true)";
         db.execute_sql(query).unwrap();
         let first = db
             .hnsw_cache

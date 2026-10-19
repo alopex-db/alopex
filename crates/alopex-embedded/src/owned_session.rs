@@ -79,7 +79,15 @@ impl Database {
         self: Arc<Self>,
         mode: TxnMode,
     ) -> Result<OwnedEmbeddedTransaction> {
-        let session = self.begin_owned_transaction(mode)?;
+        let (session, cached, observer) = {
+            let _gate = self
+                .hnsw_cache_gate
+                .read()
+                .expect("hnsw cache gate lock poisoned");
+            let session = self.begin_owned_transaction(mode)?;
+            let (_, cached) = self.hnsw_cache_snapshot();
+            (session, cached, self.hnsw_cache_observer())
+        };
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == alopex_core::kv::RangeChangeJournalCapability::Supported
@@ -106,6 +114,11 @@ impl Database {
             catalog_modified: false,
             journal,
             hnsw_indices: HashMap::new(),
+            sql_hnsw: cached
+                .into_iter()
+                .map(|(name, index)| (name, alopex_sql::storage::HnswTxnEntry::cached_read(index)))
+                .collect(),
+            sql_hnsw_observer: observer,
             vector_cache_invalidated: false,
             vector_index: None,
             vector_index_dirty: false,
@@ -127,6 +140,8 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) catalog_modified: bool,
     pub(crate) journal: Option<LocalRangeChangeJournal>,
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
+    pub(crate) sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
+    pub(crate) sql_hnsw_observer: Arc<dyn alopex_sql::storage::HnswCacheObserver>,
     pub(crate) vector_cache_invalidated: bool,
     pub(crate) vector_index: Option<VectorKeyIndex>,
     pub(crate) vector_index_dirty: bool,
@@ -160,6 +175,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Stage one key/value pair inside this owned transaction.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        if key.starts_with(b"hnsw:") {
+            self.sql_hnsw.clear();
+        }
         self.vector_cache_invalidated = true;
         self.session
             .with_transaction(|transaction| transaction.put(key.to_vec(), value.to_vec()))
@@ -168,6 +186,9 @@ impl OwnedEmbeddedTransaction {
 
     /// Stage one deletion inside this owned transaction.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        if key.starts_with(b"hnsw:") {
+            self.sql_hnsw.clear();
+        }
         self.vector_cache_invalidated = true;
         self.session
             .with_transaction(|transaction| transaction.delete(key.to_vec()))
@@ -376,6 +397,7 @@ impl OwnedEmbeddedTransaction {
             // SQL owns its own graph and may update or drop an index. The next
             // direct HNSW operation must reload the transaction's current KV state.
             self.hnsw_indices.clear();
+            self.sql_hnsw.clear();
         }
         Ok(())
     }
@@ -404,11 +426,11 @@ impl OwnedEmbeddedTransaction {
     /// Restore direct HNSW state to the set present when the savepoint was created.
     fn rollback_hnsw_to_savepoint(&mut self, retained: &HashSet<String>) -> Result<()> {
         // Drop stale graphs before loading, including when loading fails midway.
-        self.hnsw_indices.clear();
         // A newer savepoint stages HNSW changes and clears their undo snapshot.
         // The core transaction has already rolled back to the requested point;
         // reload that version instead of using the latest graph's undo state.
         self.hnsw_indices.clear();
+        self.sql_hnsw.clear();
         let restored = self
             .session
             .with_transaction(|transaction| {
@@ -515,7 +537,14 @@ impl OwnedEmbeddedTransaction {
                         .write()
                         .expect("hnsw cache lock poisoned");
                     for (name, (index, _)) in hnsw_indices {
-                        cache.insert(name, Arc::new(index));
+                        Database::hnsw_cache_insert_bounded(
+                            &mut cache,
+                            name,
+                            Arc::new(index),
+                            self.db
+                                .hnsw_cache_limit_bytes
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        );
                     }
                 }
             },
@@ -541,6 +570,7 @@ impl OwnedEmbeddedTransaction {
             let _ = index.rollback(state);
         }
         self.hnsw_indices.clear();
+        self.sql_hnsw.clear();
         self.overlay = CatalogOverlay::default();
         Ok(())
     }

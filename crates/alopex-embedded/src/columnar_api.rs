@@ -84,6 +84,10 @@ pub struct ColumnarIndexInfo {
 /// カラムナー関連設定。
 #[derive(Debug, Clone)]
 pub struct EmbeddedConfig {
+    /// Optional estimated HNSW graph byte budget (default 256 MiB, zero disables).
+    pub hnsw_cache_bytes: Option<u64>,
+    /// Optional retained HNSW graph count (default 128, must be positive).
+    pub hnsw_cache_entries: Option<usize>,
     /// データパス（Disk モード時に必須）。
     pub path: Option<PathBuf>,
     /// カラムナーストレージモード。
@@ -98,6 +102,8 @@ impl EmbeddedConfig {
     /// ディスクモードで初期化。
     pub fn disk(path: PathBuf) -> Self {
         Self {
+            hnsw_cache_bytes: None,
+            hnsw_cache_entries: None,
             path: Some(path),
             storage_mode: StorageMode::Disk,
             memory_limit: None,
@@ -108,6 +114,8 @@ impl EmbeddedConfig {
     /// インメモリモードで初期化（無制限）。
     pub fn in_memory() -> Self {
         Self {
+            hnsw_cache_bytes: None,
+            hnsw_cache_entries: None,
             path: None,
             storage_mode: StorageMode::InMemory,
             memory_limit: None,
@@ -118,6 +126,8 @@ impl EmbeddedConfig {
     /// インメモリモードでメモリ上限を設定。
     pub fn in_memory_with_limit(limit: usize) -> Self {
         Self {
+            hnsw_cache_bytes: None,
+            hnsw_cache_entries: None,
             path: None,
             storage_mode: StorageMode::InMemory,
             memory_limit: Some(limit),
@@ -144,6 +154,12 @@ pub enum StorageMode {
 impl Database {
     /// 構成付きでデータベースを開く（カラムナー機能を初期化）。
     pub fn open_with_config(config: EmbeddedConfig) -> Result<Self> {
+        if config.hnsw_cache_entries == Some(0) {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "hnsw_cache_entries".into(),
+                reason: "must be positive".into(),
+            }));
+        }
         let store = match config.storage_mode {
             StorageMode::Disk => {
                 let path = config.path.clone().ok_or_else(|| {
@@ -161,12 +177,19 @@ impl Database {
             .map_err(Error::Core)?,
         };
 
-        Ok(Self::init(
+        let db = Self::init(
             store,
             config.storage_mode,
             config.memory_limit,
             config.segment_config,
-        ))
+        );
+        db.set_hnsw_cache_limits(
+            config
+                .hnsw_cache_bytes
+                .unwrap_or(crate::DEFAULT_HNSW_CACHE_LIMIT_BYTES),
+            config.hnsw_cache_entries,
+        )?;
+        Ok(db)
     }
 
     /// 現在のカラムナーストレージモードを返す。
