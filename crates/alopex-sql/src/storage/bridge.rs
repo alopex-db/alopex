@@ -280,7 +280,7 @@ pub fn trim_hnsw_transaction_cache(
     let mut used = entries.values().fold(0_u64, |sum, entry| {
         sum.saturating_add(entry.index.stats().memory_bytes)
     });
-    while used > bytes || entries.len() > count {
+    while (bytes == 0 && !entries.is_empty()) || used > bytes || entries.len() > count {
         let victim = entries
             .iter()
             .filter(|(_, entry)| !entry.dirty)
@@ -291,7 +291,7 @@ pub fn trim_hnsw_transaction_cache(
         };
         let entry = entries.remove(&name).expect("selected entry exists");
         let size = entry.index.stats().memory_bytes;
-        if let (true, Some(observer)) = (size > bytes, observer) {
+        if let (true, Some(observer)) = (bytes == 0 || size > bytes, observer) {
             observer.oversize(&name, size, bytes);
         }
         used = used.saturating_sub(size);
@@ -1007,6 +1007,17 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn zero_budget_drops_empty_clean_hnsw_graphs() {
+        let index =
+            HnswIndex::create("empty_zero", HnswConfig::default().with_dimension(2)).unwrap();
+        assert_eq!(index.stats().memory_bytes, 0);
+        let mut entries =
+            HashMap::from([("empty_zero".to_owned(), HnswTxnEntry::cached_read(index))]);
+        trim_hnsw_transaction_cache(&mut entries, 0, 128, None);
+        assert!(entries.is_empty());
     }
 
     #[test]

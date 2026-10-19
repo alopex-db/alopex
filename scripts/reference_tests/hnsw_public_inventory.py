@@ -77,6 +77,10 @@ EVIDENCE_BY_CLAIM = {
     "HnswConfig": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
     "HnswIndex.create": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow",
     "HnswIndex.load/save": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#save_and_load_roundtrip_preserves_graph",
+    "HnswIndex.load_node_count": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#node_count_metadata_tracks_active_nodes_without_reading_corrupt_graph_nodes",
+    "HnswIndex.fork_owned": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#fork_owned_never_mutates_shared_reader_graph",
+    "Embedded HNSW cache controls": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+    "Python HNSW cache controls": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
     "HnswIndex.clone_for_read": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#read_clone_searches_shared_graph_without_inheriting_callbacks",
     "HnswIndex.upsert": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_upsert_reconnects_existing_key_without_duplicate_results",
     "HnswIndex.search": "scripts/performance/hnsw_v0811_contract.py#run_benchmark",
@@ -144,6 +148,8 @@ def claim_for(row: dict[str, object]) -> str:
             "SQL.HNSW_DELETE_SYNC": "SQL HNSW DML/transaction synchronization",
         }[api]
     if surface == "embedded":
+        if api.rsplit(".", 1)[-1] in {"set_hnsw_cache_limits", "hnsw_cache_stats", "warm_hnsw_index", "HnswCacheStats", "HnswCacheIndexStats"}:
+            return "Embedded HNSW cache controls"
         if api.endswith(".set_hnsw_cache_limit"):
             return "Embedded HNSW cache limit"
         if "compact" in api:
@@ -154,6 +160,8 @@ def claim_for(row: dict[str, object]) -> str:
             return "Embedded transaction upsert/delete/commit/rollback/reopen"
         return "Embedded create/search/drop"
     if surface == "Python":
+        if api.rsplit(".", 1)[-1] in {"set_hnsw_cache_limit", "hnsw_cache_stats", "warm_hnsw_index"}:
+            return "Python HNSW cache controls"
         if api == "Python.HnswConfig":
             return "Python.HnswConfig"
         if api in {"Python.HnswStats", "Python.SearchResult", "Python.SearchStats"}:
@@ -180,6 +188,8 @@ def claim_for(row: dict[str, object]) -> str:
         "load": "HnswIndex.load/save",
         "save": "HnswIndex.load/save",
         "clone_for_read": "HnswIndex.clone_for_read",
+        "load_node_count": "HnswIndex.load_node_count",
+        "fork_owned": "HnswIndex.fork_owned",
         "upsert": "HnswIndex.upsert",
         "upsert_batch": "HnswIndex.upsert",
         "upsert_staged": "upsert reconnect",
@@ -356,6 +366,12 @@ def inventory() -> list[dict[str, object]]:
     rows.extend(
         row("embedded", f"embedded.{owner}.{name}", "crates/alopex-embedded/src/lib.rs")
         for owner, name in rust_methods(embedded, lambda name: "hnsw" in name)
+    )
+
+    embedded_cache = (ROOT / "crates/alopex-embedded/src/hnsw_cache.rs").read_text(encoding="utf-8")
+    rows.extend(
+        row("embedded", f"embedded.{name}", "crates/alopex-embedded/src/hnsw_cache.rs")
+        for name in re.findall(r"^pub struct (HnswCache\w+)", embedded_cache, re.MULTILINE)
     )
 
     stub_types = re.findall(r"^class ((?:Hnsw|Search)[A-Za-z0-9_]+)", pyi, re.MULTILINE)

@@ -74,7 +74,7 @@ impl Counters {
                 index = name,
                 memory_bytes = bytes,
                 limit_bytes = limit,
-                "HNSW graph exceeds cache budget; queries remain available without retention"
+                "HNSW cache retention is disabled or too small; queries remain available without retention"
             );
         }
     }
@@ -180,7 +180,10 @@ impl HnswCacheState {
         }
     }
     pub(crate) fn trim(&mut self, bytes: u64, preserve: Option<&str>) {
-        while self.used_bytes > bytes || self.indices.len() > self.max_entries {
+        while (bytes == 0 && !self.indices.is_empty())
+            || self.used_bytes > bytes
+            || self.indices.len() > self.max_entries
+        {
             let victim = self
                 .metadata
                 .iter()

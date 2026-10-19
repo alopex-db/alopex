@@ -195,3 +195,21 @@ def test_drop_recreate_index_discards_transaction_graph():
     tx.commit()
     assert db.execute_sql(QUERY) == [{'id': 2}]
     db.close()
+
+
+@pytest.mark.parametrize('mode', [TxnMode.READ_ONLY, TxnMode.READ_WRITE])
+def test_disabling_cache_drops_empty_transaction_graphs(mode):
+    db = Database.new()
+    db.execute_sql('CREATE TABLE items (id INTEGER PRIMARY KEY, e VECTOR(2,L2))')
+    db.execute_sql('CREATE INDEX ih ON items (e) USING HNSW')
+    assert db.execute_sql(QUERY) == []
+    assert db.hnsw_cache_stats()['entries'] == 1
+    tx = db.begin(mode)
+    db.set_hnsw_cache_limit(0)
+    assert db.hnsw_cache_stats()['entries'] == 0
+    before = db.hnsw_cache_stats()['misses']
+    for _ in range(2):
+        assert tx.execute_sql(QUERY) == []
+    assert db.hnsw_cache_stats()['misses'] == before + 2
+    tx.rollback()
+    db.close()

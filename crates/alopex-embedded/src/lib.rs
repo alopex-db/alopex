@@ -2667,6 +2667,21 @@ mod tests {
     }
 
     #[test]
+    fn hnsw_cache_zero_budget_removes_zero_size_graphs() {
+        let db = Database::new();
+        let index =
+            HnswIndex::create("empty_zero", HnswConfig::default().with_dimension(2)).unwrap();
+        assert_eq!(index.stats().memory_bytes, 0);
+        db.hnsw_cache_insert("empty_zero", index);
+        assert_eq!(db.hnsw_cache_stats().entries, 1);
+        db.set_hnsw_cache_limit(0);
+        let stats = db.hnsw_cache_stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.used_bytes, 0);
+        assert_eq!(stats.evictions, 1);
+    }
+
+    #[test]
     fn hnsw_cache_old_observer_never_touches_replacement_entry() {
         let db = Database::new();
         db.hnsw_cache_insert("a", cached_test_index("a", 2));
