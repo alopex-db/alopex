@@ -381,6 +381,30 @@ impl PyDatabase {
         }
     }
 
+    fn validate_cache_entries(entries: Option<usize>) -> PyResult<()> {
+        if entries == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "hnsw_cache_entries must be positive",
+            ));
+        }
+        Ok(())
+    }
+
+    fn configure_cache(
+        db: &alopex_embedded::Database,
+        bytes: Option<u64>,
+        entries: Option<usize>,
+    ) -> PyResult<()> {
+        if bytes.is_some() || entries.is_some() {
+            db.set_hnsw_cache_limits(
+                bytes.unwrap_or_else(|| db.hnsw_cache_stats().limit_bytes),
+                entries,
+            )
+            .map_err(error::embedded_err)?;
+        }
+        Ok(())
+    }
+
     fn ensure_open(&self) -> PyResult<Arc<alopex_embedded::Database>> {
         self.control.ensure_open()?;
         self.inner
@@ -393,10 +417,17 @@ impl PyDatabase {
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
-    #[pyo3(signature = (path, *, thread_mode = None))]
-    fn open(path: &str, thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn open(
+        path: &str,
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
         let db = alopex_embedded::Database::open(Path::new(path)).map_err(error::embedded_err)?;
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
             db,
             alopex_embedded::StorageMode::Disk,
@@ -405,21 +436,34 @@ impl PyDatabase {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (*, thread_mode = None))]
-    fn new(thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (*, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn new(
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
+        let db = alopex_embedded::Database::new();
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
-            alopex_embedded::Database::new(),
+            db,
             alopex_embedded::StorageMode::InMemory,
             thread_mode,
         ))
     }
 
     #[staticmethod]
-    #[pyo3(signature = (*, thread_mode = None))]
-    fn open_in_memory(thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (*, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn open_in_memory(
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
         let db = alopex_embedded::Database::open_in_memory().map_err(error::embedded_err)?;
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
             db,
             alopex_embedded::StorageMode::InMemory,
@@ -450,6 +494,49 @@ impl PyDatabase {
     fn thread_mode(&self) -> PyResult<PyThreadMode> {
         self.control.ensure_open()?;
         Ok(self.control.thread_mode().into())
+    }
+
+    /// Set retained graph limits. Zero bytes disables retention; active calls/readers may still own graphs.
+    #[pyo3(signature = (bytes, *, entries = None))]
+    fn set_hnsw_cache_limit(&self, bytes: u64, entries: Option<usize>) -> PyResult<()> {
+        Self::validate_cache_entries(entries)?;
+        self.ensure_open()?
+            .set_hnsw_cache_limits(bytes, entries)
+            .map_err(error::embedded_err)
+    }
+
+    /// Cumulative load/reuse counters and current global entries (not process RSS).
+    fn hnsw_cache_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let stats = self.ensure_open()?.hnsw_cache_stats();
+        let result = PyDict::new(py);
+        result.set_item("limit_bytes", stats.limit_bytes)?;
+        result.set_item("limit_entries", stats.limit_entries)?;
+        result.set_item("used_bytes", stats.used_bytes)?;
+        result.set_item("entries", stats.entries)?;
+        result.set_item("hits", stats.hits)?;
+        result.set_item("misses", stats.misses)?;
+        result.set_item("evictions", stats.evictions)?;
+        result.set_item("oversize_skips", stats.oversize_skips)?;
+        result.set_item("invalidations", stats.invalidations)?;
+        result.set_item("load_ns_total", stats.load_ns_total)?;
+        let indexes = PyList::empty(py);
+        for index in stats.indexes {
+            let entry = PyDict::new(py);
+            entry.set_item("name", index.name)?;
+            entry.set_item("bytes", index.bytes)?;
+            entry.set_item("hits", index.hits)?;
+            entry.set_item("last_access_ns", index.last_access_ns)?;
+            indexes.append(entry)?;
+        }
+        result.set_item("indexes", indexes)?;
+        Ok(result.into_any().unbind())
+    }
+
+    /// Load one graph. Returns retained bytes, or zero when disabled/oversize.
+    fn warm_hnsw_index(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+        let db = self.ensure_open()?;
+        py.detach(|| db.warm_hnsw_index(name))
+            .map_err(error::embedded_err)
     }
 
     /// SQL を実行する（auto-commit）。
@@ -956,7 +1043,7 @@ mod tests {
         use std::time::Duration;
 
         Python::initialize();
-        let db = Arc::new(PyDatabase::new(Some("multi")).unwrap());
+        let db = Arc::new(PyDatabase::new(Some("multi"), None, None).unwrap());
         Python::attach(|py| {
             db.create_hnsw_index(
                 py,
@@ -1014,7 +1101,7 @@ mod tests {
     #[test]
     fn execute_sql_ddl_dml_select_end_to_end() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
 
             let ddl = db
                 .execute_sql(
@@ -1063,7 +1150,7 @@ mod tests {
     #[test]
     fn execute_sql_select_empty_returns_empty_list() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let rows = db
@@ -1077,7 +1164,7 @@ mod tests {
     #[test]
     fn prepared_statement_python_surface_rebinds_and_finalizes() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE prepared (id INTEGER PRIMARY KEY)", None)
                 .unwrap();
             let mut statement = db.prepare("INSERT INTO prepared (id) VALUES (?)").unwrap();
@@ -1100,7 +1187,7 @@ mod tests {
             const ROWS: usize = 400;
             const DIMENSIONS: usize = 128;
 
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
@@ -1135,7 +1222,8 @@ mod tests {
     #[test]
     fn python_database_sql_stream_reads_rows_written_by_detached_auto_commit_calls() {
         with_py(|py| {
-            let db = Py::new(py, PyDatabase::new(None).expect("db")).expect("python database");
+            let db = Py::new(py, PyDatabase::new(None, None, None).expect("db"))
+                .expect("python database");
             let db = db.bind(py);
             db.call_method1(
                 "execute_sql",
@@ -1168,7 +1256,7 @@ mod tests {
     #[test]
     fn execute_sql_parse_error_maps_to_alopex_error_with_sql_code() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             let err = db
                 .execute_sql(py, "SELEKT 1 FRUM nowhere", None)
                 .expect_err("parse error");
@@ -1186,7 +1274,7 @@ mod tests {
     #[test]
     fn execute_sql_guides_explicit_transaction_statements_to_begin() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             for sql in ["BEGIN", "SAVEPOINT retry", "COMMIT", "ROLLBACK"] {
                 let err = db
                     .execute_sql(py, sql, None)
@@ -1202,7 +1290,7 @@ mod tests {
     #[test]
     fn execute_sql_on_closed_database_is_error() {
         with_py(|py| {
-            let mut db = PyDatabase::new(None).expect("db");
+            let mut db = PyDatabase::new(None, None, None).expect("db");
             db.close(py).expect("close");
             db.close(py).expect("repeated close is idempotent");
             let err = db.execute_sql(py, "SELECT 1", None).expect_err("closed");
@@ -1213,12 +1301,12 @@ mod tests {
     #[test]
     fn single_thread_database_reports_a_classified_cross_thread_error() {
         pyo3::Python::initialize();
-        let database = PyDatabase::new(Some("single")).expect("single-thread db");
+        let database = PyDatabase::new(Some("single"), None, None).expect("single-thread db");
         assert_eq!(
             database.thread_mode().unwrap().__repr__(),
             "ThreadMode.SINGLE"
         );
-        assert!(PyDatabase::new(Some("invalid")).is_err());
+        assert!(PyDatabase::new(Some("invalid"), None, None).is_err());
 
         let control = database.control.clone();
         let code = std::thread::spawn(move || {
@@ -1242,7 +1330,7 @@ mod tests {
     #[test]
     fn execute_sql_vector_param_roundtrip() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))",
@@ -1289,7 +1377,7 @@ mod tests {
             const ROWS: usize = 400;
             const DIMENSIONS: usize = 128;
 
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
@@ -1317,7 +1405,7 @@ mod tests {
     #[test]
     fn execute_sql_rejects_scalar_params() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let scalar = 1i64.into_bound_py_any(py).expect("int");
@@ -1330,7 +1418,7 @@ mod tests {
 
     #[test]
     fn close_rolls_back_tracked_transactions_and_cleans_up() {
-        let mut db = PyDatabase::new(None).expect("db");
+        let mut db = PyDatabase::new(None, None, None).expect("db");
         let txn1 = db.begin(None).expect("txn1");
         let txn2 = db.begin(None).expect("txn2");
 
@@ -1368,7 +1456,7 @@ mod tests {
     #[test]
     fn issue583_close_updates_active_status_and_preserves_terminal_states() {
         with_py(|py| {
-            let db = Py::new(py, PyDatabase::new(None).unwrap()).unwrap();
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
             let native = db.borrow(py).inner.as_ref().unwrap().clone();
             let mode = Py::new(
                 py,
@@ -1414,7 +1502,7 @@ mod tests {
     #[test]
     fn issue583_close_pre_call_failure_preserves_active_transaction_for_retry() {
         with_py(|py| {
-            let db = Py::new(py, PyDatabase::new(None).unwrap()).unwrap();
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
             let mode = Py::new(
                 py,
                 crate::types::PyTxnMode::from(alopex_core::TxnMode::ReadWrite),
@@ -1453,7 +1541,7 @@ mod tests {
     #[test]
     fn issue583_close_ends_stream_before_pre_call_retry() {
         with_py(|py| {
-            let db = Py::new(py, PyDatabase::new(None).unwrap()).unwrap();
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
             db.bind(py)
                 .call_method1("execute_sql", ("CREATE TABLE t (id INTEGER PRIMARY KEY)",))
                 .unwrap();
@@ -1500,7 +1588,7 @@ mod tests {
         let deadline = Duration::from_secs(3);
         let mut outcomes = Vec::new();
         for lock_tracking in [true, false] {
-            let mut db = PyDatabase::new(Some("multi")).unwrap();
+            let mut db = PyDatabase::new(Some("multi"), None, None).unwrap();
             let txn = db.begin(None).unwrap();
             let tracked = Arc::clone(&db.txns);
             let holder_tracked = Arc::clone(&tracked);
@@ -1583,7 +1671,7 @@ mod tests {
     #[test]
     fn close_retry_keeps_tracked_transactions_on_failure() {
         pyo3::Python::initialize();
-        let mut db = PyDatabase::new(None).expect("db");
+        let mut db = PyDatabase::new(None, None, None).expect("db");
         let _txn = db.begin(None).expect("txn");
 
         db.inject_rollback_failure_once();
@@ -1606,9 +1694,9 @@ mod tests {
     #[test]
     fn rollback_failure_injection_is_database_scoped() {
         pyo3::Python::initialize();
-        let mut injected = PyDatabase::new(None).expect("injected db");
+        let mut injected = PyDatabase::new(None, None, None).expect("injected db");
         let _injected_txn = injected.begin(None).expect("injected txn");
-        let mut unaffected = PyDatabase::new(None).expect("unaffected db");
+        let mut unaffected = PyDatabase::new(None, None, None).expect("unaffected db");
         let _unaffected_txn = unaffected.begin(None).expect("unaffected txn");
 
         injected.inject_rollback_failure_once();
@@ -1623,7 +1711,7 @@ mod tests {
     #[test]
     fn close_terminates_a_transaction_owned_stream_before_rollback() {
         with_py(|py| {
-            let mut db = PyDatabase::new(None).expect("db");
+            let mut db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE stream_close (id INTEGER PRIMARY KEY)",
@@ -1647,7 +1735,7 @@ mod tests {
     fn prepared_execute_many_python_vectors_commit_400_rows() {
         with_py(|py| {
             const ROWS: usize = 400;
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
@@ -1687,7 +1775,7 @@ mod tests {
     #[test]
     fn execute_sql_reports_the_actual_sql_input_limit() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             let sql = format!("{}SELECT 1", " ".repeat(1_048_576));
             let err = db.execute_sql(py, &sql, None).expect_err("oversized SQL");
             let message = err.to_string();

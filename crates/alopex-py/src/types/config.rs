@@ -245,23 +245,43 @@ impl PyHnswConfig {
 pub struct PyEmbeddedConfig {
     #[pyo3(get, set)]
     pub memory_limit_bytes: Option<usize>,
+    #[pyo3(get, set)]
+    pub hnsw_cache_bytes: Option<u64>,
+    #[pyo3(get, set)]
+    pub hnsw_cache_entries: Option<usize>,
 }
 
 impl PyEmbeddedConfig {
     pub fn to_embedded(&self) -> alopex_embedded::EmbeddedConfig {
-        match self.memory_limit_bytes {
+        let mut config = match self.memory_limit_bytes {
             Some(limit) => alopex_embedded::EmbeddedConfig::in_memory_with_limit(limit),
             None => alopex_embedded::EmbeddedConfig::in_memory(),
-        }
+        };
+        config.hnsw_cache_bytes = self.hnsw_cache_bytes;
+        config.hnsw_cache_entries = self.hnsw_cache_entries;
+        config
     }
 }
 
 #[pymethods]
 impl PyEmbeddedConfig {
     #[new]
-    #[pyo3(signature = (memory_limit_bytes = None))]
-    fn new(memory_limit_bytes: Option<usize>) -> Self {
-        Self { memory_limit_bytes }
+    #[pyo3(signature = (memory_limit_bytes = None, *, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn new(
+        memory_limit_bytes: Option<usize>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
+        if hnsw_cache_entries == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "hnsw_cache_entries must be positive",
+            ));
+        }
+        Ok(Self {
+            memory_limit_bytes,
+            hnsw_cache_bytes,
+            hnsw_cache_entries,
+        })
     }
 }
 

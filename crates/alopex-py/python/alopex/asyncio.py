@@ -366,21 +366,31 @@ class AsyncDatabase(_AsyncLocalHandle):
     """Awaitable embedded-local Database facade using the caller's asyncio loop."""
 
     @classmethod
-    async def new(cls, *, thread_mode: Optional[str] = None) -> "AsyncDatabase":
-        database = Database.new(thread_mode=thread_mode)
+    async def new(cls, *, thread_mode: Optional[str] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "AsyncDatabase":
+        database = Database.new(thread_mode=thread_mode, hnsw_cache_bytes=hnsw_cache_bytes, hnsw_cache_entries=hnsw_cache_entries)
         return cls(database, database.thread_mode == ThreadMode.SINGLE)
 
     @classmethod
     async def open(
-        cls, path: str, *, thread_mode: Optional[str] = None
+        cls, path: str, *, thread_mode: Optional[str] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None
     ) -> "AsyncDatabase":
-        database = Database.open(path, thread_mode=thread_mode)
+        database = Database.open(path, thread_mode=thread_mode, hnsw_cache_bytes=hnsw_cache_bytes, hnsw_cache_entries=hnsw_cache_entries)
         return cls(database, database.thread_mode == ThreadMode.SINGLE)
 
     @classmethod
-    async def open_in_memory(cls, *, thread_mode: Optional[str] = None) -> "AsyncDatabase":
-        database = Database.open_in_memory(thread_mode=thread_mode)
+    async def open_in_memory(cls, *, thread_mode: Optional[str] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "AsyncDatabase":
+        database = Database.open_in_memory(thread_mode=thread_mode, hnsw_cache_bytes=hnsw_cache_bytes, hnsw_cache_entries=hnsw_cache_entries)
         return cls(database, database.thread_mode == ThreadMode.SINGLE)
+
+    async def set_hnsw_cache_limit(self, bytes: int, *, entries: Optional[int] = None) -> None:
+        self._handle.set_hnsw_cache_limit(bytes, entries=entries)
+
+    async def hnsw_cache_stats(self) -> dict[str, Any]:
+        return self._handle.hnsw_cache_stats()
+
+    async def warm_hnsw_index(self, name: str) -> int:
+        """Finite native load on the owner thread; may block the event loop."""
+        return self._handle.warm_hnsw_index(name)
 
     async def execute_sql(
         self, sql: str, params: Optional[Sequence[Any]] = None

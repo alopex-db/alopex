@@ -271,7 +271,8 @@
     "crates/alopex-py/src/embedded/database.rs",
     "crates/alopex-py/python/alopex/_alopex.pyi",
     "crates/alopex-sql/src/executor/hnsw_bridge.rs",
-    "docs/parity/README.md"
+    "docs/parity/README.md",
+    "crates/alopex-embedded/src/hnsw_cache.rs"
   ],
   "status_values": [
     "reference-compatible",
@@ -540,6 +541,34 @@
       "performance_issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "api": "HnswIndex.load_node_count",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#node_count_metadata_tracks_active_nodes_without_reading_corrupt_graph_nodes",
+      "issue": 672
+    },
+    {
+      "api": "HnswIndex.fork_owned",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#fork_owned_never_mutates_shared_reader_graph",
+      "issue": 672
+    },
+    {
+      "api": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
+    },
+    {
+      "api": "Python HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
+      "issue": 672
     }
   ],
   "public_api": [
@@ -627,6 +656,15 @@
     },
     {
       "surface": "Python",
+      "api": "Python.method.hnsw_cache_stats",
+      "claim": "Python HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
+      "issue": 672
+    },
+    {
+      "surface": "Python",
       "api": "Python.method.search_hnsw",
       "claim": "Python.search_hnsw",
       "status": "known-performance-divergence",
@@ -635,6 +673,15 @@
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.method.set_hnsw_cache_limit",
+      "claim": "Python HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
+      "issue": 672
     },
     {
       "surface": "Python",
@@ -657,6 +704,15 @@
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Python",
+      "api": "Python.method.warm_hnsw_index",
+      "claim": "Python HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
+      "issue": 672
     },
     {
       "surface": "Rust",
@@ -810,6 +866,15 @@
     },
     {
       "surface": "Rust",
+      "api": "Rust.HnswIndex.fork_owned",
+      "claim": "HnswIndex.fork_owned",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#fork_owned_never_mutates_shared_reader_graph",
+      "issue": 672
+    },
+    {
+      "surface": "Rust",
       "api": "Rust.HnswIndex.load",
       "claim": "HnswIndex.load/save",
       "status": "known-performance-divergence",
@@ -818,6 +883,15 @@
       "issue": 306,
       "performance_contract": "hnsw-pareto-v1",
       "performance_evidence": "hnsw-pareto"
+    },
+    {
+      "surface": "Rust",
+      "api": "Rust.HnswIndex.load_node_count",
+      "claim": "HnswIndex.load_node_count",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#node_count_metadata_tracks_active_nodes_without_reading_corrupt_graph_nodes",
+      "issue": 672
     },
     {
       "surface": "Rust",
@@ -1100,6 +1174,15 @@
     },
     {
       "surface": "embedded",
+      "api": "embedded.Database.hnsw_cache_stats",
+      "claim": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
+    },
+    {
+      "surface": "embedded",
       "api": "embedded.Database.search_hnsw",
       "claim": "Embedded create/search/drop",
       "status": "known-performance-divergence",
@@ -1117,6 +1200,42 @@
       "reference": "alopex",
       "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget",
       "issue": 581
+    },
+    {
+      "surface": "embedded",
+      "api": "embedded.Database.set_hnsw_cache_limits",
+      "claim": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
+    },
+    {
+      "surface": "embedded",
+      "api": "embedded.Database.warm_hnsw_index",
+      "claim": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
+    },
+    {
+      "surface": "embedded",
+      "api": "embedded.HnswCacheIndexStats",
+      "claim": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
+    },
+    {
+      "surface": "embedded",
+      "api": "embedded.HnswCacheStats",
+      "claim": "Embedded HNSW cache controls",
+      "status": "alopex-extension",
+      "reference": "alopex",
+      "evidence": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+      "issue": 672
     },
     {
       "surface": "embedded",

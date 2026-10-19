@@ -188,7 +188,7 @@ pub(crate) struct HnswMetadata {
     pub entry_point: Option<u32>,
     /// Highest level currently present in the graph.
     pub max_level: usize,
-    /// Total number of nodes (including deleted).
+    /// Number of active nodes, excluding logically deleted nodes.
     pub node_count: u64,
     /// Count of logically deleted nodes.
     pub deleted_count: u64,

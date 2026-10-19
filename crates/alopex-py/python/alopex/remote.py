@@ -1190,6 +1190,15 @@ class RemoteDatabase:
     def get_hnsw_stats(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Database.get_hnsw_stats", _HNSW_REASON)
 
+    def set_hnsw_cache_limit(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.set_hnsw_cache_limit", _HNSW_REASON)
+
+    def hnsw_cache_stats(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.hnsw_cache_stats", _HNSW_REASON)
+
+    def warm_hnsw_index(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.warm_hnsw_index", _HNSW_REASON)
+
     @classmethod
     def open(cls, *_args: Any, **_kwargs: Any) -> "RemoteDatabase":
         raise _unsupported("Database.open", _CONSTRUCTOR_REASON)

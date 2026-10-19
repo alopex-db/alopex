@@ -83,7 +83,10 @@ class HnswConfig:
 class EmbeddedConfig:
     memory_limit_bytes: Optional[int]
 
-    def __init__(self, memory_limit_bytes: Optional[int] = None) -> None: ...
+    hnsw_cache_bytes: Optional[int]
+    hnsw_cache_entries: Optional[int]
+
+    def __init__(self, memory_limit_bytes: Optional[int] = None, *, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> None: ...
 
 
 class DatabaseOptions:
@@ -555,13 +558,13 @@ class PreparedStatement:
 
 class Database:
     @staticmethod
-    def open(path: str, *, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def open(path: str, *, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
-    def new(*, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def new(*, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
-    def open_in_memory(*, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def open_in_memory(*, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
     def open_with_config(
@@ -572,6 +575,10 @@ class Database:
 
     @property
     def thread_mode(self) -> ThreadMode: ...
+
+    def set_hnsw_cache_limit(self, bytes: int, *, entries: Optional[int] = None) -> None: ...
+    def hnsw_cache_stats(self) -> Dict[str, Any]: ...
+    def warm_hnsw_index(self, name: str) -> int: ...
 
     def execute_sql(
         self,
