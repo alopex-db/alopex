@@ -7575,26 +7575,26 @@
         "turbo_policy": "unavailable"
       },
       "lock_hash": "830ed51960a9817a688151824ed18b5544a781784c1c38d86ba4e6fd87dd283d",
-      "measured_at": "2026-10-19T09:30:18.768552+00:00",
+      "measured_at": "2026-10-19T11:10:31.348658+00:00",
       "metrics": {
         "read_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.5303285374135217
+          "value": 0.4646991188305932
         },
         "scan_overhead_ms": {
           "direction": "lower_is_better",
           "unit": "ms",
-          "value": 0.0028552999879138947
+          "value": 0.0022551999904862905
         },
         "write_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.3846825302470901
+          "value": 0.5338842001165855
         }
       },
       "profile": "gha-ubuntu-24.04-x64-single-core-v1",
-      "ref": "refs/tags/v0.8.16-rc.1",
+      "ref": "refs/tags/v0.8.16",
       "schema_version": 1,
       "workload_signature": "24582af1beabd9d231ac5cbe3ac357c503f14c9e18cb8f7a76aacf549f2d1393"
     }
