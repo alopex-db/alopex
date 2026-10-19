@@ -329,6 +329,7 @@ dependencies = [
  "alopex-embedded",
  "alopex-sql",
  "arrow",
+ "base64 0.22.1",
  "criterion",
  "ctor",
  "numpy",

@@ -28,13 +28,18 @@ def test_issue583_scan_default_limit_and_exclusive_cursor(scan_db):
         expected = [(f"user:{i:03}".encode(), b"v") for i in range(103)]
         for key, value in expected:
             txn.put(key, value)
-        for scan, args in [(txn.scan_prefix, (b"user:",)), (txn.scan_range, (b"user:", b"user;"))]:
-            first = list(scan(*args))
-            assert first == expected[:100]
-            assert list(scan(*args, cursor=first[-1][0])) == expected[100:]
-            assert list(scan(*args, limit=2, cursor=b"user:100")) == expected[101:]
-            assert list(scan(*args, cursor=b"z")) == []
-            assert list(scan(*args, limit=1, cursor=b"a")) == expected[:1]
+        for scan, page, args in [
+            (txn.scan_prefix, txn.scan_prefix_page, (b"user:",)),
+            (txn.scan_range, txn.scan_range_page, (b"user:", b"user;")),
+        ]:
+            assert list(scan(*args)) == expected
+            first = page(*args)
+            assert first["entries"] == expected[:100]
+            assert first["has_more"]
+            assert list(scan(*args, cursor=first["next_cursor"])) == expected[100:]
+            assert list(scan(*args, limit=2, cursor=first["next_cursor"])) == expected[100:102]
+            with pytest.raises(ValueError, match="cursor"):
+                scan(*args, cursor=b"z")
 
 
 @pytest.mark.parametrize("method,args", [("scan_prefix", (b"user:",)), ("scan_range", (b"user:", b"user;"))])
@@ -47,7 +52,7 @@ def test_issue583_scan_budgets_fail_without_poisoning_transaction(scan_db, metho
             with pytest.raises(AlopexError, match=option):
                 scan(*args, **{option: 0})
         with pytest.raises(AlopexError):
-            scan(*args, scan_budget=1)
+            scan(*args, scan_budget=1, strict_budget=True)
         with pytest.raises(AlopexError):
             scan(*args, max_bytes=1)
         assert list(scan(*args, limit=1)) == [(b"user:1", b"payload")]
@@ -76,18 +81,21 @@ def test_issue583_search_filters_before_limit_and_cursor(scan_db):
         txn.put(b"user:2", b"two")
         page = txn.search_keys(b"*", limit=1)
         assert page["entries"] == [(b"user:1", b"one")]
-        assert page["next_cursor"] == b"user:1"
+        assert page["next_cursor"].startswith(b"alopex-scan-v1:")
+        assert page["has_more"]
         assert page["scanned"] > 1
         assert txn.search_keys(b"*", limit=1, cursor=page["next_cursor"])["entries"] == [(b"user:2", b"two")]
         with pytest.raises(AlopexError):
-            txn.search_keys(b"*", scan_budget=1)
+            txn.search_keys(b"*", scan_budget=1, strict_budget=True)
 
 
 def test_issue583_search_cursor_before_prefix_is_clamped(scan_db):
     with scan_db.begin(TxnMode.READ_WRITE) as txn:
         txn.put(b"b", b"unrelated")
         txn.put(b"user:1", b"value")
-        assert txn.search_keys(b"user:*", cursor=b"a")["entries"] == [(b"user:1", b"value")]
+        cursor = txn.scan_prefix_page(b"", limit=1)["next_cursor"]
+        assert cursor is not None
+        assert txn.search_keys(b"user:*", cursor=cursor)["entries"] == [(b"user:1", b"value")]
 
 
 def test_issue583_post_snapshot_candidates_consume_scan_budget(scan_db):
@@ -100,7 +108,7 @@ def test_issue583_post_snapshot_candidates_consume_scan_budget(scan_db):
             writer.commit()
         for method, args in [(reader.scan_prefix, (b"future:",)), (reader.search_keys, (b"future:*",))]:
             with pytest.raises(AlopexError):
-                method(*args, scan_budget=1)
+                method(*args, scan_budget=1, strict_budget=True)
             result = method(*args, scan_budget=10)
             assert (result["entries"] if isinstance(result, dict) else list(result)) == []
     finally:
@@ -136,7 +144,7 @@ def test_issue583_post_snapshot_sstable_candidates_consume_scan_budget(tmp_path)
         db.flush()
         for method, args in [(reader.scan_prefix, (b"future:",)), (reader.search_keys, (b"future:*",))]:
             with pytest.raises(AlopexError):
-                method(*args, scan_budget=1)
+                method(*args, scan_budget=1, strict_budget=True)
             result = method(*args, scan_budget=10)
             assert (result["entries"] if isinstance(result, dict) else list(result)) == []
     finally:
@@ -163,27 +171,27 @@ def test_binary_prefix_pages_resume_before_nul_extensions(scan_db, prefix, tmp_p
             (prefix + b"\xff", b"old"),
         ]
         methods = [
-            (txn.scan_prefix, (prefix,)),
-            (txn.scan_range, (prefix, prefix + b"\xff\x00")),
+            (txn.scan_prefix_page, (prefix,)),
+            (txn.scan_range_page, (prefix, prefix + b"\xff\x00")),
             (txn.search_keys, (prefix + b"*",)),
         ]
         for method, args in methods:
             cursor = None
             found = []
+            previous_key = None
             for _ in range(len(expected) + 1):
                 result = method(*args, limit=1, cursor=cursor)
-                entries = result["entries"] if isinstance(result, dict) else list(result)
-                if not entries:
-                    if isinstance(result, dict):
-                        assert result["next_cursor"] is None
-                    break
+                entries = result["entries"]
                 assert len(entries) == 1
-                next_cursor = entries[-1][0]
-                assert cursor is None or cursor < next_cursor
-                if isinstance(result, dict):
-                    assert result["next_cursor"] == next_cursor
+                key = entries[-1][0]
+                assert previous_key is None or previous_key < key
+                previous_key = key
                 found.extend(entries)
-                cursor = next_cursor
+                if not result["has_more"]:
+                    assert result["next_cursor"] is None
+                    break
+                cursor = result["next_cursor"]
+                assert cursor.startswith(b"alopex-scan-v1:")
             else:
                 pytest.fail("enumeration did not terminate after the last key")
             assert found == expected

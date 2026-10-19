@@ -16,6 +16,12 @@ All notable changes to this project will be documented in this file.
   `SELECT *` therefore return an additional column; consumers that require a
   fixed result shape should select columns explicitly (#478).
 
+- Python KV prefix/range scans return all matches by default; explicit `limit`
+  caps the total. New page APIs expose `has_more`, opaque cursors, and physical
+  work counts. Candidate-budget exhaustion is resumable unless `strict_budget`
+  is enabled; exact terminal boundaries succeed. Complete collection has a
+  configurable total raw-byte cap, and async iterators yield between pages (#670).
+
 ### Compatibility
 
 - Python SQL calls now reject parameterized batches containing multiple

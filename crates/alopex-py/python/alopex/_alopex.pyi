@@ -1,5 +1,12 @@
 from builtins import str as _str
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union, overload
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union, TypedDict, overload
+
+class KeyScanPage(TypedDict):
+    entries: List[Tuple[bytes, bytes]]
+    next_cursor: Optional[bytes]
+    has_more: bool
+    scanned: int
+
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -710,8 +717,10 @@ class Transaction:
     def get(self, key: bytes) -> Optional[bytes]: ...
     def put(self, key: bytes, value: bytes) -> None: ...
     def delete(self, key: bytes) -> None: ...
-    def scan_prefix(self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
-    def scan_range(self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_prefix(self, prefix: bytes, *, limit: Optional[int] = None, page_size: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, max_total_bytes: int = 104857600, include_internal: bool = False, strict_budget: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_prefix_page(self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False, strict_budget: bool = False) -> KeyScanPage: ...
+    def scan_range(self, start: bytes, end: bytes, *, limit: Optional[int] = None, page_size: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, max_total_bytes: int = 104857600, include_internal: bool = False, strict_budget: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_range_page(self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False, strict_budget: bool = False) -> KeyScanPage: ...
     @overload
     def search_keys(
         self,
@@ -723,7 +732,8 @@ class Transaction:
         max_bytes: int = 16777216,
         *,
         include_internal: bool = False,
-    ) -> Dict[str, Any]: ...
+        strict_budget: bool = False,
+    ) -> KeyScanPage: ...
     @overload
     def search_keys(
         self,
@@ -735,7 +745,8 @@ class Transaction:
         max_bytes: int = 16777216,
         *,
         include_internal: bool = False,
-    ) -> Dict[str, Any]: ...
+        strict_budget: bool = False,
+    ) -> KeyScanPage: ...
     def upsert_vector(
         self,
         key: bytes,
