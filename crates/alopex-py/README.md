@@ -15,10 +15,10 @@ Catalog API (polars) を使う場合:
 pip install alopex[polars]
 ```
 
-開発中は maturin を利用できます。
+開発テストでは、ファイル名と行番号を保つ軽量デバッグ情報のdev profileで maturin を利用できます。
 
 ```bash
-maturin develop -m crates/alopex-py/pyproject.toml
+maturin develop -m crates/alopex-py/Cargo.toml
 ```
 
 オプション依存:
@@ -52,6 +52,18 @@ with db.begin(TxnMode.READ_ONLY) as txn:
     print(value)
 
 db.close()
+```
+
+組み込み `Database.execute_sql()` は auto-commit です。SQL の `BEGIN` や `SAVEPOINT` を渡す代わりに、明示トランザクションのメソッドを使います。保存点メソッドは組み込み `Transaction` と `AsyncTransaction` で利用できます。
+
+```python
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.execute_sql("INSERT INTO orders (id) VALUES (1)")
+    txn.savepoint("before_optional_item")
+    txn.execute_sql("INSERT INTO orders (id) VALUES (2)")
+    txn.rollback_to("before_optional_item")
+    txn.release("before_optional_item")
+    txn.commit()
 ```
 
 ## サーバー接続（v0.8.8）
@@ -90,6 +102,31 @@ statement.execute()
 statement.reset()
 statement.finalize()
 ```
+
+`Database.prepare`が返す`PreparedStatement.execute_many(rows)`は、`None` / bool / number / text /
+vector の行を1 transactionで実行します。各行は list または tuple にし、途中の行が
+失敗した場合は先行行も rollback されます。
+
+```python
+batch = embedded.prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+assert batch.execute_many([(3, "gamma"), (4, "delta")]) == [1, 1]
+```
+
+`Transaction.prepare(sql)`も同じ`PreparedStatement`型を返します。handleは元の
+transactionで実行し、自動commitしません。`Transaction.execute_many(sql, rows)`は
+同じbatch経路の簡略形です。SQLは単一の非制御文、値はnative scalar/vectorに限ります。
+Decimal/datetimeの文字列展開へのfallbackは行いません。
+
+Transaction-owned batchの実行エラーはtransactionをfailedにします。呼出元は明示的に
+rollbackするか、呼出前に作成したsavepointへrollback_toしてください。batchだけを自動で
+巻き戻す保証はありません。commitを試してnative失敗した場合、handleはrolled_back状態へ
+移り、再rollbackは不要です。型・個数のpreflight拒否はSQL書込前に発生します。
+
+元transactionのcommit/rollback/dropまたはDatabase.close後は、prepared handleの
+bind/reset/parameter_count/execute/execute_manyも拒否されます。finalizeは終了後も可能で、
+自身のowner参照だけを解放します（2回目はエラー）。元transactionのdropは従来どおりrollback
+し、prepared handleが生きていてもtransactionを延命しません。active stream中の実行は拒否され、
+全消費後は再実行できます。途中closeしたstreamはrollbackを必要とします。
 
 | target | 結果 |
 | --- | --- |
@@ -286,6 +323,37 @@ with db.begin(TxnMode.READ_WRITE) as txn:
 results, stats = db.search_hnsw("idx", np.array([1.0, 0.0], dtype=np.float32), 1)
 print(stats.nodes_visited, stats.distance_computations, stats.search_time_us)
 ```
+
+### HNSW キャッシュ
+
+```python
+db = Database.open("app.alopex", hnsw_cache_bytes=512 * 1024 * 1024,
+                   hnsw_cache_entries=128)
+retained_bytes = db.warm_hnsw_index("idx")
+print(db.hnsw_cache_stats())
+db.set_hnsw_cache_limit(256 * 1024 * 1024, entries=64)
+```
+
+`new`、`open_in_memory`、`EmbeddedConfig` でも同じ設定を指定できます。
+件数は正の整数です。バイト数を0にすると保持を無効にします。
+上限は推定グラフ容量で、プロセスのRSS、一時ロード中のグラフ、実行中の読み手の保持分は含みません。
+LRUで最終アクセスが古い索引から追い出します。上限を超える索引でも検索はでき、
+`oversize_skips` を加算し、索引ごとに一度警告します。ウォームアップは保持できた容量を返し、
+保持できなければ0、索引がない場合や破損している場合はエラーを返します。
+
+統計には上限・使用量・件数、累積の `hits`、実際のグラフロード試行数 `misses`、
+`evictions`、`oversize_skips`、`invalidations`、`load_ns_total`、保持中の索引一覧を含みます。
+索引別の `hits` と `last_access_ns` は共有グラフのアクセスを示します。
+`last_access_ns` はキャッシュ初期化からの経過ナノ秒です。
+
+`db.begin()` は開始時の共有グラフだけを自身のKVスナップショットと一緒に取得し、
+SQL呼び出し間で再利用します。キャッシュにないグラフはそのトランザクションのKVから読み、
+共有キャッシュへ公開しません。最初の書き込み時は独立したグラフへコピーします。
+保持上限の変更は、明示トランザクションの次のSQL呼び出しでも適用します。
+書き込み開始時のジャーナル準備と最初のグラフコピーのコストは別途かかります。
+
+`alopex.asyncio.AsyncDatabase` にも同じ設定と3メソッドがあります。
+有限のネイティブ処理を所有スレッドで実行するため、ウォームアップ中はイベントループをブロックします。
 
 ### Catalog API（polars 必須）
 

@@ -34,6 +34,8 @@ lane_fuzz = []
 # Forward-compatible table-function coverage kept out of the v0.8.9 gate.
 generate_series = []
 [dependencies]
+cap-primitives = "=4.0.3"
+cap-fs-ext = { version = "=4.0.3", default-features = false }
 thiserror = "2.0"
 regex = "1.11"
 csv = "1.3"
@@ -45,9 +47,16 @@ sha2 = "0.10"
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
-parquet = { version = "53", features = ["arrow"] }
+parquet = { version = "53", features = ["arrow", "experimental"] }
+bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
+flate2 = { version = "=1.1.8", default-features = false, features = ["rust_backend"] }
+zstd = { version = "=0.13.3", default-features = false, features = ["experimental"] }
+brotli-decompressor = "=4.0.3"
+thrift = { version = "=0.17.0", default-features = false }
+crc32fast = "=1.5.0"
 arrow-array = "53"
 arrow-schema = "53"
+arrow-ipc = "53"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
 rmp-serde = "1.3"
@@ -62,6 +71,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 
 [dev-dependencies]
+alopex-core = { workspace = true, features = ["test-utils"] }
 proptest = "1.4"
 criterion = "0.5"
 rusqlite = { version = "0.31", features = ["bundled"] }

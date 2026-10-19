@@ -15,7 +15,6 @@ lane_ci = []
 # but not sufficient, for multi-node cluster control: runtime bootstrap also
 # verifies the authenticated dispatcher and durable storage prerequisites.
 chirps = [
-    "dep:alopex-chirps",
     "dep:alopex-chirps-core",
     "dep:alopex-chirps-gossip-swim",
     "dep:alopex-chirps-raft-storage",
@@ -37,7 +36,6 @@ sha2 = "0.10"
 # the build depend on whichever branch the neighbouring working tree happened
 # to be on, so an unrelated in-progress change there could add a dependency
 # this workspace's lock file did not know about.
-alopex-chirps = { version = "0.5.2", optional = true }
 alopex-chirps-core = { version = "0.5.2", optional = true }
 alopex-chirps-gossip-swim = { version = "0.5.2", optional = true }
 alopex-chirps-raft-storage = { version = "0.5.2", optional = true }

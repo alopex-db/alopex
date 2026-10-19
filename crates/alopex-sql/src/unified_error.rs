@@ -223,6 +223,9 @@ impl From<ParserError> for SqlError {
 impl From<PlannerError> for SqlError {
     fn from(value: PlannerError) -> Self {
         match value {
+            PlannerError::ResourceExhausted { message } => {
+                Self::from(ExecutorError::ResourceExhausted { message })
+            }
             PlannerError::TableNotFound { name, line, column } => Self::Catalog {
                 message: format!("table '{name}' not found"),
                 location: ErrorLocation { line, column },

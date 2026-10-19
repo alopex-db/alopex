@@ -31,6 +31,27 @@ compaction remain extensions. The SQL ledger similarly records SQLite as the
 base dialect and selects PostgreSQL, DuckDB, or DataFusion per feature; it does
 not claim wholesale compatibility with any one database.
 
+## Vector capability coverage
+
+The HNSW ledger's `capabilities` is the sole declaration of query breadth,
+path controls, search statistics, ordered batch reads, and atomic batch
+writes across core, embedded, SQL, Python, HTTP, and gRPC. HTTP/gRPC SQL routes
+are distinct from their dedicated table-vector APIs (`HTTP.raw`/`gRPC.raw`).
+The latter may use a SQL transaction internally but are not SQL endpoints or
+KV-key HNSW APIs. A single-key HNSW upsert is not a batch operation. SQL
+multi-row INSERT alone does not prove a dedicated batch API's atomicity.
+
+`covered` links the owning behavior test and its observation; it does not
+record a passing run. Candidate acceptance still requires that test's exact
+commit-bound result. `unverified` blocks the existing ledger validator.
+`unsupported` records a capability gap, while `not-applicable` records an API
+boundary; both require an explanation and owning issue. Neither means PASS.
+The validator checks schema and link consistency only. Its reference check
+does not prove that a selector is executable or that its assertions cover a
+claim. Review must confirm the owning test's actual assertions; PASS requires
+a fixed-selector run that executes the test, rejecting skips and zero tests.
+The existing Python/server/core/SQL tests own those observations.
+
 ## Performance evidence coverage
 
 `performance-v0.8.11.json` maps every tabular and SQL evidence ID to the exact

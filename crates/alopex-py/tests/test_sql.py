@@ -8,10 +8,13 @@
 - ``Transaction.execute_sql`` も同一形状
 """
 
+import datetime as dt
+import gc
+import io
 import json
+from decimal import Decimal
 
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -32,6 +35,424 @@ def users_db(db):
 def test_execute_sql_ddl_returns_none(db):
     result = db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     assert result is None
+
+
+def test_btree_adaptive_explain_reports_actual_path(db):
+    db.execute_sql("CREATE TABLE adaptive (id INT, v INT)")
+    db.prepare("INSERT INTO adaptive VALUES (?, ?)").execute_many(
+        [[i, i] for i in range(1025)]
+    )
+    db.execute_sql("CREATE INDEX adaptive_v ON adaptive(v)")
+    for count, expected_path, fallback in [
+        (100, "IndexScan", "none"),
+        (1024, "IndexScan", "none"),
+        (1025, "Scan", "CandidateCap"),
+    ]:
+        query = f"SELECT id FROM adaptive WHERE v < {count}"
+        planned = db.execute_sql(f"EXPLAIN {query}")[0]["QUERY PLAN"]
+        assert "adaptive=true max_candidates=1024" in planned
+        assert "fallback=Scan" in planned
+        # Exercise both the database and explicit transaction SQL entrypoints.
+        txn = db.begin(TxnMode.READ_ONLY)
+        try:
+            for execute in [db.execute_sql, txn.execute_sql]:
+                document = json.loads(
+                    execute(f"EXPLAIN (ANALYZE, FORMAT JSON) {query}")[0]["query_plan"]
+                )
+                actual = document["physical_plan"]["access_path"]["actual"]
+                assert actual["path"] == expected_path
+                assert actual["fallback"] == fallback
+                assert actual["candidates_examined"] == count
+                assert len(execute(query)) == count
+        finally:
+            txn.rollback()
+
+
+def test_parameterized_multiple_statements_fail_before_execution(db):
+    db.execute_sql("CREATE TABLE multi_params (id INTEGER PRIMARY KEY)")
+    sql = "INSERT INTO multi_params VALUES (?); INSERT INTO multi_params VALUES (?)"
+    with pytest.raises(ValueError, match="複数 SQL 文") as error:
+        db.execute_sql(sql, [1, 2])
+    assert error.value.code == "ALOPEX-PY019"
+    assert db.execute_sql("SELECT id FROM multi_params") == []
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    with pytest.raises(ValueError, match="複数 SQL 文"):
+        txn.execute_sql(sql, [1, 2])
+    with pytest.raises(ValueError, match="複数 SQL 文"):
+        txn.execute_sql_stream(
+            "SELECT ? AS amount; SELECT ? AS amount",
+            [Decimal("12345678901234567.89")] * 2,
+        )
+    assert txn.execute_sql("SELECT id FROM multi_params") == []
+    txn.rollback()
+
+
+def test_transaction_stream_rendered_decimal_is_exact(db):
+    value = Decimal("12345678901234567.89")
+    txn = db.begin(TxnMode.READ_WRITE)
+    try:
+        assert list(txn.execute_sql_stream("SELECT ? AS amount", [value])) == [
+            {"amount": value}
+        ]
+        assert list(txn.execute_sql_stream("SELECT -? AS amount", [value])) == [
+            {"amount": -value}
+        ]
+    finally:
+        txn.rollback()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1E+38"),
+        Decimal("1E-39"),
+        Decimal("1E+1000000"),
+    ],
+)
+def test_transaction_stream_rejects_unrepresentable_decimal_before_render(db, value):
+    txn = db.begin(TxnMode.READ_WRITE)
+    try:
+        with pytest.raises(ValueError, match="Decimal") as error:
+            txn.execute_sql_stream("SELECT ? AS amount", [value])
+        assert error.value.code == "ALOPEX-PY017"
+    finally:
+        txn.rollback()
+
+
+@pytest.fixture(
+    params=[
+        "native",
+        "mixed",
+        "stream",
+        "transaction",
+        "transaction_stream",
+        "prepared",
+    ]
+)
+def decimal_query(db, request):
+    """Exercise native bindings and both public SQL-rendering paths."""
+    api = request.param
+    txn = db.begin(TxnMode.READ_WRITE) if api.startswith("transaction") else None
+    statement = db.prepare("SELECT ? AS value") if api == "prepared" else None
+
+    def execute(value):
+        sql = "SELECT ? AS value"
+        if api == "mixed":
+            return db.execute_sql(
+                "SELECT ? AS value, ? AS at", [value, dt.datetime(2024, 1, 1)]
+            )[0]["value"]
+        if statement is not None:
+            statement.bind(1, value)
+            return statement.execute()[0]["value"]
+        owner = txn if txn is not None else db
+        if api.endswith("stream"):
+            rows = list(owner.execute_sql_stream(sql, [value]))
+            assert len(rows) == 1
+            return rows[0]["value"]
+        return owner.execute_sql(sql, [value])[0]["value"]
+
+    try:
+        yield execute
+    finally:
+        if statement is not None:
+            statement.finalize()
+        if txn is not None:
+            txn.rollback()
+
+
+@pytest.mark.parametrize("capitals", [0, 1])
+def test_decimal_paths_match_tuple_reference(decimal_query, capitals):
+    from decimal import localcontext
+
+    # Cover precision, scale, sign, zero, trailing zeros, and scientific notation.
+    # The oracle uses Decimal's tuple, independently of the Rust text parser.
+    with localcontext() as context:
+        context.capitals = capitals
+        for digits in ["0", "1", "10", "1000", "9" * 37, "9" * 38, "9" * 39]:
+            for exponent in [-1000000, -39, -38, -7, -6, -2, 0, 1, 37, 38, 1000000]:
+                for sign in [0, 1]:
+                    value = Decimal((sign, tuple(map(int, digits)), exponent))
+                    parts = value.as_tuple()
+                    width = len(parts.digits) + max(parts.exponent, 0)
+                    valid = -38 <= parts.exponent <= 38 and width <= 38
+                    if valid:
+                        result = decimal_query(value)
+                        assert result == value, (value, result)
+                        assert result.as_tuple().exponent == min(exponent, 0)
+                    else:
+                        with pytest.raises(ValueError, match="Decimal"):
+                            decimal_query(value)
+        for text in ["NaN", "-NaN123", "sNaN", "Infinity", "-Infinity"]:
+            with pytest.raises(ValueError, match="Decimal"):
+                decimal_query(Decimal(text))
+
+
+def test_decimal_subclass_keeps_formatting_contract(decimal_query):
+    class FormattedDecimal(Decimal):
+        def __str__(self):
+            raise AssertionError("subclasses must use their existing format hook")
+
+    value = FormattedDecimal("1.2300")
+    result = decimal_query(value)
+    assert result == Decimal("1.2300")
+    assert result.as_tuple().exponent == -4
+
+
+def test_parameter_binding_keeps_native_and_mixed_paths(db):
+    db.execute_sql("CREATE TABLE native_params (id INTEGER PRIMARY KEY, label TEXT)")
+    assert db.execute_sql("INSERT INTO native_params VALUES (?, ?)", [10, "direct"]) == 1
+
+    native_statement = db.prepare("INSERT INTO native_params VALUES (?, ?)")
+    native_statement.bind(1, 11)
+    native_statement.bind(2, "prepared")
+    assert native_statement.execute() == 1
+
+    db.execute_sql("CREATE TABLE mixed_params (id INTEGER PRIMARY KEY, at TIMESTAMP)")
+    timestamp = dt.datetime(2024, 5, 4, 3, 2, 1)
+
+    assert db.execute_sql("INSERT INTO mixed_params VALUES (?, ?)", [1, timestamp]) == 1
+
+    mixed_float = db.execute_sql(
+        "SELECT ? AS value, ? AS at",
+        [2.0, timestamp],
+    )
+    assert type(mixed_float[0]["value"]) is float
+    assert mixed_float[0]["value"] == 2.0
+
+    statement = db.prepare("INSERT INTO mixed_params VALUES (?, ?)")
+    statement.bind(1, 2)
+    statement.bind(2, timestamp)
+    assert statement.execute() == 1
+
+    assert db.execute_sql("SELECT id FROM native_params ORDER BY id") == [{"id": 10}, {"id": 11}]
+    assert db.execute_sql("SELECT id FROM mixed_params ORDER BY id") == [{"id": 1}, {"id": 2}]
+
+
+def test_native_float_parameters_preserve_double_type(db):
+    assert db.execute_sql("SELECT ? / 2 AS value", [5.0]) == [{"value": 2.5}]
+
+    prepared = db.prepare("SELECT ? AS value")
+    prepared.bind(1, 2.0)
+    assert prepared.execute() == [{"value": 2.0}]
+
+    selected = db.execute_sql("SELECT ? AS value", [2.0])
+    assert type(selected[0]["value"]) is float
+    assert selected == [{"value": 2.0}]
+
+    db.execute_sql("CREATE TABLE double_params (id BIGINT PRIMARY KEY, value DOUBLE)")
+    assert db.execute_sql("INSERT INTO double_params VALUES (?, ?)", [1, 1e20]) == 1
+    assert db.execute_sql("SELECT value FROM double_params") == [{"value": 1e20}]
+
+
+def test_exact_decimal_parameters_use_native_transaction_bindings(db):
+    value = Decimal("12345678901234567.89")
+    boundary = Decimal(12345678901234567890123456789012345678)
+    db.execute_sql("CREATE TABLE decimal_params (id INTEGER PRIMARY KEY, amount DECIMAL(30,2))")
+    txn = db.begin(TxnMode.READ_WRITE)
+    boundary_statement = txn.prepare("SELECT ? AS value")
+    boundary_statement.bind(1, boundary)
+    assert boundary_statement.execute() == [{"value": boundary}]
+    boundary_statement.finalize()
+    statement = txn.prepare("INSERT INTO decimal_params VALUES (?, ?)")
+    statement.bind(1, 1)
+    statement.bind(2, value)
+    assert statement.execute() == 1
+    assert statement.execute_many([[2, value], [3, Decimal("0.01")]]) == [1, 1]
+    assert txn.execute_many("INSERT INTO decimal_params VALUES (?, ?)", [[4, value]]) == [1]
+    for invalid in [Decimal("NaN"), Decimal("Infinity"), Decimal("1E+38"), Decimal("1E-39")]:
+        with pytest.raises(ValueError, match="Decimal"):
+            statement.bind(2, invalid)
+    txn.commit()
+    statement.finalize()
+    assert db.execute_sql("SELECT id, amount FROM decimal_params ORDER BY id") == [
+        {"id": 1, "amount": value},
+        {"id": 2, "amount": value},
+        {"id": 3, "amount": Decimal("0.01")},
+        {"id": 4, "amount": value},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("column_type", "value"),
+    [
+        ("DECIMAL(38,0)", Decimal(-99999999999999999999999999999999999999)),
+        ("DECIMAL(38,38)", Decimal("-1E-38")),
+    ],
+)
+def test_transaction_decimal_extremes_survive_reopen(tmp_path, column_type, value):
+    path = str(tmp_path / "decimal-extremes")
+    database = Database.open(path)
+    try:
+        database.execute_sql(
+            f"CREATE TABLE decimal_extremes (id INTEGER PRIMARY KEY, amount {column_type})"
+        )
+        transaction = database.begin(TxnMode.READ_WRITE)
+        statement = transaction.prepare("INSERT INTO decimal_extremes VALUES (?, ?)")
+        assert statement.execute_many([[1, value]]) == [1]
+        statement.finalize()
+        transaction.commit()
+    finally:
+        database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT amount FROM decimal_extremes") == [
+            {"amount": value}
+        ]
+    finally:
+        reopened.close()
+
+
+def test_transaction_parameters_use_native_prepared_values(db):
+    dimensions = 70_000
+    values = [0.5] * dimensions
+    middle = dimensions // 2
+    values[middle] = -0.25
+    db.execute_sql(
+        f"CREATE TABLE transaction_params (id INTEGER PRIMARY KEY, value VECTOR({dimensions}))"
+    )
+
+    transaction = db.begin(TxnMode.READ_WRITE)
+    selected = transaction.execute_sql("SELECT ? / 2 AS value", [5.0])
+    assert type(selected[0]["value"]) is float
+    assert selected == [{"value": 2.5}]
+    assert (
+        transaction.execute_sql("INSERT INTO transaction_params VALUES (?, ?)", [1, values])
+        == 1
+    )
+    transaction.commit()
+
+    stored = db.execute_sql("SELECT value FROM transaction_params")
+    assert len(stored[0]["value"]) == dimensions
+    assert stored[0]["value"][0] == 0.5
+    assert stored[0]["value"][middle] == -0.25
+    assert stored[0]["value"][-1] == 0.5
+
+
+def test_transaction_native_text_parameter_does_not_expand_sql(db):
+    payload = "x" * 1_048_576
+    transaction = db.begin(TxnMode.READ_WRITE)
+    try:
+        selected = transaction.execute_sql("SELECT ? AS value", [payload])
+        assert type(selected[0]["value"]) is str
+        assert selected == [{"value": payload}]
+    finally:
+        transaction.rollback()
+
+
+def test_transaction_mixed_parameters_fall_back_to_rendered_sql(db):
+    transaction = db.begin(TxnMode.READ_WRITE)
+    timestamp = dt.datetime(2024, 5, 4, 3, 2, 1)
+
+    selected = transaction.execute_sql(
+        "SELECT ? AS value, ? AS at",
+        [2.0, timestamp],
+    )
+
+    assert type(selected[0]["value"]) is float
+    assert selected[0]["value"] == 2.0
+    transaction.rollback()
+
+
+def test_prepared_execute_many_is_atomic(db):
+    db.execute_sql("CREATE TABLE batch_items (id INTEGER PRIMARY KEY, embedding VECTOR(2))")
+    statement = db.prepare("INSERT INTO batch_items VALUES (?, ?)")
+
+    assert statement.execute_many(((1, (1.0, 0.0)), (2, (0.0, 1.0)))) == [1, 1]
+    assert db.execute_sql("SELECT id FROM batch_items ORDER BY id") == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql("DELETE FROM batch_items")
+    with pytest.raises(AlopexError):
+        statement.execute_many([[1, [1.0, 0.0]], [1, [0.0, 1.0]]])
+    assert db.execute_sql("SELECT id FROM batch_items") == []
+
+    with pytest.raises(
+        ValueError,
+        match="プレースホルダ 2 個に対しパラメータ 1 個",
+    ) as error:
+        statement.execute_many([[3]])
+    assert error.value.code == "ALOPEX-PY015"
+    with pytest.raises(TypeError):
+        statement.execute_many([{"id": 3, "embedding": [1.0, 0.0]}])
+
+
+@pytest.mark.parametrize("close_first", [False, True])
+def test_prepared_finalize_releases_database_handle(tmp_path, close_first):
+    path = str(tmp_path / "prepared-finalize")
+    database = Database.open(path)
+    database.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+    database.execute_sql("INSERT INTO items VALUES (1)")
+    statement = database.prepare("SELECT id FROM items")
+    if close_first:
+        database.close()
+    statement.finalize()
+    if not close_first:
+        database.close()
+
+    # Keep both wrappers alive: garbage collection must not release this lock.
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id FROM items") == [{"id": 1}]
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.finalize()
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.execute()
+        with pytest.raises(AlopexError, match="prepared statement is finalized"):
+            statement.parameter_count()
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("operation", ["select", "native", "rendered", "many"])
+def test_prepared_rejects_execute_after_database_close(tmp_path, operation):
+    path = str(tmp_path / "prepared-closed")
+    database = Database.open(path)
+    database.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, at TIMESTAMP)")
+    database.execute_sql("INSERT INTO items VALUES (1, NULL)")
+    sql = "SELECT id FROM items" if operation == "select" else "INSERT INTO items VALUES (?, ?)"
+    statement = database.prepare(sql)
+    if operation in ("native", "rendered"):
+        statement.bind(1, 2)
+        statement.bind(2, dt.datetime(2024, 5, 4, 3, 2, 1) if operation == "rendered" else None)
+    database.close()
+    try:
+        with pytest.raises(AlopexError, match="database is closed"):
+            statement.parameter_count()
+        with pytest.raises(AlopexError, match="database is closed"):
+            if operation == "many":
+                statement.execute_many([[2, None], [3, None]])
+            else:
+                statement.execute()
+    finally:
+        statement.finalize()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id FROM items ORDER BY id") == [{"id": 1}]
+    finally:
+        reopened.close()
+
+
+def test_prepared_active_handle_guides_reopen_error(tmp_path):
+    path = str(tmp_path / "prepared-owner")
+    database = Database.open(path)
+    statement = database.prepare("SELECT 1 AS value")
+    database.close()
+    try:
+        with pytest.raises(AlopexError, match="already open") as error:
+            Database.open(path)
+        assert "already open in this process" in str(error.value)
+        assert "PreparedStatement" in str(error.value)
+    finally:
+        statement.finalize()
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT 1 AS value") == [{"value": 1}]
+    finally:
+        reopened.close()
 
 
 def test_execute_sql_portable_metadata_exact_rows(db):
@@ -628,6 +1049,22 @@ def test_execute_sql_question_mark_inside_literal_is_not_placeholder(users_db):
     assert rows == [{"name": "wh?t"}]
 
 
+@pytest.mark.parametrize("params", [None, [], ()])
+def test_execute_sql_empty_bindings_preserve_literal_and_comment_question_marks(db, params):
+    assert db.execute_sql(
+        "SELECT 'wh?t' AS value /* block ? */ -- line ?\n", params
+    ) == [{"value": "wh?t"}]
+
+
+@pytest.mark.parametrize("params", [None, [], ()])
+def test_execute_sql_empty_bindings_validate_before_transaction_control(db, params):
+    for sql in ["SELECT ? AS value", "BEGIN ?"]:
+        with pytest.raises(ValueError) as raised:
+            db.execute_sql(sql, params)
+        assert raised.value.code == "ALOPEX-PY015"
+    assert db.execute_sql("SELECT 1 AS value") == [{"value": 1}]
+
+
 def test_execute_sql_value_types_roundtrip(db):
     db.execute_sql(
         "CREATE TABLE vals (id INTEGER PRIMARY KEY, flag BOOLEAN, ratio DOUBLE, big BIGINT)"
@@ -648,6 +1085,24 @@ def test_execute_sql_vector_param_roundtrip(db):
     )
     rows = db.execute_sql("SELECT embedding FROM docs WHERE id = ?", [1])
     assert rows == [{"embedding": [0.25, -1.5, 2.0]}]
+
+
+def test_execute_sql_vector_batch_params_do_not_expand_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    sql = "INSERT INTO docs (id, embedding) VALUES " + ", ".join(
+        "(?, ?)" for _ in range(rows)
+    )
+    params = [
+        value
+        for row in range(rows)
+        for value in (row, [0.25] * dimensions)
+    ]
+
+    assert db.execute_sql(sql, params) == rows
 
 
 def test_execute_sql_numpy_vector_param(db):
@@ -696,6 +1151,20 @@ def test_execute_sql_invalid_sql_raises_alopex_error_with_code(db):
     with pytest.raises(AlopexError) as raised:
         db.execute_sql("SELEKT 1 FRUM nowhere")
     assert getattr(raised.value, "code", "").startswith("ALOPEX-")
+
+
+def test_execute_sql_rejects_nul_sql_before_native_binding(db):
+    with pytest.raises(ValueError) as raised:
+        db.execute_sql("SELECT 1\0")
+    assert raised.value.code == "ALOPEX-PY019"
+
+
+def test_transaction_execute_sql_rejects_nul_sql_before_native_binding(db):
+    transaction = db.begin(TxnMode.READ_WRITE)
+    with pytest.raises(ValueError) as raised:
+        transaction.execute_sql("SELECT 1\0")
+    assert raised.value.code == "ALOPEX-PY019"
+    transaction.rollback()
 
 
 def test_execute_sql_on_closed_database_raises(db):
@@ -775,3 +1244,173 @@ def test_execute_sql_placeholder_inside_comment_is_ignored(users_db):
 def test_execute_sql_nul_character_param_raises_value_error(users_db):
     with pytest.raises(ValueError):
         users_db.execute_sql("SELECT * FROM users WHERE name = ?", ["a\x00b"])
+
+
+def test_execute_sql_null_vector_is_sql_null_and_skipped_by_hnsw(db):
+    db.execute_sql(
+        "CREATE TABLE vector_items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    db.execute_sql(
+        "INSERT INTO vector_items VALUES (1, [0.0, 0.0]), (2, NULL)"
+    )
+    assert db.execute_sql(
+        "SELECT vector_distance(embedding, [0.0, 0.0], 'l2') AS distance, "
+        "vector_similarity(embedding, [0.0, 0.0], 'l2') AS similarity "
+        "FROM vector_items WHERE id = 2"
+    ) == [{"distance": None, "similarity": None}]
+
+    nearest = (
+        "SELECT id FROM vector_items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 1"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}]
+    db.execute_sql("CREATE INDEX vector_items_hnsw ON vector_items (embedding) USING HNSW")
+    assert db.execute_sql(nearest) == [{"id": 1}]
+
+
+def test_all_null_hnsw_survives_updates_and_disk_reopen(tmp_path):
+    path = str(tmp_path / "null-vectors.alopex")
+    database = Database.open(path)
+    database.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))"
+    )
+    database.execute_sql("INSERT INTO items VALUES (1, NULL), (2, NULL)")
+    database.execute_sql("CREATE INDEX items_hnsw ON items (embedding) USING HNSW")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    nearest = (
+        "SELECT id FROM items "
+        "ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') ASC LIMIT 2"
+    )
+    def assert_null_completion(connection, non_null_id=None):
+        exact = connection.execute_sql(nearest + " WITH (enable_hnsw = false)")
+        indexed = connection.execute_sql(nearest + " WITH (enable_hnsw = true)")
+        for result in (exact, indexed):
+            assert len(result) == 2
+            assert len({row["id"] for row in result}) == 2
+            assert all(row["id"] in {1, 2, 3} for row in result)
+            if non_null_id is not None:
+                assert result[0] == {"id": non_null_id}
+        # NULL ties have no required order; both paths must retain LIMIT rows.
+
+    assert_null_completion(database)
+    database.execute_sql("INSERT INTO items VALUES (3, NULL)")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    database.execute_sql("UPDATE items SET embedding = [0.0, 0.0] WHERE id = 2")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 1
+    assert_null_completion(database, non_null_id=2)
+    database.execute_sql("UPDATE items SET embedding = NULL WHERE id = 2")
+    assert database.get_hnsw_stats("items_hnsw").node_count == 0
+    assert_null_completion(database)
+    database.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.execute_sql("SELECT id, embedding FROM items ORDER BY id") == [
+            {"id": 1, "embedding": None},
+            {"id": 2, "embedding": None},
+            {"id": 3, "embedding": None},
+        ]
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 0
+        assert_null_completion(reopened)
+        reopened.execute_sql("UPDATE items SET embedding = [1.0, 0.0] WHERE id = 1")
+        assert reopened.get_hnsw_stats("items_hnsw").node_count == 1
+        assert_null_completion(reopened, non_null_id=1)
+    finally:
+        reopened.close()
+
+
+def test_physical_hnsw_null_updates_match_exact_search(db):
+    # Force the indexed path independently of the evolving cost threshold.
+    # The smaller NULL regression alone does not prove physical index updates.
+    tail = ", 0.0" * 1023
+    query_vector = f"[-1.0{tail}]"
+    db.execute_sql(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(1024, L2))"
+    )
+    db.execute_sql("INSERT INTO items VALUES (0, NULL)")
+    for item_id in range(1, 1025):
+        db.execute_sql(f"INSERT INTO items VALUES ({item_id}, [{item_id - 1}.0{tail}])")
+    nearest = (
+        f"SELECT id FROM items ORDER BY "
+        f"vector_distance(embedding, {query_vector}, 'l2') ASC LIMIT 2"
+    )
+    assert db.execute_sql(nearest) == [{"id": 1}, {"id": 2}]
+    db.execute_sql(
+        "CREATE INDEX items_hnsw ON items (embedding) USING HNSW WITH (ef_search = 1024)"
+    )
+    assert db.get_hnsw_stats("items_hnsw").node_count == 1024
+    indexed_query = nearest + " WITH (enable_hnsw = true)"
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
+    assert db.execute_sql(indexed_query) == [{"id": 1}, {"id": 2}]
+
+    db.execute_sql(f"UPDATE items SET embedding = {query_vector} WHERE id = 0")
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 1")
+    assert db.execute_sql(indexed_query) == [{"id": 0}, {"id": 2}]
+    db.execute_sql("UPDATE items SET embedding = NULL WHERE id = 0")
+    expected = [{"id": 2}, {"id": 3}]
+    assert db.execute_sql(indexed_query) == expected
+    assert db.execute_sql(
+        f"SELECT vector_distance(embedding, {query_vector}, 'l2') AS distance, "
+        f"vector_similarity(embedding, {query_vector}, 'l2') AS similarity "
+        "FROM items WHERE id = 0"
+    ) == [{"distance": None, "similarity": None}]
+    plan = next(iter(db.execute_sql("EXPLAIN ANALYZE " + indexed_query)[0].values()))
+    assert "HnswSearch index=items_hnsw" in plan, plan
+    assert "nodes_visited=" in plan and "nodes_visited=0" not in plan, plan
+    db.execute_sql("DROP INDEX items_hnsw")
+    plan = next(iter(db.execute_sql("EXPLAIN " + nearest)[0].values()))
+    assert not plan.startswith("HnswSearch"), plan
+    assert db.execute_sql(nearest) == expected
+
+
+def test_columnar_dml_rejects_writes_and_preserves_copied_rows(tmp_path):
+    path = tmp_path / "columnar.alopex"
+    db = Database.open(str(path))
+    db.execute_sql(
+        "CREATE TABLE c (id INTEGER PRIMARY KEY, t0 TEXT, price DOUBLE) "
+        "WITH (storage='columnar')"
+    )
+    assert db.copy_from_csv("c", io.BytesIO(b"1,a,1.0\n2,b,2.0\n"), False) == 2
+    db.execute_sql("CREATE TABLE source (id INTEGER PRIMARY KEY, price DOUBLE)")
+    db.execute_sql("INSERT INTO source VALUES (1, 9.0)")
+
+    select = "SELECT id, t0, price FROM c ORDER BY id"
+    copied = [
+        {"id": 1, "t0": "a", "price": 1.0},
+        {"id": 2, "t0": "b", "price": 2.0},
+    ]
+    assert db.execute_sql(select) == copied
+
+    for sql in (
+        "INSERT INTO c VALUES (3, 'c', 3.0)",
+        "UPDATE c SET price = 9.0 WHERE id = 1",
+        "UPDATE c SET price = 9.0 WHERE id = 999",
+        "DELETE FROM c WHERE id = 2",
+        "DELETE FROM c WHERE id = 999",
+        (
+            "MERGE INTO c USING source ON c.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET price = source.price"
+        ),
+    ):
+        with pytest.raises(AlopexError, match="not supported for columnar tables"):
+            db.execute_sql(sql)
+        assert db.execute_sql(select) == copied, sql
+
+    del db
+    gc.collect()
+    assert Database.open(str(path)).execute_sql(select) == copied
+
+
+def test_prepared_execute_many_keeps_400_vectors_out_of_parser_payload(db):
+    rows = 400
+    dimensions = 128
+    db.execute_sql(
+        "CREATE TABLE batch_vectors (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))"
+    )
+    statement = db.prepare("INSERT INTO batch_vectors (id, embedding) VALUES (?, ?)")
+    batch = [[row, [0.25] * dimensions] for row in range(rows)]
+
+    assert statement.execute_many(batch) == [1] * rows
+    assert db.execute_sql("SELECT COUNT(*) AS n FROM batch_vectors") == [{"n": rows}]

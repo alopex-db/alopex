@@ -2,14 +2,19 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
+use alopex_sql::{AlopexDialect, Parser, SqlValue};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::IntoPyObjectExt;
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::sql::{self, PyPreparedBinding};
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
-use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
+use crate::embedded::transaction::{
+    rollback_tracked_for_database_close, PyTransaction, PyTransactionInner,
+};
 use crate::error;
 use crate::types::{
     DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PySharedExecutionReport,
@@ -21,6 +26,8 @@ use crate::vector::SliceOrOwned;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, Sender};
 
 #[pyclass(name = "Database")]
 pub struct PyDatabase {
@@ -32,14 +39,25 @@ pub struct PyDatabase {
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
     #[cfg(test)]
     rollback_fail_count: AtomicUsize,
+    #[cfg(test)]
+    hnsw_detach_hook: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 #[pyclass(name = "PreparedStatement")]
 pub struct PyPreparedStatement {
-    database: Arc<alopex_embedded::Database>,
+    owner: Option<PreparedOwner>,
+    control: Arc<DatabaseControl>,
     sql: String,
-    bindings: Vec<Option<String>>,
-    finalized: bool,
+    bindings: Vec<Option<PyPreparedBinding>>,
+}
+
+#[derive(Clone)]
+enum PreparedOwner {
+    Database(Arc<alopex_embedded::Database>),
+    Transaction {
+        inner: Arc<PyTransactionInner>,
+        statement: Arc<alopex_sql::Statement>,
+    },
 }
 
 struct PythonReader(Py<PyAny>);
@@ -99,12 +117,13 @@ impl Write for PythonWriter {
 
 #[pymethods]
 impl PyPreparedStatement {
-    fn parameter_count(&self) -> usize {
-        self.bindings.len()
+    fn parameter_count(&self, py: Python<'_>) -> PyResult<usize> {
+        self.ensure_open(py)?;
+        Ok(self.bindings.len())
     }
 
-    fn bind(&mut self, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
-        self.ensure_open()?;
+    fn bind(&mut self, py: Python<'_>, index: usize, value: Bound<'_, PyAny>) -> PyResult<()> {
+        let transaction_owned = matches!(self.ensure_open(py)?, PreparedOwner::Transaction { .. });
         let count = self.bindings.len();
         let slot = index
             .checked_sub(1)
@@ -112,26 +131,36 @@ impl PyPreparedStatement {
             .ok_or_else(|| {
                 error::to_py_err(format!("parameter index {index} is outside 1..={count}"))
             })?;
-        *slot = Some(crate::embedded::sql::render_param(&value, index - 1)?);
+        let binding = sql::prepared_binding(&value, index - 1)?;
+        if transaction_owned && matches!(binding, PyPreparedBinding::Rendered(_)) {
+            return Err(error::AlopexError::SqlParamUnsupportedType(
+                "transaction prepared bindings require native scalar or vector values".into(),
+            )
+            .into());
+        }
+        *slot = Some(binding);
         Ok(())
     }
 
-    fn reset(&mut self) -> PyResult<()> {
-        self.ensure_open()?;
+    fn reset(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.ensure_open(py)?;
         self.bindings.fill(None);
         Ok(())
     }
 
     fn finalize(&mut self) -> PyResult<()> {
-        self.ensure_open()?;
+        // Finalization must remain possible after Database.close(). Taking the
+        // handle both marks this statement finalized and releases its lock owner.
+        self.owner
+            .take()
+            .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
         self.bindings.clear();
-        self.finalized = true;
         Ok(())
     }
 
     fn execute(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
-        let rendered = self
+        let owner = self.ensure_open(py)?.clone();
+        let bindings = self
             .bindings
             .iter()
             .enumerate()
@@ -141,22 +170,184 @@ impl PyPreparedStatement {
                     .ok_or_else(|| error::to_py_err(format!("parameter ?{} is unbound", index + 1)))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let sql = crate::embedded::sql::bind_rendered_params(&self.sql, &rendered)?;
-        let database = Arc::clone(&self.database);
-        let result = py
-            .detach(move || database.execute_sql(&sql))
-            .map_err(error::embedded_err)?;
+        let sql = self.sql.clone();
+        if let PreparedOwner::Transaction { inner, statement } = &owner {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(value) => Ok(value),
+                    PyPreparedBinding::Rendered(_) => {
+                        Err(error::AlopexError::SqlParamUnsupportedType(
+                            "transaction prepared bindings require native values".into(),
+                        )
+                        .into())
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let result =
+                crate::embedded::transaction::with_prepared_transaction(py, inner, true, |txn| {
+                    txn.execute_prepared_statement(statement, &values)
+                })?;
+            return sql::execution_result_to_py(py, result);
+        }
+        let PreparedOwner::Database(database) = owner else {
+            unreachable!()
+        };
+        let result = if bindings
+            .iter()
+            .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
+        {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            py.detach(move || {
+                let mut statement = database.prepare(&sql)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    statement.bind(index + 1, value)?;
+                }
+                statement.execute()
+            })
+            .map_err(error::embedded_err)?
+        } else {
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let sql = crate::embedded::sql::bind_rendered_params(&sql, &rendered)?;
+            py.detach(move || database.execute_sql(&sql))
+                .map_err(error::embedded_err)?
+        };
         crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
+    /// Execute native rows. Transaction-owned statements leave commit/rollback to the caller.
+    pub(super) fn execute_many(
+        &mut self,
+        py: Python<'_>,
+        rows: Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let owner = self.ensure_open(py)?.clone();
+        let rows = prepared_native_rows(&rows, self.bindings.len())?;
+        let sql = self.sql.clone();
+        let results = match owner {
+            PreparedOwner::Database(database) => py
+                .detach(move || database.prepare(&sql)?.execute_many(rows))
+                .map_err(error::embedded_err)?,
+            PreparedOwner::Transaction { inner, statement } => {
+                crate::embedded::transaction::with_prepared_transaction(py, &inner, true, |txn| {
+                    txn.execute_prepared_many(&statement, rows, |_| Ok(()))
+                })?
+            }
+        };
+        let values = PyList::empty(py);
+        for result in results {
+            values.append(crate::embedded::sql::execution_result_to_py(py, result)?)?;
+        }
+        values.into_py_any(py)
     }
 }
 
+fn prepared_native_rows(
+    rows: &Bound<'_, PyAny>,
+    parameter_count: usize,
+) -> PyResult<Vec<Vec<SqlValue>>> {
+    let rows: Vec<Bound<'_, PyAny>> = if let Ok(list) = rows.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = rows.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Err(error::AlopexError::SqlParamUnsupportedType(
+            "execute_many の rows には list または tuple を指定してください".to_string(),
+        )
+        .into());
+    };
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let values: Vec<Bound<'_, PyAny>> = if let Ok(list) = row.cast::<PyList>() {
+                list.iter().collect()
+            } else if let Ok(tuple) = row.cast::<PyTuple>() {
+                tuple.iter().collect()
+            } else {
+                return Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                    "execute_many の rows[{row_index}] には list または tuple を指定してください"
+                ))
+                .into());
+            };
+            if values.len() != parameter_count {
+                return Err(error::AlopexError::SqlParamCountMismatch {
+                    expected: parameter_count,
+                    actual: values.len(),
+                }
+                .into());
+            }
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| match sql::prepared_binding(value, index)? {
+                    PyPreparedBinding::Native(native) => Ok(native),
+                    PyPreparedBinding::Rendered(_) => {
+                        Err(error::AlopexError::SqlParamUnsupportedType(format!(
+                            "execute_many の rows[{row_index}][{index}] は native scalar または vector である必要があります"
+                        ))
+                        .into())
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
 impl PyPreparedStatement {
-    fn ensure_open(&self) -> PyResult<()> {
-        if self.finalized {
-            Err(error::to_py_err("prepared statement is finalized"))
-        } else {
-            Ok(())
+    fn ensure_open(&self, py: Python<'_>) -> PyResult<&PreparedOwner> {
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| error::to_py_err("prepared statement is finalized"))?;
+        self.control.ensure_open()?;
+        if let PreparedOwner::Transaction { inner, .. } = owner {
+            crate::embedded::transaction::with_prepared_transaction(py, inner, false, |_| Ok(()))?;
         }
+        Ok(owner)
+    }
+
+    pub(super) fn for_transaction(
+        py: Python<'_>,
+        sql: &str,
+        inner: Arc<PyTransactionInner>,
+        control: Arc<DatabaseControl>,
+    ) -> PyResult<Self> {
+        control.ensure_open()?;
+        crate::embedded::transaction::with_prepared_transaction(py, &inner, false, |_| Ok(()))?;
+        sql::validate_sql_input(sql)?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "transaction prepared statements do not accept transaction control SQL",
+            ));
+        }
+        let mut statements = Parser::parse_sql(&AlopexDialect, sql)
+            .map_err(|err| error::embedded_err(alopex_embedded::Error::Sql(err.into())))?;
+        if statements.len() != 1 {
+            return Err(error::embedded_err(
+                alopex_embedded::Error::PreparedStatementRequiresSingleStatement,
+            ));
+        }
+        let parameter_count = sql::split_on_placeholders(sql).len() - 1;
+        Ok(Self {
+            owner: Some(PreparedOwner::Transaction {
+                inner,
+                statement: Arc::new(statements.remove(0)),
+            }),
+            control,
+            sql: sql.to_owned(),
+            bindings: vec![None; parameter_count],
+        })
     }
 }
 
@@ -167,22 +358,8 @@ impl PyDatabase {
     }
 
     #[cfg(test)]
-    fn consume_rollback_failure(&self) -> bool {
-        let mut count = self.rollback_fail_count.load(Ordering::SeqCst);
-        loop {
-            if count == 0 {
-                return false;
-            }
-            match self.rollback_fail_count.compare_exchange_weak(
-                count,
-                count - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(observed) => count = observed,
-            }
-        }
+    fn take_hnsw_detach_hook(&self) -> Option<(Sender<()>, Receiver<()>)> {
+        self.hnsw_detach_hook.lock().unwrap().take()
     }
 
     fn from_db(
@@ -199,7 +376,33 @@ impl PyDatabase {
             txns: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             rollback_fail_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            hnsw_detach_hook: Mutex::new(None),
         }
+    }
+
+    fn validate_cache_entries(entries: Option<usize>) -> PyResult<()> {
+        if entries == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "hnsw_cache_entries must be positive",
+            ));
+        }
+        Ok(())
+    }
+
+    fn configure_cache(
+        db: &alopex_embedded::Database,
+        bytes: Option<u64>,
+        entries: Option<usize>,
+    ) -> PyResult<()> {
+        if bytes.is_some() || entries.is_some() {
+            db.set_hnsw_cache_limits(
+                bytes.unwrap_or_else(|| db.hnsw_cache_stats().limit_bytes),
+                entries,
+            )
+            .map_err(error::embedded_err)?;
+        }
+        Ok(())
     }
 
     fn ensure_open(&self) -> PyResult<Arc<alopex_embedded::Database>> {
@@ -214,10 +417,17 @@ impl PyDatabase {
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
-    #[pyo3(signature = (path, *, thread_mode = None))]
-    fn open(path: &str, thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn open(
+        path: &str,
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
         let db = alopex_embedded::Database::open(Path::new(path)).map_err(error::embedded_err)?;
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
             db,
             alopex_embedded::StorageMode::Disk,
@@ -226,21 +436,34 @@ impl PyDatabase {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (*, thread_mode = None))]
-    fn new(thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (*, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn new(
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
+        let db = alopex_embedded::Database::new();
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
-            alopex_embedded::Database::new(),
+            db,
             alopex_embedded::StorageMode::InMemory,
             thread_mode,
         ))
     }
 
     #[staticmethod]
-    #[pyo3(signature = (*, thread_mode = None))]
-    fn open_in_memory(thread_mode: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (*, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    fn open_in_memory(
+        thread_mode: Option<&str>,
+        hnsw_cache_bytes: Option<u64>,
+        hnsw_cache_entries: Option<usize>,
+    ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
+        Self::validate_cache_entries(hnsw_cache_entries)?;
         let db = alopex_embedded::Database::open_in_memory().map_err(error::embedded_err)?;
+        Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
             db,
             alopex_embedded::StorageMode::InMemory,
@@ -273,6 +496,49 @@ impl PyDatabase {
         Ok(self.control.thread_mode().into())
     }
 
+    /// Set retained graph limits. Zero bytes disables retention; active calls/readers may still own graphs.
+    #[pyo3(signature = (bytes, *, entries = None))]
+    fn set_hnsw_cache_limit(&self, bytes: u64, entries: Option<usize>) -> PyResult<()> {
+        Self::validate_cache_entries(entries)?;
+        self.ensure_open()?
+            .set_hnsw_cache_limits(bytes, entries)
+            .map_err(error::embedded_err)
+    }
+
+    /// Cumulative load/reuse counters and current global entries (not process RSS).
+    fn hnsw_cache_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let stats = self.ensure_open()?.hnsw_cache_stats();
+        let result = PyDict::new(py);
+        result.set_item("limit_bytes", stats.limit_bytes)?;
+        result.set_item("limit_entries", stats.limit_entries)?;
+        result.set_item("used_bytes", stats.used_bytes)?;
+        result.set_item("entries", stats.entries)?;
+        result.set_item("hits", stats.hits)?;
+        result.set_item("misses", stats.misses)?;
+        result.set_item("evictions", stats.evictions)?;
+        result.set_item("oversize_skips", stats.oversize_skips)?;
+        result.set_item("invalidations", stats.invalidations)?;
+        result.set_item("load_ns_total", stats.load_ns_total)?;
+        let indexes = PyList::empty(py);
+        for index in stats.indexes {
+            let entry = PyDict::new(py);
+            entry.set_item("name", index.name)?;
+            entry.set_item("bytes", index.bytes)?;
+            entry.set_item("hits", index.hits)?;
+            entry.set_item("last_access_ns", index.last_access_ns)?;
+            indexes.append(entry)?;
+        }
+        result.set_item("indexes", indexes)?;
+        Ok(result.into_any().unbind())
+    }
+
+    /// Load one graph. Returns retained bytes, or zero when disabled/oversize.
+    fn warm_hnsw_index(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+        let db = self.ensure_open()?;
+        py.detach(|| db.warm_hnsw_index(name))
+            .map_err(error::embedded_err)
+    }
+
     /// SQL を実行する（auto-commit）。
     ///
     /// Args:
@@ -297,10 +563,54 @@ impl PyDatabase {
         params: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.ensure_open()?;
-        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
-        let result = py
-            .detach(move || db.execute_sql(&bound_sql))
-            .map_err(error::embedded_err)?;
+        sql::validate_sql_input(sql)?;
+        let bindings = sql::prepared_bindings(params.as_ref())?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Database.execute_sql is auto-commit; use db.begin() and Transaction.savepoint(), rollback_to(), or release() for explicit transactions",
+            ));
+        }
+        let validated_sql =
+            crate::embedded::sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
+        let result = if !bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| matches!(binding, PyPreparedBinding::Native(_)))
+        {
+            drop(validated_sql);
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            let sql = sql.to_owned();
+            py.detach(move || {
+                // prepare performs the single-statement parse and validation.
+                // Parsing here and again before entering this branch doubled
+                // parser work for every native parameter, including Decimal.
+                let mut statement = db.prepare(&sql)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    statement.bind(index + 1, value)?;
+                }
+                statement.execute()
+            })
+            .map_err(error::embedded_err)?
+        } else if bindings.is_empty() {
+            py.detach(move || db.execute_sql(&validated_sql))
+                .map_err(error::embedded_err)?
+        } else {
+            drop(validated_sql);
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let bound_sql = crate::embedded::sql::bind_rendered_params(sql, &rendered)?;
+            py.detach(move || db.execute_sql(&bound_sql))
+                .map_err(error::embedded_err)?
+        };
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
@@ -333,10 +643,10 @@ impl PyDatabase {
             .map_err(error::embedded_err)?
             .parameter_count();
         Ok(PyPreparedStatement {
-            database,
+            owner: Some(PreparedOwner::Database(database)),
+            control: Arc::clone(&self.control),
             sql: sql.to_owned(),
             bindings: vec![None; parameter_count],
-            finalized: false,
         })
     }
 
@@ -519,7 +829,7 @@ impl PyDatabase {
         crate::types::cluster::routing_diagnostics_to_py(py, &diagnostics)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if !self.control.begin_close()? {
             return Ok(());
         }
@@ -531,50 +841,15 @@ impl PyDatabase {
             self.control.reopen_after_close_failure()?;
             return Err(err);
         }
-        let txns = self.txns.clone();
-        let mut guard = txns
-            .lock()
-            .map_err(|_| error::to_py_err("transaction tracking lock poisoned"))?;
-        let mut first_err: Option<PyErr> = None;
-        guard.retain(|weak| {
-            if let Some(handle) = weak.upgrade() {
-                let mut txn_guard = match handle.txn.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        if first_err.is_none() {
-                            first_err = Some(error::to_py_err("transaction lock poisoned"));
-                        }
-                        return true;
-                    }
-                };
-                #[cfg(test)]
-                if self.consume_rollback_failure() {
-                    if first_err.is_none() {
-                        first_err = Some(error::to_py_err("ロールバック失敗（テスト注入）"));
-                    }
-                    return true;
-                }
-                if let Some(txn) = txn_guard.as_mut() {
-                    if let Err(err) = txn.rollback() {
-                        if first_err.is_none() {
-                            first_err = Some(error::embedded_err(err));
-                        }
-                        return true;
-                    }
-                    *txn_guard = None;
-                    false
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        });
-        if let Some(err) = first_err {
+        if let Err(err) = rollback_tracked_for_database_close(
+            py,
+            &self.txns,
+            #[cfg(test)]
+            &self.rollback_fail_count,
+        ) {
             self.control.reopen_after_close_failure()?;
             return Err(err);
         }
-        drop(guard);
         // Converge into the single `.alopex` file before releasing the handle, so a
         // convergence failure surfaces as a Python exception instead of being
         // swallowed by the best-effort `Drop` path.
@@ -589,10 +864,21 @@ impl PyDatabase {
         Ok(())
     }
 
-    fn create_hnsw_index(&self, name: &str, config: PyHnswConfig) -> PyResult<()> {
+    fn create_hnsw_index(&self, py: Python<'_>, name: &str, config: PyHnswConfig) -> PyResult<()> {
         let db = self.ensure_open()?;
-        db.create_hnsw_index(name, config.into())
-            .map_err(error::embedded_err)
+        let name = name.to_string();
+        let config = config.into();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.create_hnsw_index(&name, config)
+        })
+        .map_err(error::embedded_err)
     }
 
     #[pyo3(signature = (name, query, k, ef_search = None))]
@@ -630,16 +916,37 @@ impl PyDatabase {
         })
     }
 
-    fn drop_hnsw_index(&self, name: &str) -> PyResult<()> {
+    fn drop_hnsw_index(&self, py: Python<'_>, name: &str) -> PyResult<()> {
         let db = self.ensure_open()?;
-        db.drop_hnsw_index(name).map_err(error::embedded_err)
+        let name = name.to_string();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.drop_hnsw_index(&name)
+        })
+        .map_err(error::embedded_err)
     }
 
-    fn get_hnsw_stats(&self, name: &str) -> PyResult<PyHnswStats> {
+    fn get_hnsw_stats(&self, py: Python<'_>, name: &str) -> PyResult<PyHnswStats> {
         let db = self.ensure_open()?;
-        db.get_hnsw_stats(name)
-            .map(PyHnswStats::from)
-            .map_err(error::embedded_err)
+        let name = name.to_string();
+        #[cfg(test)]
+        let hook = self.take_hnsw_detach_hook();
+        py.detach(move || {
+            #[cfg(test)]
+            if let Some((started, release)) = hook {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            db.get_hnsw_stats(&name)
+        })
+        .map(PyHnswStats::from)
+        .map_err(error::embedded_err)
     }
 
     /// Stream CSV bytes from a Python binary reader into a table.
@@ -730,9 +1037,71 @@ mod tests {
     }
 
     #[test]
+    fn hnsw_management_releases_gil_during_native_waits() {
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        Python::initialize();
+        let db = Arc::new(PyDatabase::new(Some("multi"), None, None).unwrap());
+        Python::attach(|py| {
+            db.create_hnsw_index(
+                py,
+                "existing",
+                crate::types::PyHnswConfig {
+                    dim: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+
+        for operation in ["create", "stats", "drop"] {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            *db.hnsw_detach_hook.lock().unwrap() = Some((started_tx, release_rx));
+            let worker_db = Arc::clone(&db);
+            let worker = thread::spawn(move || {
+                Python::attach(|py| {
+                    let result = match operation {
+                        "create" => worker_db.create_hnsw_index(
+                            py,
+                            "created",
+                            crate::types::PyHnswConfig {
+                                dim: 2,
+                                ..Default::default()
+                            },
+                        ),
+                        "stats" => worker_db.get_hnsw_stats(py, "existing").map(|_| ()),
+                        "drop" => worker_db.drop_hnsw_index(py, "existing"),
+                        _ => unreachable!(),
+                    };
+                    result.map_err(|error| error.to_string())
+                })
+            });
+            let started = started_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            let (progress_tx, progress_rx) = mpsc::channel();
+            let observer = thread::spawn(move || {
+                Python::attach(|_| {
+                    let _ = progress_tx.send(());
+                });
+            });
+            let gil_progress = started && progress_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            // Release the worker before asserting so a failed GIL check cannot strand it.
+            let _ = release_tx.send(());
+            let result = worker.join().unwrap();
+            observer.join().unwrap();
+            assert!(
+                gil_progress && result.is_ok(),
+                "operation={operation}, GIL_progress={gil_progress}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn execute_sql_ddl_dml_select_end_to_end() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
 
             let ddl = db
                 .execute_sql(
@@ -781,7 +1150,7 @@ mod tests {
     #[test]
     fn execute_sql_select_empty_returns_empty_list() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let rows = db
@@ -795,17 +1164,17 @@ mod tests {
     #[test]
     fn prepared_statement_python_surface_rebinds_and_finalizes() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE prepared (id INTEGER PRIMARY KEY)", None)
                 .unwrap();
             let mut statement = db.prepare("INSERT INTO prepared (id) VALUES (?)").unwrap();
-            assert_eq!(statement.parameter_count(), 1);
+            assert_eq!(statement.parameter_count(py).unwrap(), 1);
             let one = 1i64.into_py_any(py).unwrap();
-            statement.bind(1, one.bind(py).clone()).unwrap();
+            statement.bind(py, 1, one.bind(py).clone()).unwrap();
             statement.execute(py).unwrap();
-            statement.reset().unwrap();
+            statement.reset(py).unwrap();
             let two = 2i64.into_py_any(py).unwrap();
-            statement.bind(1, two.bind(py).clone()).unwrap();
+            statement.bind(py, 1, two.bind(py).clone()).unwrap();
             statement.execute(py).unwrap();
             statement.finalize().unwrap();
             assert!(statement.execute(py).is_err());
@@ -813,9 +1182,48 @@ mod tests {
     }
 
     #[test]
+    fn prepared_statement_python_vectors_stay_out_of_the_parser_payload() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            const DIMENSIONS: usize = 128;
+
+            let db = PyDatabase::new(None, None, None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let sql = format!(
+                "INSERT INTO items (id, embedding) VALUES {}",
+                std::iter::repeat_n("(?, ?)", ROWS)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let mut statement = db.prepare(&sql).expect("prepare");
+            for row in 0..ROWS {
+                statement
+                    .bind(py, 2 * row + 1, (row as i64).into_bound_py_any(py).unwrap())
+                    .expect("id");
+                statement
+                    .bind(
+                        py,
+                        2 * row + 2,
+                        PyList::new(py, vec![0.25f64; DIMENSIONS])
+                            .unwrap()
+                            .into_any(),
+                    )
+                    .expect("vector");
+            }
+            statement.execute(py).expect("insert");
+        });
+    }
+
+    #[test]
     fn python_database_sql_stream_reads_rows_written_by_detached_auto_commit_calls() {
         with_py(|py| {
-            let db = Py::new(py, PyDatabase::new(None).expect("db")).expect("python database");
+            let db = Py::new(py, PyDatabase::new(None, None, None).expect("db"))
+                .expect("python database");
             let db = db.bind(py);
             db.call_method1(
                 "execute_sql",
@@ -848,7 +1256,7 @@ mod tests {
     #[test]
     fn execute_sql_parse_error_maps_to_alopex_error_with_sql_code() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             let err = db
                 .execute_sql(py, "SELEKT 1 FRUM nowhere", None)
                 .expect_err("parse error");
@@ -864,11 +1272,27 @@ mod tests {
     }
 
     #[test]
+    fn execute_sql_guides_explicit_transaction_statements_to_begin() {
+        with_py(|py| {
+            let db = PyDatabase::new(None, None, None).expect("db");
+            for sql in ["BEGIN", "SAVEPOINT retry", "COMMIT", "ROLLBACK"] {
+                let err = db
+                    .execute_sql(py, sql, None)
+                    .expect_err("transaction statement must be guided");
+                assert!(
+                    err.to_string().contains("db.begin()"),
+                    "{sql} did not explain the Python transaction API: {err}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn execute_sql_on_closed_database_is_error() {
         with_py(|py| {
-            let mut db = PyDatabase::new(None).expect("db");
-            db.close().expect("close");
-            db.close().expect("repeated close is idempotent");
+            let mut db = PyDatabase::new(None, None, None).expect("db");
+            db.close(py).expect("close");
+            db.close(py).expect("repeated close is idempotent");
             let err = db.execute_sql(py, "SELECT 1", None).expect_err("closed");
             assert!(err.is_instance_of::<crate::error::PyAlopexError>(py));
         });
@@ -877,12 +1301,12 @@ mod tests {
     #[test]
     fn single_thread_database_reports_a_classified_cross_thread_error() {
         pyo3::Python::initialize();
-        let database = PyDatabase::new(Some("single")).expect("single-thread db");
+        let database = PyDatabase::new(Some("single"), None, None).expect("single-thread db");
         assert_eq!(
             database.thread_mode().unwrap().__repr__(),
             "ThreadMode.SINGLE"
         );
-        assert!(PyDatabase::new(Some("invalid")).is_err());
+        assert!(PyDatabase::new(Some("invalid"), None, None).is_err());
 
         let control = database.control.clone();
         let code = std::thread::spawn(move || {
@@ -906,7 +1330,7 @@ mod tests {
     #[test]
     fn execute_sql_vector_param_roundtrip() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))",
@@ -948,9 +1372,40 @@ mod tests {
     }
 
     #[test]
+    fn execute_sql_vector_batch_stays_out_of_the_parser_payload() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            const DIMENSIONS: usize = 128;
+
+            let db = PyDatabase::new(None, None, None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let sql = format!(
+                "INSERT INTO items (id, embedding) VALUES {}",
+                std::iter::repeat_n("(?, ?)", ROWS)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let params = PyList::empty(py);
+            for row in 0..ROWS {
+                params.append(row as i64).expect("id");
+                params
+                    .append(PyList::new(py, vec![0.25f64; DIMENSIONS]).unwrap())
+                    .expect("vector");
+            }
+            db.execute_sql(py, &sql, Some(params.into_any()))
+                .expect("insert");
+        });
+    }
+
+    #[test]
     fn execute_sql_rejects_scalar_params() {
         with_py(|py| {
-            let db = PyDatabase::new(None).expect("db");
+            let db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let scalar = 1i64.into_bound_py_any(py).expect("int");
@@ -963,7 +1418,7 @@ mod tests {
 
     #[test]
     fn close_rolls_back_tracked_transactions_and_cleans_up() {
-        let mut db = PyDatabase::new(None).expect("db");
+        let mut db = PyDatabase::new(None, None, None).expect("db");
         let txn1 = db.begin(None).expect("txn1");
         let txn2 = db.begin(None).expect("txn2");
 
@@ -972,7 +1427,7 @@ mod tests {
             guard.take();
         }
 
-        db.close().expect("close");
+        Python::attach(|py| db.close(py)).expect("close");
 
         assert!(db.ensure_open().is_err());
         assert!(db.inner.is_none());
@@ -990,14 +1445,237 @@ mod tests {
             .is_none());
     }
 
+    fn close_status_pair(txn: &Bound<'_, PyAny>) -> (String, String) {
+        let status = txn.getattr("status").unwrap();
+        (
+            status.get_item("state").unwrap().extract().unwrap(),
+            status.get_item("stream_effect").unwrap().extract().unwrap(),
+        )
+    }
+
+    #[test]
+    fn issue583_close_updates_active_status_and_preserves_terminal_states() {
+        with_py(|py| {
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
+            let native = db.borrow(py).inner.as_ref().unwrap().clone();
+            let mode = Py::new(
+                py,
+                crate::types::PyTxnMode::from(alopex_core::TxnMode::ReadWrite),
+            )
+            .unwrap();
+            let active = db.bind(py).call_method1("begin", (&mode,)).unwrap();
+            let committed = db.bind(py).call_method1("begin", (&mode,)).unwrap();
+            let rolled_back = db.bind(py).call_method1("begin", (&mode,)).unwrap();
+            for (txn, key) in [(&active, b"a"), (&committed, b"c"), (&rolled_back, b"r")] {
+                txn.call_method1(
+                    "put",
+                    (
+                        pyo3::types::PyBytes::new(py, key),
+                        pyo3::types::PyBytes::new(py, b"value"),
+                    ),
+                )
+                .unwrap();
+            }
+            committed.call_method0("commit").unwrap();
+            rolled_back.call_method0("rollback").unwrap();
+            db.bind(py).call_method0("close").unwrap();
+            db.bind(py).call_method0("close").unwrap();
+            assert_eq!(
+                close_status_pair(&active),
+                ("rolled_back".into(), "closed".into())
+            );
+            assert_eq!(
+                close_status_pair(&committed),
+                ("committed".into(), "closed".into())
+            );
+            assert_eq!(
+                close_status_pair(&rolled_back),
+                ("rolled_back".into(), "closed".into())
+            );
+            let mut reader = native.begin(alopex_core::TxnMode::ReadOnly).unwrap();
+            assert_eq!(reader.get(b"a").unwrap(), None);
+            assert_eq!(reader.get(b"r").unwrap(), None);
+            assert_eq!(reader.get(b"c").unwrap(), Some(b"value".to_vec()));
+        });
+    }
+
+    #[test]
+    fn issue583_close_pre_call_failure_preserves_active_transaction_for_retry() {
+        with_py(|py| {
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
+            let mode = Py::new(
+                py,
+                crate::types::PyTxnMode::from(alopex_core::TxnMode::ReadWrite),
+            )
+            .unwrap();
+            let txn = db.bind(py).call_method1("begin", (&mode,)).unwrap();
+            let key = pyo3::types::PyBytes::new(py, b"pending");
+            txn.call_method1("put", (&key, pyo3::types::PyBytes::new(py, b"value")))
+                .unwrap();
+            db.borrow(py).inject_rollback_failure_once();
+            let error = db.bind(py).call_method0("close").unwrap_err();
+            assert!(error.is_instance_of::<crate::error::PyAlopexError>(py));
+            assert!(error.to_string().contains("テスト注入"));
+            assert_eq!(
+                close_status_pair(&txn),
+                ("active".into(), "committable".into())
+            );
+            assert_eq!(
+                txn.call_method1("get", (&key,))
+                    .unwrap()
+                    .extract::<Vec<u8>>()
+                    .unwrap(),
+                b"value"
+            );
+            assert!(db.borrow(py).ensure_open().is_ok());
+            assert_eq!(db.borrow(py).txns.lock().unwrap().len(), 1);
+            db.bind(py).call_method0("close").unwrap();
+            assert_eq!(
+                close_status_pair(&txn),
+                ("rolled_back".into(), "closed".into())
+            );
+            assert!(db.borrow(py).txns.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn issue583_close_ends_stream_before_pre_call_retry() {
+        with_py(|py| {
+            let db = Py::new(py, PyDatabase::new(None, None, None).unwrap()).unwrap();
+            db.bind(py)
+                .call_method1("execute_sql", ("CREATE TABLE t (id INTEGER PRIMARY KEY)",))
+                .unwrap();
+            db.bind(py)
+                .call_method1("execute_sql", ("INSERT INTO t VALUES (1)",))
+                .unwrap();
+            let txn = db.bind(py).call_method0("begin").unwrap();
+            let stream = txn
+                .call_method1("execute_sql_stream", ("SELECT id FROM t",))
+                .unwrap();
+            assert_eq!(close_status_pair(&txn), ("active".into(), "active".into()));
+            db.borrow(py).inject_rollback_failure_once();
+            let error = db.bind(py).call_method0("close").unwrap_err();
+            assert!(error.to_string().contains("テスト注入"));
+            let stream_error = stream.call_method0("__next__").unwrap_err();
+            assert_eq!(
+                stream_error
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "stream_closed"
+            );
+            assert_eq!(
+                close_status_pair(&txn),
+                ("active".into(), "must_abort".into())
+            );
+            db.bind(py).call_method0("close").unwrap();
+            assert_eq!(
+                close_status_pair(&txn),
+                ("rolled_back".into(), "closed".into())
+            );
+        });
+    }
+
+    #[test]
+    fn issue583_close_releases_gil_and_all_tracking_guards_before_reattaching() {
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        Python::initialize();
+        let deadline = Duration::from_secs(3);
+        let mut outcomes = Vec::new();
+        for lock_tracking in [true, false] {
+            let mut db = PyDatabase::new(Some("multi"), None, None).unwrap();
+            let txn = db.begin(None).unwrap();
+            let tracked = Arc::clone(&db.txns);
+            let holder_tracked = Arc::clone(&tracked);
+            let holder_inner = Arc::clone(&txn.inner);
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let holder = thread::spawn(move || {
+                if lock_tracking {
+                    let _guard = holder_tracked.lock().unwrap();
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                } else {
+                    let _guard = holder_inner.txn.lock().unwrap();
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                }
+            });
+            if held_rx.recv_timeout(deadline).is_err() {
+                let _ = release_tx.send(());
+                holder.join().unwrap();
+                panic!("close mutex holder did not become ready");
+            }
+            let (started_tx, started_rx) = mpsc::channel();
+            let closer = thread::spawn(move || {
+                Python::attach(|py| {
+                    let _ = started_tx.send(());
+                    db.close(py).map_err(|error| error.to_string())
+                })
+            });
+            let started = started_rx.recv_timeout(deadline).is_ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (observe_tx, observe_rx) = mpsc::channel();
+            let (unlocked_tx, unlocked_rx) = mpsc::channel();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let observer_inner = Arc::clone(&txn.inner);
+            let observer = started.then(|| {
+                thread::spawn(move || {
+                    Python::attach(|_| {
+                        let _ = ready_tx.send(());
+                        if observe_rx.recv() != Ok(true) {
+                            return;
+                        }
+                        loop {
+                            if let Ok(registry) = tracked.try_lock() {
+                                if registry.is_empty() {
+                                    if let Ok(transaction) = observer_inner.txn.try_lock() {
+                                        if transaction.is_none() {
+                                            let _ = unlocked_tx.send(());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            match stop_rx.try_recv() {
+                                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                                Err(mpsc::TryRecvError::Empty) => thread::yield_now(),
+                            }
+                        }
+                    })
+                })
+            });
+            let progress = started && ready_rx.recv_timeout(deadline).is_ok();
+            let _ = release_tx.send(());
+            let _ = observe_tx.send(progress);
+            let unlocked = progress && unlocked_rx.recv_timeout(deadline).is_ok();
+            let _ = stop_tx.send(());
+            holder.join().unwrap();
+            if let Some(observer) = observer {
+                observer.join().unwrap();
+            }
+            let result = closer.join().unwrap();
+            outcomes.push((lock_tracking, started, progress, unlocked, result));
+        }
+        // Every holder and worker has joined before either cell may fail.
+        assert!(outcomes.iter().all(|(_, started, progress, unlocked, result)|
+            *started && *progress && *unlocked && result.is_ok()),
+            "(tracking_mutex, started, GIL_progress, guards_before_GIL_return, result): {outcomes:?}");
+    }
+
     #[test]
     fn close_retry_keeps_tracked_transactions_on_failure() {
         pyo3::Python::initialize();
-        let mut db = PyDatabase::new(None).expect("db");
+        let mut db = PyDatabase::new(None, None, None).expect("db");
         let _txn = db.begin(None).expect("txn");
 
         db.inject_rollback_failure_once();
-        db.close().expect_err("close should fail once");
+        Python::attach(|py| db.close(py)).expect_err("close should fail once");
 
         assert!(!db
             .txns
@@ -1005,7 +1683,7 @@ mod tests {
             .expect("transaction list lock poisoned")
             .is_empty());
 
-        db.close().expect("close retry");
+        Python::attach(|py| db.close(py)).expect("close retry");
         assert!(db
             .txns
             .lock()
@@ -1016,28 +1694,24 @@ mod tests {
     #[test]
     fn rollback_failure_injection_is_database_scoped() {
         pyo3::Python::initialize();
-        let mut injected = PyDatabase::new(None).expect("injected db");
+        let mut injected = PyDatabase::new(None, None, None).expect("injected db");
         let _injected_txn = injected.begin(None).expect("injected txn");
-        let mut unaffected = PyDatabase::new(None).expect("unaffected db");
+        let mut unaffected = PyDatabase::new(None, None, None).expect("unaffected db");
         let _unaffected_txn = unaffected.begin(None).expect("unaffected txn");
 
         injected.inject_rollback_failure_once();
 
-        unaffected
-            .close()
+        Python::attach(|py| unaffected.close(py))
             .expect("another database must not consume the injected failure");
-        injected
-            .close()
+        Python::attach(|py| injected.close(py))
             .expect_err("the owning database must receive the injected failure");
-        injected
-            .close()
-            .expect("the owning database can retry close");
+        Python::attach(|py| injected.close(py)).expect("the owning database can retry close");
     }
 
     #[test]
     fn close_terminates_a_transaction_owned_stream_before_rollback() {
         with_py(|py| {
-            let mut db = PyDatabase::new(None).expect("db");
+            let mut db = PyDatabase::new(None, None, None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE stream_close (id INTEGER PRIMARY KEY)",
@@ -1051,10 +1725,68 @@ mod tests {
                 .execute_sql_stream("SELECT id FROM stream_close", None, None, None)
                 .expect("stream");
 
-            db.close().expect("close");
+            db.close(py).expect("close");
             let error = stream.next_row(py).expect_err("closed stream");
             let code: String = error.value(py).getattr("code").unwrap().extract().unwrap();
             assert_eq!(code, "stream_closed");
+        });
+    }
+    #[test]
+    fn prepared_execute_many_python_vectors_commit_400_rows() {
+        with_py(|py| {
+            const ROWS: usize = 400;
+            let db = PyDatabase::new(None, None, None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))",
+                None,
+            )
+            .expect("ddl");
+            let mut statement = db
+                .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+                .expect("prepare");
+            let batch = PyList::empty(py);
+            for row in 0..ROWS {
+                let params = PyList::empty(py);
+                params.append(row).expect("id");
+                params
+                    .append(PyList::new(py, vec![0.25f64; 128]).unwrap())
+                    .expect("vector");
+                batch.append(params).expect("row");
+            }
+            let results = statement.execute_many(py, batch.into_any()).expect("batch");
+            assert_eq!(results.bind(py).cast::<PyList>().unwrap().len(), ROWS);
+            let count = db
+                .execute_sql(py, "SELECT COUNT(*) AS n FROM items", None)
+                .expect("count");
+            let rows = count.bind(py).cast::<PyList>().expect("rows");
+            let first_row = rows.get_item(0).unwrap();
+            let row = first_row.cast::<PyDict>().unwrap();
+            assert_eq!(
+                row.get_item("n")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                ROWS
+            );
+        });
+    }
+    #[test]
+    fn execute_sql_reports_the_actual_sql_input_limit() {
+        with_py(|py| {
+            let db = PyDatabase::new(None, None, None).expect("db");
+            let sql = format!("{}SELECT 1", " ".repeat(1_048_576));
+            let err = db.execute_sql(py, &sql, None).expect_err("oversized SQL");
+            let message = err.to_string();
+            assert!(
+                message.contains("SQL input at most 1048576 UTF-8 bytes"),
+                "{message}"
+            );
+            assert!(
+                message.contains("SQL input exceeds byte limit"),
+                "{message}"
+            );
         });
     }
 }

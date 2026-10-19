@@ -2,7 +2,22 @@ name: CI
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
   pull_request:
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -23,6 +38,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify change scope classifier
+        run: bash scripts/ci/test_classify_change_scope.sh
       - name: Classify production and release-process changes
         id: classify
         shell: bash
@@ -30,26 +47,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           base_sha="${PUSH_BEFORE_SHA}"
           if [[ "${EVENT_NAME}" == "pull_request" ]]; then
             base_sha="${PR_BASE_SHA}"
+          elif [[ "${base_sha}" == "0000000000000000000000000000000000000000" ]]; then
+            base_sha="$(git merge-base "origin/${DEFAULT_BRANCH}" "${GITHUB_SHA}")"
           fi
+          bash scripts/ci/classify-change-scope.sh "${base_sha}" "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
-          production=false
-          changed=0
-          while IFS= read -r -d '' path; do
-            changed=$((changed + 1))
-            case "${path}" in
-              .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
-              *) production=true ;;
-            esac
-          done < <(git diff --name-only -z "${base_sha}" "${GITHUB_SHA}")
-          if [[ "${changed}" -eq 0 ]]; then
-            production=true
-          fi
-          echo "production=${production}" >> "${GITHUB_OUTPUT}"
+          python3 scripts/ci/check_parser_wire_contract.py "${base_sha}" "${GITHUB_SHA}"
 
   fmt:
     name: Rustfmt
@@ -108,11 +117,36 @@ jobs:
         run: bash scripts/test-nim-parser.sh --backend host
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  clippy-beta:
+    name: Clippy (beta)
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build Nim SQL parser library
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
+      - name: Run Nim SQL parser tests
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true'
-    runs-on: ${{ matrix.os }}
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
@@ -134,9 +168,15 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
+          timeout 120s sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -187,8 +227,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
 
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
 
       - name: Set up Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -264,7 +306,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
+          timeout 120s sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -394,8 +436,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true'
-    runs-on: ${{ matrix.os }}
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python
@@ -407,12 +450,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
 
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
@@ -455,7 +505,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
+          timeout 120s sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -579,9 +629,9 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [scope, fmt, formal, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [scope, fmt, formal, clippy, clippy-beta, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |
@@ -593,6 +643,7 @@ jobs:
             if [[ "${{ needs.fmt.result }}" != "skipped" ]] || \
                [[ "${{ needs.formal.result }}" != "skipped" ]] || \
                [[ "${{ needs.clippy.result }}" != "skipped" ]] || \
+               [[ "${{ needs.clippy-beta.result }}" != "skipped" ]] || \
                [[ "${{ needs.test.result }}" != "skipped" ]] || \
                [[ "${{ needs.coverage.result }}" != "skipped" ]] || \
                [[ "${{ needs['security-audit'].result }}" != "skipped" ]] || \
@@ -607,6 +658,7 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.formal.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
+             [[ "${{ needs.clippy-beta.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
@@ -616,6 +668,7 @@ jobs:
             echo "fmt: ${{ needs.fmt.result }}"
             echo "formal: ${{ needs.formal.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
+            echo "clippy-beta: ${{ needs.clippy-beta.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"

@@ -108,6 +108,9 @@ pub struct SearchStats {
     pub distance_computations: u64,
     /// Elapsed search time in microseconds.
     pub search_time_us: u64,
+    /// Effective breadth after the graph applies its active-node bound.
+    #[cfg(test)]
+    pub(crate) effective_ef_search: usize,
     #[cfg(test)]
     pub(crate) query_norm_computations: u64,
 }
@@ -146,7 +149,7 @@ pub(crate) struct HnswNode {
     /// Vector payload.
     pub vector: Vec<f32>,
     /// Cached L2 norm for cosine scoring.
-    pub norm: f32,
+    pub norm: f64,
     /// Metadata blob associated with the vector.
     pub metadata: Vec<u8>,
     /// Adjacency lists per level (level -> node IDs).
@@ -185,7 +188,7 @@ pub(crate) struct HnswMetadata {
     pub entry_point: Option<u32>,
     /// Highest level currently present in the graph.
     pub max_level: usize,
-    /// Total number of nodes (including deleted).
+    /// Number of active nodes, excluding logically deleted nodes.
     pub node_count: u64,
     /// Count of logically deleted nodes.
     pub deleted_count: u64,

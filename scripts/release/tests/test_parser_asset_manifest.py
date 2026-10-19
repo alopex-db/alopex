@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Behavior tests for deterministic Nim parser target archives."""
 
 from __future__ import annotations
@@ -9,7 +8,8 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,8 +17,10 @@ import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
+from scripts.release.tests.host_tools import git_bash
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
@@ -28,6 +30,9 @@ RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release.yml"
 PY_RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/alopex-py-release.yml"
 NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-dual-library-v2"
+# Git's bin/bash.exe launcher prepends system tools to PATH when given a script,
+# bypassing the injected rm fixture. Use the actual shell for failure injection.
+BASH = git_bash()
 TARGET_LIBRARIES = {
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
@@ -60,46 +65,112 @@ def sha256(path: Path) -> str:
 
 
 def canonical_json(path: Path, value: object) -> None:
-    path.write_text(
-        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    path.write_bytes(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     )
 
 
+def python_executable(path: Path, source: str) -> None:
+    """Run fixtures through Git Bash even when MSYS path conversion is disabled."""
+    script = path.with_name(path.name + ".py")
+    script.write_bytes(source.encode("utf-8"))
+    path.write_bytes(
+        (
+            "#!/bin/sh\nexec "
+            + shlex.quote(Path(sys.executable).as_posix())
+            + " "
+            + shlex.quote(script.as_posix())
+            + ' "$@"\n'
+        ).encode("utf-8")
+    )
+    path.chmod(0o755)
+
+
+def retrying_rm_executable(
+    path: Path, marker: Path, build_root: Path, real_rm: str
+) -> None:
+    # Keep the failure injector in MSYS: a native Python subprocess can cause
+    # a new rm runtime to mount the build-owned TEMP as /tmp and refuse deletion.
+    path.write_bytes(
+        (
+            "#!/bin/sh\n"
+            "last=''\n"
+            'for argument do last="$argument"; done\n'
+            'if [ "${last##*/}" = ' + shlex.quote(build_root.name) + " ] && "
+            "[ ! -e " + shlex.quote(marker.as_posix()) + " ]; then\n"
+            "  : > " + shlex.quote(marker.as_posix()) + "\n"
+            "  printf '%s\\n' 'rm: Directory not empty' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            "exec " + shlex.quote(Path(real_rm).as_posix()) + ' "$@"\n'
+        ).encode("utf-8")
+    )
+    path.chmod(0o755)
+
+
 def normalized_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
-    with path.open("wb") as raw:
-        with gzip.GzipFile(
-            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-        ) as compressed:
-            with tarfile.open(
-                fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
-            ) as archive:
-                for name, content in members:
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(content)
-                    info.mode = 0o644
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(content))
+    with path.open("wb") as raw, gzip.GzipFile(
+        filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+    ) as compressed, tarfile.open(
+        fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
+    ) as archive:
+        for name, content in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
 
 
 class ParserAssetManifestTests(unittest.TestCase):
+    def native_target(self) -> str:
+        host = platform.system()
+        machine = platform.machine().lower()
+        targets = {
+            ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+            ("Linux", "amd64"): "x86_64-unknown-linux-gnu",
+            ("Darwin", "x86_64"): "x86_64-apple-darwin",
+            ("Darwin", "amd64"): "x86_64-apple-darwin",
+            ("Darwin", "arm64"): "aarch64-apple-darwin",
+            ("Darwin", "aarch64"): "aarch64-apple-darwin",
+            ("Windows", "x86_64"): "x86_64-pc-windows-msvc",
+            ("Windows", "amd64"): "x86_64-pc-windows-msvc",
+        }
+        target = targets.get((host, machine))
+        if target is None:
+            self.skipTest(f"unsupported parser builder host: {host} {machine}")
+        return target
+
+    def native_build_root(self) -> Path:
+        temporary_root = Path("/tmp")
+        if platform.system() == "Windows":
+            temporary_root = Path(
+                subprocess.check_output(
+                    [BASH, "-c", "cygpath -w /tmp"], text=True
+                ).strip()
+            )
+        return temporary_root / (
+            f"alopex-nim-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
+            f"-contract-{MANIFEST.REQUIRED_CONTRACT_VERSION}-{self.native_target()}"
+        )
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="alopex-parser-manifest-")
         self.root = Path(self.temp.name)
         self.source = self.root / "parser-source"
         (self.source / "src").mkdir(parents=True)
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.25.0\n", encoding="utf-8"
+            "0.28.0\n", encoding="utf-8"
         )
         (self.source / "nim_sql_parser.nimble").write_text(
             'version = "0.6.0"\n', encoding="utf-8"
         )
         (self.source / "src/alopex_sql_parser.nim").write_text(
-            "proc parserVersion(): string = \"0.25.0\"\n", encoding="utf-8"
+            "proc parserVersion(): string = \"0.28.0\"\n", encoding="utf-8"
         )
 
         self.nim = self.root / "nim"
@@ -241,7 +312,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             "--alopex-version",
             MANIFEST.REQUIRED_ALOPEX_VERSION,
             "--contract-version",
-            "0.25.0",
+            "0.28.0",
             "--target",
             target,
             "--library",
@@ -273,7 +344,7 @@ class ParserAssetManifestTests(unittest.TestCase):
         self.run_cli(*arguments, expected=expected)
         stem = (
             f"alopex-parser-v{MANIFEST.REQUIRED_ALOPEX_VERSION}"
-            f"-contract-0.25.0-{target}"
+            f"-contract-0.28.0-{target}"
         )
         return output / f"{stem}.json", output / f"{stem}.tar.gz"
 
@@ -303,14 +374,21 @@ class ParserAssetManifestTests(unittest.TestCase):
             shutil.copy2(path, seed / name)
 
         fake_nim = self.root / "fake-nim"
-        fake_nim.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_nim,
+            """
+import json
+import os
 import pathlib
 import sys
 
 if "--version" in sys.argv[1:]:
     print("Nim Compiler Version 2.2.10 [Linux: amd64]")
     raise SystemExit(0)
+
+if log := os.environ.get("ALOPEX_COMPILER_PATH_LOG"):
+    with pathlib.Path(log).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(sys.argv[1:]) + "\\n")
 
 output = next(arg.split(":", 1)[1] for arg in sys.argv[1:] if arg.startswith("-o:"))
 dependency_paths = sorted(
@@ -320,13 +398,12 @@ dependency_paths = sorted(
 )
 pathlib.Path(output).write_text("\\n".join(dependency_paths), encoding="utf-8")
 """,
-            encoding="utf-8",
         )
-        fake_nim.chmod(0o755)
 
         fake_nimble = self.root / "fake-nimble"
-        fake_nimble.write_text(
-            f"""#!{sys.executable}
+        python_executable(
+            fake_nimble,
+            f"""
 import pathlib
 import sys
 
@@ -350,11 +427,16 @@ if len(matches) != 1:
     raise SystemExit(2)
 print(matches[0])
 """,
-            encoding="utf-8",
         )
-        fake_nimble.chmod(0o755)
 
         environment = os.environ.copy()
+        if platform.system() == "Windows":
+            # BASH is the actual shell, bypassing Git's launcher PATH setup.
+            # Use its MSYS tools before native Windows coreutils: /tmp in the
+            # build script must retain Git Bash's path semantics.
+            environment["PATH"] = (
+                f"{Path(BASH).parent}{os.pathsep}{environment['PATH']}"
+            )
         environment.update(
             {
                 "ALOPEX_NIM_BIN": str(fake_nim),
@@ -367,18 +449,17 @@ print(matches[0])
     def run_build_script(
         self, environment: dict[str, str], destination: Path
     ) -> subprocess.CompletedProcess[str]:
-        isolated_output = self.root / "build-script-output" / TARGET_LIBRARIES[
-            "x86_64-unknown-linux-gnu"
-        ]
+        target = self.native_target()
+        isolated_output = self.root / "build-script-output" / TARGET_LIBRARIES[target]
         isolated_output.parent.mkdir(exist_ok=True)
         return subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "host",
                 "--target",
-                "x86_64-unknown-linux-gnu",
+                target,
                 "--archive-dir",
                 str(destination),
                 "--output",
@@ -406,7 +487,7 @@ print(matches[0])
         self.assertEqual(
             record["alopex_version"], MANIFEST.REQUIRED_ALOPEX_VERSION
         )
-        self.assertEqual(record["contract_version"], "0.25.0")
+        self.assertEqual(record["contract_version"], "0.28.0")
         self.assertEqual(record["target"], "x86_64-unknown-linux-gnu")
         self.assertEqual(
             record["builder"]["compile"]["profile"], BUILD_PROFILE
@@ -464,7 +545,7 @@ print(matches[0])
             "--alopex-version",
             MANIFEST.REQUIRED_ALOPEX_VERSION,
             "--contract-version",
-            "0.25.0",
+            "0.28.0",
             "--target",
             "x86_64-unknown-freebsd",
             "--library",
@@ -623,18 +704,22 @@ print(matches[0])
         self.assertFalse(record.exists())
         self.assertFalse(archive.exists())
 
-    def test_pack_rejects_contract_drift_and_symlinked_source(self) -> None:
+    def test_pack_rejects_contract_drift(self) -> None:
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
             "0.3.0\n", encoding="utf-8"
         )
         self.pack(expected=2)
-        (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.25.0\n", encoding="utf-8"
-        )
-        os.symlink(
-            self.source / "src/alopex_sql_parser.nim",
-            self.source / "src/linked.nim",
-        )
+
+    def test_pack_rejects_symlinked_source(self) -> None:
+        try:
+            os.symlink(
+                self.source / "src/alopex_sql_parser.nim",
+                self.source / "src/linked.nim",
+            )
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows user lacks symbolic-link creation privilege")
+            raise
         self.pack(expected=2)
 
     def test_verify_rejects_outer_internal_and_unsafe_archive_changes(self) -> None:
@@ -698,11 +783,10 @@ print(matches[0])
             self.verify_target(record_path)
 
         oversized_tar = b"\0" * (16 * 1024 * 1024 + 1)
-        with archive_path.open("wb") as raw:
-            with gzip.GzipFile(
-                filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
-            ) as compressed:
-                compressed.write(oversized_tar)
+        with archive_path.open("wb") as raw, gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+        ) as compressed:
+            compressed.write(oversized_tar)
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["archive"]["size"] = archive_path.stat().st_size
         record["archive"]["sha256"] = sha256(archive_path)
@@ -891,9 +975,50 @@ print(matches[0])
         self.assertNotIn('${npeg_resolved}/src', text)
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
+    @unittest.skipUnless(os.name == "nt", "requires native Windows path aliases")
+    def test_native_compiler_path_expands_windows_short_alias(self) -> None:
+        bash = Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe"
+        self.assertTrue(bash.is_file(), "Git Bash is required for the Windows builder")
+        directory = self.root / "long compiler cache directory"
+        directory.mkdir()
+        source = BUILD_SCRIPT.read_text(encoding="utf-8")
+        function = source.split("to_native_path() {", 1)[1].split("\n}\n", 1)[0]
+        script = "to_native_path() {" + function + "\n}\n" + (
+            'set -euo pipefail\nRUNNER_IS_WINDOWS=1\n'
+            'short="$(cygpath -w -s "$1")"\n'
+            'to_native_path "$short"\n'
+        )
+        result = subprocess.run(
+            [str(bash), "-c", script, "compiler-path-test", str(directory)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip().lower(), str(directory.resolve()).lower())
+
+    def test_build_script_retries_transient_cleanup_failure_after_preflight_error(self) -> None:
+        build_root = self.native_build_root()
+        marker = self.root / "cleanup-failed-once"
+        fake_bin = self.root / "fake-cleanup-bin"
+        fake_bin.mkdir()
+        environment = self.build_script_fixture()
+        real_rm = shutil.which("rm", path=environment["PATH"])
+        self.assertIsNotNone(real_rm, "host rm is required by the build script")
+        fake_rm = fake_bin / "rm"
+        retrying_rm_executable(fake_rm, marker, build_root, str(real_rm))
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+        result = self.run_build_script(environment, self.root / "cleanup-retry")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("package content does not match the locked identity", result.stderr)
+        self.assertTrue(marker.exists(), "cleanup failure was not exercised")
+        self.assertNotIn("failed to remove invocation-owned build root", result.stderr)
+        self.assertNotIn("failed to remove invocation-owned build lock", result.stderr)
+        self.assertFalse(build_root.exists(), "failed build left its root behind")
+
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
+        library_name = TARGET_LIBRARIES[self.native_target()]
         repo_outputs = [
-            PARSER_DIR / "libalopex_sql_parser.so",
+            PARSER_DIR / library_name,
             PARSER_DIR / "CONTRACT_VERSION",
             PARSER_DIR / "SHA256SUMS",
         ]
@@ -908,9 +1033,7 @@ print(matches[0])
         self.assertIn("Nimble 0.22.3 is required", result.stderr)
         self.assertFalse(destination.exists())
         isolated_output = self.root / "build-script-output"
-        self.assertFalse(
-            (isolated_output / "libalopex_sql_parser.so").exists()
-        )
+        self.assertFalse((isolated_output / library_name).exists())
         self.assertFalse((isolated_output / "CONTRACT_VERSION").exists())
         self.assertFalse((isolated_output / "SHA256SUMS").exists())
         after = {
@@ -918,7 +1041,142 @@ print(matches[0])
         }
         self.assertEqual(after, before, "test build must not mutate worktree output")
 
+    def test_build_script_uses_explicit_python_and_retries_success_cleanup(self) -> None:
+        fake_bin = self.root / "system-python-bin"
+        fake_bin.mkdir()
+        system_python = fake_bin / "python3"
+        system_python.write_text(
+            "#!/bin/sh\necho 'unexpected system Python' >&2\nexit 70\n",
+            encoding="utf-8",
+        )
+        system_python.chmod(0o755)
+
+        checksum_marker = self.root / "path-checksum-invoked"
+        if platform.system() == "Darwin":
+            for name in ("sha256sum", "shasum"):
+                incompatible_checksum = fake_bin / name
+                incompatible_checksum.write_text(
+                    f"#!{sys.executable}\n"
+                    "from pathlib import Path\n"
+                    f"Path({str(checksum_marker)!r}).write_text('invoked')\n"
+                    "raise SystemExit(126)\n",
+                    encoding="utf-8",
+                )
+                incompatible_checksum.chmod(0o755)
+
+        selected_python = self.root / "selected-python"
+        python_executable(
+            selected_python,
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "with Path(os.environ['ALOPEX_SELECTED_PYTHON_LOG']).open('a', encoding='utf-8') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if len(sys.argv) > 2 and sys.argv[2] == 'verify-inputs':\n"
+            "    raise SystemExit(0)\n"
+            "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
+        )
+        invocation_log = self.root / "selected-python.log"
+        compiler_log = self.root / "compiler-paths.log"
+
+        host = platform.system()
+        machine = platform.machine().lower()
+        if host == "Darwin" and machine in {"arm64", "aarch64"}:
+            target = "aarch64-apple-darwin"
+        elif host == "Darwin" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-apple-darwin"
+        elif host == "Linux" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-unknown-linux-gnu"
+        elif host == "Windows" and machine in {"x86_64", "amd64"}:
+            target = "x86_64-pc-windows-msvc"
+        else:
+            self.skipTest(f"unsupported parser builder host: {host} {machine}")
+
+        environment = self.build_script_fixture()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "PYTHON": str(selected_python),
+                "ALOPEX_SELECTED_PYTHON_LOG": str(invocation_log),
+                "ALOPEX_COMPILER_PATH_LOG": str(compiler_log),
+            }
+        )
+
+        build_root = self.native_build_root()
+        cleanup_marker = self.root / "success-cleanup-failed-once"
+        real_rm = shutil.which("rm", path=environment["PATH"])
+        self.assertIsNotNone(real_rm, "host rm is required by the build script")
+        fake_rm = fake_bin / "rm"
+        retrying_rm_executable(fake_rm, cleanup_marker, build_root, str(real_rm))
+
+        output_dir = self.root / "explicit-python-output"
+        output_dir.mkdir()
+        output = output_dir / TARGET_LIBRARIES[target]
+        result = subprocess.run(
+            [
+                BASH,
+                str(BUILD_SCRIPT),
+                "--backend",
+                "host",
+                "--target",
+                target,
+                "--output",
+                str(output),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertTrue(cleanup_marker.exists(), "cleanup failure was not exercised")
+        self.assertFalse(build_root.exists(), "successful build left its root behind")
+        self.assertTrue(output.is_file())
+        if platform.system() == "Windows":
+            # Check both compiler calls, including the static cache. MSVC cannot
+            # reliably relativize an 8.3 alias against a long working directory.
+            compiler_calls = [
+                json.loads(line)
+                for line in compiler_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(compiler_calls), 2)
+            for arguments in compiler_calls:
+                for argument in arguments:
+                    if argument.startswith(("--nimcache:", "--path:", "-o:")):
+                        compiler_path = argument.split(":", 1)[1]
+                        self.assertEqual(
+                            Path(compiler_path),
+                            Path(compiler_path).resolve(),
+                            "native compiler paths must expand Windows short names",
+                        )
+        self.assertTrue((output_dir / TARGET_STATIC_LIBRARIES[target]).is_file())
+        self.assertEqual(
+            (output_dir / "CONTRACT_VERSION").read_bytes(),
+            b"0.28.0\n",
+        )
+        invocations = [
+            json.loads(line)
+            for line in invocation_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(invocations[0][0], "-")
+        self.assertEqual(
+            Path(invocations[0][1]).resolve(), (REPOSITORY_ROOT / "Cargo.toml").resolve()
+        )
+        self.assertEqual(Path(invocations[1][0]).resolve(), MANIFEST_TOOL.resolve())
+        self.assertEqual(invocations[1][1], "verify-inputs")
+        self.assertEqual(len(invocations), 2)
+        self.assertFalse(checksum_marker.exists(), "incompatible checksum tool was invoked")
+
     def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
+        if self.native_target() != "x86_64-unknown-linux-gnu":
+            self.skipTest("Docker parser builds require native x86_64 Linux")
         fake_bin = self.root / "fake-docker-bin"
         fake_bin.mkdir()
         capture = self.root / "docker-arguments.json"
@@ -931,6 +1189,10 @@ from pathlib import Path
 import sys
 
 arguments = sys.argv[1:]
+if arguments[:1] == ["info"]:
+    print(os.environ.get("ALOPEX_DOCKER_SECURITY_OPTIONS", ""))
+    raise SystemExit(0)
+
 output_setting = next(
     (value for value in arguments if "ALOPEX_NIM_PARSER_OUTPUT=" in value),
     None,
@@ -988,16 +1250,18 @@ raise SystemExit(43)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         environment["ALOPEX_DOCKER_CAPTURE"] = str(capture)
+        environment["ALOPEX_DOCKER_SECURITY_OPTIONS"] = ""
+        command = [
+            BASH,
+            str(BUILD_SCRIPT),
+            "--backend",
+            "docker",
+            "--output",
+            str(isolated_output),
+        ]
 
         result = subprocess.run(
-            [
-                "bash",
-                str(BUILD_SCRIPT),
-                "--backend",
-                "docker",
-                "--output",
-                str(isolated_output),
-            ],
+            command,
             cwd=REPOSITORY_ROOT,
             env=environment,
             text=True,
@@ -1014,9 +1278,30 @@ raise SystemExit(43)
         self.assertEqual(isolated_output.read_bytes(), b"docker-parser-output")
         self.assertEqual(
             (isolated_dir / "CONTRACT_VERSION").read_text(encoding="utf-8"),
-            "0.25.0\n",
+            "0.28.0\n",
         )
         self.assertIn("ALOPEX_NIM_PARSER_OUTPUT=/output/", docker_arguments)
+        self.assertIn("--user", json.loads(docker_arguments)["arguments"])
+
+        environment["ALOPEX_DOCKER_SECURITY_OPTIONS"] = "name=rootless"
+        rootless_result = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        rootless_arguments = (
+            capture.read_text(encoding="utf-8") if capture.exists() else ""
+        )
+        self.assertEqual(
+            rootless_result.returncode,
+            0,
+            f"{rootless_result.stderr}\ndocker arguments: {rootless_arguments}",
+        )
+        self.assertEqual(isolated_output.read_bytes(), b"docker-parser-output")
+        self.assertNotIn("--user", json.loads(rootless_arguments)["arguments"])
         after = {
             path: path.read_bytes() if path.exists() else None for path in repo_outputs
         }
@@ -1030,9 +1315,7 @@ raise SystemExit(43)
         docker.chmod(0o755)
         isolated_dir = self.root / "non-linux-output"
         isolated_dir.mkdir()
-        isolated_output = isolated_dir / TARGET_LIBRARIES[
-            "x86_64-unknown-linux-gnu"
-        ]
+        isolated_output = isolated_dir / TARGET_LIBRARIES[self.native_target()]
         isolated_output.write_bytes(b"existing-output")
         contract = isolated_dir / "CONTRACT_VERSION"
         checksum = isolated_dir / "SHA256SUMS"
@@ -1043,7 +1326,7 @@ raise SystemExit(43)
 
         result = subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "docker",
@@ -1068,7 +1351,7 @@ raise SystemExit(43)
     def test_build_script_rejects_archive_on_non_host_backend(self) -> None:
         result = subprocess.run(
             [
-                "bash",
+                BASH,
                 str(BUILD_SCRIPT),
                 "--backend",
                 "docker",

@@ -138,6 +138,9 @@ pub trait KVTransaction<'a> {
         let mut cursor_start = request.cursor.clone().unwrap_or_default();
         let mut scan = if request.cursor.is_some() {
             cursor_start.push(0);
+            if cursor_start.as_slice() < prepared.prefix() {
+                cursor_start = prepared.prefix().to_vec();
+            }
             self.scan_from(&cursor_start)?
         } else {
             self.scan_prefix(prepared.prefix())?
@@ -156,6 +159,12 @@ pub trait KVTransaction<'a> {
     /// `None` and callers retain their snapshot-based fallback.
     fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
         None
+    }
+
+    /// Visit every currently buffered write key without copying values.
+    /// Returns false when the backend cannot provide the complete set.
+    fn visit_pending_write_keys(&self, _visitor: &mut dyn FnMut(&[u8])) -> bool {
+        false
     }
 
     /// Commits the transaction, applying all buffered writes.

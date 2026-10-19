@@ -10,15 +10,320 @@
 //! `PreparedStatement` の両方が同じ変換規則を使う。
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
 };
 use pyo3::IntoPyObjectExt;
 
-use alopex_sql::storage::SqlValue;
-use alopex_sql::ExecutionResult;
+use alopex_sql::storage::{DecimalValue, SqlValue};
+use alopex_sql::{AlopexDialect, ExecutionResult, Parser, StatementKind};
 
 use crate::error::AlopexError;
+
+/// Detect transaction control anywhere in a valid SQL batch before execution.
+/// Both Python execution surfaces require their explicit transaction methods.
+pub(crate) fn is_transaction_control_statement(sql: &str) -> bool {
+    let keyword = leading_sql_keyword(sql);
+    let starts_with_transaction_control = [
+        "BEGIN",
+        "START",
+        "SET",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+    ]
+    .iter()
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate));
+    if !starts_with_transaction_control && !sql.contains(';') {
+        return false;
+    }
+
+    Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement.kind,
+                StatementKind::Begin { .. }
+                    | StatementKind::SetTransaction { .. }
+                    | StatementKind::Commit
+                    | StatementKind::Rollback
+                    | StatementKind::Savepoint { .. }
+                    | StatementKind::RollbackToSavepoint { .. }
+                    | StatementKind::ReleaseSavepoint { .. }
+            )
+        })
+    })
+}
+
+fn leading_sql_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(newline) = comment.find('\n') else {
+                return "";
+            };
+            sql = &comment[newline + 1..];
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return "";
+            };
+            sql = &comment[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    sql.split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
+}
+
+/// One Python binding after classifying whether it can use the native
+/// prepared-statement transport or needs the SQL-literal compatibility path.
+#[derive(Clone)]
+pub(crate) enum PyPreparedBinding {
+    Native(SqlValue),
+    Rendered(String),
+}
+
+fn native_binding(native: SqlValue) -> PyPreparedBinding {
+    PyPreparedBinding::Native(native)
+}
+
+// Like DuckDB's import cache, retain the Decimal class rather than importing
+// and resolving it for every bound value and every result cell.
+fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static DECIMAL_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(DECIMAL_TYPE
+        .get_or_try_init(py, || {
+            PyModule::import(py, "decimal")?
+                .getattr("Decimal")
+                .map(Bound::unbind)
+        })?
+        .bind(py))
+}
+
+/// Apply the same finite, precision, and scale limits to native and rendered Decimals.
+fn decimal_value(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+) -> PyResult<Option<(DecimalValue, Option<String>)>> {
+    let decimal_type = decimal_type(value.py())?;
+    if !value.is_instance(decimal_type)? {
+        return Ok(None);
+    }
+    let invalid = || {
+        PyErr::from(AlopexError::SqlParamInvalidValue(format!(
+            "params[{index}]: Decimal は有限で精度・小数桁数が 38 以下である必要があります"
+        )))
+    };
+    // Decimal.__str__ uses scientific notation for extreme exponents, so this
+    // path never expands 1E+1000000 into a million-character fixed-point value.
+    // Keep subclass hooks on the compatibility path below.
+    if value.get_type().is(decimal_type) {
+        let text = value.str()?;
+        let decimal = decimal_from_python_text(&text.to_cow()?).ok_or_else(invalid)?;
+        return Ok(Some((decimal, None)));
+    }
+    if !value.call_method0("is_finite")?.extract::<bool>()? {
+        return Err(invalid());
+    }
+    // Bound the fixed-point rendering before calling __format__: an exponent
+    // such as 1E+1000000 must not allocate a megabyte of SQL text.
+    let parts = value.call_method0("as_tuple")?;
+    let exponent = parts
+        .getattr("exponent")?
+        .extract::<i64>()
+        .map_err(|_| invalid())?;
+    let digits = parts.getattr("digits")?.len()?;
+    let width = if exponent >= 0 {
+        digits.checked_add(usize::try_from(exponent).map_err(|_| invalid())?)
+    } else {
+        Some(digits)
+    };
+    if width.is_none_or(|width| width > 38) || !(-38..=38).contains(&exponent) {
+        return Err(invalid());
+    }
+    let rendered = value
+        .call_method1("__format__", ("f",))?
+        .extract::<String>()?;
+    let decimal = DecimalValue::parse(&rendered).ok_or_else(invalid)?;
+    Ok(Some((decimal, Some(rendered))))
+}
+
+/// Parse the canonical text of an exact Python Decimal without Python tuple or
+/// formatting calls. Preserve the original coefficient's precision and exponent
+/// limits, including trailing zeros and zero with an out-of-range exponent.
+fn decimal_from_python_text(text: &str) -> Option<DecimalValue> {
+    let (mantissa, exponent) = match text.split_once(['E', 'e']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, mantissa),
+    };
+    let mut coefficient = 0_i128;
+    let mut fraction = None::<i64>;
+    let mut precision = 0_u32;
+    let mut seen_digit = false;
+    for byte in unsigned.bytes() {
+        if byte == b'.' && fraction.is_none() {
+            fraction = Some(0);
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        seen_digit = true;
+        let digit = i128::from(byte - b'0');
+        if coefficient != 0 || digit != 0 {
+            precision += 1;
+            if precision > 38 {
+                return None;
+            }
+        }
+        coefficient = coefficient.checked_mul(10)?.checked_add(digit)?;
+        if let Some(fraction) = fraction.as_mut() {
+            *fraction = fraction.checked_add(1)?;
+        }
+    }
+    if !seen_digit {
+        return None;
+    }
+    let exponent = exponent.checked_sub(fraction.unwrap_or(0))?;
+    if !(-38..=38).contains(&exponent) {
+        return None;
+    }
+    let scale = if exponent >= 0 {
+        let exponent = u32::try_from(exponent).ok()?;
+        if precision.max(1) + exponent > 38 {
+            return None;
+        }
+        coefficient = coefficient.checked_mul(10_i128.checked_pow(exponent)?)?;
+        0
+    } else {
+        u8::try_from(-exponent).ok()?
+    };
+    Some(DecimalValue::new(
+        if negative { -coefficient } else { coefficient },
+        scale,
+    ))
+}
+
+pub(crate) fn render_prepared_binding(
+    binding: PyPreparedBinding,
+) -> alopex_embedded::Result<String> {
+    match binding {
+        PyPreparedBinding::Native(value) => alopex_embedded::render_prepared_parameter(&value),
+        PyPreparedBinding::Rendered(value) => Ok(value),
+    }
+}
+
+/// Convert Python parameter values once for every embedded SQL execution surface.
+///
+/// Database and explicit-transaction execution share this owner so a binding
+/// classified as native never falls back to SQL text materialization merely
+/// because a transaction is active.
+pub(crate) fn prepared_bindings(
+    params: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PyPreparedBinding>> {
+    let Some(params) = params else {
+        return Ok(Vec::new());
+    };
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = params.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = params.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Err(AlopexError::SqlParamUnsupportedType(
+            "params には list または tuple を指定してください".into(),
+        )
+        .into());
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, value)| prepared_binding(value, index))
+        .collect()
+}
+
+pub(crate) fn prepared_binding(
+    value: &Bound<'_, PyAny>,
+    index: usize,
+) -> PyResult<PyPreparedBinding> {
+    if value.is_none() {
+        return Ok(native_binding(SqlValue::Null));
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Ok(native_binding(SqlValue::Boolean(value.extract()?)));
+    }
+    if value.is_instance_of::<PyInt>() {
+        let integer = value.extract::<i64>().map_err(|_| {
+            AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}] の整数が 64bit 符号付き整数の範囲外です"
+            ))
+        })?;
+        return Ok(native_binding(
+            i32::try_from(integer)
+                .map(SqlValue::Integer)
+                .unwrap_or(SqlValue::BigInt(integer)),
+        ));
+    }
+    if value.is_instance_of::<PyFloat>() {
+        let number = value.extract::<f64>()?;
+        if !number.is_finite() {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: 有限でない浮動小数点値（{number}）は使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Double(number)));
+    }
+    if value.is_instance_of::<PyString>() {
+        let text = value.extract::<String>()?;
+        if text.contains('\0') {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: NUL 文字を含む文字列は使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Text(text)));
+    }
+    if value.is_instance_of::<PyBytes>() || value.is_instance_of::<PyByteArray>() {
+        return Ok(PyPreparedBinding::Rendered(render_param(value, index)?));
+    }
+    if let Some((decimal, _)) = decimal_value(value, index)? {
+        return Ok(native_binding(SqlValue::Decimal(decimal)));
+    }
+    reject_mapping_or_set(value, index)?;
+    if let Ok(iter) = value.try_iter() {
+        let mut values = Vec::new();
+        for (position, item) in iter.enumerate() {
+            let value = item?.extract::<f64>().map_err(|_| {
+                PyErr::from(AlopexError::SqlParamUnsupportedType(format!(
+                    "params[{index}][{position}] を数値へ変換できません"
+                )))
+            })?;
+            if !value.is_finite() || !(value as f32).is_finite() {
+                return Err(AlopexError::SqlParamInvalidValue(format!(
+                    "params[{index}][{position}] は有限の f32 である必要があります"
+                ))
+                .into());
+            }
+            values.push(value as f32);
+        }
+        if values.is_empty() {
+            return Err(AlopexError::SqlParamInvalidValue(format!(
+                "params[{index}]: 空のベクトルリテラルは使用できません"
+            ))
+            .into());
+        }
+        return Ok(native_binding(SqlValue::Vector(values)));
+    }
+    Ok(PyPreparedBinding::Rendered(render_param(value, index)?))
+}
 
 /// `?` プレースホルダへ params をエスケープ展開した SQL を返す。
 ///
@@ -28,6 +333,13 @@ use crate::error::AlopexError;
 /// - プレースホルダ数とパラメータ数の不一致は `ValueError`。
 /// - NUL 文字を含む SQL / 文字列パラメータは `ValueError`（FFI 境界の制約）。
 pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
+    validate_sql_input(sql)?;
+    let rendered = render_params(params)?;
+    bind_rendered_params(sql, &rendered)
+}
+
+/// Validate the SQL text before either native or rendered parameter execution.
+pub(crate) fn validate_sql_input(sql: &str) -> PyResult<()> {
     // Nim FFI 境界（nim_ffi.rs）は CString を使うため、NUL を含む SQL は panic になる。
     // ここで明示的に ValueError として拒否する。
     if sql.contains('\0') {
@@ -36,8 +348,7 @@ pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyRes
         )
         .into());
     }
-    let rendered = render_params(params)?;
-    bind_rendered_params(sql, &rendered)
+    Ok(())
 }
 
 pub(crate) fn bind_rendered_params(sql: &str, rendered: &[String]) -> PyResult<String> {
@@ -48,6 +359,15 @@ pub(crate) fn bind_rendered_params(sql: &str, rendered: &[String]) -> PyResult<S
             expected: placeholders,
             actual: rendered.len(),
         }
+        .into());
+    }
+    if !rendered.is_empty()
+        && sql.contains(';')
+        && Parser::parse_sql(&AlopexDialect, sql).is_ok_and(|statements| statements.len() > 1)
+    {
+        return Err(AlopexError::SqlStatementInvalid(
+            "パラメータ付きの複数 SQL 文は実行できません。文ごとに実行してください".into(),
+        )
         .into());
     }
     if rendered.is_empty() {
@@ -123,7 +443,7 @@ enum ScanState {
 }
 
 /// SQL を「引用符・コメント外の `?`」で分割する。戻り値の長さは `プレースホルダ数 + 1`。
-fn split_on_placeholders(sql: &str) -> Vec<&str> {
+pub(super) fn split_on_placeholders(sql: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     let mut state = ScanState::Normal;
@@ -226,12 +546,9 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
-    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
-    if value.is_instance(&decimal_type)? {
-        let text = value
-            .call_method1("__format__", ("f",))?
-            .extract::<String>()?;
-        return Ok(format!("DECIMAL {}", escape_text(&text)));
+    if let Some((decimal, _)) = decimal_value(value, index)? {
+        return alopex_embedded::render_prepared_parameter(&SqlValue::Decimal(decimal))
+            .map_err(crate::error::embedded_err);
     }
     if value.is_instance_of::<PyString>() {
         let text = value.extract::<String>()?;
@@ -251,10 +568,7 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
         ))
         .into());
     }
-    // dict などのマッピングはベクトルとして反復するとキーのみが展開されるため明示的に拒否する。
-    if value.cast::<PyDict>().is_ok() || value.hasattr("keys")? {
-        return Err(unsupported_type_error(value, index));
-    }
+    reject_mapping_or_set(value, index)?;
     // 数値シーケンス（list / tuple / numpy 配列など）はベクトルリテラルへ展開する。
     if let Ok(iter) = value.try_iter() {
         return render_vector(iter, index);
@@ -267,6 +581,17 @@ pub(crate) fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<S
         return render_f64(v).ok_or_else(|| non_finite_error(index, v));
     }
     Err(unsupported_type_error(value, index))
+}
+
+fn reject_mapping_or_set(value: &Bound<'_, PyAny>, index: usize) -> PyResult<()> {
+    if value.hasattr("keys")? {
+        return Err(unsupported_type_error(value, index));
+    }
+    let set_type = PyModule::import(value.py(), "collections.abc")?.getattr("Set")?;
+    if value.is_instance(&set_type)? {
+        return Err(unsupported_type_error(value, index));
+    }
+    Ok(())
 }
 
 /// Return true for Python's naive `datetime.datetime` values.
@@ -412,8 +737,7 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
             value.set_item("microseconds", micros)?;
             value.into_py_any(py)
         }
-        SqlValue::Decimal(value) => PyModule::import(py, "decimal")?
-            .getattr("Decimal")?
+        SqlValue::Decimal(value) => decimal_type(py)?
             .call1((value.to_string(),))?
             .unbind()
             .into_py_any(py),
@@ -465,15 +789,178 @@ mod tests {
 
     use alopex_sql::{storage::DecimalValue, SqlValue};
 
-    use super::{bind_params, bind_sql_params_py, sql_value_to_py};
+    use super::{bind_params, bind_sql_params_py, sql_value_to_py, PyPreparedBinding};
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
         Python::attach(f);
     }
 
+    #[test]
+    fn prepared_decimal_is_native_exact_and_bounded() {
+        with_py(|py| {
+            let decimal = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            for (text, expected) in [
+                (
+                    "12345678901234567.89",
+                    DecimalValue::new(1234567890123456789, 2),
+                ),
+                ("1E+20", DecimalValue::new(100000000000000000000, 0)),
+                ("1E-38", DecimalValue::new(1, 38)),
+                (
+                    "12345678901234567890123456789012345678",
+                    DecimalValue::new(12345678901234567890123456789012345678, 0),
+                ),
+            ] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(matches!(
+                    super::prepared_binding(&value, 0).unwrap(),
+                    PyPreparedBinding::Native(SqlValue::Decimal(actual)) if actual == expected
+                ));
+            }
+            for text in ["NaN", "Infinity", "1E+38", "1E-39"] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(super::prepared_binding(&value, 0).is_err(), "{text}");
+            }
+        });
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decimal_text_matches_python_tuple_reference(
+            digits in "[0-9]{1,40}",
+            exponent in -45_i64..46,
+            negative in proptest::prelude::any::<bool>(),
+        ) {
+            with_py(|py| {
+                let decimal = PyModule::import(py, "decimal").unwrap().getattr("Decimal").unwrap();
+                let value = decimal.call1((format!("{}{digits}E{exponent}", if negative { "-" } else { "" }),)).unwrap();
+                let parts = value.call_method0("as_tuple").unwrap();
+                let exponent = parts.getattr("exponent").unwrap().extract::<i64>().unwrap();
+                let digits = parts.getattr("digits").unwrap().len().unwrap();
+                let expected = if (-38..=38).contains(&exponent) && digits as i64 + exponent.max(0) <= 38 {
+                    DecimalValue::parse(&value.call_method1("__format__", ("f",)).unwrap().extract::<String>().unwrap())
+                } else {
+                    None
+                };
+                let text = value.str().unwrap().extract::<String>().unwrap();
+                assert_eq!(super::decimal_from_python_text(&text), expected, "{text}");
+            });
+        }
+    }
+
+    #[test]
+    fn rendered_decimal_is_exact_and_bounded_before_sql_allocation() {
+        with_py(|py| {
+            let decimal = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            let valid = decimal.call1(("12345678901234567.89",)).unwrap();
+            assert_eq!(
+                super::render_param(&valid, 0).unwrap(),
+                "CAST('12345678901234567.89' AS DECIMAL(19,2))"
+            );
+            for text in ["NaN", "Infinity", "1E+38", "1E-39", "1E+1000000"] {
+                let value = decimal.call1((text,)).unwrap();
+                assert!(super::render_param(&value, 0).is_err(), "{text}");
+            }
+        });
+    }
+
     fn params_list<'py>(py: Python<'py>, values: Vec<Bound<'py, PyAny>>) -> Bound<'py, PyAny> {
         PyList::new(py, values).expect("params list").into_any()
+    }
+
+    fn container_expression<'py>(py: Python<'py>, expression: &str) -> Bound<'py, PyAny> {
+        let expression = std::ffi::CString::new(expression).unwrap();
+        py.eval(expression.as_c_str(), None, None).unwrap()
+    }
+
+    fn assert_container_bindings_rejected(py: Python<'_>, expressions: &[&str]) {
+        let mut failures = Vec::new();
+        for expression in expressions {
+            let value = container_expression(py, expression);
+            match super::prepared_binding(&value, 0) {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {}
+                Err(error) => failures.push(format!("prepared {expression}: {error}")),
+                Ok(_) => failures.push(format!("prepared {expression}: incorrectly accepted")),
+            }
+            let value = container_expression(py, expression);
+            match super::render_param(&value, 0) {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {}
+                Err(error) => failures.push(format!("rendered {expression}: {error}")),
+                Ok(value) => failures.push(format!("rendered {expression}: accepted as {value}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue582_mapping_bindings_are_rejected_in_both_paths() {
+        with_py(|py| {
+            assert_container_bindings_rejected(
+                py,
+                &[
+                    "{1: 'x'}",
+                    "__import__('collections').UserDict({1: 'x'})",
+                    "__import__('types').MappingProxyType({1: 'x'})",
+                    "type('MappingLike', (), {'keys': lambda self: [1], '__iter__': lambda self: iter([1])})()",
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn issue582_set_bindings_are_rejected_in_both_paths() {
+        with_py(|py| {
+            assert_container_bindings_rejected(
+                py,
+                &[
+                    "{1, 2}",
+                    "frozenset([1, 2])",
+                    "{1: 'x', 2: 'y'}.keys()",
+                    "type('NumberSet', (__import__('collections.abc', fromlist=['Set']).Set,), {'__contains__': lambda self, x: x in (1, 2), '__iter__': lambda self: iter([1, 2]), '__len__': lambda self: 2})()",
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn issue582_ordered_numeric_iterables_preserve_vector_values() {
+        with_py(|py| {
+            eprintln!(
+                "runtime Python={} NumPy={}",
+                py.import("sys").unwrap().getattr("version").unwrap(),
+                py.import("numpy").unwrap().getattr("__version__").unwrap()
+            );
+            for expression in [
+                "[1, 2, 3]",
+                "(1, 2, 3)",
+                "range(1, 4)",
+                "(x for x in [1, 2, 3])",
+                "__import__('numpy').array([1, 2, 3], dtype='float32')",
+            ] {
+                let value = container_expression(py, expression);
+                let binding = super::prepared_binding(&value, 0).unwrap();
+                match binding {
+                    super::PyPreparedBinding::Native(SqlValue::Vector(values)) => {
+                        assert_eq!(values, vec![1.0f32, 2.0, 3.0], "{expression}");
+                    }
+                    _ => panic!("ordered vector did not use native binding: {expression}"),
+                }
+                // The prepared owner consumes generators; evaluate a fresh one for rendering.
+                let value = container_expression(py, expression);
+                assert_eq!(
+                    super::render_param(&value, 0).unwrap(),
+                    "[1.0, 2.0, 3.0]",
+                    "{expression}"
+                );
+            }
+        });
     }
 
     #[test]
@@ -564,6 +1051,24 @@ mod tests {
     }
 
     #[test]
+    fn bind_params_rejects_only_parameterized_multiple_statements() {
+        with_py(|py| {
+            let params = params_list(py, vec![1i64.into_bound_py_any(py).unwrap()]);
+            let error = bind_params("SELECT ?; SELECT 2", Some(&params)).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert!(error.to_string().contains("複数 SQL 文"));
+            assert_eq!(
+                bind_params("SELECT 1; SELECT 2", None).unwrap(),
+                "SELECT 1; SELECT 2"
+            );
+            assert_eq!(
+                bind_params("SELECT ';' AS mark, ? AS value", Some(&params)).unwrap(),
+                "SELECT ';' AS mark, 1 AS value"
+            );
+        });
+    }
+
+    #[test]
     fn bind_params_null_bool_and_floats() {
         with_py(|py| {
             let params = params_list(
@@ -607,7 +1112,7 @@ mod tests {
             let params = params_list(py, vec![input]);
             assert_eq!(
                 bind_params("SELECT ?", Some(&params)).unwrap(),
-                "SELECT DECIMAL '12.340'"
+                "SELECT CAST('12.340' AS DECIMAL(5,3))"
             );
 
             let output =

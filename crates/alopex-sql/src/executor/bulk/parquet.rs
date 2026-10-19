@@ -1,20 +1,59 @@
 use std::fs::File;
+use std::sync::Arc;
 
+use alopex_core::sql::stream::ByteSized;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray, ListArray,
-    MapArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray,
+    LargeStringArray, ListArray, MapArray, StringArray, StructArray, Time64MicrosecondArray,
+    TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
-use crate::catalog::TableMetadata;
+use crate::catalog::{ColumnMetadata, TableMetadata};
+use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::SqlValue;
 
-use super::{BulkReader, CopyField, CopySchema};
+use super::{BulkReader, CopyField, CopySchema, CopySecurityConfig, open_input_file};
+
+mod input;
+mod pages;
+mod preflight;
+mod schema;
+use preflight::{check_footer, check_pages};
+
+const MAX_READ_PARQUET_ROWS: u64 = 100_000;
+const READ_PARQUET_BATCH_SIZE: usize = 1024;
+
+/// The file bound to a READ_PARQUET plan. Clones share its lifetime, not a cursor.
+#[derive(Clone)]
+pub struct ParquetReadSource(Arc<File>);
+
+impl std::fmt::Debug for ParquetReadSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ParquetReadSource { .. }")
+    }
+}
+
+impl ParquetReadSource {
+    pub(crate) fn read(
+        &self,
+        path: &str,
+        planned: &[ColumnMetadata],
+        security: Option<&CopySecurityConfig>,
+        memory: Option<&MemoryPolicy>,
+    ) -> Result<Vec<Vec<SqlValue>>> {
+        // A plan prepared by a less restricted caller must still satisfy the
+        // executing transaction's current policy. A capability-authorized handle
+        // must identify the retained input, rather than merely a path replacement.
+        super::input_file::authorize_planned_input(&self.0, path, security)?;
+        read_parquet_source(Arc::clone(&self.0), planned, memory)
+    }
+}
 
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
@@ -22,6 +61,7 @@ pub struct ParquetReader {
     target_types: Vec<ResolvedType>,
     reader: ParquetRecordBatchReader,
     buffer: Option<Vec<Vec<SqlValue>>>,
+    row_offset: usize,
 }
 
 impl ParquetReader {
@@ -29,39 +69,347 @@ impl ParquetReader {
         let file = File::open(path)
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to open parquet: {e}")))?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-            ExecutorError::BulkLoad(format!("failed to read parquet metadata: {e}"))
-        })?;
+        Self::from_file(file, table_meta)
+    }
 
-        let arrow_schema = builder.schema();
-        let mut fields = Vec::with_capacity(arrow_schema.fields().len());
-        for f in arrow_schema.fields() {
-            let ty = map_arrow_type(f.data_type())?;
-            fields.push(CopyField {
-                name: Some(f.name().clone()),
-                data_type: Some(ty),
+    fn from_file(file: File, table_meta: &TableMetadata) -> Result<Self> {
+        Self::from_file_with_memory(file, &table_meta.columns, None, false)
+    }
+
+    fn from_file_with_memory(
+        file: File,
+        planned: &[ColumnMetadata],
+        memory: Option<&MemoryPolicy>,
+        validate_planned_schema: bool,
+    ) -> Result<Self> {
+        Self::from_shared_file(Arc::new(file), planned, memory, validate_planned_schema)
+    }
+
+    fn from_shared_file(
+        file: Arc<File>,
+        planned: &[ColumnMetadata],
+        memory: Option<&MemoryPolicy>,
+        validate_planned_schema: bool,
+    ) -> Result<Self> {
+        let input = input::InputFile::from(Arc::clone(&file));
+        let mut cursor = input.cursor();
+        let limit = memory.and_then(MemoryPolicy::limit_bytes);
+        let footer = limit
+            .map(|limit| check_footer(&mut cursor, limit))
+            .transpose()?;
+        // SQL exposes fields and rows; ordinary root KV need not be cloned into Arrow Schema.
+        let skip_arrow_metadata = footer
+            .as_ref()
+            .is_some_and(|footer| !footer.has_arrow_schema);
+        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&input)
+            .and_then(|metadata| schema::reader_metadata(metadata, skip_arrow_metadata))
+            .map_err(|error| {
+                ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
+            })?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(input, metadata);
+        let fields = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                Ok(CopyField {
+                    name: Some(field.name().clone()),
+                    data_type: Some(map_arrow_type(field.data_type())?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if validate_planned_schema && fields.len() != planned.len() {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: planned.len(),
+                actual: fields.len(),
+                reason: "READ_PARQUET column count changed after planning".into(),
             });
         }
+        for (position, (field, column)) in fields.iter().zip(planned).enumerate() {
+            // SQL aliases change planned names, not the source's positional types.
+            if validate_planned_schema && field.data_type.as_ref() != Some(&column.data_type) {
+                return Err(ExecutorError::SchemaMismatch {
+                    expected: planned.len(),
+                    actual: fields.len(),
+                    reason: format!("READ_PARQUET column {position} type changed after planning"),
+                });
+            }
+        }
+        let declared_rows = builder.metadata().file_metadata().num_rows();
+        let overflow = || ExecutorError::ResourceExhausted {
+            message: "READ_PARQUET retained size overflow".into(),
+        };
+        let mut count = u64::try_from(declared_rows)
+            .map_err(|_| ExecutorError::BulkLoad("negative parquet row count".into()))?;
+        if validate_planned_schema {
+            let group_rows =
+                builder
+                    .metadata()
+                    .row_groups()
+                    .iter()
+                    .try_fold(0_u64, |total, group| {
+                        let rows = u64::try_from(group.num_rows()).map_err(|_| {
+                            ExecutorError::BulkLoad("negative parquet row group count".into())
+                        })?;
+                        total.checked_add(rows).ok_or_else(overflow)
+                    })?;
+            let declared = count.max(group_rows);
+            if declared > MAX_READ_PARQUET_ROWS {
+                return Err(ExecutorError::ResourceExhausted {
+                    message: format!(
+                        "READ_PARQUET exceeds row limit {MAX_READ_PARQUET_ROWS} (declared {declared})"
+                    ),
+                });
+            }
+            count = declared;
+        }
+        let mut reserved_bytes = footer
+            .as_ref()
+            .map_or(0, |footer| footer.retained_metadata_bytes);
+        if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
+            // Source batches and the later query containers have separate lifetimes.
+            let row_capacity = if count <= READ_PARQUET_BATCH_SIZE as u64 {
+                count
+            } else {
+                count.checked_next_power_of_two().ok_or_else(overflow)?
+            };
+            let row_slots = row_capacity
+                .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
+                .ok_or_else(overflow)?;
+            let values_and_metadata = (planned.len() as u64)
+                .checked_mul(std::mem::size_of::<SqlValue>() as u64)
+                .and_then(|bytes| bytes.checked_mul(count))
+                .and_then(|bytes| bytes.checked_add(reserved_bytes))
+                .ok_or_else(overflow)?;
+            let minimum = values_and_metadata
+                .checked_add(row_slots)
+                .ok_or_else(overflow)?;
+            let query_capacity = if count == 0 {
+                0
+            } else {
+                count
+                    .checked_next_power_of_two()
+                    .ok_or_else(overflow)?
+                    .max(4)
+            };
+            // The iterator backing and the receiving Vec<Row> coexist during collection.
+            let query_minimum = count
+                .checked_add(query_capacity)
+                .and_then(|slots| {
+                    slots.checked_mul(std::mem::size_of::<crate::executor::Row>() as u64)
+                })
+                .and_then(|bytes| bytes.checked_add(values_and_metadata))
+                .ok_or_else(overflow)?;
+            let declared_minimum = minimum.max(query_minimum);
+            if policy.over_limit(declared_minimum) {
+                return Err(ExecutorError::ResourceExhausted {
+                    message: format!(
+                        "READ_PARQUET requires at least {declared_minimum} bytes for declared rows and metadata (limit {}); spilling this operator is not supported",
+                        policy.limit_bytes().unwrap_or(u64::MAX)
+                    ),
+                });
+            }
+            reserved_bytes = minimum;
+        }
+        if let (Some(limit), Some(footer)) = (limit, footer) {
+            reserved_bytes = check_pages(
+                &mut cursor,
+                builder.metadata(),
+                footer.start,
+                limit,
+                reserved_bytes,
+            )?;
+        }
 
-        let reader = builder
-            .with_batch_size(1024)
-            .build()
-            .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
+        let reader = if let Some(limit) = limit {
+            let metadata = builder.metadata().clone();
+            let schema = builder.schema().clone();
+            drop(builder);
+            let schema = pages::reader_schema_hint(schema);
+            pages::reader(
+                file,
+                metadata,
+                &schema,
+                READ_PARQUET_BATCH_SIZE,
+                limit,
+                reserved_bytes,
+            )
+        } else {
+            builder.with_batch_size(READ_PARQUET_BATCH_SIZE).build()
+        }
+        .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
         // TODO: バッチサイズを open 引数で受け取れるようにし、呼び出し側で柔軟に制御できるようにする。
 
-        let target_types: Vec<ResolvedType> = table_meta
-            .columns
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect();
+        let target_types: Vec<ResolvedType> = planned.iter().map(|c| c.data_type.clone()).collect();
 
         Ok(Self {
             schema: CopySchema { fields },
             target_types,
             reader,
             buffer: None,
+            row_offset: 0,
         })
     }
+}
+
+pub fn parquet_schema(path: &str) -> Result<CopySchema> {
+    parquet_schema_with_read_options(path, None, None)
+}
+
+pub(crate) fn parquet_schema_with_read_options(
+    path: &str,
+    security: Option<&CopySecurityConfig>,
+    limit: Option<u64>,
+) -> Result<CopySchema> {
+    plan_parquet_source(path, security, limit).map(|(schema, _source)| schema)
+}
+
+pub(crate) fn plan_parquet_source(
+    path: &str,
+    security: Option<&CopySecurityConfig>,
+    limit: Option<u64>,
+) -> Result<(CopySchema, ParquetReadSource)> {
+    let file = Arc::new(match security {
+        Some(config) => open_input_file(path, config)?,
+        None => File::open(path)
+            .map_err(|error| ExecutorError::BulkLoad(format!("failed to open parquet: {error}")))?,
+    });
+    let input = input::InputFile::from(Arc::clone(&file));
+    let schema = match schema::read(&mut input.cursor(), limit) {
+        Ok(schema) => schema,
+        Err(error) if limit.is_some() => return Err(error),
+        // Preserve the legacy decoder's broader grammar for unbounded planning.
+        Err(_) => ParquetRecordBatchReaderBuilder::try_new(input)
+            .map_err(|error| {
+                ExecutorError::BulkLoad(format!("failed to read parquet metadata: {error}"))
+            })?
+            .schema()
+            .clone(),
+    };
+    schema
+        .fields()
+        .iter()
+        .map(|field| {
+            Ok(CopyField {
+                name: Some(field.name().clone()),
+                data_type: Some(map_arrow_type(field.data_type())?),
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|fields| (CopySchema { fields }, ParquetReadSource(file)))
+}
+
+pub fn read_parquet(path: &str) -> Result<(CopySchema, Vec<Vec<SqlValue>>)> {
+    let (schema, source) = plan_parquet_source(path, None, None)?;
+    let columns = schema
+        .fields
+        .iter()
+        .map(|field| {
+            Ok(crate::catalog::ColumnMetadata::new(
+                field.name.clone().unwrap_or_default(),
+                field
+                    .data_type
+                    .clone()
+                    .ok_or_else(|| ExecutorError::BulkLoad("missing parquet field type".into()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rows = source.read(path, &columns, None, None)?;
+    Ok((schema, rows))
+}
+
+/// Read against SQL's planned types, accounting for decoded payloads and retained
+/// row/value capacity, with footer and page declarations checked before decoding.
+fn read_parquet_source(
+    file: Arc<File>,
+    planned: &[ColumnMetadata],
+    memory: Option<&MemoryPolicy>,
+) -> Result<Vec<Vec<SqlValue>>> {
+    let mut reader = ParquetReader::from_shared_file(file, planned, memory, true)?;
+    let mut rows: Vec<Vec<SqlValue>> = Vec::new();
+    let mut retained_bytes = 0_u64;
+    let overflow = || ExecutorError::ResourceExhausted {
+        message: "READ_PARQUET retained size overflow".into(),
+    };
+    while let Some(batch) = reader.next_batch(READ_PARQUET_BATCH_SIZE)? {
+        if let Some(policy) = memory.filter(|policy| policy.limit_bytes().is_some()) {
+            for row in &batch {
+                retained_bytes = retained_bytes
+                    .checked_add(
+                        (row.capacity() as u64)
+                            .checked_mul(std::mem::size_of::<SqlValue>() as u64)
+                            .ok_or_else(overflow)?,
+                    )
+                    .ok_or_else(overflow)?;
+                for value in row {
+                    retained_bytes = retained_bytes
+                        .checked_add(value.estimated_bytes())
+                        .ok_or_else(overflow)?;
+                }
+            }
+            // The reader already owns this decoded batch. Charge it together
+            // before retaining it, and reserve outer slots once per growth.
+            let required = rows.len().checked_add(batch.len()).ok_or_else(overflow)?;
+            let capacity = if required > rows.capacity() {
+                rows.capacity()
+                    .checked_mul(2)
+                    .ok_or_else(overflow)?
+                    .max(required)
+            } else {
+                rows.capacity()
+            };
+            let query_capacity = if required == 0 {
+                0
+            } else {
+                required
+                    .checked_next_power_of_two()
+                    .ok_or_else(overflow)?
+                    .max(4)
+            };
+            let query_slots = required
+                .checked_add(query_capacity)
+                .and_then(|slots| slots.checked_mul(std::mem::size_of::<crate::executor::Row>()))
+                .ok_or_else(overflow)? as u64;
+            let enforce_capacity = |capacity: usize| {
+                let bytes = (capacity as u64)
+                    .checked_mul(std::mem::size_of::<Vec<SqlValue>>() as u64)
+                    .and_then(|bytes| retained_bytes.checked_add(bytes.max(query_slots)))
+                    .ok_or_else(overflow)?;
+                // This reader retains rows in memory and cannot spill them.
+                if policy.over_limit(bytes) {
+                    return Err(ExecutorError::ResourceExhausted {
+                        message: format!(
+                            "READ_PARQUET requires {bytes} bytes (limit {}); spilling this operator is not supported",
+                            policy.limit_bytes().unwrap_or(u64::MAX)
+                        ),
+                    });
+                }
+                Ok(())
+            };
+            enforce_capacity(capacity)?;
+            if rows.is_empty() && batch.capacity() == capacity {
+                // Reuse the reader's already-accounted outer allocation.
+                rows = batch;
+                continue;
+            }
+            if capacity > rows.capacity() {
+                rows.try_reserve_exact(capacity - rows.len())
+                    .map_err(|error| ExecutorError::ResourceExhausted {
+                        message: format!("READ_PARQUET row allocation failed: {error}"),
+                    })?;
+                // An allocator may provide more capacity than requested.
+                enforce_capacity(rows.capacity())?;
+            }
+        }
+        rows.extend(batch);
+    }
+    Ok(rows)
+}
+
+#[cold]
+fn parquet_io_error(error: std::io::Error) -> ExecutorError {
+    ExecutorError::BulkLoad(format!("failed to inspect parquet: {error}"))
 }
 
 impl BulkReader for ParquetReader {
@@ -89,21 +437,69 @@ impl BulkReader for ParquetReader {
         };
 
         let mut rows: Vec<Vec<SqlValue>> = Vec::with_capacity(batch.num_rows());
-        for row_idx in 0..batch.num_rows() {
-            let mut row = Vec::with_capacity(self.schema.fields.len());
-            for col_idx in 0..self.schema.fields.len() {
-                let value = arrow_value_to_sql(
-                    batch.column(col_idx).as_ref(),
-                    batch.schema().field(col_idx).data_type(),
-                    self.target_types
-                        .get(col_idx)
-                        .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
-                    row_idx,
-                )?;
-                row.push(value);
+        let native_primitives = self.schema.fields.len() == batch.num_columns()
+            && self.target_types.len() == batch.num_columns()
+            && batch
+                .schema_ref()
+                .fields()
+                .iter()
+                .zip(&self.target_types)
+                .all(|(field, target)| {
+                    matches!(
+                        (field.data_type(), target),
+                        (ArrowDataType::Int32, ResolvedType::Integer)
+                            | (ArrowDataType::Int64, ResolvedType::BigInt)
+                            | (ArrowDataType::Float32, ResolvedType::Float)
+                            | (ArrowDataType::Float64, ResolvedType::Double)
+                            | (ArrowDataType::Boolean, ResolvedType::Boolean)
+                    )
+                });
+        if native_primitives {
+            rows.resize_with(batch.num_rows(), || {
+                Vec::with_capacity(self.schema.fields.len())
+            });
+            for (col_idx, field) in batch.schema_ref().fields().iter().enumerate() {
+                macro_rules! append_column {
+                    ($array:ty, $value:ident) => {{
+                        let values = batch
+                            .column(col_idx)
+                            .as_any()
+                            .downcast_ref::<$array>()
+                            .unwrap();
+                        for (row, value) in rows.iter_mut().zip(values.iter()) {
+                            row.push(value.map_or(SqlValue::Null, SqlValue::$value));
+                        }
+                    }};
+                }
+                match field.data_type() {
+                    ArrowDataType::Int32 => append_column!(Int32Array, Integer),
+                    ArrowDataType::Int64 => append_column!(Int64Array, BigInt),
+                    ArrowDataType::Float32 => append_column!(Float32Array, Float),
+                    ArrowDataType::Float64 => append_column!(Float64Array, Double),
+                    ArrowDataType::Boolean => append_column!(BooleanArray, Boolean),
+                    _ => unreachable!("native primitive types were checked before allocation"),
+                }
             }
-            rows.push(row);
+        } else {
+            // Fallible conversions keep the existing row-first error order.
+            for row_idx in 0..batch.num_rows() {
+                let mut row = Vec::with_capacity(self.schema.fields.len());
+                for col_idx in 0..self.schema.fields.len() {
+                    let value = arrow_value_to_sql(
+                        batch.column(col_idx).as_ref(),
+                        batch.schema_ref().field(col_idx).data_type(),
+                        self.target_types
+                            .get(col_idx)
+                            .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
+                        row_idx,
+                        self.row_offset + row_idx,
+                    )?;
+                    row.push(value);
+                }
+                rows.push(row);
+            }
         }
+        self.row_offset += batch.num_rows();
 
         if rows.len() > max_rows {
             let rest = rows.split_off(max_rows);
@@ -121,7 +517,7 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
         ArrowDataType::Float32 => Ok(ResolvedType::Float),
         ArrowDataType::Float64 => Ok(ResolvedType::Double),
         ArrowDataType::Boolean => Ok(ResolvedType::Boolean),
-        ArrowDataType::Utf8 => Ok(ResolvedType::Text),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(ResolvedType::Text),
         ArrowDataType::Binary | ArrowDataType::LargeBinary => Ok(ResolvedType::Blob),
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
             Ok(ResolvedType::Timestamp)
@@ -144,6 +540,7 @@ fn arrow_value_to_sql(
     dt: &ArrowDataType,
     expected: &ResolvedType,
     row_idx: usize,
+    source_row_idx: usize,
 ) -> Result<SqlValue> {
     if array.is_null(row_idx) {
         return Ok(SqlValue::Null);
@@ -170,6 +567,19 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::BigInt(arr.value(row_idx)))
         }
+        (ArrowDataType::Int64, ResolvedType::Integer) => {
+            let value = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row_idx);
+            i32::try_from(value).map(SqlValue::Integer).map_err(|_| {
+                ExecutorError::BulkLoad(format!(
+                    "row {}: cannot convert INT64 value {value} to INTEGER (out of range)",
+                    source_row_idx + 1
+                ))
+            })
+        }
         (ArrowDataType::Int64, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::Double(arr.value(row_idx) as f64))
@@ -194,6 +604,10 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Ok(SqlValue::Text(arr.value(row_idx).to_string()))
         }
+        (ArrowDataType::LargeUtf8, ResolvedType::Text) => {
+            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            Ok(SqlValue::Text(arr.value(row_idx).to_string()))
+        }
         (ArrowDataType::Utf8, ResolvedType::Json) => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             crate::storage::JsonValue::parse(arr.value(row_idx))
@@ -213,7 +627,13 @@ fn arrow_value_to_sql(
             let values = arr.value(row_idx);
             (0..values.len())
                 .map(|index| {
-                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                    arrow_value_to_sql(
+                        values.as_ref(),
+                        values.data_type(),
+                        element,
+                        index,
+                        source_row_idx,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(SqlValue::Array)
@@ -223,7 +643,13 @@ fn arrow_value_to_sql(
             let values = arr.value(row_idx);
             (0..values.len())
                 .map(|index| {
-                    arrow_value_to_sql(values.as_ref(), values.data_type(), element, index)
+                    arrow_value_to_sql(
+                        values.as_ref(),
+                        values.data_type(),
+                        element,
+                        index,
+                        source_row_idx,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(SqlValue::Array)
@@ -236,8 +662,20 @@ fn arrow_value_to_sql(
             (0..entries.len())
                 .map(|index| {
                     Ok((
-                        arrow_value_to_sql(keys.as_ref(), keys.data_type(), key, index)?,
-                        arrow_value_to_sql(values.as_ref(), values.data_type(), value, index)?,
+                        arrow_value_to_sql(
+                            keys.as_ref(),
+                            keys.data_type(),
+                            key,
+                            index,
+                            source_row_idx,
+                        )?,
+                        arrow_value_to_sql(
+                            values.as_ref(),
+                            values.data_type(),
+                            value,
+                            index,
+                            source_row_idx,
+                        )?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()
@@ -264,6 +702,7 @@ fn arrow_value_to_sql(
                             arrow_fields[index].data_type(),
                             data_type,
                             row_idx,
+                            source_row_idx,
                         )?,
                     ))
                 })
@@ -342,6 +781,42 @@ mod tests {
     use crate::storage::DecimalValue;
 
     #[test]
+    fn large_utf8_and_int64_narrowing_convert_at_the_copy_boundary() {
+        let text = arrow_array::LargeStringArray::from(vec![Some("large text")]);
+        assert_eq!(
+            map_arrow_type(text.data_type()).unwrap(),
+            ResolvedType::Text
+        );
+        assert_eq!(
+            arrow_value_to_sql(&text, text.data_type(), &ResolvedType::Text, 0, 0).unwrap(),
+            SqlValue::Text("large text".into())
+        );
+
+        let integers = Int64Array::from(vec![Some(42), Some(i64::from(i32::MAX) + 1)]);
+        assert_eq!(
+            arrow_value_to_sql(
+                &integers,
+                integers.data_type(),
+                &ResolvedType::Integer,
+                0,
+                0
+            )
+            .unwrap(),
+            SqlValue::Integer(42)
+        );
+        let error = arrow_value_to_sql(
+            &integers,
+            integers.data_type(),
+            &ResolvedType::Integer,
+            1,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("row 2"), "{error}");
+    }
+
+    #[test]
     fn arrow_list_maps_to_native_array_with_null_elements() {
         let mut builder =
             arrow_array::builder::ListBuilder::new(arrow_array::builder::Int32Builder::new());
@@ -356,6 +831,7 @@ mod tests {
                 &array,
                 array.data_type(),
                 &ResolvedType::Array(Box::new(ResolvedType::Integer)),
+                0,
                 0,
             )
             .unwrap(),
@@ -388,6 +864,7 @@ mod tests {
                     precision: 10,
                     scale: 2,
                 },
+                0,
                 0,
             )
             .unwrap(),

@@ -82,6 +82,9 @@ pub struct KeySearchRequest {
     /// Maximum combined key and value bytes inspected or returned by one page.
     #[serde(default = "default_response_bytes")]
     pub max_bytes: usize,
+    /// Fail instead of returning a continuation when work cannot fill a page.
+    #[serde(default)]
+    pub strict_budget: bool,
 }
 
 impl KeySearchRequest {
@@ -93,7 +96,14 @@ impl KeySearchRequest {
             limit,
             scan_budget,
             max_bytes: DEFAULT_KEY_SEARCH_RESPONSE_BYTES,
+            strict_budget: false,
         }
+    }
+
+    /// Select error-on-budget behavior instead of resumable bounded work.
+    pub fn with_strict_budget(mut self, strict: bool) -> Self {
+        self.strict_budget = strict;
+        self
     }
 
     /// Continue strictly after a prior response cursor.
@@ -123,10 +133,12 @@ pub struct KeySearchEntry {
 pub struct KeySearchPage {
     /// Matching entries in ascending raw-byte key order.
     pub entries: Vec<KeySearchEntry>,
-    /// The last returned key when the page filled its limit.
+    /// Last processed physical key when further scanning remains.
     pub next_cursor: Option<Key>,
     /// Candidate keys inspected after the cursor.
     pub scanned: usize,
+    /// Further physical candidates remain; filtered continuations can be empty.
+    pub has_more: bool,
 }
 
 pub(crate) struct PreparedKeySearch {
@@ -157,27 +169,50 @@ impl PreparedKeySearch {
 
     pub(crate) fn collect(
         &self,
+        next: impl FnMut() -> Result<Option<(Key, Option<Value>)>>,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        self.collect_filtered(next, request, cancellation, &|_| true)
+    }
+
+    pub(crate) fn collect_filtered(
+        &self,
         mut next: impl FnMut() -> Result<Option<(Key, Option<Value>)>>,
         request: &KeySearchRequest,
         cancellation: &KeySearchCancellation,
+        include: &dyn Fn(&[u8]) -> bool,
     ) -> Result<KeySearchPage> {
         let mut entries = Vec::with_capacity(request.limit);
         let mut scanned = 0usize;
         let mut scanned_bytes = 0usize;
         let mut response_bytes = 0usize;
+        let mut last_processed = None;
+        let mut has_more = false;
         loop {
             if cancellation.is_cancelled() {
                 return Err(Error::SearchCancelled);
             }
-            if scanned == request.scan_budget {
-                return Err(Error::SearchBudgetExceeded {
-                    limit: request.scan_budget,
-                });
-            }
+            // One continuation lookahead distinguishes an exact boundary from
+            // truncation. It is not advanced past by the returned cursor.
             let Some((key, value)) = next()? else {
                 break;
             };
             if !self.prefix.is_empty() && !key.starts_with(&self.prefix) {
+                break;
+            }
+            let visible = value.is_some() && self.matcher.is_match(&key) && include(&key);
+            if entries.len() == request.limit && visible {
+                has_more = true;
+                break;
+            }
+            if scanned == request.scan_budget {
+                if request.strict_budget && entries.len() < request.limit {
+                    return Err(Error::SearchBudgetExceeded {
+                        limit: request.scan_budget,
+                    });
+                }
+                has_more = true;
                 break;
             }
             scanned += 1;
@@ -190,35 +225,34 @@ impl PreparedKeySearch {
                     requested: scanned_bytes,
                 });
             }
-            if let Some(value) = value.filter(|_| self.matcher.is_match(&key)) {
-                let cursor_bytes = if entries.len() + 1 == request.limit {
-                    key.len()
-                } else {
-                    0
-                };
-                let requested = response_bytes
+            last_processed = Some(key.clone());
+            if visible {
+                let value = value.expect("visible entry has a value");
+                response_bytes = response_bytes
                     .saturating_add(key.len())
-                    .saturating_add(value.len())
-                    .saturating_add(cursor_bytes);
-                if requested > request.max_bytes {
+                    .saturating_add(value.len());
+                if response_bytes > request.max_bytes {
                     return Err(Error::SearchResponseTooLarge {
                         limit: request.max_bytes,
-                        requested,
+                        requested: response_bytes,
                     });
                 }
-                response_bytes = requested;
                 entries.push(KeySearchEntry { key, value });
-                if entries.len() == request.limit {
-                    break;
-                }
             }
         }
-        let next_cursor = (entries.len() == request.limit)
-            .then(|| entries.last().expect("non-empty full page").key.clone());
+        let next_cursor = if has_more { last_processed } else { None };
+        let requested = response_bytes.saturating_add(next_cursor.as_ref().map_or(0, Vec::len));
+        if requested > request.max_bytes {
+            return Err(Error::SearchResponseTooLarge {
+                limit: request.max_bytes,
+                requested,
+            });
+        }
         Ok(KeySearchPage {
             entries,
             next_cursor,
             scanned,
+            has_more,
         })
     }
 }

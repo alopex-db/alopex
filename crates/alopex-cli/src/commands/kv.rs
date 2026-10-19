@@ -590,8 +590,10 @@ fn search_request(
             ));
         }
     };
-    let mut request =
-        KeySearchRequest::new(pattern, page_size, scan_budget).with_max_bytes(max_bytes);
+    let mut request = KeySearchRequest::new(pattern, page_size, scan_budget)
+        .with_max_bytes(max_bytes)
+        // Row output cannot carry a continuation on an empty page.
+        .with_strict_budget(true);
     if let Some(cursor) = cursor_hex {
         request.cursor = Some(decode_hex("cursor", cursor)?);
     }
@@ -961,6 +963,32 @@ pub fn kv_status_columns() -> Vec<Column> {
 mod tests {
     use super::*;
     use crate::output::jsonl::JsonlFormatter;
+
+    #[test]
+    fn search_row_output_preserves_explicit_budget_failure() {
+        let request =
+            search_request(KvSearchMode::Glob, "*missing", false, None, 10, 1, 1024).unwrap();
+        assert!(request.strict_budget);
+        let db = create_test_db();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(b"a", b"v").unwrap();
+        txn.put(b"b", b"v").unwrap();
+        txn.commit().unwrap();
+        let mut output = Vec::new();
+        let mut writer = create_search_writer(&mut output);
+        assert!(execute_search(
+            &db,
+            KvSearchMode::Glob,
+            "*missing",
+            false,
+            None,
+            10,
+            1,
+            1024,
+            &mut writer
+        )
+        .is_err());
+    }
 
     fn create_test_db() -> Database {
         Database::open_in_memory().unwrap()

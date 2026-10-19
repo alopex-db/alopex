@@ -2,10 +2,17 @@ name: alopex-py
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths:
       - ".github/workflows/alopex-py.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -17,8 +24,14 @@ on:
   pull_request:
     paths:
       - ".github/workflows/alopex-py.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/reference_tests/hnsw_public_inventory.py"
+      - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
@@ -27,6 +40,20 @@ on:
       # change on the server side has to re-run it.
       - "crates/alopex-server/**"
       - "crates/alopex-cluster/**"
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -58,7 +85,8 @@ jobs:
 
   test:
     name: test ${{ matrix.numpy_runtime }} py${{ matrix.python }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # Opt in only for trusted candidate pushes; PRs retain hosted runners.
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -72,8 +100,13 @@ jobs:
       - name: Checkout
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded temporary macOS runner
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/prepare-temporary-macos-runner.sh
       - name: Setup Python
-        if: ${{ !env.ACT }}
+        if: ${{ !env.ACT && runner.environment != 'self-hosted' }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -105,10 +138,10 @@ jobs:
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
         run: |
           if [[ -n "${ACT:-}" ]]; then
-            python -m pip install numpy
+            python -m pip install numpy pyarrow
             exit 0
           fi
-          python -m pip install numpy
+          python -m pip install numpy pyarrow
       - name: Install patchelf (Linux)
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
@@ -158,7 +191,7 @@ jobs:
           fi
           test -f "$library"
           cp "$library" crates/alopex-py/python/alopex/native/
-          printf '0.25.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
+          printf '0.28.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$library" | sed "s#${NIM_SQL_PARSER_DIR}/##" > crates/alopex-py/python/alopex/native/SHA256SUMS
           else
@@ -210,9 +243,40 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
+      - name: Run HNSW management and commit GIL regressions
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        run: cargo test -p alopex-py --lib releases_gil -- --nocapture
+      - name: Verify release wheel import and SQL API
+        if: ${{ !env.ACT && matrix.numpy_runtime == 'with-numpy' }}
+        run: |
+          set -euo pipefail
+          release_temp_root="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            release_temp_root="$(cygpath -u "$release_temp_root")"
+          fi
+          wheel_dir="${release_temp_root}/alopex-release-wheel"
+          mkdir -p "$wheel_dir"
+          env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_PROFILE_RELEASE_STRIP \
+            maturin build -m crates/alopex-py/Cargo.toml --release --out "$wheel_dir"
+          wheel="$(find "$wheel_dir" -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
+          fi
+          smoke_venv="${release_temp_root}/alopex-release-wheel-smoke"
+          python -m venv "$smoke_venv"
+          smoke_python="$smoke_venv/bin/python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            smoke_python="$smoke_venv/Scripts/python.exe"
+          fi
+          "$smoke_python" -m pip install pytest numpy
+          "$smoke_python" -m pip install --no-index --no-deps "$wheel"
+          "$smoke_python" -m pytest -q crates/alopex-py/tests/test_sql.py
       - name: Verify HNSW runtime and source inventory
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
-        run: python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
+        run: |
+          python -m unittest scripts.reference_tests.test_hnsw_public_inventory
+          python scripts/reference_tests/hnsw_public_inventory.py --runtime docs/parity/hnsw-v0.8.11.json
       - name: Verify vector APIs remain exported without NumPy installed
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'without-numpy' }}
         run: |
@@ -409,7 +473,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
+          timeout 120s sudo docker image prune --all --force || true
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Python
@@ -471,7 +535,7 @@ jobs:
 
   ci-success:
     name: ci-success
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs: [rust-check, test, polars-test, server-e2e, typecheck]
     runs-on: ubuntu-latest
     steps:

@@ -10,6 +10,26 @@ proc parseErrorMessage(sql: string): string =
   except ParseError as error:
     result = error.msg
 
+suite "Decimal literal precision":
+  test "integer trailing zeros count toward every supported precision":
+    for width in 1 .. 38:
+      for prefix in ["", "-", "+", "000", "-000"]:
+        let literal = prefix & "1" & repeat('0', width - 1)
+        let expr = parseSql("SELECT DECIMAL '" & literal & "'").children[0].children[0]
+        check expr.kind == nkCast
+        check expr.children[1].children[1].intVal == width
+        check expr.children[1].children[2].intVal == 0
+    expect ParseError:
+      discard parseSql("SELECT DECIMAL '1" & repeat('0', 38) & "'")
+
+  test "only leading whole zeros are excluded from precision":
+    for (literal, precision, scale) in [
+        ("10.00", 4, 2), ("00010.00", 4, 2), ("-1000.0", 5, 1),
+        ("0.000", 3, 3), ("000", 1, 0), ("1.000", 4, 3)]:
+      let expr = parseSql("SELECT DECIMAL '" & literal & "'").children[0].children[0]
+      check expr.children[1].children[1].intVal == precision
+      check expr.children[1].children[2].intVal == scale
+
 # ---------------------------------------------------------------------------
 # Tokenizer tests
 # ---------------------------------------------------------------------------
@@ -189,6 +209,12 @@ suite "Expressions — literals":
     check expr.kind == nkBinaryOp
     check expr.binRight.kind == nkIntervalLit
     check expr.binRight.strVal == "24 hours"
+
+  test "fractional and year-to-month INTERVAL qualifiers are preserved":
+    let ast = parseSql("SELECT INTERVAL '1.5' DAY, INTERVAL '1-2' YEAR TO MONTH")
+    let projection = ast.children[0]
+    check projection.children[0].strVal == "1.5 DAY"
+    check projection.children[1].strVal == "1-2 YEAR TO MONTH"
 
   test "SQL-TS reserved names are accepted as functions and columns":
     let ast = parseSql(
@@ -1199,6 +1225,21 @@ suite "DML — COPY":
 # ---------------------------------------------------------------------------
 
 suite "DDL — CREATE TABLE":
+
+  test "CTAS accepts storage options before AS":
+    let ast = parseSql("CREATE TABLE copy WITH (storage='columnar') AS SELECT 1 AS id")
+    check ast.kind == nkCreateTable
+    check ast.children.anyIt(it.kind == nkWithOptions)
+    check ast.children.anyIt(it.kind == nkSelect)
+
+  test "CTAS accepts trailing storage options and rejects duplicate options":
+    let ast = parseSql("CREATE TABLE copy AS SELECT 1 AS id WITH (storage='columnar')")
+    check ast.kind == nkCreateTable
+    check ast.children.anyIt(it.kind == nkWithOptions)
+    check ast.children.anyIt(it.kind == nkSelect)
+    check parseErrorMessage(
+      "CREATE TABLE copy WITH (storage='row') AS SELECT 1 AS id WITH (storage='columnar')"
+    ).contains("duplicate CREATE TABLE WITH options")
 
   test "CREATE TABLE with common constraints":
     let ast = parseSql("""

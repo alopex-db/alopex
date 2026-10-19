@@ -193,8 +193,8 @@ if not isinstance(distributions, list) or not distributions or any(
 parser = data.get("parser")
 if not isinstance(parser, dict):
     fail("parser public surface is missing")
-if parser.get("contract") != "0.25.0":
-    fail("parser contract must be 0.25.0")
+if parser.get("contract") != "0.28.0":
+    fail("parser contract must be 0.28.0")
 for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")
@@ -262,20 +262,23 @@ run_step() {
     shift
     STEP_INDEX=$((STEP_INDEX + 1))
     local logfile="${LOG_DIR}/step-${STEP_INDEX}.log"
+    local started_ns
+    started_ns="$(date +%s%N)"
 
     log_info "${name}"
     "$@" 2>&1 | tee "${logfile}"
     local status="${PIPESTATUS[0]}"
+    local duration_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status success --description "${description}" --log "${logfile}"
+            --name "${name}" --status success --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
         OVERALL_STATUS="fail"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
-            --name "${name}" --status failure --description "${description}" --log "${logfile}"
+            --name "${name}" --status failure --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
         write_report
         exit "${status}"
     fi
@@ -315,7 +318,11 @@ run_step "コンテナイメージビルド" \
 # で使い回す)、以降のデモ実行では PATH に加えるだけにする。独立crateには
 # lockfileを同梱し、read-onlyでマウントした検証対象ソースへCargoが書き込ま
 # ないようにする。
+# The helper is built by container root for rootless-Podman bind-mount
+# compatibility, then executed by the image's non-root user. mktemp creates
+# mode 0700, which prevents that user from traversing the parent directory.
 TOOLS_TARGET_DIR="$(mktemp -d)"
+chmod 755 "${TOOLS_TARGET_DIR}"
 
 # /tools-target/release (verify-release-embedded のビルド出力) を PATH に
 # 追加する。イメージの ENV PATH は Dockerfile 側で維持されるので、ここでは
@@ -333,9 +340,22 @@ run_in_container() {
         "$@"
 }
 
+build_tools_in_container() {
+    docker run --rm \
+        --user 0:0 -e HOME=/tmp/verify-home \
+        -v "${REPO_ROOT}":/workspace:ro \
+        -v "${TOOLS_TARGET_DIR}":/tools-target \
+        -w /workspace \
+        -e "ALOPEX_BINARY_SOURCE=released" \
+        -e "ALOPEX_VERSION=${ALOPEX_VERSION}" \
+        -e "ALOPEX_EXTRA_PATH=/tools-target/release" \
+        "${IMAGE_TAG}" \
+        "$@"
+}
+
 run_step "verify-release-embedded ビルド" \
     "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
-    -- run_in_container bash -c '
+    -- build_tools_in_container bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT

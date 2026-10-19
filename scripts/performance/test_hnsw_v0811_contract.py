@@ -1,16 +1,25 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
+import scripts.performance.hnsw_v0811_contract as contract
 
+from scripts.performance import hnsw_v0811_contract as hnsw
 from scripts.performance.hnsw_v0811_contract import (
     DATASET_SIZE,
     DIMENSION,
+    MEASUREMENT_RUNS,
+    _sql_vector_literal,
+    _build_sql_only_hybrid,
     analyze_scale,
+    counterbalanced_engine_orders,
     decompose_latency,
     load_amazon_products,
+    measure_counterbalanced_settings,
     measure_setting,
     recall_at_k,
     render_markdown,
@@ -19,11 +28,240 @@ from scripts.performance.hnsw_v0811_contract import (
     validate_comparison_row,
     validate_comparison_rows,
     SearchEngine,
+    RawCheckpointWriter,
     write_artifacts,
 )
 
 
 class HnswDiagnosticContractTests(unittest.TestCase):
+    def test_raw_checkpoint_is_readable_after_each_completed_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            writer = RawCheckpointWriter(Path(directory))
+            writer.append(
+                "primary-search",
+                [{"engine": "alopex-hnsw", "ef_search": 64}],
+            )
+            records = [
+                json.loads(line)
+                for line in (Path(directory) / "hnsw-diagnostic.raw.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(records[0]["event"], "start")
+        self.assertEqual(records[1]["phase"], "primary-search")
+        self.assertEqual(records[1]["rows"][0]["engine"], "alopex-hnsw")
+
+    def test_benchmark_checkpoints_each_completed_search_case(self):
+        def engine(name):
+            return SearchEngine(name, 0.0, lambda *_: [], lambda: None, 0, 0)
+
+        def measure(engine, *_args, **kwargs):
+            return [{"engine": engine.name, "ef_search": kwargs["ef_search"]}]
+
+        def measure_ann(engines, *_args, **kwargs):
+            return [
+                {"engine": engine.name, "ef_search": kwargs["ef_search_values"][0]}
+                for engine in engines
+            ]
+
+        checkpoints = []
+        vectors = np.zeros((200, 2), dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "products.csv"
+            source.write_text("fixture", encoding="utf-8")
+            with (
+                patch.object(hnsw, "DATASET_SIZE", 200),
+                patch.object(hnsw, "load_amazon_products", return_value=list(range(200))),
+                patch.object(hnsw, "build_embeddings", return_value=(vectors, 1.0)),
+                patch.object(
+                    hnsw,
+                    "exact_ground_truth",
+                    return_value=([[0]] * 200, [[0]] * 200),
+                ),
+                patch.object(hnsw, "measure_setting", side_effect=measure),
+                patch.object(
+                    hnsw,
+                    "measure_counterbalanced_settings",
+                    side_effect=measure_ann,
+                ),
+                patch.object(hnsw, "recall_sweep", return_value=[]),
+                patch.object(
+                    hnsw, "build_hnswlib", side_effect=lambda _: engine("hnswlib")
+                ),
+                patch.object(
+                    hnsw, "build_alopex", side_effect=lambda _: engine("alopex-hnsw")
+                ),
+                patch.object(
+                    hnsw,
+                    "build_faiss_flat",
+                    side_effect=lambda _: engine("faiss-flat-exact"),
+                ),
+                patch.object(
+                    hnsw,
+                    "build_faiss_hnsw",
+                    side_effect=lambda _: engine("faiss-hnsw"),
+                ),
+            ):
+                hnsw.run_benchmark(
+                    source,
+                    min_queries=1,
+                    run_count=MEASUREMENT_RUNS,
+                    extended=False,
+                    checkpoint=lambda phase, rows: checkpoints.append((phase, rows)),
+                )
+
+        self.assertEqual(sum(phase == "primary-build" for phase, _ in checkpoints), 4)
+        self.assertEqual(
+            sum(phase == "primary-search" for phase, _ in checkpoints),
+            len(hnsw.EF_SEARCH_VALUES) + 1,
+        )
+
+    def test_counterbalanced_engine_orders_visit_each_position_once(self):
+        engines = ("hnswlib", "alopex-hnsw", "faiss-hnsw")
+
+        orders = counterbalanced_engine_orders(engines)
+
+        self.assertEqual(len(orders), MEASUREMENT_RUNS)
+        self.assertEqual(MEASUREMENT_RUNS, len(engines))
+        for engine in engines:
+            self.assertEqual(
+                sorted(order.index(engine) for order in orders),
+                list(range(len(engines))),
+            )
+
+    def test_counterbalanced_measurement_rotates_ann_engine_runs(self):
+        calls = []
+
+        def engine(name):
+            return SearchEngine(
+                name,
+                0.0,
+                lambda query, k, ef: calls.append(name) or [0] * k,
+                lambda: None,
+                0,
+                0,
+            )
+
+        rows = measure_counterbalanced_settings(
+            (engine("hnswlib"), engine("alopex-hnsw"), engine("faiss-hnsw")),
+            np.zeros((1, 2), dtype=np.float32),
+            [[0]],
+            [[0]],
+            ef_search_values=(16,),
+            min_queries=1,
+            run_count=3,
+            min_duration_seconds=0,
+        )
+
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(
+            calls[-9:],
+            [
+                "hnswlib",
+                "alopex-hnsw",
+                "faiss-hnsw",
+                "alopex-hnsw",
+                "faiss-hnsw",
+                "hnswlib",
+                "faiss-hnsw",
+                "hnswlib",
+                "alopex-hnsw",
+            ],
+        )
+        self.assertEqual([row["measurement_order"] for row in rows], [0, 1, 2] * 3)
+
+    def test_primary_benchmark_counterbalances_only_ann_engines(self):
+        def builder(name):
+            return lambda vectors: SearchEngine(
+                name, 0.0, lambda query, k, ef: [0] * k, lambda: None, 0, 0
+            )
+
+        with (
+            mock.patch.object(
+                contract,
+                "load_amazon_products",
+                return_value=[None] * DATASET_SIZE,
+            ),
+            mock.patch.object(
+                contract,
+                "build_embeddings",
+                return_value=(np.zeros((DATASET_SIZE, 1), dtype=np.float32), 0.0),
+            ),
+            mock.patch.object(
+                contract,
+                "exact_ground_truth",
+                return_value=([[0]] * 200, [[0]] * 200),
+            ),
+            mock.patch.object(contract, "build_hnswlib", builder("hnswlib")),
+            mock.patch.object(contract, "build_alopex", builder("alopex-hnsw")),
+            mock.patch.object(
+                contract, "build_faiss_flat", builder("faiss-flat-exact")
+            ),
+            mock.patch.object(contract, "build_faiss_hnsw", builder("faiss-hnsw")),
+            mock.patch.object(
+                contract, "measure_counterbalanced_settings", return_value=[]
+            ) as measure_ann,
+            mock.patch.object(contract, "measure_setting", return_value=[]) as measure_flat,
+            mock.patch.object(contract, "recall_sweep", return_value=[]),
+        ):
+            contract.run_benchmark(
+                Path(__file__), min_queries=1, run_count=MEASUREMENT_RUNS, extended=False
+            )
+
+        self.assertEqual(
+            [engine.name for engine in measure_ann.call_args.args[0]],
+            ["hnswlib", "alopex-hnsw", "faiss-hnsw"],
+        )
+        self.assertEqual(measure_ann.call_args.kwargs["run_count"], MEASUREMENT_RUNS)
+        self.assertEqual(measure_flat.call_args.args[0].name, "faiss-flat-exact")
+
+    def test_sql_vector_literal_avoids_exponent_notation(self):
+        literal = _sql_vector_literal(
+            np.asarray([1e-8, -2e-10, 1.0], dtype=np.float32)
+        )
+
+        self.assertNotRegex(literal, r"\d(?:\.\d+)?[eE][+-]?\d+")
+        self.assertEqual(literal, "[0.00000001, -0.0000000002, 1.0]")
+
+    def test_sql_only_hybrid_uses_one_filtered_knn_statement(self):
+        class Database:
+            def __init__(self):
+                self.statements = []
+
+            def execute_sql(self, statement):
+                self.statements.append(statement)
+                if statement.startswith("SELECT"):
+                    return [{"id": 41}, {"id": 42}]
+                return []
+
+        database = Database()
+        search = _build_sql_only_hybrid(
+            database,
+            np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        )
+
+        self.assertEqual(
+            search(np.asarray([1.0, 0.0], dtype=np.float32), 0.2),
+            [41, 42],
+        )
+        self.assertTrue(database.statements[0].startswith("CREATE TABLE"))
+        insert = next(
+            statement
+            for statement in database.statements
+            if statement.startswith("INSERT INTO hybrid_rows")
+        )
+        self.assertIn("(0, 0, [1.0, 0.0])", insert)
+        self.assertTrue(
+            any(statement.startswith("CREATE INDEX") for statement in database.statements)
+        )
+        statement = database.statements[-1]
+        self.assertIn("WHERE bucket < 200", statement)
+        self.assertIn(
+            "vector_distance(embedding, [1.0, 0.0], 'cosine')", statement
+        )
+        self.assertIn("LIMIT 10 WITH (ef_search = 64)", statement)
+
     def test_search_measurement_terminates_on_fixed_query_count(self):
         calls = []
         engine = SearchEngine(
@@ -255,6 +493,9 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                         "alopex_advantageous_selectivities": [0.01],
                         "filter_aware_traversal": False,
                     },
+                    "hybrid_measurement_contract": {
+                        "alopex_query_surface": "SQL",
+                    },
                 },
                 scale={
                     "results": [
@@ -382,6 +623,7 @@ class HnswDiagnosticContractTests(unittest.TestCase):
             self.assertIn("| 0.99 |", report)
             self.assertIn("## Latency decomposition", report)
             self.assertIn("## Hybrid", report)
+            self.assertIn("Alopex query surface: `SQL`", report)
             self.assertIn("## Scale", report)
             self.assertIn("alopex-sql-hnsw-postfilter", report)
             self.assertIn("10,000", report)
@@ -401,62 +643,6 @@ class HnswDiagnosticContractTests(unittest.TestCase):
                 "hnsw-scale-curve.csv",
             ):
                 self.assertFalse((Path(directory) / stale).exists())
-
-    def test_extended_verification_owns_hnsw_performance_evidence(
-        self,
-    ):
-        workflow = (
-            Path(__file__).resolve().parents[2]
-            / ".github/workflows/parity-performance.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("issue_number:", workflow)
-        self.assertIn("actions/checkout@v4", workflow)
-        self.assertIn("maturin develop --release", workflow)
-        self.assertIn("31764184/archive.zip", workflow)
-        self.assertIn("glove-100-angular.hdf5", workflow)
-        self.assertIn(
-            "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
-            workflow,
-        )
-        self.assertIn("faiss-cpu==1.15.0", workflow)
-        self.assertIn("hnswlib==0.8.0", workflow)
-        self.assertIn('--release-version "$RELEASE_VERSION"', workflow)
-        self.assertIn('--glove-dataset "$GLOVE_DATASET"', workflow)
-        self.assertIn("--max-scale-n 50000", workflow)
-        self.assertNotIn("--baseline-only", workflow)
-        self.assertIn("environment.txt", workflow)
-        self.assertIn("benchmark-status.json", workflow)
-        self.assertIn("benchmark-status.md", workflow)
-        self.assertIn('"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])', workflow)
-        self.assertIn('"failure_stage": failure or incomplete', workflow)
-        self.assertIn("retain-run-outcome:", workflow)
-        self.assertIn("needs: performance", workflow)
-        self.assertIn("if: ${{ always() }}", workflow)
-        self.assertIn("${{ needs.performance.result }}", workflow)
-        self.assertIn("alopex.parity-performance-run/v1", workflow)
-        self.assertIn(
-            "parity-performance-outcome-${{ github.run_id }}-${{ github.run_attempt }}",
-            workflow,
-        )
-        self.assertIn("retention-days: 90", workflow)
-        self.assertIn('OMP_NUM_THREADS: "1"', workflow)
-        self.assertIn('RAYON_NUM_THREADS: "1"', workflow)
-        self.assertIn(
-            "parity-performance-${{ github.run_id }}-${{ github.run_attempt }}",
-            workflow,
-        )
-        release_workflow = (
-            Path(__file__).resolve().parents[2]
-            / ".github/workflows/alopex-py-release.yml"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("post-release-hnsw:", release_workflow)
-        self.assertFalse(
-            (
-                Path(__file__).resolve().parents[2]
-                / ".github/workflows/post-release-hnsw.yml"
-            ).exists()
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -503,6 +503,40 @@ fn check_text_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
     check_timestamp(&args[1..])
 }
 
+fn check_text_date_or_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_text(&args[..1])?;
+    for arg in &args[1..] {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Date | ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Date or Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_text_timestamp_or_interval(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_text(&args[..1])?;
+    for arg in &args[1..] {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Timestamp | ResolvedType::Interval | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Timestamp or Interval",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_timestamp_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
     check_timestamp(&args[..1])?;
     check_text(&args[1..])
@@ -671,9 +705,10 @@ fn check_vector_one(args: &[TypedExpr]) -> Result<(), PlannerError> {
     }
 }
 
-fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
+pub(crate) fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
     let first = match &args[0].resolved_type {
-        ResolvedType::Vector { dimension, .. } => *dimension,
+        ResolvedType::Vector { dimension, .. } => Some(*dimension),
+        ResolvedType::Null => None,
         ty => {
             return Err(PlannerError::type_mismatch(
                 "Vector",
@@ -683,7 +718,8 @@ fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
         }
     };
     let second = match &args[1].resolved_type {
-        ResolvedType::Vector { dimension, .. } => *dimension,
+        ResolvedType::Vector { dimension, .. } => Some(*dimension),
+        ResolvedType::Null => None,
         ty => {
             return Err(PlannerError::type_mismatch(
                 "Vector",
@@ -692,7 +728,9 @@ fn check_vector_triplet(args: &[TypedExpr]) -> Result<(), PlannerError> {
             ));
         }
     };
-    if first != second {
+    if let (Some(first), Some(second)) = (first, second)
+        && first != second
+    {
         return Err(PlannerError::vector_dimension_mismatch(
             first,
             second,
@@ -1319,9 +1357,15 @@ static SIGNATURES: &[ScalarSignature] = &[
         ReturnRule::FromArgs(return_arg0),
     ),
     sig(
+        "date_diff",
+        Arity::Exact(3),
+        check_text_date_or_timestamp,
+        ReturnRule::Fixed(ResolvedType::BigInt),
+    ),
+    sig(
         "extract",
         Arity::Exact(2),
-        check_text_timestamp,
+        check_text_timestamp_or_interval,
         ReturnRule::Fixed(ResolvedType::Double),
     ),
     sig(

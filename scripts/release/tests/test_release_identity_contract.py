@@ -12,7 +12,7 @@ class ReleaseIdentityContractTests(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
 
-    def test_development_workflows_do_not_use_named_branches_as_eligibility(self) -> None:
+    def test_development_workflows_check_prs_and_candidate_pushes(self) -> None:
         for path in (
             ".github/workflows/ci.yml",
             ".github/workflows/alopex-cli.yml",
@@ -22,8 +22,10 @@ class ReleaseIdentityContractTests(unittest.TestCase):
             ".github/workflows/release-process.yml",
         ):
             workflow = self.read(path)
-            self.assertNotIn("branches: [main, develop]", workflow, path)
-            self.assertNotIn("branches: [main]", workflow, path)
+            push = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:\n", 1)[0]
+            pull_request = workflow.split("\n  pull_request:\n", 1)[1].split("\n\n", 1)[0]
+            self.assertIn("branches: [main, 'integration/**', 'release/**']", push, path)
+            self.assertNotIn("    branches:", pull_request, path)
 
     def test_safe_tag_validates_commit_identity_not_branch_membership(self) -> None:
         script = self.read("scripts/release/safe-tag.sh")

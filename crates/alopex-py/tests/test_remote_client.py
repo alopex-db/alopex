@@ -13,11 +13,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import pytest
-
 import alopex
+import pytest
 from alopex import AlopexError, Database, RemoteDatabase, RemoteTransaction, Transaction
-
 
 # ---------------------------------------------------------------------------
 # スタブ HTTP サーバー
@@ -37,7 +35,7 @@ class StubState:
 class _StubHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *_args):  # noqa: D401 - silence the test server
+    def log_message(self, *_args):
         pass
 
     def _respond(self):
@@ -152,9 +150,8 @@ BAD_VALUE_CASES = [
 @pytest.mark.parametrize("wire", BAD_VALUE_CASES)
 def test_unknown_sql_value_wire_forms_are_protocol_errors(stub, wire):
     stub.body = _query_body(["v"], [[wire]])
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.execute_sql("SELECT v FROM t")
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.execute_sql("SELECT v FROM t")
     assert raised.value.code == "ALOPEX-PY203"
 
 
@@ -203,9 +200,8 @@ def test_column_order_and_duplicate_columns_match_embedded(stub):
 
 def test_row_arity_mismatch_is_a_protocol_error(stub):
     stub.body = _query_body(["a", "b"], [[{"Integer": 1}]])
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.execute_sql("SELECT a, b FROM t")
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.execute_sql("SELECT a, b FROM t")
     assert raised.value.code == "ALOPEX-PY203"
 
 
@@ -241,9 +237,8 @@ def test_server_error_codes_are_forwarded_verbatim(stub, status, code):
             "correlation_id": "cid-1234",
         }
     }
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.execute_sql("SELECT 1")
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.execute_sql("SELECT 1")
     assert raised.value.code == code
     assert raised.value.http_status == status
     assert raised.value.correlation_id == "cid-1234"
@@ -253,17 +248,15 @@ def test_server_error_codes_are_forwarded_verbatim(stub, status, code):
 def test_non_json_error_body_is_a_protocol_error(stub):
     stub.status = 502
     stub.raw_body = "<html>bad gateway</html>"
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.execute_sql("SELECT 1")
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.execute_sql("SELECT 1")
     assert raised.value.code == "ALOPEX-PY203"
 
 
 def test_non_json_success_body_is_a_protocol_error(stub):
     stub.raw_body = "not json"
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.execute_sql("SELECT 1")
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.execute_sql("SELECT 1")
     assert raised.value.code == "ALOPEX-PY203"
 
 
@@ -315,6 +308,46 @@ def test_placeholder_expansion_reuses_the_embedded_binder(stub):
     with RemoteDatabase(stub.url) as db:
         db.execute_sql(sql, params)
     assert stub.requests[-1]["body"]["sql"] == _bind_sql_params(sql, params)
+
+
+def test_parameterized_multiple_statements_fail_before_remote_request(stub):
+    from decimal import Decimal
+
+    with RemoteDatabase(stub.url) as db:
+        with pytest.raises(ValueError, match="複数 SQL 文") as error:
+            db.execute_sql(
+                "SELECT ? AS amount; SELECT ? AS amount",
+                [Decimal("12345678901234567.89")] * 2,
+            )
+        assert error.value.code == "ALOPEX-PY019"
+        assert stub.requests == []
+
+
+def test_remote_decimal_binding_preserves_digits_and_rejects_containers(stub):
+    from collections import UserDict
+    from decimal import Decimal
+    from types import MappingProxyType
+
+    with RemoteDatabase(stub.url) as db:
+        db.execute_sql("SELECT -? AS amount", [Decimal("12345678901234567.89")])
+        assert stub.requests[-1]["body"]["sql"] == (
+            "SELECT -CAST('12345678901234567.89' AS DECIMAL(19,2)) AS amount"
+        )
+        before = len(stub.requests)
+        for invalid in (UserDict({1: "x"}), MappingProxyType({1: "x"}), {1}):
+            with pytest.raises(TypeError):
+                db.execute_sql("SELECT ? AS amount", [invalid])
+        for invalid in (
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("1E+38"),
+            Decimal("1E-39"),
+            Decimal("1E+1000000"),
+        ):
+            with pytest.raises(ValueError, match="Decimal") as error:
+                db.execute_sql("SELECT ? AS amount", [invalid])
+            assert error.value.code == "ALOPEX-PY017"
+        assert len(stub.requests) == before
 
 
 def test_binder_errors_are_raised_before_any_request(stub):
@@ -677,16 +710,14 @@ def test_blank_sql_matches_the_embedded_none_without_a_request(stub, sql):
 
 
 def test_blank_sql_still_reports_binder_errors(stub):
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(ValueError):
-            db.execute_sql("   ", [1])
+    with RemoteDatabase(stub.url) as db, pytest.raises(ValueError):
+        db.execute_sql("   ", [1])
 
 
 def test_session_begin_without_session_id_is_a_protocol_error(stub):
     stub.body = {"expires_at": None}
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.begin()
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.begin()
     assert raised.value.code == "ALOPEX-PY203"
 
 
@@ -697,9 +728,8 @@ def test_cluster_status_reads_the_admin_status_cluster_field(stub):
     assert stub.requests[-1]["path"] == "/api/admin/status"
 
     stub.body = {"no_cluster_here": True}
-    with RemoteDatabase(stub.url) as db:
-        with pytest.raises(AlopexError) as raised:
-            db.cluster_status()
+    with RemoteDatabase(stub.url) as db, pytest.raises(AlopexError) as raised:
+        db.cluster_status()
     assert raised.value.code == "ALOPEX-PY203"
 
 
@@ -735,6 +765,9 @@ UNSUPPORTED_DATABASE_CALLS = [
     ("search_hnsw", ("idx", [1.0], 1)),
     ("drop_hnsw_index", ("idx",)),
     ("get_hnsw_stats", ("idx",)),
+    ("set_hnsw_cache_limit", (1024,)),
+    ("hnsw_cache_stats", ()),
+    ("warm_hnsw_index", ("idx",)),
     ("open", ("/tmp/db",)),
     ("new", ()),
     ("open_in_memory", ()),
@@ -755,21 +788,35 @@ def test_unsupported_database_methods_raise_with_a_reason(name, args):
 def test_thread_mode_is_refused_with_a_reason():
     db = RemoteDatabase("http://127.0.0.1:9")
     with pytest.raises(NotImplementedError) as raised:
-        db.thread_mode
+        _ = db.thread_mode
     assert raised.value.code == "ALOPEX-PY204"
 
 
 UNSUPPORTED_TRANSACTION_CALLS = [
+    ("prepare", ("SELECT ?",)),
+    ("execute_many", ("INSERT INTO t VALUES (?)", [[1]])),
+    ("savepoint", ("local_only",)),
+    ("rollback_to", ("local_only",)),
+    ("release", ("local_only",)),
     ("execute_sql_stream", ("SELECT 1",)),
     ("query_stream", (None,)),
+    ("prepare", ("SELECT 1",)),
+    ("execute_many", ("SELECT ?", [(1,)])),
     ("get", (b"k",)),
     ("put", (b"k", b"v")),
     ("delete", (b"k",)),
+    ("scan_prefix", (b"k",)),
+    ("scan_range", (b"a", b"z")),
+    ("scan_prefix_page", (b"a",)),
+    ("scan_range_page", (b"a", b"z")),
+    ("search_keys", (b"*",)),
     ("upsert_vector", (b"k", None, [1.0], None)),
     ("search_similar", ([1.0], None, 1)),
     ("get_vector", (b"k", None)),
     ("upsert_to_hnsw", ("idx", b"k", [1.0])),
     ("delete_from_hnsw", ("idx", b"k")),
+    ("prepare", ("SELECT 1",)),
+    ("execute_many", ("INSERT INTO t VALUES (?)", [[1]])),
 ]
 
 
@@ -781,6 +828,10 @@ def test_unsupported_transaction_methods_raise_with_a_reason(stub, name, args):
         with pytest.raises(NotImplementedError) as raised:
             getattr(txn, name)(*args)
     assert raised.value.code == "ALOPEX-PY204"
+    if name == "prepare":
+        assert "prepared statement handles" in str(raised.value)
+    elif name == "execute_many":
+        assert "atomic parameter batch endpoint" in str(raised.value)
 
 
 def _public_methods(cls):

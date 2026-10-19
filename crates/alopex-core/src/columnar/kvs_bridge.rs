@@ -34,6 +34,24 @@ pub mod key_layout {
     /// Provisioned V08 range-addressable columnar segment objects.
     pub const PREFIX_COLUMN_SEGMENT_V08: u8 = 0x15;
 
+    /// Table-owned data keyspaces, excluding reserved table metadata.
+    /// Callers delete these prefixes through their existing transaction.
+    pub fn table_data_prefixes(table_id: u32) -> [[u8; 5]; 5] {
+        [
+            PREFIX_COLUMN_SEGMENT,
+            PREFIX_SEGMENT_INDEX,
+            PREFIX_STATISTICS,
+            PREFIX_ROW_GROUP,
+            PREFIX_COLUMN_SEGMENT_V08,
+        ]
+        .map(|kind| {
+            let mut prefix = [0; 5];
+            prefix[0] = kind;
+            prefix[1..].copy_from_slice(&table_id.to_le_bytes());
+            prefix
+        })
+    }
+
     const V08_OBJECT_HEADER: u8 = 0;
     const V08_OBJECT_SCHEMA: u8 = 1;
     const V08_OBJECT_DIRECTORY: u8 = 2;
@@ -305,6 +323,7 @@ impl ColumnarKvsBridge {
     pub fn open_segment_reader(&self, table_id: u32, segment_id: u64) -> Result<SegmentReaderV2> {
         let segment = self.read_segment_raw(table_id, segment_id)?;
         SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
+            .and_then(|reader| reader.with_legacy_row_group_metadata(&segment.meta.row_groups))
     }
 
     /// セグメントメタデータのみ取得する（統計用）。

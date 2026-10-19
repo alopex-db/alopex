@@ -205,14 +205,28 @@ impl HnswStorage {
         Ok(())
     }
 
-    /// KVS からグラフを読み戻す。
-    pub(crate) fn load<'a, T: KVTransaction<'a>>(&self, txn: &mut T) -> Result<HnswGraph> {
-        let meta_key = self.meta_key();
-        let meta_bytes = txn.get(&meta_key)?.ok_or(Error::IndexNotFound {
+    /// Read only the header; graph checksum validation remains with full loading.
+    pub(crate) fn load_metadata<'a, T: KVTransaction<'a>>(
+        &self,
+        txn: &mut T,
+    ) -> Result<HnswMetadata> {
+        let bytes = txn.get(&self.meta_key())?.ok_or(Error::IndexNotFound {
             name: self.index_name.clone(),
         })?;
         let metadata: HnswMetadata =
-            bincode::deserialize(&meta_bytes).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            bincode::deserialize(&bytes).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        if metadata.version > HNSW_FORMAT_VERSION {
+            return Err(Error::UnsupportedIndexVersion {
+                found: metadata.version,
+                supported: HNSW_FORMAT_VERSION,
+            });
+        }
+        Ok(metadata)
+    }
+
+    /// KVS からグラフを読み戻す。
+    pub(crate) fn load<'a, T: KVTransaction<'a>>(&self, txn: &mut T) -> Result<HnswGraph> {
+        let metadata = self.load_metadata(txn)?;
 
         let mut node_bytes = Vec::with_capacity(metadata.next_node_id as usize);
         for node_id in 0..metadata.next_node_id {
@@ -248,12 +262,7 @@ impl HnswStorage {
                 all_node_checksums = hash(&node_bytes).wrapping_add(all_node_checksums);
 
                 key_to_node.insert(node_data.key.clone(), node_id as u32);
-                let norm = node_data
-                    .vector
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f32>()
-                    .sqrt();
+                let norm = super::vector_norm(&node_data.vector);
                 nodes.push(Some(HnswNode {
                     key: node_data.key,
                     vector: node_data.vector,

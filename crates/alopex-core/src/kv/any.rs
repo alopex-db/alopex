@@ -202,7 +202,7 @@ impl OwnedLsmTransaction {
     fn open_cursor(&mut self, bounds: OwnedLsmScanBounds) -> Result<Box<dyn OwnedKVScan>> {
         let lsm = self.lsm()?;
         let snapshot = lsm.acquire_owned_snapshot_reader();
-        let read_timestamp = {
+        {
             let state = self
                 .state
                 .lock()
@@ -211,9 +211,8 @@ impl OwnedLsmTransaction {
             if state.cursor_open {
                 return Err(Error::TxnClosed);
             }
-            state.start_timestamp
-        };
-        let tables = lsm.open_owned_sstable_cursors(&bounds, read_timestamp)?;
+        }
+        let tables = lsm.open_owned_sstable_cursors(&bounds)?;
         let mut state = self
             .state
             .lock()
@@ -368,6 +367,17 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
 
     fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
         self.open_cursor(OwnedLsmScanBounds::from(start.to_vec()))
+    }
+
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        for key in state.write_set.keys() {
+            visitor(key);
+        }
+        true
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
@@ -548,8 +558,7 @@ impl OwnedKVScan for OwnedLsmCursor {
         }
         let read_timestamp = self.read_timestamp()?;
         let lsm = OwnedLsmTransaction::lsm_from(&self.store)?;
-        let memtable_key =
-            lsm.owned_next_memtable_key_after(self.last_key.as_ref(), &self.bounds, read_timestamp);
+        let memtable_key = lsm.owned_next_memtable_key_after(self.last_key.as_ref(), &self.bounds);
         let table_key = Self::table_candidate(&mut self.tables, self.last_key.as_ref(), lsm)?;
         let base_key = match (memtable_key, table_key) {
             (Some(memory), Some(table)) => Some(memory.min(table)),
@@ -565,10 +574,11 @@ impl OwnedKVScan for OwnedLsmCursor {
                 (base_key, write_value)
             }
             (Some(base_key), Some((write_key, _))) if base_key < write_key => {
-                self.record_read(base_key.clone())?;
-                let value = lsm
-                    .owned_visible_at(&base_key, read_timestamp)?
-                    .and_then(|entry| entry.value);
+                let entry = lsm.owned_visible_at(&base_key, read_timestamp)?;
+                if entry.is_some() {
+                    self.record_read(base_key.clone())?;
+                }
+                let value = entry.and_then(|entry| entry.value);
                 (base_key, value)
             }
             (Some(_), Some((write_key, write_value))) => {
@@ -576,10 +586,11 @@ impl OwnedKVScan for OwnedLsmCursor {
                 (write_key, write_value)
             }
             (Some(base_key), None) => {
-                self.record_read(base_key.clone())?;
-                let value = lsm
-                    .owned_visible_at(&base_key, read_timestamp)?
-                    .and_then(|entry| entry.value);
+                let entry = lsm.owned_visible_at(&base_key, read_timestamp)?;
+                if entry.is_some() {
+                    self.record_read(base_key.clone())?;
+                }
+                let value = entry.and_then(|entry| entry.value);
                 (base_key, value)
             }
             (None, Some((write_key, write_value))) => {
@@ -710,6 +721,14 @@ impl<'a> KVTransaction<'a> for AnyKVTransaction<'a> {
             Self::Memory(tx) => tx.journal_pending_writes(),
             Self::Lsm(tx) => tx.journal_pending_writes(),
             Self::Owned(tx) => tx.journal_pending_writes(),
+        }
+    }
+
+    fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
+        match self {
+            Self::Memory(tx) => tx.visit_pending_write_keys(visitor),
+            Self::Lsm(tx) => tx.visit_pending_write_keys(visitor),
+            Self::Owned(tx) => tx.visit_pending_write_keys(visitor),
         }
     }
 
@@ -984,15 +1003,26 @@ mod tests {
             .clone()
             .begin_owned_transaction(TxnMode::ReadWrite)
             .unwrap();
-        transaction
+        let (empty_complete, empty_keys, complete, keys) = transaction
             .with_transaction(|transaction| {
+                let mut empty_keys = Vec::new();
+                let empty_complete =
+                    transaction.visit_pending_write_keys(&mut |key| empty_keys.push(key.to_vec()));
                 transaction.put(b"kept".to_vec(), b"before".to_vec())?;
+                transaction.put(b"kept".to_vec(), b"before".to_vec())?;
+                transaction.delete(b"deleted".to_vec())?;
                 let savepoint = transaction.create_savepoint()?;
                 transaction.put(b"discarded".to_vec(), b"after".to_vec())?;
                 transaction.rollback_to_savepoint(savepoint)?;
-                Ok(())
+                let mut keys = Vec::new();
+                let complete =
+                    transaction.visit_pending_write_keys(&mut |key| keys.push(key.to_vec()));
+                Ok((empty_complete, empty_keys, complete, keys))
             })
             .unwrap();
+        assert!(empty_complete && empty_keys.is_empty());
+        assert!(complete);
+        assert_eq!(keys, vec![b"deleted".to_vec(), b"kept".to_vec()]);
         transaction.commit().unwrap();
 
         let read = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
@@ -1039,9 +1069,32 @@ mod tests {
         writer.commit().unwrap();
 
         let reader = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
-        let error = reader
+        let page = reader
             .with_transaction(|transaction| {
                 transaction.search_keys(&KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2))
+            })
+            .unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!(page.scanned, 2);
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor, Some(b"dead-2".to_vec()));
+        let next = reader
+            .with_transaction(|transaction| {
+                let mut request = KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2);
+                request.cursor = page.next_cursor.clone();
+                transaction.search_keys(&request)
+            })
+            .unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.entries[0].key, b"live");
+        assert_eq!(next.scanned, 1);
+        assert!(!next.has_more);
+        let error = reader
+            .with_transaction(|transaction| {
+                transaction.search_keys(
+                    &KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2)
+                        .with_strict_budget(true),
+                )
             })
             .unwrap_err();
         assert!(error.to_string().contains("search scan budget exceeded"));

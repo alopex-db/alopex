@@ -1,10 +1,14 @@
-use std::sync::{Arc, Mutex};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use std::sync::{Arc, Mutex, Weak};
 
+use alopex_sql::{AlopexDialect, Parser};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::sql::{self, PyPreparedBinding};
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::DatabaseControl;
 use crate::error;
@@ -13,6 +17,56 @@ use crate::vector;
 use crate::vector::SliceOrOwned;
 use alopex_core::Key;
 use pyo3::types::PyAnyMethods;
+
+// Python cursors are opaque versioned handles; native layers retain raw keys.
+fn decode_scan_cursor(cursor: Option<Vec<u8>>) -> PyResult<Option<Vec<u8>>> {
+    cursor
+        .map(|cursor| {
+            let encoded = cursor.strip_prefix(b"alopex-scan-v1:").ok_or_else(|| {
+                PyValueError::new_err("invalid scan cursor; use next_cursor from a page")
+            })?;
+            URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| PyValueError::new_err("invalid scan cursor"))
+        })
+        .transpose()
+}
+
+fn key_scan_options(
+    limit: usize,
+    cursor: Option<Vec<u8>>,
+    scan_budget: usize,
+    max_bytes: usize,
+    include_internal: bool,
+    strict_budget: bool,
+) -> PyResult<alopex_embedded::KeyScanOptions> {
+    Ok(alopex_embedded::KeyScanOptions {
+        limit,
+        cursor: decode_scan_cursor(cursor)?,
+        scan_budget,
+        max_bytes,
+        include_internal,
+        strict_budget,
+    })
+}
+
+fn key_scan_page(py: Python<'_>, page: alopex_embedded::KeySearchPage) -> PyResult<Py<PyDict>> {
+    let response = PyDict::new(py);
+    response.set_item(
+        "entries",
+        page.entries
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect::<Vec<_>>(),
+    )?;
+    let cursor = page
+        .next_cursor
+        .map(|key| format!("alopex-scan-v1:{}", URL_SAFE_NO_PAD.encode(key)).into_bytes());
+    response.set_item("next_cursor", cursor)?;
+    response.set_item("scanned", page.scanned)?;
+    response.set_item("has_more", page.has_more)?;
+    Ok(response.unbind())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TxnState {
@@ -26,10 +80,140 @@ pub(crate) struct PyTransactionInner {
     state: Mutex<TxnState>,
 }
 
+/// Borrow the existing owner for one finite call; never create a rollback-on-drop wrapper.
+pub(super) fn with_prepared_transaction<T: Send>(
+    py: Python<'_>,
+    inner: &Arc<PyTransactionInner>,
+    executing: bool,
+    operation: impl FnOnce(&mut alopex_embedded::OwnedEmbeddedTransaction) -> alopex_embedded::Result<T>
+        + Send,
+) -> PyResult<T> {
+    enum CallError {
+        StateLock,
+        TransactionLock,
+        Closed,
+        StreamActive,
+        MustAbort,
+        Native(alopex_embedded::Error),
+    }
+    let result = py.detach(|| {
+        let state = inner.state.lock().map_err(|_| CallError::StateLock)?;
+        if *state != TxnState::Active {
+            return Err(CallError::Closed);
+        }
+        let mut guard = inner.txn.lock().map_err(|_| CallError::TransactionLock)?;
+        let txn = guard.as_mut().ok_or(CallError::Closed)?;
+        if executing {
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CallError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CallError::MustAbort);
+                }
+                _ => {}
+            }
+        }
+        operation(txn).map_err(CallError::Native)
+    });
+    result.map_err(|err| match err {
+        CallError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CallError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CallError::Closed => error::to_py_err("transaction is closed"),
+        CallError::StreamActive => {
+            error::stream_error("stream_active", "transaction stream is active")
+        }
+        CallError::MustAbort => error::stream_error(
+            "stream_abort_required",
+            "transaction stream requires rollback",
+        ),
+        CallError::Native(err) => error::embedded_err(err),
+    })
+}
+
+/// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
+pub(super) fn rollback_tracked_for_database_close(
+    py: Python<'_>,
+    tracked: &Mutex<Vec<Weak<PyTransactionInner>>>,
+    #[cfg(test)] rollback_fail_count: &std::sync::atomic::AtomicUsize,
+) -> PyResult<()> {
+    enum CloseError {
+        TrackingLock,
+        StateLock,
+        TransactionLock,
+        Native(alopex_embedded::Error),
+        #[cfg(test)]
+        Injected,
+    }
+
+    let result = py.detach(|| {
+        let mut tracked = tracked.lock().map_err(|_| CloseError::TrackingLock)?;
+        let mut first_error = None;
+        tracked.retain(|weak| {
+            let Some(handle) = weak.upgrade() else {
+                return false;
+            };
+            // Match commit's state -> transaction order. The tracking guard is also
+            // acquired and released in this detached phase, before any Python error.
+            let mut state = match handle.state.lock() {
+                Ok(state) => state,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::StateLock);
+                    return true;
+                }
+            };
+            let mut transaction = match handle.txn.lock() {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    first_error.get_or_insert(CloseError::TransactionLock);
+                    return true;
+                }
+            };
+            #[cfg(test)]
+            // `try_update` is unstable on the project's Rust 1.90 MSRV.
+            #[allow(deprecated)]
+            if rollback_fail_count
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                first_error.get_or_insert(CloseError::Injected);
+                return true;
+            }
+            if let Some(txn) = transaction.as_mut() {
+                if let Err(error) = txn.rollback() {
+                    // Preserve the error and handle, not a promise that the consuming
+                    // native rollback can be retried after a backend failure.
+                    first_error.get_or_insert(CloseError::Native(error));
+                    return true;
+                }
+            }
+            *transaction = None;
+            if *state == TxnState::Active {
+                *state = TxnState::RolledBack;
+            }
+            false
+        });
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    });
+    result.map_err(|error| match error {
+        CloseError::TrackingLock => error::to_py_err("transaction tracking lock poisoned"),
+        CloseError::StateLock => error::to_py_err("transaction state lock poisoned"),
+        CloseError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+        CloseError::Native(error) => error::embedded_err(error),
+        #[cfg(test)]
+        CloseError::Injected => error::to_py_err("ロールバック失敗（テスト注入）"),
+    })
+}
+
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
-    #[allow(dead_code)]
-    pub(crate) db: Arc<alopex_embedded::Database>,
     pub(crate) control: Arc<DatabaseControl>,
     pub(crate) streams: Arc<StreamLeaseRegistry>,
     #[allow(dead_code)]
@@ -46,7 +230,7 @@ impl PyTransaction {
         streams: Arc<StreamLeaseRegistry>,
     ) -> PyResult<Self> {
         control.ensure_open()?;
-        let txn = Arc::clone(&db)
+        let txn = db
             .begin_owned_embedded_transaction(mode)
             .map_err(error::embedded_err)?;
         let inner = PyTransactionInner {
@@ -54,7 +238,6 @@ impl PyTransaction {
             state: Mutex::new(TxnState::Active),
         };
         Ok(Self {
-            db,
             control,
             streams,
             inner: Arc::new(inner),
@@ -193,6 +376,170 @@ impl PyTransaction {
 
     fn delete(&self, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete(key))
+    }
+
+    #[pyo3(signature = (prefix, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = 104_857_600, include_internal = false, strict_budget = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_prefix(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        limit: Option<usize>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        max_total_bytes: usize,
+        include_internal: bool,
+        strict_budget: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = key_scan_options(
+            page_size,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+            strict_budget,
+        )?;
+        let entries = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_prefix_all(prefix, &options, limit, max_total_bytes)
+        })?;
+        Ok(
+            PyList::new(py, entries.into_iter().map(|e| (e.key, e.value)))?
+                .call_method0("__iter__")?
+                .unbind(),
+        )
+    }
+
+    #[pyo3(signature = (start, end, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = 104_857_600, include_internal = false, strict_budget = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_range(
+        &self,
+        py: Python<'_>,
+        start: &[u8],
+        end: &[u8],
+        limit: Option<usize>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        max_total_bytes: usize,
+        include_internal: bool,
+        strict_budget: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.control.ensure_open()?;
+        let options = key_scan_options(
+            page_size,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+            strict_budget,
+        )?;
+        let entries = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_range_all(start, end, &options, limit, max_total_bytes)
+        })?;
+        Ok(
+            PyList::new(py, entries.into_iter().map(|e| (e.key, e.value)))?
+                .call_method0("__iter__")?
+                .unbind(),
+        )
+    }
+
+    #[pyo3(signature = (prefix, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false, strict_budget = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_prefix_page(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+        strict_budget: bool,
+    ) -> PyResult<Py<PyDict>> {
+        self.control.ensure_open()?;
+        let options = key_scan_options(
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+            strict_budget,
+        )?;
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_prefix_page(prefix, &options)
+        })?;
+        key_scan_page(py, page)
+    }
+
+    #[pyo3(signature = (start, end, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false, strict_budget = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan_range_page(
+        &self,
+        py: Python<'_>,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+        strict_budget: bool,
+    ) -> PyResult<Py<PyDict>> {
+        self.control.ensure_open()?;
+        let options = key_scan_options(
+            limit,
+            cursor,
+            scan_budget,
+            max_bytes,
+            include_internal,
+            strict_budget,
+        )?;
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.scan_range_page(start, end, &options)
+        })?;
+        key_scan_page(py, page)
+    }
+
+    #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, *, include_internal = false, strict_budget = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_keys(
+        &self,
+        py: Python<'_>,
+        pattern: Bound<'_, PyAny>,
+        mode: &str,
+        limit: usize,
+        cursor: Option<Vec<u8>>,
+        scan_budget: usize,
+        max_bytes: usize,
+        include_internal: bool,
+        strict_budget: bool,
+    ) -> PyResult<Py<PyDict>> {
+        let pattern = match mode {
+            "glob" => alopex_embedded::KeyPattern::glob(pattern.extract::<Vec<u8>>()?),
+            "regex" => alopex_embedded::KeyPattern::regex(pattern.extract::<String>()?),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "mode must be either 'glob' or 'regex'",
+                ));
+            }
+        };
+        let request = alopex_embedded::KeySearchRequest {
+            pattern,
+            cursor: decode_scan_cursor(cursor)?,
+            limit,
+            scan_budget,
+            max_bytes,
+            strict_budget,
+        };
+        self.control.ensure_open()?;
+        let page = with_prepared_transaction(py, &self.inner, true, |txn| {
+            txn.search_keys_visible(&request, include_internal)
+        })?;
+        key_scan_page(py, page)
     }
 
     fn upsert_vector(
@@ -492,8 +839,15 @@ impl PyTransaction {
         sql: &str,
         params: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        sql::validate_sql_input(sql)?;
+        let bindings = sql::prepared_bindings(params.as_ref())?;
         self.ensure_active()?;
+        if sql::is_transaction_control_statement(sql) {
+            return Err(error::to_py_err(
+                "Transaction.execute_sql does not accept transaction control SQL; use Transaction.savepoint(), Transaction.rollback_to(), Transaction.release(), Transaction.commit(), or Transaction.rollback()",
+            ));
+        }
+        sql::bind_rendered_params(sql, &vec![String::new(); bindings.len()])?;
 
         // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
         // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
@@ -505,17 +859,91 @@ impl PyTransaction {
             Embedded(alopex_embedded::Error),
         }
 
-        let result = py.detach(|| {
-            let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
-            let txn = guard.as_mut().ok_or(ExecError::Closed)?;
-            txn.execute_sql(&bound_sql).map_err(ExecError::Embedded)
+        let prepared_statement = (!bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| matches!(binding, PyPreparedBinding::Native(_))))
+        .then(|| Parser::parse_sql(&AlopexDialect, sql).ok())
+        .flatten()
+        .and_then(|mut statements| {
+            if statements.len() == 1 {
+                statements.pop()
+            } else {
+                None
+            }
         });
+        let result = if let Some(statement) = prepared_statement {
+            let values = bindings
+                .into_iter()
+                .map(|binding| match binding {
+                    PyPreparedBinding::Native(native) => native,
+                    PyPreparedBinding::Rendered(_) => unreachable!("all bindings are native"),
+                })
+                .collect::<Vec<_>>();
+            py.detach(|| {
+                let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
+                let txn = guard.as_mut().ok_or(ExecError::Closed)?;
+                txn.execute_prepared_statement(&statement, &values)
+                    .map_err(ExecError::Embedded)
+            })
+        } else {
+            let rendered = bindings
+                .into_iter()
+                .map(sql::render_prepared_binding)
+                .collect::<alopex_embedded::Result<Vec<_>>>()
+                .map_err(error::embedded_err)?;
+            let bound_sql = sql::bind_rendered_params(sql, &rendered)?;
+            py.detach(|| {
+                let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
+                let txn = guard.as_mut().ok_or(ExecError::Closed)?;
+                txn.execute_sql(&bound_sql).map_err(ExecError::Embedded)
+            })
+        };
         let result = result.map_err(|err| match err {
             ExecError::LockPoisoned => error::to_py_err("transaction lock poisoned"),
             ExecError::Closed => error::to_py_err("transaction is closed"),
             ExecError::Embedded(err) => error::embedded_err(err),
         })?;
-        crate::embedded::sql::execution_result_to_py(py, result)
+        sql::execution_result_to_py(py, result)
+    }
+
+    /// Prepare one native-bound statement owned by this transaction.
+    fn prepare(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+    ) -> PyResult<crate::embedded::database::PyPreparedStatement> {
+        crate::embedded::database::PyPreparedStatement::for_transaction(
+            py,
+            sql,
+            Arc::clone(&self.inner),
+            Arc::clone(&self.control),
+        )
+    }
+
+    /// Execute native rows without committing. Execution errors require explicit rollback.
+    fn execute_many(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        rows: Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.prepare(py, sql)?.execute_many(py, rows)
+    }
+
+    /// Create a named savepoint within this transaction.
+    fn savepoint(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.create_savepoint(name))
+    }
+
+    /// Roll back changes made after the latest matching savepoint.
+    fn rollback_to(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.rollback_to_savepoint(name))
+    }
+
+    /// Release the latest matching savepoint and its descendants.
+    fn release(&self, name: &str) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.release_savepoint(name))
     }
 
     /// Open a local SELECT stream within this explicit transaction.
@@ -651,50 +1079,68 @@ impl PyTransaction {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
-        if *state != TxnState::Active {
-            return Err(error::to_py_err("transaction is closed"));
+        enum CommitError {
+            StateLock,
+            TransactionLock,
+            Closed,
+            StreamActive,
+            StreamAbortRequired,
+            Native(alopex_embedded::Error),
         }
-        let mut guard = self
-            .inner
-            .txn
-            .lock()
-            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
-        match txn.session().status() {
-            alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
-                return Err(error::stream_error(
-                    "stream_active",
-                    "commit is not allowed while a transaction stream is active",
-                ));
+
+        // No Python error may be constructed while these guards are held: doing
+        // so could reacquire the GIL before another Python caller releases it.
+        let result = py.detach(|| {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| CommitError::StateLock)?;
+            if *state != TxnState::Active {
+                return Err(CommitError::Closed);
             }
-            alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
-                return Err(error::stream_error(
-                    "stream_abort_required",
-                    "transaction stream requires rollback before commit",
-                ));
+            let mut guard = self
+                .inner
+                .txn
+                .lock()
+                .map_err(|_| CommitError::TransactionLock)?;
+            let txn = guard.as_mut().ok_or(CommitError::Closed)?;
+            match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                    return Err(CommitError::StreamActive);
+                }
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                    return Err(CommitError::StreamAbortRequired);
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        let result = py.detach(|| txn.commit());
-        match result {
-            Ok(()) => {
-                *guard = None;
-                *state = TxnState::Committed;
-                Ok(())
+            match txn.commit() {
+                Ok(()) => {
+                    *guard = None;
+                    *state = TxnState::Committed;
+                    Ok(())
+                }
+                Err(err) => {
+                    *guard = None;
+                    *state = TxnState::RolledBack;
+                    Err(CommitError::Native(err))
+                }
             }
-            Err(err) => {
-                *guard = None;
-                *state = TxnState::RolledBack;
-                Err(error::embedded_err(err))
-            }
-        }
+        });
+        result.map_err(|err| match err {
+            CommitError::StateLock => error::to_py_err("transaction state lock poisoned"),
+            CommitError::TransactionLock => error::to_py_err("transaction lock poisoned"),
+            CommitError::Closed => error::to_py_err("transaction is closed"),
+            CommitError::StreamActive => error::stream_error(
+                "stream_active",
+                "commit is not allowed while a transaction stream is active",
+            ),
+            CommitError::StreamAbortRequired => error::stream_error(
+                "stream_abort_required",
+                "transaction stream requires rollback before commit",
+            ),
+            CommitError::Native(err) => error::embedded_err(err),
+        })
     }
 
     fn rollback(&self) -> PyResult<()> {
@@ -768,6 +1214,7 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn transaction(
         database: Arc<alopex_embedded::Database>,
@@ -836,6 +1283,59 @@ mod tests {
     }
 
     #[test]
+    fn savepoint_rollback_to_and_release_preserve_prior_sql_work() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (1)", None)
+                .expect("first insert");
+            txn.savepoint("retry").expect("savepoint");
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (2)", None)
+                .expect("second insert");
+            txn.rollback_to("retry").expect("rollback to savepoint");
+            txn.release("retry").expect("release savepoint");
+            txn.commit(py).expect("commit");
+        });
+
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 1);
+    }
+
+    #[test]
+    fn execute_sql_guides_control_statements_before_running_a_prefix() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            for sql in [
+                "BEGIN",
+                "COMMIT",
+                "-- comment\nSAVEPOINT retry",
+                "ROLLBACK TO retry",
+                "INSERT INTO t (id) VALUES (99); COMMIT",
+            ] {
+                let error = txn
+                    .execute_sql(py, sql, None)
+                    .expect_err("SQL transaction control must use Python methods");
+                assert!(
+                    error.to_string().contains("Transaction.savepoint()"),
+                    "{sql} did not explain the Python transaction API: {error}"
+                );
+            }
+            txn.execute_sql(py, "SELECT id FROM t", None)
+                .expect("ordinary SQL remains available");
+            txn.commit(py).expect("guard did not fail transaction");
+        });
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
+    }
+
+    #[test]
     fn execute_sql_on_completed_transaction_is_error() {
         pyo3::Python::initialize();
         let db = Arc::new(alopex_embedded::Database::new());
@@ -872,6 +1372,290 @@ mod tests {
             txn.commit(py).expect("commit");
         });
         assert!(txn.get(b"key").is_err());
+    }
+
+    #[test]
+    fn commit_releases_gil_while_waiting_and_locks_before_reattaching() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        Python::initialize();
+        let deadline = Duration::from_secs(3);
+        let mut outcomes = Vec::new();
+        for lock_state in [true, false] {
+            let db = Arc::new(alopex_embedded::Database::new());
+            let txn = Arc::new(transaction(Arc::clone(&db), TxnMode::ReadWrite));
+            txn.put(b"committed-key", b"committed-value").unwrap();
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let holder_inner = Arc::clone(&txn.inner);
+            let holder = thread::spawn(move || {
+                if lock_state {
+                    let _guard = holder_inner.state.lock().unwrap();
+                    let _ = held_tx.send(());
+                    // The native coordinator releases this guard even on a failed probe.
+                    let _ = release_rx.recv();
+                } else {
+                    let _guard = holder_inner.txn.lock().unwrap();
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                }
+            });
+            if held_rx.recv_timeout(deadline).is_err() {
+                let _ = release_tx.send(());
+                holder.join().unwrap();
+                panic!("mutex holder did not become ready");
+            }
+
+            let (started_tx, started_rx) = mpsc::channel();
+            let commit_txn = Arc::clone(&txn);
+            let commit = thread::spawn(move || {
+                Python::attach(|py| {
+                    // Notify only after acquiring the GIL, before entering the real method.
+                    let _ = started_tx.send(());
+                    commit_txn.commit(py).map_err(|error| error.to_string())
+                })
+            });
+            let started = started_rx.recv_timeout(deadline).is_ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (observe_tx, observe_rx) = mpsc::channel();
+            let (unlocked_tx, unlocked_rx) = mpsc::channel();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let observer_inner = Arc::clone(&txn.inner);
+            // Never let a probe which acquired the GIL before commit count as progress.
+            let observer = started.then(|| {
+                thread::spawn(move || {
+                    Python::attach(|_| {
+                        let _ = ready_tx.send(());
+                        if observe_rx.recv() != Ok(true) {
+                            return;
+                        }
+                        // Keep the GIL: commit can finish only its detached native phase.
+                        // All timeouts belong to the GIL-free coordinator, not this worker.
+                        loop {
+                            if let Ok(state) = observer_inner.state.try_lock() {
+                                if *state == super::TxnState::Committed {
+                                    if let Ok(transaction) = observer_inner.txn.try_lock() {
+                                        if transaction.is_none() {
+                                            let _ = unlocked_tx.send(());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            match stop_rx.try_recv() {
+                                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                                Err(mpsc::TryRecvError::Empty) => thread::yield_now(),
+                            }
+                        }
+                    });
+                })
+            });
+            let gil_progress = started && ready_rx.recv_timeout(deadline).is_ok();
+            // Release the only contended mutex before waiting for or asserting any result.
+            let _ = release_tx.send(());
+            let _ = observe_tx.send(gil_progress);
+            let locks_released = gil_progress && unlocked_rx.recv_timeout(deadline).is_ok();
+            let _ = stop_tx.send(());
+            // On RED the observer can now acquire the GIL and consume the queued false.
+            holder.join().unwrap();
+            if let Some(observer) = observer {
+                observer.join().unwrap();
+            }
+            let committed = commit.join().unwrap();
+            let mut reader = db.begin(TxnMode::ReadOnly).unwrap();
+            assert_eq!(
+                reader.get(b"committed-key").unwrap(),
+                Some(b"committed-value".to_vec())
+            );
+            assert!(committed.is_ok(), "commit result: {committed:?}");
+            assert_eq!(*txn.inner.state.lock().unwrap(), super::TxnState::Committed);
+            assert!(txn.inner.txn.lock().unwrap().is_none());
+            outcomes.push((lock_state, started, gil_progress, locks_released));
+        }
+        // Both state/txn cells run and every worker joins before a regression can fail.
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, started, progress, unlocked)| *started && *progress && *unlocked),
+            "(state_mutex, started, GIL_progress, locks_before_GIL_return): {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn prepared_execution_serializes_with_close_and_commit_without_gil_deadlock() {
+        use std::sync::{atomic::AtomicUsize, mpsc, Mutex};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        Python::initialize();
+        let deadline = Duration::from_secs(3);
+        for close in [true, false] {
+            let db = Arc::new(alopex_embedded::Database::new());
+            db.execute_sql("CREATE TABLE prepared_race (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            let txn = Arc::new(transaction(Arc::clone(&db), TxnMode::ReadWrite));
+            let tracked = Arc::new(Mutex::new(vec![Arc::downgrade(&txn.inner)]));
+            let statement = alopex_sql::Parser::parse_sql(
+                &alopex_sql::AlopexDialect,
+                "INSERT INTO prepared_race VALUES (?)",
+            )
+            .unwrap()
+            .remove(0);
+            let expected = if close {
+                super::TxnState::RolledBack
+            } else {
+                super::TxnState::Committed
+            };
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (executed_tx, executed_rx) = mpsc::channel();
+            let prepared_inner = Arc::clone(&txn.inner);
+            let prepared = thread::spawn(move || {
+                let result = Python::attach(|py| {
+                    super::with_prepared_transaction(
+                        py,
+                        &prepared_inner,
+                        true,
+                        move |transaction| {
+                            // Both guards are held: close/commit must first wait for state.
+                            let _ = held_tx.send(());
+                            if release_rx.recv_timeout(deadline * 4).is_err() {
+                                return Ok(None);
+                            }
+                            transaction
+                                .execute_prepared_statement(
+                                    &statement,
+                                    &[alopex_sql::SqlValue::Integer(1)],
+                                )
+                                .map(Some)
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+                });
+                let _ = executed_tx.send(result);
+            });
+            let held = held_rx.recv_timeout(deadline).is_ok();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let finish_txn = Arc::clone(&txn);
+            let finish_tracked = Arc::clone(&tracked);
+            let finisher = thread::spawn(move || {
+                let result = Python::attach(|py| {
+                    // This notification precedes the method's state-lock acquisition.
+                    let _ = started_tx.send(());
+                    if close {
+                        super::rollback_tracked_for_database_close(
+                            py,
+                            &finish_tracked,
+                            &AtomicUsize::new(0),
+                        )
+                    } else {
+                        finish_txn.commit(py)
+                    }
+                    .map_err(|error| error.to_string())
+                });
+                let _ = finished_tx.send(result);
+            });
+            let started = started_rx.recv_timeout(deadline).is_ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (observe_tx, observe_rx) = mpsc::channel();
+            let (unlocked_tx, unlocked_rx) = mpsc::channel();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let observer_inner = Arc::clone(&txn.inner);
+            let observer = thread::spawn(move || {
+                Python::attach(|_| {
+                    let _ = ready_tx.send(());
+                    if observe_rx.recv_timeout(deadline * 4) != Ok(true) {
+                        return;
+                    }
+                    // Keep the GIL until every native guard is observable as released.
+                    let until = Instant::now() + deadline;
+                    while Instant::now() < until {
+                        if let Ok(registry) = tracked.try_lock() {
+                            if registry.is_empty() == close {
+                                if let Ok(state) = observer_inner.state.try_lock() {
+                                    if *state == expected {
+                                        if let Ok(transaction) = observer_inner.txn.try_lock() {
+                                            if transaction.is_none() {
+                                                let _ = unlocked_tx.send(());
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                            break;
+                        }
+                        thread::yield_now();
+                    }
+                });
+            });
+            let gil_progress = started && ready_rx.recv_timeout(deadline).is_ok();
+            // Release both workers even if a GIL probe failed; never assert while blocked.
+            let _ = release_tx.send(());
+            let _ = observe_tx.send(held && gil_progress);
+            let unlocked = held && gil_progress && unlocked_rx.recv_timeout(deadline).is_ok();
+            let _ = stop_tx.send(());
+            let executed = executed_rx.recv_timeout(deadline);
+            let finished = finished_rx.recv_timeout(deadline);
+            let mut joined = true;
+            for worker in [prepared, finisher, observer] {
+                let until = Instant::now() + deadline;
+                while !worker.is_finished() && Instant::now() < until {
+                    thread::yield_now();
+                }
+                // Bound join waits; the runner's process timeout still guards lock regressions.
+                joined &= worker.is_finished() && worker.join().is_ok();
+            }
+            assert!(
+                held && gil_progress && unlocked && joined,
+                "close={close}: held={held}, GIL_progress={gil_progress}, guards_released={unlocked}, joined={joined}"
+            );
+            assert!(
+                matches!(
+                    executed,
+                    Ok(Ok(Some(alopex_sql::ExecutionResult::RowsAffected(1))))
+                ),
+                "prepared: {executed:?}"
+            );
+            assert!(
+                matches!(finished, Ok(Ok(()))),
+                "close={close}: {finished:?}"
+            );
+            assert_eq!(*txn.inner.state.lock().unwrap(), expected);
+            assert!(txn.inner.txn.lock().unwrap().is_none());
+            assert_eq!(
+                query_row_count(&db, "SELECT id FROM prepared_race"),
+                usize::from(!close)
+            );
+            let late = Python::attach(|py| {
+                super::with_prepared_transaction::<()>(py, &txn.inner, true, |_| {
+                    panic!("late prepared execution must not enter a completed transaction")
+                })
+                .map_err(|error| error.to_string())
+            });
+            assert!(late.is_err_and(|error| error.contains("transaction is closed")));
+        }
+    }
+
+    #[test]
+    fn committed_transaction_does_not_keep_database_locked() {
+        pyo3::Python::initialize();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("locked.alopex");
+        let db = Arc::new(alopex_embedded::Database::open(&path).expect("open"));
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+        drop(db);
+
+        Python::attach(|py| txn.commit(py).expect("commit"));
+
+        let reopened = alopex_embedded::Database::open(&path)
+            .expect("a committed transaction must not keep the database locked");
+        drop(reopened);
     }
 
     #[test]

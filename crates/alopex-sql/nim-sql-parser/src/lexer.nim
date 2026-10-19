@@ -38,7 +38,7 @@ type
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
     tkArrow, tkArrowText, tkPathArrow, tkPathArrowText
     tkBitAnd, tkBitOr, tkBitXor, tkBitNot, tkShiftLeft, tkShiftRight
-    tkQuestion
+    tkQuestion, tkTsMatch
     # Special
     tkEof
 
@@ -324,6 +324,12 @@ proc nextToken*(lex: var Lexer): Token =
       discard lex.advance()
       return lex.makeToken(tkNeq, "!=", startLine, startCol)
     return lex.makeToken(tkIdent, "!", startLine, startCol)
+  of '@':
+    discard lex.advance()
+    if lex.peek() == '@':
+      discard lex.advance()
+      return lex.makeToken(tkTsMatch, "@@", startLine, startCol)
+    return lex.makeToken(tkIdent, "@", startLine, startCol)
   else:
     discard lex.advance()
     return lex.makeToken(tkIdent, $c, startLine, startCol)

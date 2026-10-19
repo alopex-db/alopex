@@ -24,6 +24,7 @@ use crate::planner::typed_expr::{
     Quantifier, SortExpr, TypedCaseWhen, TypedExpr, TypedExprKind, TypedWindowSpec,
 };
 use crate::planner::types::ResolvedType;
+use crate::storage::SqlValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -132,12 +133,22 @@ pub type SubqueryPlanner<'p> = dyn Fn(&Statement, &[ScopedTable]) -> Result<(Log
 /// ```
 pub struct TypeChecker<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
+    parameters: Option<&'a [SqlValue]>,
 }
 
 impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     /// Create a new TypeChecker with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            parameters: None,
+        }
+    }
+
+    /// Use positional parameter values while checking a prepared statement.
+    pub fn with_parameters(mut self, parameters: &'a [SqlValue]) -> Self {
+        self.parameters = Some(parameters);
+        self
     }
 
     /// Get a reference to the catalog.
@@ -163,7 +174,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let scope = [ScopedTable::new(table.clone(), 0)];
         self.infer_type_with_scope(expr, &scope, &|stmt, _outer| {
-            let planner = crate::planner::Planner::new(self.catalog);
+            let planner = match self.parameters {
+                Some(parameters) => {
+                    crate::planner::Planner::with_parameters(self.catalog, parameters)
+                }
+                None => crate::planner::Planner::new(self.catalog),
+            };
             let plan = planner.plan(stmt)?;
             Ok((plan, Vec::new()))
         })
@@ -177,9 +193,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let span = expr.span;
         match &expr.kind {
-            ExprKind::Parameter { index } => Err(PlannerError::InvalidExpression {
-                message: format!("unbound positional parameter ?{index}"),
-            }),
+            ExprKind::Parameter { index } => self.infer_parameter(*index, span),
             ExprKind::Literal { literal: lit } => self.infer_literal_type(lit, span),
 
             ExprKind::ColumnRef {
@@ -426,6 +440,78 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             resolved_type,
             span,
         })
+    }
+
+    fn infer_parameter(&self, index: usize, span: Span) -> Result<TypedExpr, PlannerError> {
+        let value = self
+            .parameters
+            .and_then(|parameters| parameters.get(index.saturating_sub(1)))
+            .ok_or_else(|| PlannerError::InvalidExpression {
+                message: format!("unbound positional parameter ?{index}"),
+            })?;
+        let literal = match value {
+            SqlValue::Null => Literal::Null,
+            SqlValue::Boolean(value) => Literal::Boolean(*value),
+            SqlValue::Integer(value) => Literal::Number(value.to_string()),
+            SqlValue::BigInt(value) => Literal::Number(value.to_string()),
+            SqlValue::Float(value) if value.is_finite() => Self::floating_parameter_literal(*value),
+            SqlValue::Double(value) if value.is_finite() => {
+                Self::floating_parameter_literal(*value)
+            }
+            SqlValue::Text(value) => Literal::String(value.clone()),
+            SqlValue::Decimal(value) => {
+                let digits = value.coefficient.unsigned_abs().max(1).ilog10() + 1;
+                let precision = digits.max(u32::from(value.scale));
+                if precision > 38 {
+                    return Err(PlannerError::InvalidExpression {
+                        message: format!(
+                            "decimal parameter ?{index} exceeds precision or scale 38"
+                        ),
+                    });
+                }
+                return Ok(TypedExpr::cast(
+                    self.infer_literal_type(&Literal::String(value.to_string()), span)?,
+                    ResolvedType::Decimal {
+                        precision: precision as u8,
+                        scale: value.scale,
+                    },
+                    span,
+                ));
+            }
+            SqlValue::Json(value) => {
+                return Ok(TypedExpr::cast(
+                    self.infer_literal_type(&Literal::String(value.as_str().to_owned()), span)?,
+                    ResolvedType::Json,
+                    span,
+                ));
+            }
+            SqlValue::Vector(values) if values.iter().all(|value| value.is_finite()) => {
+                return Ok(TypedExpr::vector_literal(
+                    values.iter().map(|value| f64::from(*value)).collect(),
+                    values.len() as u32,
+                    span,
+                ));
+            }
+            _ => {
+                return Err(PlannerError::InvalidExpression {
+                    message: format!("unsupported positional parameter ?{index}"),
+                });
+            }
+        };
+        self.infer_literal_type(&literal, span)
+    }
+
+    /// Preserve a bound finite floating-point value as a SQL floating literal.
+    ///
+    /// Rust formats whole floating-point values without a decimal point (for
+    /// example, `2.0` as `"2"`). The type checker would then re-infer that
+    /// value as Integer or BigInt, so retain an explicit floating marker.
+    fn floating_parameter_literal(value: impl ToString) -> Literal {
+        let mut rendered = value.to_string();
+        if !rendered.contains(['.', 'e', 'E']) {
+            rendered.push_str(".0");
+        }
+        Literal::Number(rendered)
     }
 
     /// Infer the type of a column reference.
@@ -867,6 +953,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             StringConcat => {
                 self.check_string_concat_op(left, right, span)?;
                 Ok(Text)
+            }
+
+            TsMatch => {
+                if matches!(left, Text | Null) && matches!(right, Text | Null) {
+                    Ok(Boolean)
+                } else {
+                    Err(PlannerError::InvalidOperator {
+                        op: "@@".into(),
+                        type_name: format!("{} and {}", left.type_name(), right.type_name()),
+                        line: span.start.line,
+                        column: span.start.column,
+                    })
+                }
             }
         }
     }
@@ -1389,10 +1488,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         // is undefined after deduplication.
         if distinct && !typed_order_by.is_empty() {
             for sort in &typed_order_by {
-                let key = super::distinct_on_expr_signature(&sort.expr);
+                let key = super::structural_expr_signature(&sort.expr);
                 let appears = typed_args
                     .iter()
-                    .any(|arg| super::distinct_on_expr_signature(arg) == key);
+                    .any(|arg| super::structural_expr_signature(arg) == key);
                 if !appears {
                     return Err(PlannerError::invalid_expression(
                         "in an aggregate with DISTINCT, ORDER BY expressions must appear in \
@@ -1852,7 +1951,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn infer_like_type_with_scope(
         &self,
@@ -2741,10 +2839,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ///
     /// # Requirements
     ///
-    /// - First argument must be a Vector type (column reference)
-    /// - Second argument must be a Vector type (vector literal)
+    /// - First and second arguments must be Vector or NULL
     /// - Third argument must be a Text type (metric string)
-    /// - Vector dimensions must match
+    /// - Known vector dimensions must match
     pub fn check_vector_distance(
         &self,
         args: &[TypedExpr],
@@ -2759,61 +2856,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             });
         }
 
-        // First argument: Vector column
-        let col_dim = match &args[0].resolved_type {
-            ResolvedType::Vector { dimension, .. } => *dimension,
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[0].span.start.line,
-                    column: args[0].span.start.column,
-                });
-            }
-        };
-
-        // Second argument: Vector literal
-        let vec_dim = match &args[1].resolved_type {
-            ResolvedType::Vector { dimension, .. } => *dimension,
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[1].span.start.line,
-                    column: args[1].span.start.column,
-                });
-            }
-        };
-
-        // Check dimension match
-        self.check_vector_dimension(col_dim, vec_dim, args[1].span)?;
-
-        // Third argument: Metric string
-        match &args[2].resolved_type {
-            ResolvedType::Text => {
-                // Validate metric value if it's a literal
-                if let TypedExprKind::Literal(Literal::String(s)) = &args[2].kind {
-                    self.normalize_metric(s, args[2].span)?;
-                }
-            }
-            ResolvedType::Null => {
-                // NULL metric is not allowed
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: "Null".to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
-            }
-            other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
-            }
-        }
+        crate::scalar::check_vector_triplet(args)?;
 
         Ok(ResolvedType::Double)
     }

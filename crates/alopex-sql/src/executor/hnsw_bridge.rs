@@ -1,6 +1,6 @@
 use alopex_core::Error as CoreError;
 use alopex_core::kv::KVStore;
-use alopex_core::vector::hnsw::{HnswConfig, HnswIndex};
+use alopex_core::vector::hnsw::{HnswConfig, HnswIndex, SearchStats, validate_ef_search};
 use alopex_core::vector::{Metric, validate_dimensions};
 
 use crate::ast::ddl::VectorMetric;
@@ -8,6 +8,8 @@ use crate::catalog::{ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTxn, SqlValue};
+
+type KnnSearchResult = (Vec<(u64, f32)>, SearchStats, usize);
 
 /// SQL と HNSW の橋渡しを行うユーティリティ。
 pub struct HnswBridge;
@@ -29,6 +31,12 @@ impl HnswBridge {
         table: &TableMetadata,
         index: &IndexMetadata,
     ) -> Result<()> {
+        if index.unique {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "CREATE UNIQUE INDEX".into(),
+                reason: "HNSW indexes do not support UNIQUE".into(),
+            });
+        }
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
         let (column, col_idx) = vector_column(table, index)?;
         let config = build_config(index, column)?;
@@ -41,8 +49,9 @@ impl HnswBridge {
             let mut entries = Vec::new();
             for entry in storage.range_scan(0, u64::MAX)? {
                 let (row_id, row) = entry.map_err(ExecutorError::Storage)?;
-                let vector = required_vector(&row_id, &table.name, column, &row[col_idx])?;
-                entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                    entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+                }
             }
             entries
         };
@@ -80,8 +89,12 @@ impl HnswBridge {
         let (column, col_idx) = vector_column(table, index)?;
         let mut owned_entries = Vec::with_capacity(rows.len());
         for (row_id, row) in rows {
-            let vector = required_vector(row_id, &table.name, column, &row[col_idx])?;
-            owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            if let Some(vector) = extract_vector(&row[col_idx], column)? {
+                owned_entries.push((row_id.to_be_bytes().to_vec(), vector, Vec::new()));
+            }
+        }
+        if owned_entries.is_empty() {
+            return Ok(());
         }
         let entries: Vec<_> = owned_entries
             .iter()
@@ -135,7 +148,10 @@ impl HnswBridge {
             return Ok(());
         }
 
-        let vector = required_vector(&row_id, &table.name, column, &new_row[col_idx])?;
+        let new_vector = extract_vector(&new_row[col_idx], column)?;
+        let Some(vector) = new_vector else {
+            return Self::on_delete(txn, index, row_id);
+        };
         let entry = txn
             .hnsw_entry_mut(&index.name)
             .map_err(ExecutorError::from)?;
@@ -155,25 +171,25 @@ impl HnswBridge {
         query: &[f32],
         k: usize,
         ef_search: Option<usize>,
-    ) -> Result<Vec<(u64, f32)>> {
+    ) -> Result<KnnSearchResult> {
         let index = txn.hnsw_entry(index_name).map_err(ExecutorError::from)?;
-        let (results, _) = index
-            .search(query, k, ef_search)
+        let (results, stats, effective_ef) = index
+            .search_with_effective_ef(query, k, ef_search)
             .map_err(ExecutorError::from)?;
-        results
-            .into_iter()
-            .map(|res| {
-                let key: [u8; 8] =
-                    res.key
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| ExecutorError::InvalidOperation {
+        let results =
+            results
+                .into_iter()
+                .map(|res| {
+                    let key: [u8; 8] = res.key.as_slice().try_into().map_err(|_| {
+                        ExecutorError::InvalidOperation {
                             operation: "HNSW search".into(),
                             reason: format!("RowID フォーマットが不正です: {:?}", res.key),
-                        })?;
-                Ok((u64::from_be_bytes(key), res.distance))
-            })
-            .collect()
+                        }
+                    })?;
+                    Ok((u64::from_be_bytes(key), res.distance))
+                })
+                .collect::<Result<Vec<_>>>()?;
+        Ok((results, stats, effective_ef))
     }
 
     /// HNSW インデックスの存在確認。
@@ -256,12 +272,7 @@ fn parse_ef_search(value: &str) -> Result<usize> {
             reason: format!("整数値に変換できません: {value}"),
         })
     })?;
-    if parsed == 0 {
-        return Err(ExecutorError::Core(CoreError::InvalidParameter {
-            param: "ef_search".into(),
-            reason: "must be greater than zero".into(),
-        }));
-    }
+    validate_ef_search(parsed).map_err(ExecutorError::from)?;
     Ok(parsed)
 }
 
@@ -283,24 +294,6 @@ fn extract_vector(value: &SqlValue, column: &ColumnMetadata) -> Result<Option<Ve
             column: column.name.clone(),
             expected: format!("VECTOR (got {})", other.type_name()),
         })),
-    }
-}
-
-fn required_vector(
-    row_id: &u64,
-    table: &str,
-    column: &ColumnMetadata,
-    value: &SqlValue,
-) -> Result<Vec<f32>> {
-    match extract_vector(value, column)? {
-        Some(vec) => Ok(vec),
-        None => Err(ExecutorError::InvalidOperation {
-            operation: "HNSW index".into(),
-            reason: format!(
-                "テーブル {table} の HNSW インデックス対象カラム {} に NULL が含まれています (RowID={row_id})",
-                column.name
-            ),
-        }),
     }
 }
 
@@ -341,5 +334,21 @@ mod tests {
         let invalid = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
             .with_option("ef_search", "0");
         assert!(HnswBridge::search_ef(&invalid).is_err());
+
+        let too_large = IndexMetadata::new(1, "idx", "items", vec!["embedding".into()])
+            .with_option("ef_search", "10000000000000");
+        assert!(HnswBridge::search_ef(&too_large).is_err());
+    }
+
+    #[test]
+    fn null_vector_is_omitted_from_the_index() {
+        let column = ColumnMetadata::new(
+            "embedding",
+            ResolvedType::Vector {
+                dimension: 2,
+                metric: VectorMetric::L2,
+            },
+        );
+        assert_eq!(extract_vector(&SqlValue::Null, &column).unwrap(), None);
     }
 }

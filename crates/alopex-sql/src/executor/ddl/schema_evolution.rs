@@ -168,6 +168,17 @@ where
                 });
             }
             new_table.columns.remove(index);
+            for (_, updated) in &mut updated_indexes {
+                updated.column_indices = updated
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        new_table
+                            .get_column_index(column)
+                            .ok_or_else(|| ExecutorError::ColumnNotFound(column.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
             let rows = scan_rows(txn, &old_table)?;
             rewrite_rows(txn, &new_table, rows, |mut row| {
                 row.remove(index);
@@ -291,6 +302,13 @@ pub fn execute_truncate<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
     txn.delete_prefix(&KeyEncoder::table_prefix(table.table_id))?;
     txn.delete_prefix(&KeyEncoder::sequence_key(table.table_id))?;
+    if table.storage_options.storage_type == crate::catalog::StorageType::Columnar {
+        for prefix in
+            alopex_core::columnar::kvs_bridge::key_layout::table_data_prefixes(table.table_id)
+        {
+            txn.delete_prefix(&prefix)?;
+        }
+    }
     for index in catalog.get_indexes_for_table(table_name) {
         if matches!(index.method, Some(IndexMethod::Hnsw)) {
             HnswBridge::drop_index(txn, index, false)?;

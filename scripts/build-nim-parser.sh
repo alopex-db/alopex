@@ -11,15 +11,6 @@ MANIFEST_TOOL="${ROOT_DIR}/scripts/release/parser_asset_manifest.py"
 BACKEND="${NIM_PARSER_BACKEND:-auto}"
 TARGET=""
 ARCHIVE_DIR=""
-REQUIRED_ALOPEX_VERSION="$(python3 - "${ROOT_DIR}/Cargo.toml" <<'PY'
-import pathlib
-import sys
-import tomllib
-
-with pathlib.Path(sys.argv[1]).open("rb") as stream:
-    print(tomllib.load(stream)["workspace"]["package"]["version"])
-PY
-)"
 REQUIRED_CONTRACT_VERSION="$(tr -d '\r\n' < "${PARSER_DIR}/PARSER_CONTRACT_VERSION")"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
@@ -142,7 +133,9 @@ to_posix_path() {
 to_native_path() {
   local candidate="$1"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
-    candidate="$(cygpath -w "${candidate}")"
+    # MSVC's wrapper relativizes source paths against its long working path.
+    # An 8.3 TEMP alias can turn that into an overlong, unreadable relative path.
+    candidate="$(cygpath -w -l "${candidate}")"
   fi
   printf '%s\n' "${candidate}"
 }
@@ -202,13 +195,50 @@ resolve_executable() {
   printf '%s/%s\n' "${candidate_dir}" "$(basename "${candidate}")"
 }
 
+resolve_python() {
+  local python_candidate="${PYTHON:-}"
+
+  if [[ -z "${python_candidate}" ]]; then
+    python_candidate="$(command -v python3 || command -v python || true)"
+  fi
+  [[ -n "${python_candidate}" ]] || {
+    echo "Python 3 is required to produce parser archives" >&2
+    exit 1
+  }
+  python_candidate="$(to_posix_path "${python_candidate}")"
+  case "${python_candidate}" in
+    */.asdf/shims/python|*/.asdf/shims/python.exe|*/.asdf/shims/python3|*/.asdf/shims/python3.exe)
+      command -v asdf >/dev/null 2>&1 || {
+        echo "cannot resolve the asdf Python shim" >&2
+        exit 1
+      }
+      python_candidate="$(asdf which "$(basename "${python_candidate}" .exe)")"
+      ;;
+  esac
+  PYTHON_BIN="$(resolve_executable "${python_candidate}")"
+  [[ -x "${PYTHON_BIN}" ]] || {
+    echo "resolved Python is not executable: ${PYTHON_BIN}" >&2
+    exit 1
+  }
+}
+
+resolve_python
+REQUIRED_ALOPEX_VERSION="$("${PYTHON_BIN}" - "${ROOT_DIR}/Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+with pathlib.Path(sys.argv[1]).open("rb") as stream:
+    print(tomllib.load(stream)["workspace"]["package"]["version"])
+PY
+)"
+
 resolve_host_tools() {
   local nim_candidate="${ALOPEX_NIM_BIN:-}"
   local nimble_candidate="${ALOPEX_NIMBLE_BIN:-}"
   local nimble_bin_dir
   local nimble_name
   local nimble_sibling
-  local python_candidate
 
   if [[ -z "${nim_candidate}" ]]; then
     nim_candidate="$(command -v nim || true)"
@@ -251,26 +281,6 @@ resolve_host_tools() {
     exit 1
   }
 
-  python_candidate="$(command -v python3 || command -v python || true)"
-  [[ -n "${python_candidate}" ]] || {
-    echo "Python 3 is required to produce parser archives" >&2
-    exit 1
-  }
-  python_candidate="$(to_posix_path "${python_candidate}")"
-  case "${python_candidate}" in
-    */.asdf/shims/python|*/.asdf/shims/python.exe|*/.asdf/shims/python3|*/.asdf/shims/python3.exe)
-      command -v asdf >/dev/null 2>&1 || {
-        echo "cannot resolve the asdf Python shim" >&2
-        exit 1
-      }
-      python_candidate="$(asdf which "$(basename "${python_candidate}" .exe)")"
-      ;;
-  esac
-  PYTHON_BIN="$(resolve_executable "${python_candidate}")"
-  [[ -x "${PYTHON_BIN}" ]] || {
-    echo "resolved Python is not executable: ${PYTHON_BIN}" >&2
-    exit 1
-  }
 }
 
 if [[ "${BACKEND}" == "auto" ]]; then
@@ -322,6 +332,7 @@ build_host() (
   local python_bin
   local original_status
   local cleanup_status
+  local attempt
   local build_succeeded=0
 
   resolve_host_tools
@@ -347,14 +358,26 @@ build_host() (
   # created by this invocation.
   build_root="/tmp/alopex-nim-parser-v${REQUIRED_ALOPEX_VERSION}-contract-${REQUIRED_CONTRACT_VERSION}-${HOST_TARGET}"
   build_lock="${build_root}.lock"
+  # Called indirectly by the EXIT trap below.
+  # shellcheck disable=SC2329
   cleanup_host_build() {
     original_status=$?
     trap - EXIT
     set +e
     cleanup_status=0
     if [[ "${build_root_created}" == "1" ]]; then
-      rm -rf -- "${build_root}"
-      cleanup_status=$?
+      # Windows runners can retain a just-closed Nim output handle briefly.
+      # Retry only this invocation's canonical build root, then fail visibly.
+      for attempt in 1 2 3 4 5; do
+        if rm -rf -- "${build_root}" && [[ ! -e "${build_root}" ]]; then
+          cleanup_status=0
+          break
+        fi
+        cleanup_status=1
+        if [[ "${attempt}" != "5" ]]; then
+          sleep 1
+        fi
+      done
     fi
     if [[ "${build_lock_created}" == "1" ]]; then
       rmdir -- "${build_lock}" || cleanup_status=1
@@ -393,7 +416,10 @@ build_host() (
   home_owned="${build_root}/home"
   xdg_cache_owned="${build_root}/xdg-cache"
   tmp_owned="${build_root}/tmp"
+  # cygpath can expand 8.3 aliases only for paths that already exist. Create
+  # both compiler caches before converting their paths for the native tools.
   mkdir -p "${nimble_dir_owned}/pkgs2" "${build_root}/nimcache" \
+    "${build_root}/nimcache-static" \
     "${home_owned}" "${xdg_cache_owned}" "${tmp_owned}"
 
   find_seeded_package() {
@@ -448,7 +474,8 @@ EOF
   export SOURCE_DATE_EPOCH=0
   export TZ=UTC
   export ZERO_AR_DATE=1
-  export PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  PATH="$(dirname "${NIM_BIN}"):${PATH}"
+  export PATH
   unset NIMBLE_DIR
   export ALOPEX_NIM_BIN="${nim_bin_arg}"
   if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then
@@ -525,14 +552,14 @@ EOF
         static_flags+=(--passL:-s)
         ;;
       x86_64-apple-darwin|aarch64-apple-darwin)
-        static_flags+=(--passL:-Wl,-x)
+        static_flags+=("--passL:-Wl,-x")
         ;;
       x86_64-pc-windows-msvc)
         static_flags+=(
           --passL:-static
           --passL:-static-libgcc
           --passL:-s
-          --passL:-Wl,--no-insert-timestamp
+          "--passL:-Wl,--no-insert-timestamp"
         )
         # MSVC has no -fPIC (all code is position independent there) and
         # rejects the flag, so the Windows branch replaces it outright.
@@ -600,7 +627,9 @@ build_docker() {
     echo "docker is required for the Docker backend" >&2
     return 1
   }
-  if command -v podman >/dev/null 2>&1 && [[ "$(command -v docker)" -ef "$(command -v podman)" ]]; then
+  if docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq 'name=rootless'; then
+    user_args=()
+  elif command -v podman >/dev/null 2>&1 && [[ "$(command -v docker)" -ef "$(command -v podman)" ]]; then
     user_args=(--userns=keep-id --user "$(id -u):$(id -g)")
   fi
   output_dir="$(dirname "${OUTPUT}")"
@@ -674,7 +703,13 @@ write_identity_sidecars() (
   checksum_tmp="${output_dir}/.SHA256SUMS.$$"
   trap 'rm -f -- "${contract_tmp}" "${checksum_tmp}"' EXIT
 
-  if command -v sha256sum >/dev/null 2>&1; then
+  # PATH may contain x86-only checksum tools on an arm64 macOS host.
+  if [[ "$(uname -s)" == "Darwin" && -x /usr/bin/shasum ]]; then
+    output_sha="$(/usr/bin/shasum -a 256 "${OUTPUT}")"
+    output_sha="${output_sha%% *}"
+    static_output_sha="$(/usr/bin/shasum -a 256 "${STATIC_OUTPUT}")"
+    static_output_sha="${static_output_sha%% *}"
+  elif command -v sha256sum >/dev/null 2>&1; then
     output_sha="$(sha256sum "${OUTPUT}")"
     output_sha="${output_sha%% *}"
     static_output_sha="$(sha256sum "${STATIC_OUTPUT}")"

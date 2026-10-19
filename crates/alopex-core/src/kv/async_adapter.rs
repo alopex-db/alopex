@@ -3,6 +3,7 @@
 use crate::async_runtime::{BoxFuture, BoxStream};
 use crate::error::{Error, Result};
 use crate::kv::async_kv::{AsyncKVStore, AsyncKVTransaction};
+use crate::kv::async_kv::{WorkerTask, WorkerTaskResult};
 use crate::kv::{KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::types::{Key, TxnMode, Value};
 use core::pin::Pin;
@@ -78,6 +79,25 @@ impl AsyncKVTransactionAdapter {
 }
 
 impl<'txn> AsyncKVTransaction<'txn> for AsyncKVTransactionAdapter {
+    fn supports_worker_tasks(&self) -> bool {
+        true
+    }
+
+    fn async_worker_task<'a>(
+        &'a mut self,
+        task: WorkerTask,
+    ) -> BoxFuture<'a, Result<WorkerTaskResult>> {
+        let commands = self.command_tx.clone();
+        Box::pin(async move {
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            commands
+                .send(Command::WorkerTask { task, respond_to })
+                .await
+                .map_err(|_| Error::TxnClosed)?;
+            response.await.map_err(|_| Error::TxnClosed)?
+        })
+    }
+
     fn async_get<'a>(&'a self, key: &'a [u8]) -> BoxFuture<'a, Result<Option<Value>>> {
         let command_tx = self.command_tx.clone();
         let key = key.to_vec();
@@ -128,15 +148,19 @@ impl<'txn> AsyncKVTransaction<'txn> for AsyncKVTransactionAdapter {
         let prefix = prefix.to_vec();
         let error_sender = sender.clone();
 
-        tokio::spawn(async move {
-            if command_tx
-                .send(Command::ScanPrefix { prefix, sender })
-                .await
-                .is_err()
-            {
-                let _ = error_sender.send(Err(Error::TxnClosed)).await;
+        match command_tx.try_send(Command::ScanPrefix { prefix, sender }) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                let _ = error_sender.try_send(Err(Error::TxnClosed));
             }
-        });
+            Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
+                tokio::spawn(async move {
+                    if command_tx.send(command).await.is_err() {
+                        let _ = error_sender.send(Err(Error::TxnClosed)).await;
+                    }
+                });
+            }
+        }
 
         Box::pin(ReceiverStream { receiver })
     }
@@ -194,6 +218,10 @@ impl<'txn> AsyncKVTransaction<'txn> for AsyncKVTransactionAdapter {
 }
 
 enum Command {
+    WorkerTask {
+        task: WorkerTask,
+        respond_to: tokio::sync::oneshot::Sender<Result<WorkerTaskResult>>,
+    },
     Get {
         key: Vec<u8>,
         respond_to: tokio::sync::oneshot::Sender<Result<Option<Value>>>,
@@ -246,6 +274,22 @@ fn run_worker<S>(
 
     while let Some(command) = command_rx.blocking_recv() {
         match command {
+            Command::WorkerTask { task, respond_to } => {
+                let result = match txn.as_mut() {
+                    Some(transaction) => {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task(transaction)))
+                            .map_err(|_| Error::TxnClosed)
+                    }
+                    None => Err(Error::TxnClosed),
+                };
+                let failed = result.is_err();
+                let _ = respond_to.send(result);
+                if failed {
+                    // A failed callback may have changed the transaction. Close it
+                    // and let the worker perform its explicit rollback below.
+                    break;
+                }
+            }
             Command::Get { key, respond_to } => {
                 let result = (|| {
                     let txn = txn.as_mut().ok_or(Error::TxnClosed)?;
@@ -334,5 +378,147 @@ impl<T> Stream for ReceiverStream<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.receiver).poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RollbackCountingStore(Arc<AtomicUsize>);
+
+    struct RollbackCountingTransaction(Arc<AtomicUsize>);
+
+    impl<'a> KVTransaction<'a> for RollbackCountingTransaction {
+        fn id(&self) -> crate::types::TxnId {
+            crate::types::TxnId(1)
+        }
+        fn mode(&self) -> TxnMode {
+            TxnMode::ReadWrite
+        }
+        fn get(&mut self, _key: &Key) -> Result<Option<Value>> {
+            Ok(None)
+        }
+        fn put(&mut self, _key: Key, _value: Value) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&mut self, _key: Key) -> Result<()> {
+            Ok(())
+        }
+        fn scan_prefix(
+            &mut self,
+            _prefix: &[u8],
+        ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+            Ok(Box::new(std::iter::empty()))
+        }
+        fn scan_range(
+            &mut self,
+            _start: &[u8],
+            _end: &[u8],
+        ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+            Ok(Box::new(std::iter::empty()))
+        }
+        fn commit_self(self) -> Result<()> {
+            panic!("failed worker task must not commit")
+        }
+        fn rollback_self(self) -> Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl<'a> crate::txn::TxnManager<'a, RollbackCountingTransaction> for RollbackCountingStore {
+        fn begin(&'a self, mode: TxnMode) -> Result<RollbackCountingTransaction> {
+            KVStore::begin(self, mode)
+        }
+        fn commit(&'a self, txn: RollbackCountingTransaction) -> Result<()> {
+            txn.commit_self()
+        }
+        fn rollback(&'a self, txn: RollbackCountingTransaction) -> Result<()> {
+            txn.rollback_self()
+        }
+    }
+
+    impl KVStore for RollbackCountingStore {
+        type Transaction<'a> = RollbackCountingTransaction;
+        type Manager<'a> = Self;
+
+        fn txn_manager(&self) -> Self::Manager<'_> {
+            Self(Arc::clone(&self.0))
+        }
+        fn begin(&self, _mode: TxnMode) -> Result<Self::Transaction<'_>> {
+            Ok(RollbackCountingTransaction(Arc::clone(&self.0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_task_panic_closes_transaction_and_rolls_back_once() {
+        let rollbacks = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(RollbackCountingStore(Arc::clone(&rollbacks)));
+        let (commands, receiver) = tokio::sync::mpsc::channel(1);
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            run_worker(store, TxnMode::ReadWrite, receiver, ready)
+        });
+        started.await.unwrap().unwrap();
+        let mut adapter = AsyncKVTransactionAdapter::new(commands);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            adapter.async_worker_task(Box::new(|_| panic!("controlled worker task failure"))),
+        )
+        .await
+        .expect("worker task must report closure");
+        assert!(matches!(result, Err(Error::TxnClosed)));
+        assert!(matches!(
+            adapter.async_get(b"key").await,
+            Err(Error::TxnClosed)
+        ));
+        drop(adapter);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .expect("worker must finish");
+        assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+        assert!(outcome.is_ok(), "worker must contain the callback panic");
+    }
+
+    #[tokio::test]
+    async fn prefix_scan_reports_closed_worker_and_finishes() {
+        let (commands, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let adapter = AsyncKVTransactionAdapter::new(commands);
+        let mut stream = adapter.async_scan_prefix(b"key:");
+        assert!(matches!(stream.next().await, Some(Err(Error::TxnClosed))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn prefix_scan_waits_for_queue_capacity_and_preserves_rows() {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+        let (respond_to, _response) = tokio::sync::oneshot::channel();
+        assert!(commands
+            .try_send(Command::Get {
+                key: b"existing".to_vec(),
+                respond_to,
+            })
+            .is_ok());
+        let adapter = AsyncKVTransactionAdapter::new(commands);
+        let mut stream = adapter.async_scan_prefix(b"key:");
+        assert!(matches!(receiver.recv().await, Some(Command::Get { .. })));
+        let Some(Command::ScanPrefix { prefix, sender }) = receiver.recv().await else {
+            panic!("expected queued prefix scan");
+        };
+        assert_eq!(prefix, b"key:");
+        sender
+            .send(Ok((b"key:1".to_vec(), b"value".to_vec())))
+            .await
+            .unwrap();
+        drop(sender);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            (b"key:1".to_vec(), b"value".to_vec())
+        );
+        assert!(stream.next().await.is_none());
     }
 }

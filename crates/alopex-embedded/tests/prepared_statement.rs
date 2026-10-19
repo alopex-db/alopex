@@ -1,7 +1,222 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use alopex_embedded::{Database, Error};
 use alopex_sql::{ExecutionResult, SqlValue};
+
+fn assert_decimal_query(result: ExecutionResult, expected: SqlValue) {
+    let ExecutionResult::Query(rows) = result else {
+        panic!("decimal SELECT must return rows");
+    };
+    // SqlValue equality checks the Decimal variant and coefficient/scale, not f64 equality.
+    assert_eq!(rows.rows, vec![vec![expected]]);
+}
+
+#[test]
+fn rendered_decimal_matches_native_type_value_and_scale() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    for (coefficient, scale) in [
+        (0, 38),
+        (10, 0),
+        (-1000, 0),
+        (12300, 4),
+        (1_234_567_890_123_456_789, 2),
+        (10_i128.pow(38) - 1, 0),
+        (-1, 38),
+    ] {
+        let value = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+        let rendered = alopex_embedded::render_prepared_parameter(&value).unwrap();
+        assert_decimal_query(
+            database.execute_sql(&format!("SELECT {rendered}")).unwrap(),
+            value.clone(),
+        );
+        let mut native = database.prepare("SELECT ?").unwrap();
+        native.bind(1, value.clone()).unwrap();
+        assert_decimal_query(native.execute().unwrap(), value);
+    }
+    for (coefficient, scale) in [(10_i128.pow(38), 0), (1, 39), (i128::MIN, 0)] {
+        assert!(
+            alopex_embedded::render_prepared_parameter(&SqlValue::Decimal(DecimalValue::new(
+                coefficient,
+                scale
+            )))
+            .is_err()
+        );
+    }
+}
+
+fn check_native_decimal(coefficient: i128, scale: u8, literal: &str, stored: i128) {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    let value = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+    assert_decimal_query(
+        database
+            .execute_sql(&format!("SELECT DECIMAL '{literal}'"))
+            .unwrap(),
+        value.clone(),
+    );
+    let mut select = database.prepare("SELECT ?").unwrap();
+    select.bind(1, value.clone()).unwrap();
+    assert_decimal_query(select.execute().unwrap(), value.clone());
+
+    database
+        .execute_sql("CREATE TABLE amounts (amount DECIMAL(30,2))")
+        .unwrap();
+    let expected = SqlValue::Decimal(DecimalValue::new(stored, 2));
+    assert_decimal_query(
+        database
+            .execute_sql(&format!("SELECT CAST('{literal}' AS DECIMAL(30,2))"))
+            .unwrap(),
+        expected.clone(),
+    );
+    let mut session = database.sql_session();
+    session.execute_sql("BEGIN").unwrap();
+    {
+        let mut insert = session.prepare("INSERT INTO amounts VALUES (?)").unwrap();
+        insert.bind(1, value).unwrap();
+        insert.execute().unwrap();
+    }
+    assert_decimal_query(
+        session.execute_sql("SELECT amount FROM amounts").unwrap(),
+        expected.clone(),
+    );
+    session.execute_sql("COMMIT").unwrap();
+    assert_decimal_query(
+        database.execute_sql("SELECT amount FROM amounts").unwrap(),
+        expected,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_preserves_fraction_beyond_f64_precision() {
+    check_native_decimal(
+        1_234_567_890_123_456_789,
+        2,
+        "12345678901234567.89",
+        1_234_567_890_123_456_789,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_preserves_valid_precision_and_scale_boundaries() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    for (coefficient, scale, literal) in [
+        (
+            99_999_999_999_999_999_999_999_999_999_999_999_999i128,
+            0,
+            "99999999999999999999999999999999999999",
+        ),
+        (1, 38, "0.00000000000000000000000000000000000001"),
+        (0, 38, "0.00000000000000000000000000000000000000"),
+    ] {
+        let expected = SqlValue::Decimal(DecimalValue::new(coefficient, scale));
+        assert_decimal_query(
+            database
+                .execute_sql(&format!("SELECT DECIMAL '{literal}'"))
+                .unwrap(),
+            expected.clone(),
+        );
+        let mut select = database.prepare("SELECT ?").unwrap();
+        select.bind(1, expected.clone()).unwrap();
+        assert_decimal_query(select.execute().unwrap(), expected);
+    }
+}
+
+#[test]
+fn issue582_native_decimal_rejects_unchecked_invalid_values_without_panic() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    let mut failures = Vec::new();
+    for (coefficient, scale) in [(1, 39), (i128::MAX, 0), (i128::MIN, 0)] {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut select = database.prepare("SELECT ?").unwrap();
+            select
+                .bind(1, SqlValue::Decimal(DecimalValue::new(coefficient, scale)))
+                .unwrap();
+            select.execute()
+        }));
+        match outcome {
+            Ok(Err(Error::Sql(error)))
+                if error.to_string().to_ascii_lowercase().contains("decimal") => {}
+            other => failures.push(format!(
+                "coefficient={coefficient} scale={scale}: {other:?}"
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue582_native_decimal_preserves_integer_beyond_i64() {
+    check_native_decimal(
+        9_223_372_036_854_775_808,
+        0,
+        "9223372036854775808",
+        922_337_203_685_477_580_800,
+    );
+}
+
+#[test]
+fn issue582_native_decimal_rounds_positive_tie_away_from_zero() {
+    check_native_decimal(1005, 3, "1.005", 101);
+}
+
+#[test]
+fn issue582_native_decimal_rounds_negative_tie_away_from_zero() {
+    check_native_decimal(-1005, 3, "-1.005", -101);
+}
+
+#[test]
+fn issue582_native_decimal_precision_overflow_preserves_existing_rows() {
+    use alopex_sql::storage::DecimalValue;
+    let database = Arc::new(Database::new());
+    database.execute_sql("CREATE TABLE amounts (amount DECIMAL(3,2)); INSERT INTO amounts VALUES (DECIMAL '1.25')").unwrap();
+    // 9.995 rounds to 10.00, which exceeds DECIMAL(3,2).
+    let reference = database
+        .execute_sql("INSERT INTO amounts VALUES (CAST('9.995' AS DECIMAL(3,2)))")
+        .unwrap_err();
+    assert!(
+        matches!(&reference, Error::Sql(_)) && reference.to_string().contains("precision overflow"),
+        "{reference}"
+    );
+    let mut insert = database.prepare("INSERT INTO amounts VALUES (?)").unwrap();
+    insert
+        .bind(1, SqlValue::Decimal(DecimalValue::new(9995, 3)))
+        .unwrap();
+    let error = insert.execute().unwrap_err();
+    assert!(
+        matches!(&error, Error::Sql(_)) && error.to_string().contains("precision overflow"),
+        "{error}"
+    );
+    assert_decimal_query(
+        database.execute_sql("SELECT amount FROM amounts").unwrap(),
+        SqlValue::Decimal(DecimalValue::new(125, 2)),
+    );
+}
+
+#[test]
+fn issue582_native_decimal_change_preserves_double_parameters() {
+    let database = Arc::new(Database::new());
+    for value in [5.0, 1e20, -0.0, 1e-20, 1.5e300] {
+        let mut select = database.prepare("SELECT ?").unwrap();
+        select.bind(1, SqlValue::Double(value)).unwrap();
+        let ExecutionResult::Query(rows) = select.execute().unwrap() else {
+            panic!("SELECT rows")
+        };
+        let SqlValue::Double(actual) = rows.rows[0][0] else {
+            panic!("parameter lost Double type")
+        };
+        assert_eq!(actual.to_bits(), value.to_bits());
+    }
+    let mut division = database.prepare("SELECT ? / 2").unwrap();
+    division.bind(1, SqlValue::Double(5.0)).unwrap();
+    let ExecutionResult::Query(rows) = division.execute().unwrap() else {
+        panic!("SELECT rows")
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::Double(2.5)]]);
+}
 
 #[test]
 fn empty_binding_is_a_noop_for_parameter_free_batches() {
@@ -100,6 +315,350 @@ fn prepared_parameters_work_in_limit_offset_and_fetch_expressions() {
         panic!("SELECT must return rows");
     };
     assert_eq!(rows.rows.len(), 2);
+}
+
+#[test]
+fn prepared_vector_batch_does_not_expand_into_parser_payload() {
+    const ROWS: usize = 400;
+    const DIMENSIONS: usize = 128;
+
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))")
+        .unwrap();
+    let vector_literal = std::iter::repeat_n("0.25", DIMENSIONS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literal_sql = format!(
+        "INSERT INTO items (id, embedding) VALUES {}",
+        (0..ROWS)
+            .map(|row| format!("({row}, [{vector_literal}])"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert!(
+        literal_sql.len() < 1_048_576,
+        "literal SQL stays below the input limit"
+    );
+    let error = database.execute_sql(&literal_sql).unwrap_err();
+    assert!(
+        matches!(&error, Error::Sql(_))
+            && error
+                .to_string()
+                .contains("MessagePack collection limit of 65536 values exceeded"),
+        "literal batch must report its actual MessagePack collection constraint: {error}"
+    );
+
+    let sql = format!(
+        "INSERT INTO items (id, embedding) VALUES {}",
+        std::iter::repeat_n("(?, ?)", ROWS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert!(
+        sql.len() < 1_048_576,
+        "prepared SQL stays below the input limit"
+    );
+
+    let mut statement = database.prepare(&sql).unwrap();
+    for row in 0..ROWS {
+        statement
+            .bind(row * 2 + 1, SqlValue::Integer(row as i32))
+            .unwrap();
+        statement
+            .bind(row * 2 + 2, SqlValue::Vector(vec![0.25; DIMENSIONS]))
+            .unwrap();
+    }
+    statement.execute().unwrap();
+
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+    else {
+        panic!("COUNT must return rows");
+    };
+    assert_eq!(rows.rows, vec![vec![SqlValue::BigInt(ROWS as i64)]]);
+}
+
+#[test]
+fn prepared_native_vector_rejects_non_finite_values() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (embedding VECTOR(1, L2))")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (embedding) VALUES (?)")
+        .unwrap();
+    statement.bind(1, SqlValue::Vector(vec![f32::NAN])).unwrap();
+
+    assert!(matches!(
+        statement.execute(),
+        Err(Error::UnsupportedPreparedParameterType)
+    ));
+}
+
+#[test]
+fn prepared_fallback_literals_preserve_float_and_text_contracts() {
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Double(2.0)).unwrap(),
+        "2.0"
+    );
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Text("O'Brien".into())).unwrap(),
+        "'O''Brien'"
+    );
+    assert_eq!(
+        alopex_embedded::render_prepared_parameter(&SqlValue::Vector(vec![2.0])).unwrap(),
+        "[2.0]"
+    );
+}
+
+#[test]
+fn prepared_execute_many_commits_once_and_rolls_back_on_error() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id) VALUES (?)")
+        .unwrap();
+
+    assert!(statement
+        .execute_many(vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(1)]])
+        .is_err());
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT id FROM items").unwrap() else {
+        panic!("SELECT must return rows");
+    };
+    assert!(rows.rows.is_empty());
+
+    let results = statement
+        .execute_many(vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]])
+        .unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn prepared_execute_many_invalidates_catalog_cache_for_parameter_free_ddl() {
+    let database = Arc::new(Database::new());
+    let epoch = database.table_info_cache_epoch();
+    let mut statement = database
+        .prepare("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .unwrap();
+
+    statement
+        .execute_many(vec![Vec::<SqlValue>::new()])
+        .unwrap();
+
+    assert_eq!(database.table_info_cache_epoch(), epoch + 1);
+}
+
+#[test]
+fn prepared_execute_many_commits_hnsw_batch_once() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))")
+        .unwrap();
+    database
+        .execute_sql("CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+
+    let results = statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(2), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_row_count(&database, 2);
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        2
+    );
+}
+
+#[test]
+fn prepared_execute_many_rolls_back_hnsw_batch_on_error() {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(2, L2))")
+        .unwrap();
+    database
+        .execute_sql("CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW")
+        .unwrap();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+
+    assert!(statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .is_err());
+    assert_row_count(&database, 0);
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        0
+    );
+
+    statement
+        .execute_many(vec![
+            vec![SqlValue::Integer(1), SqlValue::Vector(vec![1.0, 0.0])],
+            vec![SqlValue::Integer(2), SqlValue::Vector(vec![0.0, 1.0])],
+        ])
+        .unwrap();
+    assert_eq!(
+        database
+            .get_hnsw_stats("items_embedding_hnsw")
+            .unwrap()
+            .node_count,
+        2
+    );
+}
+
+#[test]
+#[ignore = "run by parity-performance to publish issue #463 evidence"]
+fn prepared_execute_many_hnsw_throughput_matches_literal_batch() {
+    const ROWS: usize = 2_000;
+    const DIMENSIONS: usize = 128;
+    const LITERAL_BATCH_ROWS: usize = 200;
+    const RUNS: usize = 3;
+
+    let rows = (0..ROWS)
+        .map(|row| {
+            (
+                row as i32,
+                (0..DIMENSIONS)
+                    .map(|dimension| ((row + dimension) % 997) as f32 / 997.0)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let literal_batches = rows
+        .chunks(LITERAL_BATCH_ROWS)
+        .map(|batch| {
+            let values = batch
+                .iter()
+                .map(|(id, vector)| {
+                    let vector = vector
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("({id},[{vector}])")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("INSERT INTO items (id, embedding) VALUES {values}")
+        })
+        .collect::<Vec<_>>();
+    let prepared_rows = rows
+        .iter()
+        .map(|(id, vector)| vec![SqlValue::Integer(*id), SqlValue::Vector(vector.clone())])
+        .collect::<Vec<_>>();
+
+    let mut literal = Vec::with_capacity(RUNS);
+    let mut prepared = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let literal_first = run % 2 == 0;
+        if literal_first {
+            literal.push(record_literal_run(run, &literal_batches, ROWS));
+            prepared.push(record_prepared_run(run, &prepared_rows, ROWS));
+        } else {
+            prepared.push(record_prepared_run(run, &prepared_rows, ROWS));
+            literal.push(record_literal_run(run, &literal_batches, ROWS));
+        }
+    }
+    let literal_median = median(literal);
+    let prepared_median = median(prepared);
+    let ratio = prepared_median / literal_median;
+    eprintln!(
+        "prepared_median_rows_per_second={prepared_median:.3} literal_median_rows_per_second={literal_median:.3} ratio={ratio:.3}"
+    );
+
+    assert!(
+        ratio >= 1.0,
+        "prepared execute_many must match literal batch throughput: {ratio:.3}"
+    );
+}
+
+fn record_literal_run(run: usize, literal_batches: &[String], expected_rows: usize) -> f64 {
+    let rows_per_second = measure_literal_hnsw_insert(literal_batches, expected_rows);
+    eprintln!("literal run={run} rows_per_second={rows_per_second:.3}");
+    rows_per_second
+}
+
+fn record_prepared_run(run: usize, rows: &[Vec<SqlValue>], expected_rows: usize) -> f64 {
+    let rows_per_second = measure_prepared_hnsw_insert(rows, expected_rows);
+    eprintln!("prepared run={run} rows_per_second={rows_per_second:.3}");
+    rows_per_second
+}
+
+fn measure_literal_hnsw_insert(literal_batches: &[String], expected_rows: usize) -> f64 {
+    let database = hnsw_insert_database();
+    let start = Instant::now();
+    let mut session = database.sql_session();
+    session.execute_sql("BEGIN").unwrap();
+    for sql in literal_batches {
+        session.execute_sql(sql).unwrap();
+    }
+    session.execute_sql("COMMIT").unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    assert_row_count(&database, expected_rows);
+    expected_rows as f64 / elapsed
+}
+
+fn measure_prepared_hnsw_insert(rows: &[Vec<SqlValue>], expected_rows: usize) -> f64 {
+    let database = hnsw_insert_database();
+    let start = Instant::now();
+    let mut statement = database
+        .prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")
+        .unwrap();
+    let results = statement
+        .execute_many(rows.iter().map(Vec::as_slice))
+        .unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    assert_eq!(results.len(), expected_rows);
+    assert_row_count(&database, expected_rows);
+    expected_rows as f64 / elapsed
+}
+
+fn hnsw_insert_database() -> Arc<Database> {
+    let database = Arc::new(Database::new());
+    database
+        .execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(128, L2))")
+        .unwrap();
+    database
+        .execute_sql(
+            "CREATE INDEX items_embedding_hnsw ON items (embedding) USING HNSW \
+             WITH (m = 16, ef_construction = 200)",
+        )
+        .unwrap();
+    database
+}
+
+fn assert_row_count(database: &Database, expected_rows: usize) {
+    let ExecutionResult::Query(rows) = database.execute_sql("SELECT COUNT(*) FROM items").unwrap()
+    else {
+        panic!("COUNT must return rows");
+    };
+    assert_eq!(
+        rows.rows,
+        vec![vec![SqlValue::BigInt(expected_rows as i64)]]
+    );
+}
+
+fn median(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
 }
 
 #[test]

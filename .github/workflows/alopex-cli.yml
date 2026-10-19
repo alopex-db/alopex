@@ -2,22 +2,43 @@ name: Alopex CLI Integration Tests
 
 on:
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths:
       - 'crates/alopex-cli/**'
       - 'crates/alopex-embedded/**'
       - 'crates/alopex-core/**'
       - 'crates/alopex-sql/**'
       - 'scripts/build-nim-parser.sh'
+      - 'scripts/ci/check_cli_streaming.py'
+      - 'scripts/release/tests/test_cli_streaming_check.py'
       - '.github/actions/setup-nim-parser-toolchain/**'
       - '.github/workflows/alopex-cli.yml'
   pull_request:
     paths:
+      - '.github/workflows/alopex-cli.yml'
       - 'crates/alopex-cli/**'
       - 'crates/alopex-embedded/**'
       - 'crates/alopex-core/**'
       - 'crates/alopex-sql/**'
       - 'scripts/build-nim-parser.sh'
+      - 'scripts/ci/check_cli_streaming.py'
+      - 'scripts/release/tests/test_cli_streaming_check.py'
       - '.github/actions/setup-nim-parser-toolchain/**'
+      - '.github/workflows/alopex-cli.yml'
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -214,10 +235,10 @@ jobs:
           rm -f /tmp/limit_test.sql
 
   # ============================================================================
-  # Streaming fallback test (10,000+ rows)
+  # Streaming output and table byte-limit acceptance
   # ============================================================================
   streaming-fallback-test:
-    name: Streaming Fallback Test (10,000+ rows)
+    name: Streaming Output and Table Byte Limit
     runs-on: ubuntu-latest
     needs: cli-check
     env:
@@ -236,47 +257,10 @@ jobs:
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 
-      - name: Test 10,000+ row streaming with table format
-        run: |
-          CLI="./target/release/alopex"
-
-          # Create a script to insert 15,000 rows
-          SQL_FILE=$(mktemp)
-          echo "CREATE TABLE large_table (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
-          for i in $(seq 1 15000); do
-            echo "INSERT INTO large_table (id) VALUES ($i);"
-          done >> "$SQL_FILE"
-          echo "SELECT * FROM large_table;" >> "$SQL_FILE"
-
-          # Execute with table format (should trigger fallback at 10,000 rows)
-          timeout 180 $CLI --in-memory --output table sql --file "$SQL_FILE" >/dev/null 2>&1 || true
-          echo "PASS: Large dataset test completed"
-
-          rm -f "$SQL_FILE"
-
-      - name: Test streaming formats (no fallback needed)
-        run: |
-          CLI="./target/release/alopex"
-
-          # Create test with 15,000 rows
-          SQL_FILE=$(mktemp)
-          echo "CREATE TABLE stream_test (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
-          for i in $(seq 1 15000); do
-            echo "INSERT INTO stream_test (id) VALUES ($i);"
-          done >> "$SQL_FILE"
-          echo "SELECT * FROM stream_test;" >> "$SQL_FILE"
-
-          # JSONL format should stream without fallback.
-          # Since #26 jsonl output includes per-statement DDL/DML status
-          # lines; --quiet suppresses them so only SELECT rows are counted.
-          ROW_COUNT=$(timeout 180 $CLI --in-memory --quiet --output jsonl sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
-          if [[ "$ROW_COUNT" -ge 15000 ]]; then
-            echo "PASS: JSONL streaming works for 15,000 rows"
-          else
-            echo "INFO: JSONL streaming returned $ROW_COUNT rows"
-          fi
-
-          rm -f "$SQL_FILE"
+      - name: Verify streaming checker rejects invalid output
+        run: python3 -m unittest discover -s scripts/release/tests -p test_cli_streaming_check.py
+      - name: Verify complete row output and table byte limit
+        run: python3 scripts/ci/check_cli_streaming.py ./target/release/alopex
 
   # ============================================================================
   # Signal handling test (Ctrl-C graceful shutdown)
@@ -397,7 +381,7 @@ jobs:
     name: CLI Tests Success
     needs: [cli-check, functional-tests, streaming-fallback-test, signal-handling-test, s3-compatibility-test]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |

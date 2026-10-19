@@ -2,19 +2,86 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HNSWLIB = "nmslib/hnswlib@3f3429661187e4c24a490a0f148fc6bc89042b3d"
 PGVECTOR = "pgvector/pgvector@2627c5ff775ae6d7aef0c430121ccf857842d2f2"
 
+# Schema dimensions, not a second declaration of capability support.
+CAPABILITIES = {"query_ef_search", "force_search_path", "search_statistics", "get_vectors", "atomic_batch_upsert"}
+CAPABILITY_SURFACES = {"core.raw", "embedded.raw", "SQL", "Python.raw", "HTTP.sql", "gRPC.sql", "HTTP.raw", "gRPC.raw"}
+
+
+def validate_capabilities(payload: dict[str, object]) -> list[str]:
+    """Validate declaration schema, not executable selectors or behavior.
+
+    The calling ledger gate checks link consistency only. Review confirms the
+    owning assertions; fixed-selector execution (no skip/zero tests) proves PASS.
+    `covered` is not a passing run. An explicit unverified cell blocks this gate;
+    unsupported/N/A cells retain their reason and issue.
+    """
+    matrix = payload.get("capabilities")
+    if not isinstance(matrix, dict):
+        return ["HNSW capabilities must be an object"]
+    errors = []
+    if missing := CAPABILITIES - matrix.keys():
+        errors.append(f"HNSW missing capabilities: {sorted(missing)}")
+    if extra := matrix.keys() - CAPABILITIES:
+        errors.append(f"HNSW unknown capabilities: {sorted(extra)}")
+    for capability, surfaces in matrix.items():
+        if not isinstance(surfaces, dict):
+            errors.append(f"HNSW {capability}: surfaces must be an object")
+            continue
+        if missing := CAPABILITY_SURFACES - surfaces.keys():
+            errors.append(f"HNSW {capability}: missing surfaces {sorted(missing)}")
+        if extra := surfaces.keys() - CAPABILITY_SURFACES:
+            errors.append(f"HNSW {capability}: unknown surfaces {sorted(extra)}")
+        for surface, cell in surfaces.items():
+            label = f"HNSW {capability}/{surface}"
+            if not isinstance(cell, dict):
+                errors.append(f"{label}: cell must be an object")
+                continue
+            status = cell.get("status")
+            if not isinstance(status, str) or status not in {"covered", "unverified", "unsupported", "not-applicable"}:
+                errors.append(f"{label}: invalid status {status}")
+                continue
+            if status == "covered":
+                evidence = cell.get("evidence")
+                if not isinstance(evidence, list) or not evidence or any(
+                    not isinstance(item, str) or not re.fullmatch(r"[^#\s]+#[A-Za-z_]\w*", item)
+                    for item in evidence
+                ):
+                    errors.append(f"{label}: evidence must name behavior test selectors")
+                if not isinstance(cell.get("observation"), str) or not cell["observation"].strip():
+                    errors.append(f"{label}: missing behavior observation")
+                allowed = {"status", "evidence", "observation"}
+            else:
+                if not isinstance(cell.get("reason"), str) or not cell["reason"].strip():
+                    errors.append(f"{label}: missing reason")
+                if type(cell.get("issue")) is not int or cell["issue"] <= 0:
+                    errors.append(f"{label}: missing owning issue")
+                if status == "unverified":
+                    errors.append(f"{label}: unverified behavior")
+                allowed = {"status", "reason", "issue"}
+            if extra := cell.keys() - allowed:
+                errors.append(f"{label}: unknown fields {sorted(extra)}")
+    return errors
+
 EVIDENCE_BY_CLAIM = {
     "Metric": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#cosine_and_inner_product_search_expose_lower_is_closer_distance",
     "HnswConfig": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#hnsw_rejects_nonfinite_and_cosine_zero_vectors_at_insert_and_search",
     "HnswIndex.create": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow",
     "HnswIndex.load/save": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#save_and_load_roundtrip_preserves_graph",
+    "HnswIndex.load_node_count": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#node_count_metadata_tracks_active_nodes_without_reading_corrupt_graph_nodes",
+    "HnswIndex.fork_owned": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#fork_owned_never_mutates_shared_reader_graph",
+    "Embedded HNSW cache controls": "crates/alopex-embedded/src/lib.rs#hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes",
+    "Python HNSW cache controls": "crates/alopex-py/tests/test_hnsw_cache.py#test_limits_oversize_disabled_and_stats",
+    "HnswIndex.clone_for_read": "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs#read_clone_searches_shared_graph_without_inheriting_callbacks",
     "HnswIndex.upsert": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_upsert_reconnects_existing_key_without_duplicate_results",
     "HnswIndex.search": "scripts/performance/hnsw_v0811_contract.py#run_benchmark",
     "HnswIndex.delete": "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#deleted_nodes_are_skipped_in_results",
@@ -27,6 +94,7 @@ EVIDENCE_BY_CLAIM = {
     "HnswStats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "SearchStats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "Embedded create/search/drop": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api",
+    "Embedded HNSW cache limit": "crates/alopex-embedded/src/lib.rs#hnsw_cache_evicts_graphs_to_stay_within_estimated_byte_budget",
     "Embedded transaction upsert/delete/commit/rollback/reopen": "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_index_persists_across_reopen",
     "Python.HnswConfig": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
     "Python.create/drop/get_hnsw_stats": "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete",
@@ -54,6 +122,14 @@ def rust_methods(source: str, predicate=lambda name: True) -> list[tuple[str, st
     return methods
 
 
+def python_hnsw_methods(source: str) -> set[str]:
+    """Collect methods exported by PyO3, excluding Rust helpers and test code."""
+    methods: set[str] = set()
+    for block in re.findall(r"(?ms)^#\[pymethods\]\nimpl \w+ \{(.*?)^}\s*$", source):
+        methods.update(re.findall(r"^    fn (\w*hnsw\w*)", block, re.MULTILINE))
+    return methods
+
+
 def row(surface: str, api: str, evidence: str) -> dict[str, object]:
     return {"surface": surface, "api": api}
 
@@ -72,6 +148,10 @@ def claim_for(row: dict[str, object]) -> str:
             "SQL.HNSW_DELETE_SYNC": "SQL HNSW DML/transaction synchronization",
         }[api]
     if surface == "embedded":
+        if api.rsplit(".", 1)[-1] in {"set_hnsw_cache_limits", "hnsw_cache_stats", "warm_hnsw_index", "HnswCacheStats", "HnswCacheIndexStats"}:
+            return "Embedded HNSW cache controls"
+        if api.endswith(".set_hnsw_cache_limit"):
+            return "Embedded HNSW cache limit"
         if "compact" in api:
             return "HnswIndex.compact"
         if "get_hnsw_stats" in api:
@@ -80,6 +160,8 @@ def claim_for(row: dict[str, object]) -> str:
             return "Embedded transaction upsert/delete/commit/rollback/reopen"
         return "Embedded create/search/drop"
     if surface == "Python":
+        if api.rsplit(".", 1)[-1] in {"set_hnsw_cache_limit", "hnsw_cache_stats", "warm_hnsw_index"}:
+            return "Python HNSW cache controls"
         if api == "Python.HnswConfig":
             return "Python.HnswConfig"
         if api in {"Python.HnswStats", "Python.SearchResult", "Python.SearchStats"}:
@@ -105,11 +187,15 @@ def claim_for(row: dict[str, object]) -> str:
         "create": "HnswIndex.create",
         "load": "HnswIndex.load/save",
         "save": "HnswIndex.load/save",
+        "clone_for_read": "HnswIndex.clone_for_read",
+        "load_node_count": "HnswIndex.load_node_count",
+        "fork_owned": "HnswIndex.fork_owned",
         "upsert": "HnswIndex.upsert",
         "upsert_batch": "HnswIndex.upsert",
         "upsert_staged": "upsert reconnect",
         "upsert_staged_batch": "upsert reconnect",
         "search": "cosine distance",
+        "search_with_effective_ef": "HnswIndex.search",
         "delete": "HnswIndex.delete",
         "delete_staged": "HnswIndex staged commit/rollback",
         "drop": "HnswIndex.drop",
@@ -142,6 +228,118 @@ def materialize(payload: dict[str, object]) -> list[dict[str, object]]:
     return rows
 
 
+def capability_matrix() -> list[dict[str, object]]:
+    sources = {
+        "Rust": (ROOT / "crates/alopex-core/src/vector/hnsw/mod.rs").read_text(encoding="utf-8"),
+        "embedded": (ROOT / "crates/alopex-embedded/src/lib.rs").read_text(encoding="utf-8"),
+        "Python": (ROOT / "crates/alopex-py/src/embedded/database.rs").read_text(encoding="utf-8"),
+        "Python stub": (ROOT / "crates/alopex-py/python/alopex/_alopex.pyi").read_text(encoding="utf-8"),
+        "SQL planner": (ROOT / "crates/alopex-sql/src/planner/mod.rs").read_text(encoding="utf-8"),
+        "SQL executor": (ROOT / "crates/alopex-sql/src/executor/mod.rs").read_text(encoding="utf-8"),
+        "SQL kNN": (ROOT / "crates/alopex-sql/src/executor/query/knn.rs").read_text(encoding="utf-8"),
+    }
+    # Scope declaration checks to the search method: a comment or another API
+    # elsewhere in the file cannot establish this method's capabilities.
+    declarations = {
+        "Rust": ("pub fn search", "Result<(Vec<HnswSearchResult>, SearchStats)>"),
+        "embedded": ("pub fn search_hnsw", "Result<(Vec<HnswSearchResult>, HnswSearchStats)>"),
+        "Python": ("fn search_hnsw", "PyResult<(Vec<PySearchResult>, PySearchStats)>"),
+    }
+    for surface, (method, result) in declarations.items():
+        matches = re.findall(
+            rf"(?:^    #\[[^\n]*\]\n)*^    {re.escape(method)}\s*\([^{{]+\{{",
+            sources[surface], re.MULTILINE,
+        )
+        if len(matches) != 1:
+            raise RuntimeError(f"HNSW capability disappeared from {surface}: {method}")
+        signature = re.sub(r"\s+", "", matches[0])
+        required = ["ef_search:Option<usize>", "->" + re.sub(r"\s+", "", result) + "{"]
+        if surface == "Python":
+            required.append("#[pyo3(signature=(name,query,k,ef_search=None))]")
+        for marker in required:
+            if marker not in signature:
+                raise RuntimeError(f"HNSW capability disappeared from {surface}: {method} {marker}")
+
+    stub = ast.parse(sources["Python stub"])
+    methods = [
+        method for owner in stub.body
+        if isinstance(owner, ast.ClassDef) and owner.name == "Database"
+        for method in owner.body
+        if isinstance(method, ast.FunctionDef) and method.name == "search_hnsw"
+    ]
+    if len(methods) != 1:
+        raise RuntimeError("HNSW capability disappeared from Python stub: Database.search_hnsw")
+    method = methods[0]
+    defaults = dict(zip(
+        [arg.arg for arg in method.args.args][len(method.args.args) - len(method.args.defaults):],
+        method.args.defaults,
+    ))
+    ef_args = [arg for arg in method.args.args if arg.arg == "ef_search"]
+    default = defaults.get("ef_search")
+    if (len(ef_args) != 1 or ef_args[0].annotation is None
+            or ast.unparse(ef_args[0].annotation) != "Optional[int]"
+            or not isinstance(default, ast.Constant) or default.value is not None):
+        raise RuntimeError("HNSW capability disappeared from Python stub: search_hnsw ef_search")
+    if method.returns is None or ast.unparse(method.returns) != "Tuple[List[SearchResult], SearchStats]":
+        raise RuntimeError("HNSW capability disappeared from Python stub: search_hnsw SearchStats")
+
+    required_sql = {
+        "SQL planner": ('"ef_search"',),
+        "SQL executor": ("explain_knn_stats_text",),
+        "SQL kNN": ("pattern.options.enable_hnsw == Some(false)",),
+    }
+    for surface, markers in required_sql.items():
+        for marker in markers:
+            if marker not in sources[surface]:
+                raise RuntimeError(f"HNSW capability disappeared from {surface}: {marker}")
+
+    def supported(surface: str, evidence: str) -> dict[str, str]:
+        return {"surface": surface, "status": "supported", "evidence": evidence}
+
+    def not_applicable(surface: str) -> dict[str, str]:
+        return {
+            "surface": surface,
+            "status": "not_applicable",
+            "reason": "direct HNSW search has no SQL planner path",
+        }
+
+    core_ef = "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#ef_search_is_auto_corrected"
+    core_stats = "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs#insert_and_search_basic_flow"
+    embedded_ef = "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_upsert_reconnects_existing_key_without_duplicate_results"
+    embedded_stats = "crates/alopex-embedded/tests/hnsw_integration_tests.rs#hnsw_lifecycle_via_embedded_api"
+    python = "crates/alopex-py/tests/test_hnsw.py#test_hnsw_create_search_delete"
+    sql = "crates/alopex-sql/tests/knn_optimization.rs#explain_analyze_reports_hnsw_search_statistics_and_fallback"
+    return [
+        {
+            "capability": "query_ef_search",
+            "surfaces": [
+                supported("Rust", core_ef),
+                supported("embedded", embedded_ef),
+                supported("Python", python),
+                supported("SQL", sql),
+            ],
+        },
+        {
+            "capability": "search_statistics",
+            "surfaces": [
+                supported("Rust", core_stats),
+                supported("embedded", embedded_stats),
+                supported("Python", python),
+                supported("SQL", sql),
+            ],
+        },
+        {
+            "capability": "query_path_control",
+            "surfaces": [
+                not_applicable("Rust"),
+                not_applicable("embedded"),
+                not_applicable("Python"),
+                supported("SQL", sql),
+            ],
+        },
+    ]
+
+
 def inventory() -> list[dict[str, object]]:
     core_mod = (ROOT / "crates/alopex-core/src/vector/hnsw/mod.rs").read_text(encoding="utf-8")
     core_types = (ROOT / "crates/alopex-core/src/vector/hnsw/types.rs").read_text(encoding="utf-8")
@@ -170,15 +368,19 @@ def inventory() -> list[dict[str, object]]:
         for owner, name in rust_methods(embedded, lambda name: "hnsw" in name)
     )
 
+    embedded_cache = (ROOT / "crates/alopex-embedded/src/hnsw_cache.rs").read_text(encoding="utf-8")
+    rows.extend(
+        row("embedded", f"embedded.{name}", "crates/alopex-embedded/src/hnsw_cache.rs")
+        for name in re.findall(r"^pub struct (HnswCache\w+)", embedded_cache, re.MULTILINE)
+    )
+
     stub_types = re.findall(r"^class ((?:Hnsw|Search)[A-Za-z0-9_]+)", pyi, re.MULTILINE)
     rows.extend(
         row("Python", f"Python.{name}", "crates/alopex-py/python/alopex/_alopex.pyi")
         for name in stub_types
     )
     stub_methods = set(re.findall(r"^    def (\w*hnsw\w*)", pyi, re.MULTILINE))
-    runtime_methods = set(
-        re.findall(r"^    fn (\w*hnsw\w*)", py_source + "\n" + py_transaction, re.MULTILINE)
-    )
+    runtime_methods = python_hnsw_methods(py_source) | python_hnsw_methods(py_transaction)
     if stub_methods != runtime_methods:
         raise RuntimeError(
             f"Python HNSW runtime/.pyi mismatch: stub-only={sorted(stub_methods-runtime_methods)}, "
@@ -234,16 +436,27 @@ def main() -> int:
     args = parser.parse_args()
     payload = json.loads(args.ledger.read_text(encoding="utf-8"))
     expected = materialize(payload)
+    matrix = capability_matrix()
     if args.runtime:
         validate_runtime(expected)
     if args.write:
         payload["public_api"] = expected
+        payload["capability_matrix"] = matrix
         args.ledger.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return 0
+    # Reuse the owning gate, including existing test-reference integrity checks.
+    # Regeneration above is not validation and never claims behavior PASS.
+    sys.path.insert(0, str(ROOT))
+    from scripts.validate_v0811_ledgers import validate
+
+    if errors := validate(args.ledger):
+        raise RuntimeError("\n".join(errors))
     if payload.get("public_api") != expected:
         raise RuntimeError("HNSW public inventory is stale; run with --write")
+    if payload.get("capability_matrix") != matrix:
+        raise RuntimeError("HNSW capability matrix is stale; run with --write")
     print(f"validated {len(expected)} HNSW public API rows")
     return 0
 

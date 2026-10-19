@@ -5,6 +5,19 @@ use crate::error::Result;
 use crate::kv::{KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::types::{Key, Value};
 
+#[cfg(feature = "tokio")]
+/// An owned response returned from a transaction-worker operation.
+pub type WorkerTaskResult = Box<dyn std::any::Any + Send>;
+
+/// An owned operation executed where the synchronous transaction lives.
+/// The operation cannot retain or move the borrowed transaction.
+#[cfg(feature = "tokio")]
+pub type WorkerTask = Box<
+    dyn for<'txn> FnOnce(&mut dyn crate::kv::KVTransaction<'txn>) -> WorkerTaskResult
+        + Send
+        + 'static,
+>;
+
 /// Async version of [`KVStore`].
 pub trait AsyncKVStore: MaybeSend {
     /// The async transaction type for this store.
@@ -18,6 +31,29 @@ pub trait AsyncKVStore: MaybeSend {
 
 /// Async version of [`KVTransaction`].
 pub trait AsyncKVTransaction<'txn>: MaybeSend {
+    /// Whether this transaction can execute an owned synchronous operation
+    /// without sending each individual key operation between workers.
+    #[cfg(feature = "tokio")]
+    fn supports_worker_tasks(&self) -> bool {
+        false
+    }
+
+    /// Runs an owned operation on the transaction worker, preserving its
+    /// existing commit/rollback boundary. Native async backends may decline.
+    #[cfg(feature = "tokio")]
+    fn async_worker_task<'a>(
+        &'a mut self,
+        task: WorkerTask,
+    ) -> BoxFuture<'a, Result<WorkerTaskResult>> {
+        drop(task);
+        Box::pin(async {
+            Err(crate::Error::InvalidParameter {
+                param: "worker task".into(),
+                reason: "backend does not provide synchronous worker access".into(),
+            })
+        })
+    }
+
     /// Retrieves the value for a given key.
     fn async_get<'a>(&'a self, key: &'a [u8]) -> BoxFuture<'a, Result<Option<Value>>>;
 

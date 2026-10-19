@@ -122,3 +122,29 @@ fn decimal_literal_accepts_the_maximum_scale() {
         .unwrap();
     assert_eq!(result.rows, vec![vec![decimal(1, 38)]]);
 }
+
+#[test]
+fn decimal_literal_counts_integer_trailing_zeros() {
+    for width in 1..=38 {
+        let coefficient = 10_i128.pow(width - 1);
+        for sign in ["", "-", "+"] {
+            let result = run(&format!("SELECT DECIMAL '{sign}000{coefficient}'"))
+                .unwrap()
+                .unwrap();
+            let expected = if sign == "-" {
+                -coefficient
+            } else {
+                coefficient
+            };
+            assert_eq!(result.rows, vec![vec![decimal(expected, 0)]]);
+        }
+    }
+    let result = run("SELECT DECIMAL '00010.00', DECIMAL '-1000.0', DECIMAL '0.000'")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.rows,
+        vec![vec![decimal(1000, 2), decimal(-10000, 1), decimal(0, 3)]]
+    );
+    assert!(run(&format!("SELECT DECIMAL '{}'", 10_i128.pow(38))).is_err());
+}

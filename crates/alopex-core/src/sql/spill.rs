@@ -37,53 +37,77 @@ where
     let directory = policy.spill_directory().ok_or_else(|| Error::SpillFailed {
         reason: "sort spill: spill directory not configured".into(),
     })?;
-    ensure_spill_dir(directory)?;
-    let (path, file) = create_spill_file(directory, prefix)?;
-    let mut writer = BufWriter::new(file);
+    let (path, bytes_written) = write_spill_file(directory, prefix, |writer| {
+        entries.sort_by(|a, b| compare_keys(&a.1, &b.1));
 
-    entries.sort_by(|a, b| compare_keys(&a.1, &b.1));
+        let mut bytes_written = 0u64;
+        for (row, keys) in entries.iter() {
+            let key_bytes = encode_key(keys);
+            let row_bytes = encode_row(row);
+            let key_len = u32::try_from(key_bytes.len()).map_err(|_| Error::SpillFailed {
+                reason: "sort spill: sort key size exceeds u32::MAX".into(),
+            })?;
+            let row_len = u32::try_from(row_bytes.len()).map_err(|_| Error::SpillFailed {
+                reason: "sort spill: row size exceeds u32::MAX".into(),
+            })?;
 
-    let mut bytes_written = 0u64;
-    for (row, keys) in entries.iter() {
-        let key_bytes = encode_key(keys);
-        let row_bytes = encode_row(row);
-        let key_len = u32::try_from(key_bytes.len()).map_err(|_| Error::SpillFailed {
-            reason: "sort spill: sort key size exceeds u32::MAX".into(),
-        })?;
-        let row_len = u32::try_from(row_bytes.len()).map_err(|_| Error::SpillFailed {
-            reason: "sort spill: row size exceeds u32::MAX".into(),
-        })?;
+            writer
+                .write_all(&row_id(row).to_le_bytes())
+                .map_err(|err| spill_io_error("sort spill", err))?;
+            writer
+                .write_all(&key_len.to_le_bytes())
+                .map_err(|err| spill_io_error("sort spill", err))?;
+            writer
+                .write_all(&row_len.to_le_bytes())
+                .map_err(|err| spill_io_error("sort spill", err))?;
+            writer
+                .write_all(&key_bytes)
+                .map_err(|err| spill_io_error("sort spill", err))?;
+            writer
+                .write_all(&row_bytes)
+                .map_err(|err| spill_io_error("sort spill", err))?;
+            bytes_written = bytes_written
+                .saturating_add(8)
+                .saturating_add(4)
+                .saturating_add(4)
+                .saturating_add(key_bytes.len() as u64)
+                .saturating_add(row_bytes.len() as u64);
+        }
 
-        writer
-            .write_all(&row_id(row).to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&key_len.to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&row_len.to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&key_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&row_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        bytes_written = bytes_written
-            .saturating_add(8)
-            .saturating_add(4)
-            .saturating_add(4)
-            .saturating_add(key_bytes.len() as u64)
-            .saturating_add(row_bytes.len() as u64);
-    }
-
-    writer
-        .flush()
-        .map_err(|err| spill_io_error("sort spill", err))?;
+        Ok(bytes_written)
+    })?;
     policy.record_spill(bytes_written, 1);
     entries.clear();
 
     Ok(path)
+}
+
+// Own a newly created run until all writes and flush succeed.
+struct PendingSpillFile(Option<PathBuf>);
+
+impl Drop for PendingSpillFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn write_spill_file<F>(directory: &Path, prefix: &str, write: F) -> Result<(PathBuf, u64)>
+where
+    F: FnOnce(&mut BufWriter<File>) -> Result<u64>,
+{
+    ensure_spill_dir(directory)?;
+    let (path, file) = create_spill_file(directory, prefix)?;
+    let mut pending = PendingSpillFile(Some(path));
+    // Declare the writer after the guard so it closes before unlink on errors.
+    let mut writer = BufWriter::new(file);
+    let bytes = write(&mut writer)?;
+    writer
+        .flush()
+        .map_err(|err| spill_io_error("sort spill", err))?;
+    drop(writer);
+    Ok((pending.0.take().expect("pending run is owned"), bytes))
 }
 
 /// Ensure the spill directory exists.
@@ -359,6 +383,59 @@ mod tests {
             row_id,
             value: decode_i64(bytes)?,
         })
+    }
+
+    #[test]
+    fn spill_file_partial_write_error_removes_created_file() {
+        use std::io::{self, Write};
+
+        struct FailAfter<'a> {
+            inner: &'a mut std::io::BufWriter<std::fs::File>,
+            remaining: usize,
+        }
+        impl Write for FailAfter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(io::Error::other("controlled partial spill write"));
+                }
+                let written = self
+                    .inner
+                    .write(&bytes[..bytes.len().min(self.remaining)])?;
+                self.inner.flush()?;
+                self.remaining -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut partial_path = None;
+        let error = super::write_spill_file(dir.path(), "partial-write", |writer| {
+            writer.write_all(b"header").unwrap();
+            writer.flush().unwrap();
+            let path = std::fs::read_dir(dir.path())
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let mut failing = FailAfter {
+                inner: writer,
+                remaining: 3,
+            };
+            let error = failing.write_all(b"payload").unwrap_err();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 9);
+            partial_path = Some(path);
+            Err(super::spill_io_error("sort spill", error))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::SpillFailed { reason } if reason.contains("controlled partial spill write"))
+        );
+        assert!(!partial_path.unwrap().exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

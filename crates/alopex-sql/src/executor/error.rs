@@ -89,7 +89,7 @@ pub enum ExecutorError {
     UnsupportedFormat(String),
 
     /// Schema mismatch between input and table.
-    #[error("schema mismatch: expected {expected} columns, got {actual} - {reason}")]
+    #[error("schema mismatch: {reason}")]
     SchemaMismatch {
         expected: usize,
         actual: usize,
@@ -134,7 +134,18 @@ pub enum ExecutorError {
 
     /// Planner error (wrapped for convenience).
     #[error("planner error: {0}")]
-    Planner(#[from] crate::planner::PlannerError),
+    Planner(#[source] crate::planner::PlannerError),
+}
+
+impl From<crate::planner::PlannerError> for ExecutorError {
+    fn from(error: crate::planner::PlannerError) -> Self {
+        match error {
+            crate::planner::PlannerError::ResourceExhausted { message } => {
+                Self::ResourceExhausted { message }
+            }
+            other => Self::Planner(other),
+        }
+    }
 }
 
 /// Constraint violation details.

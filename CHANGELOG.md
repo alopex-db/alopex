@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Query-local HNSW `ef_search` and `enable_hnsw` controls accept typed prepared
+  parameters. Parser contract `0.28.0` carries expression values for these
+  options; DDL options remain strings. Mixed contracts fail before decoding (#671).
+
+- The Nim parser wire contract is `0.27.0`; JOIN nodes now carry their NATURAL
+  attribute directly, and the contract covers UNIQUE indexes, CTAS, and
+  unit-bearing INTERVAL literals. Incompatible parser/consumer versions are
+  rejected before decoding. Comma FROM items preserve explicit JOIN precedence.
+- The Nim parser wire contract `0.26.0` added query-level
+  HNSW options.
+- `FTS_SEARCH` includes the primary-key column in its result. Queries using
+  `SELECT *` therefore return an additional column; consumers that require a
+  fixed result shape should select columns explicitly (#478).
+
+- Python KV prefix/range scans return all matches by default; explicit `limit`
+  caps the total. New page APIs expose `has_more`, opaque cursors, and physical
+  work counts. Candidate-budget exhaustion is resumable unless `strict_budget`
+  is enabled; exact terminal boundaries succeed. Complete collection has a
+  configurable total raw-byte cap, and async iterators yield between pages (#670).
+
+### Compatibility
+
+- Python SQL calls now reject parameterized batches containing multiple
+  statements. Run each statement separately; the old SQL-text expansion could
+  lose Decimal precision in later results (#582).
+- Catalog loading now rejects invalid DEFAULT or constraint metadata instead
+  of silently discarding it. Internal encoding properties no longer appear in
+  public table properties. Rust callers converting `PersistedTableMeta` and
+  `TableMetadata` must use `TryFrom` and handle conversion errors (#472).
+- Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
+  Keep a backup created before upgrading if rollback to v0.8.15 is required;
+  reopening newly written segments with v0.8.15 fails with a decoding error
+  (#470).
+- Upgrading cannot recover column DEFAULT expressions that v0.8.15 and older
+  releases did not persist. Re-declare those defaults explicitly; the new
+  persistence behavior preserves defaults recorded by v0.8.16 (#472).
+
+- Opening a database created by v0.8.15 or earlier now rebuilds missing UNIQUE
+  constraint indexes. If existing rows violate a UNIQUE constraint, opening
+  fails without changing the database. Keep a backup, remove the conflicting
+  rows with the prior version or a repair tool, then reopen with v0.8.16.
+  Table-level PRIMARY KEY declarations are recognized regardless of their
+  order among constraints; multiple declarations are rejected (#585).
+
 ## [0.8.15] — 2026-09-24
 
 ### Fixed

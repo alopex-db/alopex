@@ -148,6 +148,7 @@ pub const REMOTE_LOCAL_ONLY_TEMPORAL_FUNCTIONS: &[&str] = &[
     "current_timestamp",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "make_date",
@@ -179,6 +180,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "currval",
     "date",
     "date_add",
+    "date_diff",
     "date_sub",
     "datetime",
     "json",
@@ -730,6 +732,7 @@ fn validate_plan(
             "DML is outside the read-only remote-read catalog",
         )),
         LogicalPlan::CreateTable { .. }
+        | LogicalPlan::CreateTableAs { .. }
         | LogicalPlan::DropTable { .. }
         | LogicalPlan::CreateView { .. }
         | LogicalPlan::DropView { .. }
@@ -861,7 +864,14 @@ fn validate_plan(
             limit,
             offset,
             ties,
+            knn_options,
         } => {
+            if !knn_options.is_empty() {
+                return Err(RemoteReadRejection::local_only(
+                    "knn_query_options_local_only",
+                    "per-query HNSW controls are not in the v0.8 remote-read catalog",
+                ));
+            }
             if ties.is_some() {
                 return Err(RemoteReadRejection::local_only(
                     "fetch_with_ties_local_only",
@@ -1050,7 +1060,7 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::ast::expr::Literal;
-    use crate::catalog::{ColumnMetadata, MemoryCatalog};
+    use crate::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
     use crate::planner::{
         Planner, Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr,
     };
@@ -1156,6 +1166,34 @@ mod tests {
     }
 
     #[test]
+    fn date_diff_queries_remain_local_only_before_remote_transport() {
+        let mut catalog = MemoryCatalog::new();
+        catalog
+            .create_table(TableMetadata::new(
+                "users",
+                vec![ColumnMetadata::new("created_at", ResolvedType::Timestamp)],
+            ))
+            .unwrap();
+        let planner = Planner::new(&catalog);
+
+        for sql in [
+            "SELECT DATE_DIFF('day', created_at, TIMESTAMP '2017-01-09') FROM users",
+            "SELECT created_at FROM users WHERE date_diff('day', created_at, TIMESTAMP '2017-01-09') > 0",
+        ] {
+            let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+            let plan = planner.plan(&statement).unwrap();
+            assert!(
+                matches!(
+                    classify(&plan, &references()),
+                    RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                        if code == "stateful_function_local_only"
+                ),
+                "DATE_DIFF must remain local-only: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn metadata_values_fail_closed_before_remote_transport() {
         let catalog = MemoryCatalog::new();
         let planner = Planner::new(&catalog);
@@ -1198,7 +1236,13 @@ mod tests {
 
     #[test]
     fn explicitly_excluded_scalar_and_vector_expressions_remain_local_only() {
-        for name in ["random", "json_valid", "date_add", "array_length"] {
+        for name in [
+            "random",
+            "json_valid",
+            "date_add",
+            "date_diff",
+            "array_length",
+        ] {
             let expression = TypedExpr::function_call(
                 name.to_string(),
                 vec![],
@@ -1353,6 +1397,7 @@ mod tests {
             limit: Some(2),
             offset: None,
             ties,
+            knn_options: crate::planner::logical_plan::KnnQueryOptions::default(),
         };
         assert!(matches!(
             classify(&plan, &references()),

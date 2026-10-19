@@ -5,6 +5,7 @@ on:
   schedule:
     - cron: '17 2 * * 1'
   push:
+    branches: [main, 'integration/**', 'release/**']
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'
@@ -16,6 +17,20 @@ on:
       - 'scripts/release/**'
       - 'scripts/parity/**'
       - 'formal/release-report/**'
+
+# Supersede PRs and unprotected development branch pushes. Preserve other
+# push runs (protected/integration/release branches and tags), scheduled
+# runs and manual runs individually as verification evidence.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'push' && github.ref_type == 'branch' &&
+        !github.ref_protected &&
+        !startsWith(github.ref, 'refs/heads/integration/') &&
+        !startsWith(github.ref, 'refs/heads/release/'))) &&
+      github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -262,7 +277,7 @@ jobs:
           # ロードする。build.rs の rpath だけでは解決できないため、ライブラリの
           # ディレクトリを LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test -p alopex-core --tests format_compatibility_test $FEATURE_FLAGS
+        run: cargo test -p alopex-core --test format_compatibility_test --features lane_ci $FEATURE_FLAGS
 
   wasm:
     # Advisory until v1.0.0, which is when WASM becomes a supported target.

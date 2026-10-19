@@ -14,6 +14,7 @@ s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
 
 lane_ci = []
 [dependencies]
+tracing.workspace = true
 alopex-cluster.workspace = true
 alopex-core.workspace = true
 alopex-sql.workspace = true
@@ -30,6 +31,7 @@ futures = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3.8"
 criterion = { workspace = true }
 rand = { workspace = true }

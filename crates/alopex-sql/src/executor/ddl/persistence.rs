@@ -12,7 +12,11 @@ pub fn persist_table<'txn, T: KVTransaction<'txn>>(
     txn: &mut T,
     table: &TableMetadata,
 ) -> Result<(), ExecutorError> {
-    let persisted = PersistedTableMeta::from(table);
+    let persisted =
+        PersistedTableMeta::try_from(table).map_err(|err| ExecutorError::InvalidOperation {
+            operation: "CatalogPersistence".into(),
+            reason: err.to_string(),
+        })?;
     let value =
         bincode_config()
             .serialize(&persisted)

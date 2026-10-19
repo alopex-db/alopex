@@ -168,6 +168,14 @@ _KV_REASON = (
     "separate from SQL sessions; mixing both into one RemoteTransaction would "
     "misreport which transaction the operation joined"
 )
+_SAVEPOINT_REASON = (
+    "the server session API exposes no savepoint action, so this local-only "
+    "transaction operation cannot be represented without changing the session contract"
+)
+_PREPARED_REASON = (
+    "the server session API exposes no prepared-statement handle or batch execution "
+    "contract, so this embedded transaction operation cannot be represented remotely"
+)
 _LOCAL_ONLY_REASON = "it reports process-local engine state that a remote server does not expose for its caller"
 _CONSTRUCTOR_REASON = (
     "the server client is constructed from a URL; use alopex.connect(url) or "
@@ -746,6 +754,27 @@ class RemoteTransaction:
 
     # -- explicit refusals ---------------------------------------------------
 
+    def prepare(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.prepare",
+            "the server session API does not expose prepared statement handles",
+        )
+
+    def execute_many(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported(
+            "Transaction.execute_many",
+            "the server session API has no atomic parameter batch endpoint",
+        )
+
+    def savepoint(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.savepoint", _SAVEPOINT_REASON)
+
+    def rollback_to(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.rollback_to", _SAVEPOINT_REASON)
+
+    def release(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.release", _SAVEPOINT_REASON)
+
     def execute_sql_stream(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.execute_sql_stream", _STREAM_REASON)
 
@@ -761,11 +790,28 @@ class RemoteTransaction:
     def delete(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.delete", _KV_REASON)
 
+    def scan_prefix(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_prefix", _KV_REASON)
+
+    def scan_range(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_range", _KV_REASON)
+
+    def scan_prefix_page(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_prefix_page", _KV_REASON)
+
+    def scan_range_page(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_range_page", _KV_REASON)
+
+    def search_keys(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.search_keys", _KV_REASON)
+
     def upsert_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.upsert_vector", _KV_REASON)
 
     def search_similar(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.search_similar", _KV_REASON)
+
+
 
     def get_vector(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.get_vector", _KV_REASON)
@@ -1143,6 +1189,15 @@ class RemoteDatabase:
 
     def get_hnsw_stats(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Database.get_hnsw_stats", _HNSW_REASON)
+
+    def set_hnsw_cache_limit(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.set_hnsw_cache_limit", _HNSW_REASON)
+
+    def hnsw_cache_stats(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.hnsw_cache_stats", _HNSW_REASON)
+
+    def warm_hnsw_index(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Database.warm_hnsw_index", _HNSW_REASON)
 
     @classmethod
     def open(cls, *_args: Any, **_kwargs: Any) -> "RemoteDatabase":

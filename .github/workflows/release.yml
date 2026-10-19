@@ -111,6 +111,10 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Verify parser producer source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.90.0
         with:
@@ -161,7 +165,7 @@ jobs:
           loaded = ctypes.CDLL(str(library))
           loaded.alopex_parser_version.restype = ctypes.c_char_p
           version = loaded.alopex_parser_version().decode("ascii")
-          if version != "0.25.0":
+          if version != "0.28.0":
               raise SystemExit(f"native smoke version mismatch: {version}")
           print(f"native smoke passed: {record['target']} parser {version}")
           PY
@@ -302,7 +306,7 @@ jobs:
           mkdir -p "${asset_dir}"
           gh release download "${RELEASE_TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --pattern "parser-vendor-manifest-v${version}.json" \
-            --pattern "alopex-parser-v${version}-contract-0.25.0-*.tar.gz" \
+            --pattern "alopex-parser-v${version}-contract-0.28.0-*.tar.gz" \
             --dir "${asset_dir}" --clobber
           manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
           python "${stage}/scripts/release/parser_asset_manifest.py" verify-manifest \
@@ -340,7 +344,7 @@ jobs:
               target_dir.mkdir(parents=True, exist_ok=True)
               (target_dir / dynamic_name).write_bytes(library)
               (target_dir / static_name).write_bytes(static_library)
-              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.25.0\n")
+              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.28.0\n")
               (target_dir / "SHA256SUMS").write_bytes(
                   f"{asset['library']['sha256']}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
               )
@@ -354,6 +358,20 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/alopex-crate-assets"
           echo "RELEASE_STAGE=${stage}" >> "$GITHUB_ENV"
           echo "CRATE_ASSETS=${RUNNER_TEMP}/alopex-crate-assets" >> "$GITHUB_ENV"
+      - name: Build and smoke staged parser through strict default path
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/alopex-release-strict-target
+        run: |
+          set -euo pipefail
+          unset ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD NIM_SQL_PARSER_LIB_DIR
+          cd "${RELEASE_STAGE}"
+          cargo build --locked --release -p alopex-sql
+          export LD_LIBRARY_PATH="${PWD}/crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          cargo test --locked --release -p alopex-sql --test nim_bridge_test \
+            exposes_the_nim_wire_contract_version -- --exact
+          cargo test --locked --release -p alopex-sql --test nim_bridge_test \
+            distinct_on_crosses_the_nim_messagepack_boundary -- --exact
       - name: Package and bind every published crate once
         shell: bash
         run: |
@@ -674,3 +692,14 @@ jobs:
           done
           [[ -n "${run_id}" ]]
           gh run watch "${run_id}" --exit-status
+
+      - name: Dispatch independent public verification report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON_TAG: ${{ steps.release.outputs.python_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PYTHON_TAG#alopex-py-v}"
+          gh workflow run public-release-verification.yml --ref "${PYTHON_TAG}" \
+            -f "version=${version}"

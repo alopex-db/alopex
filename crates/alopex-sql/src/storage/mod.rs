@@ -17,6 +17,7 @@ pub use bridge::{
     BorrowedSqlTransaction, LocalRangeChangeJournal, RangeChangeJournalScope, SqlTransaction,
     SqlTxn, TxnBridge, TxnContext,
 };
+pub use bridge::{HnswCacheObserver, HnswTxnEntry, trim_hnsw_transaction_cache};
 pub use codec::RowCodec;
 #[cfg(feature = "tokio")]
 pub use erased::ErasedAsyncSqlTransaction;

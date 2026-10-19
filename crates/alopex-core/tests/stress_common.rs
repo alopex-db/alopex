@@ -2,8 +2,10 @@
 
 mod common;
 
+use alopex_core::kv::AnyKV;
 use alopex_core::{KVStore, KVTransaction, TxnMode};
 use common::*;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg_attr(not(feature = "lane_smoke"), ignore)]
@@ -53,10 +55,20 @@ fn test_harness_sync_multi() {
             slo: None,
         };
         let harness = StressTestHarness::new(cfg).unwrap();
+        // Keep one engine open for the whole workload. Separate disk opens
+        // violate the exclusive-open contract and do not model concurrent
+        // transactions against one shared database.
+        let shared_store: Mutex<Option<Arc<AnyKV>>> = Mutex::new(None);
         let result = harness.run_concurrent(|tid, ctx| {
             let _op = begin_op(ctx);
             let key = format!("k{tid}").into_bytes();
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
+            let store = {
+                let mut shared = shared_store.lock().unwrap();
+                if shared.is_none() {
+                    *shared = Some(Arc::new(open_store_for_mode(&ctx.db_path, mode)?));
+                }
+                Arc::clone(shared.as_ref().unwrap())
+            };
             let mut txn = store.begin(TxnMode::ReadWrite)?;
             txn.put(key.clone(), b"v".to_vec())?;
             txn.commit_self()?;
@@ -69,6 +81,23 @@ fn test_harness_sync_multi() {
             mode.as_str(),
             result.failure_summary().unwrap_or_default()
         );
+        if result.skipped {
+            continue;
+        }
+        let store = shared_store
+            .into_inner()
+            .unwrap()
+            .expect("workers opened a store");
+        let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+        for tid in 0..harness.config.concurrency {
+            let key = format!("k{tid}").into_bytes();
+            assert_eq!(
+                reader.get(&key).unwrap(),
+                Some(b"v".to_vec()),
+                "all workers must write into the same database"
+            );
+        }
+        reader.commit_self().unwrap();
     }
 }
 

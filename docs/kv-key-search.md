@@ -1,8 +1,10 @@
 # KV key search
 
-KV key search is an additive, bounded API over opaque key bytes. Existing
-`get`, `scan_prefix`, and `scan_range` behavior is unchanged, and `/` has no
-separator, hierarchy, normalization, or canonicalization meaning.
+KV key search is a bounded API over opaque key bytes. `/` has no separator,
+hierarchy, normalization, or canonicalization meaning. Raw Rust and HTTP KV
+operations retain their existing visibility. Python embedded enumeration now
+defaults to user-visible keys and complete scans; exact `get`/`put`/`delete`
+remain unchanged.
 
 ## Contract summary
 
@@ -28,8 +30,10 @@ Each request must set `limit` and `scan_budget`. One page returns at most
 4 KiB of pattern input. The inspected and returned raw key-and-value byte
 budget defaults to 16 MiB and cannot exceed 100 MiB; HTTP further caps it from
 the configured serialized-response limit. Zero or excessive bounds and invalid patterns are
-`InvalidParameter` errors. Exhausting the candidate budget is
-`SearchBudgetExceeded`; exceeding the response budget is
+`InvalidParameter` errors. Exhausting the candidate budget normally returns a
+resumable page with `has_more=true`; `strict_budget=true` instead returns
+`SearchBudgetExceeded` when more work remains. Exactly reaching the budget at
+the end is successful. Exceeding the response budget is
 `SearchResponseTooLarge`. HTTP maps invalid input to 400 and either resource
 limit to 413.
 
@@ -37,15 +41,104 @@ Core, owned, async, and embedded callers can pass `KeySearchCancellation` for
 cooperative cancellation. HTTP and CLI calls remain bounded by `scan_budget`;
 abandoning a page does not create persistent server-side search state.
 
-When a response fills `limit`, `next_cursor` is the last returned raw key. The
-caller may submit it as the next exclusive cursor. A final full page can yield
-an empty follow-up page; this avoids an unbounded look-ahead scan.
+`has_more` reports whether scanning can continue; `next_cursor` is then the
+last processed physical key, which can differ from the last returned key when
+filtering internal keys or tombstones. Follow the cursor even for an empty
+page. One continuation lookahead is not counted or advanced past by the cursor.
+A final page, including one exactly filling `limit` or `scan_budget`, has
+`has_more=false` and no cursor. Core/HTTP/CLI cursors remain raw bytes; Python
+cursors are opaque, versioned byte handles and must only be passed back intact.
+They are not authorization tokens or encrypted data.
 
 ## Public surfaces
 
 Rust callers use `KeySearchRequest` with `KVTransaction::search_keys`,
 `OwnedKVTransaction::search_keys`, or `AsyncKVTransaction::async_search_keys`.
-Embedded callers use `Transaction::search_keys`.
+Embedded callers use `Transaction::search_keys`. Owned embedded transactions
+also expose `scan_prefix_all`/`scan_range_all` with total count and byte caps,
+and `scan_prefix_page`/`scan_range_page` with `KeyScanOptions`. The borrowed Rust
+`Transaction::scan_prefix` remains its existing lazy raw iterator: it streams
+all matches and does not eagerly collect or impose a silent page boundary.
+Rust callers collecting that raw iterator own the allocation policy.
+
+Python embedded callers use `Transaction.scan_prefix`, `Transaction.scan_range`,
+and `Transaction.search_keys`. The scan methods collect all matching entries
+by default (`limit=None`) and return frozen iterators of `(key, value)` byte pairs.
+An explicit `limit` caps the total result count; `page_size` controls internal
+work checkpoints, not result truncation. `scan_range` includes `start` and
+excludes `end`. `search_keys` returns a page dictionary with `entries`, `next_cursor`,
+`has_more`, and `scanned`. All three calls use the transaction's current view, including its
+uncommitted writes:
+
+```python
+from alopex import Database, TxnMode
+
+db = Database.new()
+with db.begin(TxnMode.READ_WRITE) as txn:
+    txn.put(b"cart:42:open", b"item")
+    assert list(txn.scan_prefix(b"cart:42:")) == [(b"cart:42:open", b"item")]
+    assert list(txn.scan_range(b"cart:42:", b"cart:43:")) == [
+        (b"cart:42:open", b"item")
+    ]
+
+    page = txn.search_keys(b"cart:*", limit=100)
+    assert page["entries"] == [(b"cart:42:open", b"item")]
+    # Pass page["next_cursor"] as cursor= to resume when it is not None.
+
+    regex_page = txn.search_keys(r"^cart:[0-9]+:", mode="regex", limit=100)
+    assert regex_page["entries"] == [(b"cart:42:open", b"item")]
+db.close()
+```
+
+Glob patterns are `bytes`; regex patterns are `str`. `search_keys`,
+`scan_prefix_page`, and `scan_range_page` return at most 100 entries by default,
+with a 10,000-candidate work budget and a 16 MiB inspected/response byte budget.
+Each page is independently bounded. Non-strict work-budget exhaustion returns
+a continuation; explicit `strict_budget=True` requests an error instead.
+
+Complete `scan_prefix`/`scan_range` resume work internally in one physical pass
+and one transaction view. `max_total_bytes` defaults to 100 MiB of raw returned
+keys and values. Exceeding it raises an error without returning a partial
+iterator. This cap is not a bound on Python object or total process memory.
+`max_bytes` remains a per-checkpoint inspection budget. Returned iterators remain
+readable after commit/rollback. For larger data, consume bounded pages:
+
+```python
+cursor = None
+while True:
+    page = txn.scan_prefix_page(b"cart:", limit=100, cursor=cursor)
+    for key, value in page["entries"]:
+        consume(key, value)
+    if not page["has_more"]:
+        break
+    cursor = page["next_cursor"]
+```
+
+`AsyncTransaction` has the same collection and page methods, plus `iter_prefix`
+and `iter_range` async iterators. The iterators yield event-loop control between
+bounded page calls on the transaction handle's owner thread. Individual native
+page calls and complete collection calls remain synchronous; no background
+worker moves a single-thread handle to another thread. Use async iterators for
+cooperative enumeration and cancellation between pages. Changing pending writes
+between page calls can change later pages; a complete collection freezes its
+view in a single call.
+
+This complete-range versus resumable-page distinction follows the transaction-
+retaining range loop in [FoundationDB's Python binding](https://github.com/apple/foundationdb/blob/main/bindings/python/fdb/impl.py).
+
+Python scans and searches exclude SQL rows/indexes/catalogs/sequences, columnar
+storage, HNSW metadata/nodes, vector registries/segments, and transaction/range
+metadata by default. Filtering happens before the result limit; hidden keys
+still consume scan and byte budgets. `include_internal=True` restores raw
+enumeration (the page budgets still apply). Existing user keys that share an
+internal namespace are hidden by default too: this is a visibility convention,
+not access control or a data migration. Exact `get` still addresses those keys.
+Ordinary prefixes such as `vector:` and `columnar:` are not reserved wholesale.
+
+The byte limit counts raw keys and values, not total process memory: a cursor
+may decode one candidate and backend buffers before its size is checked. A bounded
+page never materializes the whole range. A budget failure closes its cursor
+without returning a partial page or invalidating the transaction.
 
 HTTP accepts `POST /kv/search`:
 
@@ -68,6 +161,8 @@ alopex kv search --mode glob --pattern-hex ff2f2a --cursor-hex ff2f61
 alopex kv search --mode regex 'tenant/[0-9]+/events'
 ```
 
-The CLI `next_cursor_hex` column reports the resume cursor. A global CLI
+The CLI keeps strict candidate-budget errors because its row format cannot
+carry a continuation for an empty page. Core, HTTP, and Python pages support
+resumable empty pages. The CLI `next_cursor_hex` column reports the resume cursor. A global CLI
 `--limit` also reduces the requested page size, so the cursor never skips rows
 that the writer did not display.

@@ -1,22 +1,83 @@
 import hashlib
-import json
 import os
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.performance.parity_v0811_gate import evaluate, percentile, validate_document
+from scripts.performance.parity_v0811_gate import (
+    evaluate,
+    percentile,
+    validate_document,
+)
 from scripts.performance.parity_v0811_measure import (
+    MEMORY_PROFILE_QUANTUM_BYTES,
     _environment,
+    _streaming,
     normalize_hnsw,
+    normalize_memory_profile_bytes,
     summarize_latencies,
 )
 
 
 class PerformanceParityGateTests(unittest.TestCase):
-    def test_measurement_environment_ignores_untracked_directories(self):
+    def test_streaming_measurement_uses_the_same_batch_size_for_both_engines(self):
+        observed: dict[str, list[int]] = {"alopex": [], "polars": []}
+
+        class Batch:
+            def __init__(self, height: int):
+                self.height = height
+
+        class Batches:
+            def __init__(self):
+                self.values = iter((Batch(1), Batch(1)))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.values)
+
+        class Plan:
+            def __init__(self, engine: str):
+                self.engine = engine
+
+            def collect(self):
+                return Batch(2)
+
+            def collect_batches(self, *, chunk_size: int):
+                observed[self.engine].append(chunk_size)
+                return Batches()
+
+        def scan(engine: str):
+            return lambda _fixture: Plan(engine)
+
+        alopex = types.SimpleNamespace(LazyFrame=types.SimpleNamespace(scan_csv=scan("alopex")))
+        polars = types.SimpleNamespace(__version__="1.43.2", scan_csv=scan("polars"))
+        with patch.dict(sys.modules, {"alopex": alopex, "polars": polars}):
+            _streaming("alopex", Path("rows.csv"), rows=2, warmups=0, runs=1)
+            _streaming("polars", Path("rows.csv"), rows=2, warmups=0, runs=1)
+
+        self.assertEqual(observed, {"alopex": [8192], "polars": [8192]})
+
+    def test_measurement_normalizes_page_sized_memory_variance(self):
+        baseline = normalize_memory_profile_bytes(54746497024)
+        self.assertEqual(baseline, normalize_memory_profile_bytes(54746501120))
+        self.assertNotEqual(
+            baseline,
+            normalize_memory_profile_bytes(baseline + MEMORY_PROFILE_QUANTUM_BYTES),
+        )
+
+    def test_measurement_environment_records_runtime_os_and_ignores_untracked_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "source.py").write_text("source\n", encoding="utf-8")
@@ -26,9 +87,11 @@ class PerformanceParityGateTests(unittest.TestCase):
             def git_run(command, **_kwargs):
                 if command[1:3] == ["rev-parse", "HEAD"]:
                     return subprocess.CompletedProcess(command, 0, stdout="revision\n")
-                return subprocess.CompletedProcess(
-                    command, 0, stdout=b"source.py\0.venv\0"
-                )
+                if command[1:2] == ["ls-files"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=b"source.py\0.venv\0"
+                    )
+                raise AssertionError(f"unexpected subprocess: {command!r}")
 
             try:
                 os.chdir(root)
@@ -38,8 +101,37 @@ class PerformanceParityGateTests(unittest.TestCase):
                         side_effect=git_run,
                     ),
                     patch(
+                        "scripts.performance.parity_v0811_measure.platform.processor",
+                        return_value="test cpu",
+                    ),
+                    patch(
                         "scripts.performance.parity_v0811_measure.importlib.metadata.version",
                         return_value="0.8.14",
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.freedesktop_os_release",
+                        return_value={"ID": "ubuntu", "VERSION_ID": "26.04"},
+                        create=True,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.Path.read_text",
+                        side_effect=(
+                            "model name : test cpu\n",
+                            "MemTotal: 1024 kB\n",
+                        ),
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.os.sched_getaffinity",
+                        return_value={0},
+                        create=True,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.os.cpu_count",
+                        return_value=1,
+                    ),
+                    patch(
+                        "scripts.performance.parity_v0811_measure.platform.release",
+                        return_value="test-kernel",
                     ),
                 ):
                     environment = _environment()
@@ -49,6 +141,10 @@ class PerformanceParityGateTests(unittest.TestCase):
         expected = hashlib.sha256()
         expected.update(b"source.py\0source\n\0")
         self.assertEqual(environment["alopex_tree_sha256"], expected.hexdigest())
+        self.assertEqual(environment["os"], "ubuntu-26.04")
+        self.assertEqual(environment["cpu_model"], "test cpu")
+        self.assertEqual(environment["memory_bytes"], 1024 * 1024)
+        self.assertEqual(environment["cpu_affinity"], [0])
 
     def test_measurement_summary_reports_percentiles_and_throughput(self):
         summary = summarize_latencies([0.001, 0.002, 0.004, 0.003], rows=100)
@@ -133,6 +229,34 @@ class PerformanceParityGateTests(unittest.TestCase):
         }
 
         self.assertEqual(evaluate("example", contract, measurement), [])
+
+    def test_gate_uses_absolute_budget_for_noisy_micro_latency_ratio(self):
+        contract = {
+            "kind": "sql",
+            "reference_revision": "sqlite/sqlite@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "metrics": ["plan_latency_p50_ms"],
+            "thresholds": {
+                "max_latency_ratio": 35.0,
+                "min_throughput_ratio": 0.025,
+                "max_peak_memory_ratio": 4.5,
+                "max_absolute_by_metric": {"plan_latency_p50_ms": 1.25},
+                "max_ratio_by_metric": {"plan_latency_p50_ms": 60.0},
+            },
+        }
+        measurement = {
+            "reference_revision": "sqlite/sqlite@v1.0.0",
+            "dataset_sha256": "a" * 64,
+            "subject": {"plan_latency_p50_ms": 0.994358},
+            "reference": {"plan_latency_p50_ms": 0.014545},
+        }
+
+        self.assertEqual(evaluate("sqlite", contract, measurement), [])
+
+        measurement["subject"]["plan_latency_p50_ms"] = 1.251
+        errors = evaluate("sqlite", contract, measurement)
+
+        self.assertTrue(any("plan_latency_p50_ms ratio" in error for error in errors))
 
     def test_gate_rejects_wrong_revision_missing_metric_and_regression(self):
         contract = {
@@ -230,6 +354,37 @@ class PerformanceParityGateTests(unittest.TestCase):
 
         self.assertEqual(errors, ["environment: cpu_model does not match the runner profile"])
 
+    def test_gate_tolerates_minor_memtotal_drift_but_rejects_different_capacity(self):
+        memory_bytes = 54_746_497_024
+        profile = {
+            "os": "ubuntu-24.04",
+            "cpu_model": "fixed-cpu",
+            "logical_cpu_count": 8,
+            "cpu_affinity": [0],
+            "memory_bytes": memory_bytes,
+            "build_profile": "release",
+            "thread_count": 1,
+        }
+        environment = {
+            **profile,
+            "memory_bytes": memory_bytes - 716_800,
+            "alopex_version": "0.8.15",
+            "alopex_revision": "a" * 40,
+            "alopex_tree_sha256": "b" * 64,
+            "kernel": "6.0",
+            "python_version": "3.11.11",
+        }
+        contracts = {"runner_profile": profile, "contracts": {}}
+        measurements = {"environment": environment, "results": []}
+
+        self.assertEqual(validate_document(contracts, measurements, "curated"), [])
+
+        environment["memory_bytes"] = memory_bytes - 16 * 1024 * 1024 - 1
+        self.assertEqual(
+            validate_document(contracts, measurements, "curated"),
+            ["environment: memory_bytes does not match the runner profile"],
+        )
+
     def test_gate_uses_metric_specific_latency_budget(self):
         contract = {
             "reference_revision": "project@v1.0.0",
@@ -250,6 +405,36 @@ class PerformanceParityGateTests(unittest.TestCase):
         }
 
         self.assertEqual(evaluate("example", contract, measurement), [])
+
+    def test_gate_rejects_invalid_metric_domains(self):
+        contract = {
+            "reference_revision": "project@v1.0.0",
+            "fixture": {"dataset_sha256": "a" * 64},
+            "thresholds": {"max_latency_ratio": 2.0, "min_recall": 0.99,
+                           "max_recall_delta": 0.01},
+        }
+        for metric, invalid in (
+            ("latency_p50_ms", -1.0), ("latency_p50_ms", True),
+            ("latency_p50_ms", float("nan")),
+            ("latency_p50_ms", float("inf")),
+            ("recall_at_10", 1.01), ("recall_at_10", True),
+            ("recall_at_10", -0.01), ("recall_at_10", float("nan")),
+        ):
+            for arm in ("subject", "reference"):
+                with self.subTest(metric=metric, invalid=invalid, arm=arm):
+                    row = {
+                        "reference_revision": "project@v1.0.0",
+                        "dataset_sha256": "a" * 64,
+                        "subject": {metric: 1.0}, "reference": {metric: 1.0},
+                    }
+                    row[arm][metric] = invalid
+                    errors = evaluate("hnsw", {**contract, "metrics": [metric]}, row)
+                    self.assertTrue(errors, f"accepted invalid {arm} {metric}: {invalid}")
+
+    def test_gate_rejects_duplicate_evidence_instead_of_overwriting(self):
+        row = {"contract": "hnsw", "evidence_id": "query"}
+        errors = validate_document({}, {"results": [row, dict(row)]}, "full")
+        self.assertTrue(any("duplicate evidence" in error for error in errors))
 
     def test_hnsw_gate_rejects_recall_outside_the_reference_band(self):
         contract = {

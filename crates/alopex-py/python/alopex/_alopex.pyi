@@ -1,5 +1,12 @@
 from builtins import str as _str
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Tuple, Union, TypedDict, overload
+
+class KeyScanPage(TypedDict):
+    entries: List[Tuple[bytes, bytes]]
+    next_cursor: Optional[bytes]
+    has_more: bool
+    scanned: int
+
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -76,7 +83,10 @@ class HnswConfig:
 class EmbeddedConfig:
     memory_limit_bytes: Optional[int]
 
-    def __init__(self, memory_limit_bytes: Optional[int] = None) -> None: ...
+    hnsw_cache_bytes: Optional[int]
+    hnsw_cache_entries: Optional[int]
+
+    def __init__(self, memory_limit_bytes: Optional[int] = None, *, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> None: ...
 
 
 class DatabaseOptions:
@@ -537,17 +547,24 @@ class PreparedStatement:
     def reset(self) -> None: ...
     def finalize(self) -> None: ...
     def execute(self) -> Union[List[Dict[str, Any]], int, None]: ...
+    def execute_many(
+        self,
+        rows: Union[
+            List[Union[List[Any], Tuple[Any, ...]]],
+            Tuple[Union[List[Any], Tuple[Any, ...]], ...],
+        ],
+    ) -> List[Union[List[Dict[str, Any]], int, None]]: ...
 
 
 class Database:
     @staticmethod
-    def open(path: str, *, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def open(path: str, *, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
-    def new(*, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def new(*, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
-    def open_in_memory(*, thread_mode: Optional[Literal["multi", "single"]] = None) -> "Database": ...
+    def open_in_memory(*, thread_mode: Optional[Literal["multi", "single"]] = None, hnsw_cache_bytes: Optional[int] = None, hnsw_cache_entries: Optional[int] = None) -> "Database": ...
 
     @staticmethod
     def open_with_config(
@@ -558,6 +575,10 @@ class Database:
 
     @property
     def thread_mode(self) -> ThreadMode: ...
+
+    def set_hnsw_cache_limit(self, bytes: int, *, entries: Optional[int] = None) -> None: ...
+    def hnsw_cache_stats(self) -> Dict[str, Any]: ...
+    def warm_hnsw_index(self, name: str) -> int: ...
 
     def execute_sql(
         self,
@@ -576,7 +597,8 @@ class Database:
             NotImplementedError: ``bytes`` parameters (BLOB literals are not
                 supported by the SQL parser yet).
             AlopexError: SQL parse/execution errors (``code`` carries the
-                stable ALOPEX-P/S/C/E### error code).
+                stable ALOPEX-P/S/C/E### error code), or transaction-control
+                statements. Use :meth:`begin` for explicit transactions.
         """
         ...
     def execute_shared(
@@ -650,6 +672,15 @@ class Database:
 
 
 class Transaction:
+    def prepare(self, sql: str) -> PreparedStatement: ...
+    def execute_many(
+        self,
+        sql: str,
+        rows: Union[
+            List[Union[List[Any], Tuple[Any, ...]]],
+            Tuple[Union[List[Any], Tuple[Any, ...]], ...],
+        ],
+    ) -> List[Union[List[Dict[str, Any]], int, None]]: ...
     @property
     def status(self) -> Dict[str, str]: ...
 
@@ -673,6 +704,15 @@ class Transaction:
                 already completed.
         """
         ...
+    def savepoint(self, name: str) -> None:
+        """Create a named savepoint in this transaction."""
+        ...
+    def rollback_to(self, name: str) -> None:
+        """Roll back changes made after the latest matching savepoint."""
+        ...
+    def release(self, name: str) -> None:
+        """Release the latest matching savepoint and its descendants."""
+        ...
     def execute_sql_stream(
         self,
         sql: str,
@@ -684,6 +724,36 @@ class Transaction:
     def get(self, key: bytes) -> Optional[bytes]: ...
     def put(self, key: bytes, value: bytes) -> None: ...
     def delete(self, key: bytes) -> None: ...
+    def scan_prefix(self, prefix: bytes, *, limit: Optional[int] = None, page_size: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, max_total_bytes: int = 104857600, include_internal: bool = False, strict_budget: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_prefix_page(self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False, strict_budget: bool = False) -> KeyScanPage: ...
+    def scan_range(self, start: bytes, end: bytes, *, limit: Optional[int] = None, page_size: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, max_total_bytes: int = 104857600, include_internal: bool = False, strict_budget: bool = False) -> Iterator[Tuple[bytes, bytes]]: ...
+    def scan_range_page(self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None, scan_budget: int = 10000, max_bytes: int = 16777216, include_internal: bool = False, strict_budget: bool = False) -> KeyScanPage: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: bytes,
+        mode: Literal["glob"] = "glob",
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+        *,
+        include_internal: bool = False,
+        strict_budget: bool = False,
+    ) -> KeyScanPage: ...
+    @overload
+    def search_keys(
+        self,
+        pattern: str,
+        mode: Literal["regex"],
+        limit: int = 100,
+        cursor: Optional[bytes] = None,
+        scan_budget: int = 10000,
+        max_bytes: int = 16777216,
+        *,
+        include_internal: bool = False,
+        strict_budget: bool = False,
+    ) -> KeyScanPage: ...
     def upsert_vector(
         self,
         key: bytes,

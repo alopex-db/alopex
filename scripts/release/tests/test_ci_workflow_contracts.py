@@ -205,12 +205,14 @@ class CiWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(path, process)
             self.assertIn(path, compatibility)
+        scope = (REPOSITORY_ROOT / "scripts/ci/classify-change-scope.sh").read_text()
+        self.assertIn("bash scripts/ci/classify-change-scope.sh", ci)
         for path in (
             ".github/workflows/*",
             "scripts/release/*",
             "formal/release-report/*",
         ):
-            self.assertIn(path, ci)
+            self.assertIn(path, scope)
         self.assertIn("name: Change scope", ci)
         self.assertIn("needs: [scope]", ci)
         self.assertIn("needs.scope.outputs.production == 'true'", ci)
@@ -220,7 +222,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("cargo test", process)
         self.assertNotIn("pull_request:", stress)
         self.assertNotIn("release-process-contract:", ci)
-        self.assertIn("scripts/parity/*", ci)
+        self.assertIn("scripts/parity/*", scope)
         self.assertGreaterEqual(compatibility.count("scripts/parity/**"), 2)
         self.assertGreaterEqual(parity.count("scripts/parity/**"), 2)
         self.assertIn("scripts.parity.test_compat_fixture_contract", parity)
