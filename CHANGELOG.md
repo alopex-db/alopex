@@ -35,10 +35,11 @@ All notable changes to this project will be documented in this file.
   of silently discarding it. Internal encoding properties no longer appear in
   public table properties. Rust callers converting `PersistedTableMeta` and
   `TableMetadata` must use `TryFrom` and handle conversion errors (#472).
-- Columnar and vector segments written by v0.8.16 cannot be read by v0.8.15.
-  Keep a backup created before upgrading if rollback to v0.8.15 is required;
-  reopening newly written segments with v0.8.15 fails with a decoding error
-  (#470).
+- v0.8.16 retains readers for existing V2 columnar and vector segments,
+  including their row-group-specific encoding metadata (#470). New writes use
+  the V3 segment format and require v0.8.16 or later to read. This format
+  change does not itself require exporting and reinserting an existing
+  database when upgrading to v0.8.16.
 - Upgrading cannot recover column DEFAULT expressions that v0.8.15 and older
   releases did not persist. Re-declare those defaults explicitly; the new
   persistence behavior preserves defaults recorded by v0.8.16 (#472).
