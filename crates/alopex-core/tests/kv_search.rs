@@ -460,6 +460,7 @@ fn sparse_budget_pages_resume_and_exact_terminal_budget_succeeds() {
     assert!(page.next_cursor.is_none());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 proptest::proptest! {
     #[test]
     fn bounded_continuations_match_complete_reference(

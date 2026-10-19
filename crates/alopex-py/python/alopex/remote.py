@@ -796,6 +796,12 @@ class RemoteTransaction:
     def scan_range(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.scan_range", _KV_REASON)
 
+    def scan_prefix_page(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_prefix_page", _KV_REASON)
+
+    def scan_range_page(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise _unsupported("Transaction.scan_range_page", _KV_REASON)
+
     def search_keys(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported("Transaction.search_keys", _KV_REASON)
 

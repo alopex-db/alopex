@@ -1069,9 +1069,32 @@ mod tests {
         writer.commit().unwrap();
 
         let reader = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
-        let error = reader
+        let page = reader
             .with_transaction(|transaction| {
                 transaction.search_keys(&KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2))
+            })
+            .unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!(page.scanned, 2);
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor, Some(b"dead-2".to_vec()));
+        let next = reader
+            .with_transaction(|transaction| {
+                let mut request = KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2);
+                request.cursor = page.next_cursor.clone();
+                transaction.search_keys(&request)
+            })
+            .unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.entries[0].key, b"live");
+        assert_eq!(next.scanned, 1);
+        assert!(!next.has_more);
+        let error = reader
+            .with_transaction(|transaction| {
+                transaction.search_keys(
+                    &KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2)
+                        .with_strict_budget(true),
+                )
             })
             .unwrap_err();
         assert!(error.to_string().contains("search scan budget exceeded"));

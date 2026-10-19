@@ -804,6 +804,8 @@ UNSUPPORTED_TRANSACTION_CALLS = [
     ("delete", (b"k",)),
     ("scan_prefix", (b"k",)),
     ("scan_range", (b"a", b"z")),
+    ("scan_prefix_page", (b"a",)),
+    ("scan_range_page", (b"a", b"z")),
     ("search_keys", (b"*",)),
     ("upsert_vector", (b"k", None, [1.0], None)),
     ("search_similar", ([1.0], None, 1)),
