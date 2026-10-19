@@ -10,6 +10,7 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/compatibility/**"
       - "scripts/reference_tests/hnsw_public_inventory.py"
       - "scripts/reference_tests/test_hnsw_public_inventory.py"
       - "docs/parity/hnsw-v0.8.11.json"
@@ -29,6 +30,7 @@ on:
       - "scripts/release/verify_macos_wheel_linkedit.py"
       - ".github/actions/setup-nim-parser-toolchain/**"
       - "scripts/build-nim-parser.sh"
+      - "scripts/compatibility/**"
       - "scripts/reference_tests/hnsw_public_inventory.py"
       - "scripts/reference_tests/test_hnsw_public_inventory.py"
       - "docs/parity/hnsw-v0.8.11.json"
@@ -85,6 +87,11 @@ jobs:
 
   test:
     name: test ${{ matrix.numpy_runtime }} py${{ matrix.python }} (${{ matrix.os }})
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "2"
     # Opt in only for trusted candidate pushes; PRs retain hosted runners.
     runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     strategy:
@@ -272,6 +279,53 @@ jobs:
           "$smoke_python" -m pip install pytest numpy
           "$smoke_python" -m pip install --no-index --no-deps "$wheel"
           "$smoke_python" -m pytest -q crates/alopex-py/tests/test_sql.py
+      - name: Run old-writer to candidate-reader compatibility matrix
+        if: ${{ !env.ACT && matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_BUILD_JOBS: "2"
+          PIP_NO_CACHE_DIR: "1"
+        run: |
+          set -euo pipefail
+          compat_root="${RUNNER_TEMP}/alopex-upgrade-compatibility"
+          old_env="${compat_root}/old-env"
+          candidate_python="${RUNNER_TEMP}/alopex-release-wheel-smoke/bin/python"
+          candidate_wheel="$(find "${RUNNER_TEMP}/alopex-release-wheel" -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$candidate_wheel"
+          mkdir -p "$compat_root"
+          cleanup() { rm -rf -- "$old_env"; }
+          trap cleanup EXIT
+          python -m unittest scripts.compatibility.test_runner
+          python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
+            --additional-bytes 20000000000 -- bash scripts/compatibility/build-rust.sh
+          python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
+            --additional-bytes 2000000000 -- python -m venv "$old_env"
+          python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
+            --additional-bytes 2000000000 -- "$old_env/bin/python" -m pip install \
+            --only-binary=:all: 'alopex==0.8.15' 'numpy==2.2.1' 'pyarrow==26.0.0'
+          python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
+            --additional-bytes 2000000000 -- "$candidate_python" -m pip install \
+            --only-binary=:all: 'numpy==2.2.1' 'pyarrow==26.0.0'
+          python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
+            --additional-bytes 2000000000 -- python scripts/compatibility/run.py \
+            --old-python "$old_env/bin/python" --new-python "$candidate_python" \
+            --candidate-wheel "$candidate_wheel" \
+            --old-rust "$CARGO_TARGET_DIR/debug/alopex-compat-baseline" \
+            --new-rust "$CARGO_TARGET_DIR/debug/alopex-compat-candidate" \
+            --output "$compat_root/results"
+      - name: Upload cross-version compatibility evidence
+        if: ${{ always() && !env.ACT && matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/alopex-upgrade-compatibility/results
+            ${{ runner.temp }}/alopex-upgrade-compatibility/storage.jsonl
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify HNSW runtime and source inventory
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
         run: |

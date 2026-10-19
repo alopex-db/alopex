@@ -1,0 +1,22 @@
+[package]
+name = "alopex-compat-candidate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "alopex-compat-candidate"
+path = "../rust_harness.rs"
+
+[dependencies]
+alopex-embedded = { path = "../../../crates/alopex-embedded" }
+alopex-sql = { path = "../../../crates/alopex-sql" }
+serde_json = "1"
+chrono = "0.4"
+csv = "1"
+
+[profile.dev]
+debug = 0
+incremental = false

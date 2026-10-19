@@ -1,0 +1,15 @@
+{
+  "ddl": [
+    "CREATE TABLE scalars (id INTEGER PRIMARY KEY, note TEXT, n BIGINT, score DOUBLE, active BOOLEAN)",
+    "CREATE TABLE typed (id INTEGER PRIMARY KEY, amount DECIMAL(18,6), day DATE, clock TIME, stamp TIMESTAMP)",
+    "CREATE TABLE vectors (id INTEGER PRIMARY KEY, embedding VECTOR(3, L2), note TEXT)",
+    "CREATE TABLE col (id INTEGER PRIMARY KEY, note TEXT, score DOUBLE) WITH (storage='columnar')"
+  ],
+  "seed": [
+    "INSERT INTO scalars VALUES (1, '', 9223372036854775807, 1.25, TRUE), (2, NULL, -9223372036854775807, -0.5, FALSE), (3, '日本語,''quote''\nnext', 0, 0.0, TRUE)",
+    "INSERT INTO typed VALUES (1, CAST('123.456789' AS DECIMAL(18,6)), DATE '2024-02-29', TIME '12:34:56.123456', TIMESTAMP '2024-02-29 12:34:56.123456')",
+    "INSERT INTO vectors VALUES (1, [0.0,1.0,2.0], 'nearest'), (2, [10.0,11.0,12.0], 'far')"
+  ],
+  "index": "CREATE INDEX vec_idx ON vectors(embedding) USING HNSW",
+  "knn_query": "SELECT id FROM vectors ORDER BY vector_distance(embedding, [0.0,1.0,2.0], 'l2') ASC LIMIT 1"
+}
