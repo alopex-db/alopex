@@ -746,7 +746,7 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
             let (btree_indexes, hnsw_path) = {
                 let guard = catalog.read().expect("catalog lock poisoned");
                 (
-                    query::selected_btree_indexes(&input, &*guard),
+                    query::selected_btree_indexes(&input, &*guard, txn.memory_policy()),
                     query::explain_knn_path(txn, &*guard, &input)?,
                 )
             };
@@ -760,6 +760,7 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
                 ));
             }
             let started = Instant::now();
+            let btree_trace = query::BtreeTrace::start();
             let execution = if hnsw_path.is_some() {
                 let guard = catalog.read().expect("catalog lock poisoned");
                 query::execute_query_with_knn_stats(txn, &*guard, &input)?
@@ -780,6 +781,7 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
                     None,
                 ),
             };
+            let btree_stats = btree_trace.finish();
             crate::executor::explain_result(
                 &input,
                 hnsw_path,
@@ -787,6 +789,7 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
                 format,
                 Some(crate::executor::ExplainAnalysis {
                     knn_stats: stats.as_ref(),
+                    btree_stats: Some(&btree_stats),
                     elapsed_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     rows: crate::executor::result_rows(&result),
                 }),

@@ -37,6 +37,37 @@ def test_execute_sql_ddl_returns_none(db):
     assert result is None
 
 
+def test_btree_adaptive_explain_reports_actual_path(db):
+    db.execute_sql("CREATE TABLE adaptive (id INT, v INT)")
+    db.prepare("INSERT INTO adaptive VALUES (?, ?)").execute_many(
+        [[i, i] for i in range(1025)]
+    )
+    db.execute_sql("CREATE INDEX adaptive_v ON adaptive(v)")
+    for count, expected_path, fallback in [
+        (100, "IndexScan", "none"),
+        (1024, "IndexScan", "none"),
+        (1025, "Scan", "CandidateCap"),
+    ]:
+        query = f"SELECT id FROM adaptive WHERE v < {count}"
+        planned = db.execute_sql(f"EXPLAIN {query}")[0]["QUERY PLAN"]
+        assert "adaptive=true max_candidates=1024" in planned
+        assert "fallback=Scan" in planned
+        # Exercise both the database and explicit transaction SQL entrypoints.
+        txn = db.begin(TxnMode.READ_ONLY)
+        try:
+            for execute in [db.execute_sql, txn.execute_sql]:
+                document = json.loads(
+                    execute(f"EXPLAIN (ANALYZE, FORMAT JSON) {query}")[0]["query_plan"]
+                )
+                actual = document["physical_plan"]["access_path"]["actual"]
+                assert actual["path"] == expected_path
+                assert actual["fallback"] == fallback
+                assert actual["candidates_examined"] == count
+                assert len(execute(query)) == count
+        finally:
+            txn.rollback()
+
+
 def test_parameterized_multiple_statements_fail_before_execution(db):
     db.execute_sql("CREATE TABLE multi_params (id INTEGER PRIMARY KEY)")
     sql = "INSERT INTO multi_params VALUES (?); INSERT INTO multi_params VALUES (?)"

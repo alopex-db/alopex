@@ -174,6 +174,44 @@ fn write_int_parquet(path: &Path) {
     writer.close().expect("parquet close");
 }
 
+#[tokio::test]
+async fn btree_adaptive_async_reports_effective_byte_fallback() {
+    use alopex_sql::executor::{MemoryPolicy, SpillPolicy};
+    let store = Arc::new(AsyncKVStoreAdapter::from_arc(
+        Arc::new(MemoryKV::new()),
+        TxnMode::ReadWrite,
+    ));
+    let txn = store.begin_async().await.unwrap();
+    let mut bridge = AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, build_catalog());
+    for sql in [
+        "CREATE TABLE adaptive_async (id INT, v INT, wide TEXT)".to_owned(),
+        format!(
+            "INSERT INTO adaptive_async VALUES (1, 7, '{}')",
+            "x".repeat(1024)
+        ),
+        "CREATE INDEX adaptive_async_v ON adaptive_async(v)".to_owned(),
+    ] {
+        bridge.async_execute(&sql).await.unwrap();
+    }
+    bridge.set_memory_policy(Some(MemoryPolicy::new(Some(256), SpillPolicy::FailFast)));
+    let ExecutionResult::Query(rows) = bridge
+        .async_execute("EXPLAIN (ANALYZE, FORMAT JSON) SELECT id FROM adaptive_async WHERE v = 7")
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let SqlValue::Text(json) = &rows.rows[0][0] else {
+        panic!()
+    };
+    let json: serde_json::Value = serde_json::from_str(json).unwrap();
+    let access = &json["physical_plan"]["access_path"];
+    assert_eq!(access["adaptive"]["max_bytes"], 256);
+    assert_eq!(access["adaptive"]["max_candidates"], 32);
+    assert_eq!(access["actual"]["path"], "Scan");
+    assert_eq!(access["actual"]["fallback"], "ByteBudget");
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn read_parquet_honors_copy_allowed_dirs() {

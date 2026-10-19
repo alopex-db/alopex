@@ -22,6 +22,8 @@ type Pipeline = (
 );
 
 pub mod aggregate;
+mod btree;
+pub(crate) use btree::{BtreeAccessStats, BtreeChoice, BtreeTrace};
 pub mod columnar_scan;
 pub mod iterator;
 pub mod join;
@@ -148,13 +150,10 @@ fn execute_index_scan<'txn, S: KVStore + 'txn>(
     index: &crate::catalog::IndexMetadata,
     predicate: IndexPredicate,
     memory: Option<&MemoryPolicy>,
-) -> Result<Option<Vec<Row>>> {
-    let byte_limit = memory
-        .and_then(MemoryPolicy::limit_bytes)
-        .unwrap_or(MAX_BTREE_INDEX_BYTES)
-        .min(MAX_BTREE_INDEX_BYTES);
-    let max_candidates = MAX_BTREE_INDEX_CANDIDATES
-        .min(usize::try_from(byte_limit / std::mem::size_of::<u64>() as u64).unwrap_or(usize::MAX));
+) -> Result<btree::IndexScanOutcome> {
+    let limits = btree::BtreeLimits::new(memory);
+    let byte_limit = limits.max_bytes;
+    let max_candidates = limits.max_candidates;
     let row_ids = txn.with_index(
         index.index_id,
         index.unique,
@@ -181,8 +180,12 @@ fn execute_index_scan<'txn, S: KVStore + 'txn>(
         },
     )?;
     if row_ids.len() > max_candidates {
-        return Ok(None);
+        return Ok(btree::IndexScanOutcome::Fallback {
+            candidates: row_ids.len(),
+            reason: btree::BtreeFallback::CandidateCap,
+        });
     }
+    let candidates = row_ids.len();
     let mut row_ids = row_ids;
     row_ids.sort_unstable();
     let mut retained_bytes = (row_ids.len() * std::mem::size_of::<u64>()) as u64;
@@ -194,12 +197,15 @@ fn execute_index_scan<'txn, S: KVStore + 'txn>(
                     .saturating_add(std::mem::size_of::<Row>() as u64)
                     .saturating_add(values.iter().map(ByteSized::estimated_bytes).sum::<u64>());
                 if retained_bytes > byte_limit {
-                    return Ok(None);
+                    return Ok(btree::IndexScanOutcome::Fallback {
+                        candidates,
+                        reason: btree::BtreeFallback::ByteBudget,
+                    });
                 }
                 rows.push(Row::new(row_id, values));
             }
         }
-        Ok(Some(rows))
+        Ok(btree::IndexScanOutcome::Rows { rows, candidates })
     })?)
 }
 
@@ -224,13 +230,15 @@ fn matching_btree_index<C: Catalog + ?Sized>(
 pub(crate) fn selected_btree_indexes<C: Catalog + ?Sized>(
     plan: &LogicalPlan,
     catalog: &C,
-) -> Vec<Option<String>> {
+    memory: Option<&MemoryPolicy>,
+) -> Vec<Option<BtreeChoice>> {
     fn collect<C: Catalog + ?Sized>(
         plan: &LogicalPlan,
         catalog: &C,
-        selected: Option<String>,
+        selected: Option<BtreeChoice>,
         has_outer: bool,
-        indexes: &mut Vec<Option<String>>,
+        indexes: &mut Vec<Option<BtreeChoice>>,
+        memory: Option<&MemoryPolicy>,
     ) {
         if matches!(plan, LogicalPlan::Scan { .. }) {
             indexes.push(selected);
@@ -239,29 +247,30 @@ pub(crate) fn selected_btree_indexes<C: Catalog + ?Sized>(
         // The executor disables indexed filtering when an outer row is present.
         // A lateral right input supplies that row to every descendant operator.
         if let LogicalPlan::LateralJoin { left, right, .. } = plan {
-            collect(left, catalog, None, has_outer, indexes);
-            collect(right, catalog, None, true, indexes);
+            collect(left, catalog, None, has_outer, indexes, memory);
+            collect(right, catalog, None, true, indexes, memory);
             return;
         }
         let selected = if has_outer {
             None
         } else {
-            selected_btree_index_name(plan, catalog)
+            selected_btree_index_name(plan, catalog, memory)
         };
         for child in plan.explain_children() {
-            collect(child, catalog, selected.clone(), has_outer, indexes);
+            collect(child, catalog, selected.clone(), has_outer, indexes, memory);
         }
     }
 
     let mut indexes = Vec::new();
-    collect(plan, catalog, None, false, &mut indexes);
+    collect(plan, catalog, None, false, &mut indexes, memory);
     indexes
 }
 
 fn selected_btree_index_name<C: Catalog + ?Sized>(
     plan: &LogicalPlan,
     catalog: &C,
-) -> Option<String> {
+    memory: Option<&MemoryPolicy>,
+) -> Option<BtreeChoice> {
     let LogicalPlan::Filter { input, predicate } = plan else {
         return None;
     };
@@ -273,7 +282,8 @@ fn selected_btree_index_name<C: Catalog + ?Sized>(
         return None;
     }
     let (column, _) = index_predicate(predicate, table_meta)?;
-    matching_btree_index(catalog, table, column).map(|index| index.name)
+    matching_btree_index(catalog, table, column)
+        .map(|index| BtreeChoice::new(table, &index.name, predicate, memory))
 }
 
 #[derive(Clone)]
@@ -1080,9 +1090,9 @@ fn build_iterator_pipeline_with_outer<
                 && let Some(index) = matching_btree_index(catalog, table, column)
             {
                 let schema = table_meta.columns.clone();
-                if let Some(rows) =
-                    execute_index_scan(txn, table_meta, &index, index_predicate, memory)?
-                {
+                let outcome = execute_index_scan(txn, table_meta, &index, index_predicate, memory)?;
+                btree::record(table, &index.name, &predicate, &outcome);
+                if let btree::IndexScanOutcome::Rows { rows, .. } = outcome {
                     let input_iter = iterator::VecIterator::new(rows, schema.clone());
                     let filter_iter = FilterIterator::new(input_iter, predicate);
                     return Ok((Box::new(filter_iter), projection.clone(), schema));
