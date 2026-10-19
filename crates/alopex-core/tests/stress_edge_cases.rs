@@ -368,9 +368,10 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
         mode,
     ))
     .unwrap();
+    // All workers operate on one engine; disk stores reject duplicate opens.
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for round in 0..5 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -385,7 +386,6 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for round in 0..3 {
                     let _op = begin_op(ctx);
@@ -413,6 +413,19 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
         model,
         result.failure_summary()
     );
+    if !result.skipped {
+        let (first, last, value) = match model {
+            ExecutionModel::SyncSingle => (b"cw_0_0".to_vec(), b"cw_4_199".to_vec(), b"x".to_vec()),
+            ExecutionModel::SyncMulti => {
+                (b"cwm_0_0".to_vec(), b"cwm_2_149".to_vec(), b"y".to_vec())
+            }
+            _ => unreachable!(),
+        };
+        let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(&first).unwrap(), Some(value.clone()));
+        assert_eq!(reader.get(&last).unwrap(), Some(value));
+        reader.commit_self().unwrap();
+    }
 }
 
 fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
@@ -428,9 +441,10 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
         mode,
     ))
     .unwrap();
+    // All workers operate on one engine; disk stores reject duplicate opens.
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for level in 0..3 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -448,7 +462,6 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for level in 0..2 {
                     let _op = begin_op(ctx);
@@ -476,6 +489,21 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
         model,
         result.failure_summary()
     );
+    if !result.skipped {
+        let last = match model {
+            ExecutionModel::SyncSingle => b"ml2_99".to_vec(),
+            ExecutionModel::SyncMulti => b"mlm1_79".to_vec(),
+            _ => unreachable!(),
+        };
+        let value = match model {
+            ExecutionModel::SyncSingle => b"v2".to_vec(),
+            ExecutionModel::SyncMulti => b"mv1".to_vec(),
+            _ => unreachable!(),
+        };
+        let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(&last).unwrap(), Some(value));
+        reader.commit_self().unwrap();
+    }
 }
 
 fn run_memtable_flush_trigger(model: ExecutionModel, mode: StressStorageMode) {
@@ -558,9 +586,10 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
     };
     let cfg = edge_config("write_faster_than_flush", model, concurrency, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
+    // The writer and flusher must share the same engine and exclusive disk open.
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for batch in 0..5 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -578,7 +607,6 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for batch in 0..3 {
                     let _op = begin_op(ctx);
@@ -606,6 +634,16 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
         model,
         result.failure_summary()
     );
+    if !result.skipped {
+        let (key, value) = match model {
+            ExecutionModel::SyncSingle => (b"wf_4_299".to_vec(), b"wv".to_vec()),
+            ExecutionModel::SyncMulti => (b"wfm_2_249".to_vec(), b"wm".to_vec()),
+            _ => unreachable!(),
+        };
+        let mut reader = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(&key).unwrap(), Some(value));
+        reader.commit_self().unwrap();
+    }
 }
 
 fn run_cache_lru_eviction(model: ExecutionModel, mode: StressStorageMode) {
