@@ -6,7 +6,9 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.27.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.28.0`, returned by `alopex_parser_version()`.
+- Contract `0.28.0` represents query-local HNSW option values as `Expr`
+  (literal or positional parameter). Mixing 0.27.0 and 0.28.0 is rejected.
 - Contract `0.27.0` carries node-local `Join.natural`, `CreateIndex.unique`,
   and `CreateTable.query`. The parser retains the unit in `INTERVAL '1' DAY`.
   Producers and consumers from `0.26.0` must not be mixed with this contract.
@@ -30,7 +32,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.27.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.28.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -49,13 +51,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.27.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.28.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.27.0` surface and does not retroactively change them.
+describes the current `0.28.0` surface and does not retroactively change them.
 
 CI compares public Nim AST declarations and MessagePack writers, the Rust AST,
 and the Rust wire decoder with the pull request base (or the preceding push).
@@ -113,7 +115,7 @@ from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `knn_options: [IndexOption]` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `knn_options: [KnnOption]` |
 | `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Begin` | `isolation_level: TransactionIsolationLevel?`, `access_mode: TransactionAccessMode?` |
@@ -416,6 +418,12 @@ field. It carries query-level `LIMIT … WITH (...)` controls such as
 `ef_search` and `enable_hnsw`; an empty array means that the query has no
 override. A `0.25.0` consumer would silently ignore those controls, so the
 producer and consumer identifiers must match at the exported-version gate.
+
+Contract `0.28.0` replaces that option string with `KnnOption = { key: string,
+value: Expr, span: Span }`. `value` is a typed integer/boolean literal or a
+one-based positional `Parameter`. DDL `IndexOption.value` remains a string.
+For `LIMIT ? WITH (ef_search = ?, enable_hnsw = ?)`, indexes are 1, 2 and 3.
+The parameter indexes continue across the complete SQL statement.
 
 ## DDL Types
 

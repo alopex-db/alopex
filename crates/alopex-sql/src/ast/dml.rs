@@ -1,4 +1,3 @@
-use super::ddl::IndexOption;
 use super::expr::Expr;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
@@ -33,8 +32,17 @@ pub struct Select {
     pub limit_with_ties: bool,
     /// Per-query HNSW controls attached to a KNN `LIMIT` query.
     #[serde(default)]
-    pub knn_options: Vec<IndexOption>,
+    pub knn_options: Vec<KnnOption>,
     #[serde(default)]
+    pub span: Span,
+}
+
+/// One query-local HNSW setting (parser contract 0.28.0).
+/// Values are scalar literals or positional parameters; DDL options are unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnnOption {
+    pub key: String,
+    pub value: Expr,
     pub span: Span,
 }
 

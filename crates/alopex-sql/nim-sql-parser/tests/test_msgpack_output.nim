@@ -130,7 +130,7 @@ suite "MessagePack output - roundtrip":
 suite "MessagePack output - contract shape":
 
   test "public payload matches the versioned consumer golden":
-    const fixtureJson = staticRead("../../tests/fixtures/parser_wire_v027.json")
+    const fixtureJson = staticRead("../../tests/fixtures/parser_wire_v028.json")
     let fixture = parseJson(fixtureJson)
     check fixture["contract"].getStr() == $alopex_parser_version()
     for item in fixture["cases"]:
@@ -520,10 +520,20 @@ suite "MessagePack output - stability":
     let options = kind["knn_options"]
     check options.len == 2
     check options[0]["key"].getStr() == "ef_search"
-    check options[0]["value"].getStr() == "64"
+    check options[0]["value"]["kind"]["literal"]["value"].getStr() == "64"
     check options[0]["span"]["start"]["column"].getInt() > 0
     check options[1]["key"].getStr() == "enable_hnsw"
-    check options[1]["value"].getStr() == "false"
+    check not options[1]["value"]["kind"]["literal"]["value"].getBool()
+
+suite "MessagePack output - bound kNN options":
+  test "query option parameters follow LIMIT positions":
+    let kind = selectKind("SELECT 1 LIMIT ? WITH (ef_search = ?, enable_hnsw = ?)")
+    check kind["limit"]["kind"]["index"].getInt() == 1
+    let options = kind["knn_options"]
+    check options[0]["value"]["kind"]["variant"].getStr() == "Parameter"
+    check options[0]["value"]["kind"]["index"].getInt() == 2
+    check options[1]["value"]["kind"]["index"].getInt() == 3
+    check options[0]["value"]["span"]["start"]["column"].getInt() > 0
 
 suite "MessagePack output - staged nested JOIN compatibility":
 

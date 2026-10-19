@@ -1058,3 +1058,137 @@ fn explain_identical_vectors_preserves_exact_fallback_results_and_actual_ef() {
     );
     assert!(text.contains(&format!("rows={ROWS}\n")), "{text}");
 }
+
+#[test]
+fn knn_query_options_bind_values_before_planning() {
+    use alopex_sql::{planner::LogicalPlan, storage::SqlValue};
+    let (_executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let stmt = Parser::parse_sql(&AlopexDialect, "SELECT id FROM items ORDER BY vector_distance(embedding, ?, 'l2') LIMIT ? WITH (ef_search = ?, enable_hnsw = ?)").unwrap().pop().unwrap();
+    let values = [
+        SqlValue::Vector(vec![0.0, 0.0]),
+        SqlValue::Integer(5),
+        SqlValue::Integer(16),
+        SqlValue::Boolean(true),
+    ];
+    let guard = catalog.read().unwrap();
+    let plan = Planner::with_parameters(&*guard, &values)
+        .plan(&stmt)
+        .unwrap();
+    let LogicalPlan::Limit {
+        limit, knn_options, ..
+    } = plan
+    else {
+        panic!("expected limit");
+    };
+    assert_eq!(limit, Some(5));
+    assert_eq!(knn_options.ef_search, Some(16));
+    assert_eq!(knn_options.enable_hnsw, Some(true));
+    for ef in [
+        SqlValue::Integer(1),
+        SqlValue::BigInt(16),
+        SqlValue::BigInt(1_000_000),
+    ] {
+        let values = [
+            SqlValue::Vector(vec![0.0, 0.0]),
+            SqlValue::Integer(1),
+            ef,
+            SqlValue::Boolean(false),
+        ];
+        let plan = Planner::with_parameters(&*guard, &values)
+            .plan(&stmt)
+            .unwrap();
+        let LogicalPlan::Limit { knn_options, .. } = plan else {
+            panic!("expected limit");
+        };
+        assert!(knn_options.ef_search.is_some());
+        assert_eq!(knn_options.enable_hnsw, Some(false));
+    }
+}
+
+#[test]
+fn knn_query_options_reject_bad_bound_types_and_report_parameter_index() {
+    use alopex_sql::storage::SqlValue;
+    let (_executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let sql = "SELECT id FROM items ORDER BY vector_distance(embedding, ?, 'l2') LIMIT 1 WITH (ef_search = ?)";
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let guard = catalog.read().unwrap();
+    for value in [
+        SqlValue::Integer(0),
+        SqlValue::Integer(-1),
+        SqlValue::BigInt(1_000_001),
+        SqlValue::Text("16".into()),
+        SqlValue::Null,
+        SqlValue::Double(16.0),
+        SqlValue::Boolean(true),
+    ] {
+        let values = [SqlValue::Vector(vec![0.0, 0.0]), value];
+        let error = Planner::with_parameters(&*guard, &values)
+            .plan(&stmt)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ef_search") && error.contains("?2"),
+            "{error}"
+        );
+    }
+    let only_vector = [SqlValue::Vector(vec![0.0, 0.0])];
+    let error = Planner::with_parameters(&*guard, &only_vector)
+        .plan(&stmt)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unbound positional parameter ?2"), "{error}");
+    let stmt = Parser::parse_sql(&AlopexDialect, &sql.replace("ef_search", "enable_hnsw"))
+        .unwrap()
+        .pop()
+        .unwrap();
+    for value in [
+        SqlValue::Integer(1),
+        SqlValue::Text("true".into()),
+        SqlValue::Null,
+        SqlValue::Double(1.0),
+    ] {
+        let values = [SqlValue::Vector(vec![0.0, 0.0]), value];
+        let error = Planner::with_parameters(&*guard, &values)
+            .plan(&stmt)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("enable_hnsw") && error.contains("?2"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn knn_query_options_keep_duplicate_and_unknown_rejection() {
+    let (_executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let base =
+        "SELECT id FROM items ORDER BY vector_distance(embedding, [0.0, 0.0], 'l2') LIMIT 1 WITH ";
+    for (options, message) in [
+        (
+            "(ef_search = 16, ef_search = 32)",
+            "ef_search may be specified only once",
+        ),
+        (
+            "(enable_hnsw = true, enable_hnsw = false)",
+            "enable_hnsw may be specified only once",
+        ),
+        ("(unknown_control = 16)", "unknown kNN query option"),
+    ] {
+        let stmt = Parser::parse_sql(&AlopexDialect, &format!("{base}{options}"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let error = Planner::new(&*catalog.read().unwrap())
+            .plan(&stmt)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(message), "{error}");
+    }
+}

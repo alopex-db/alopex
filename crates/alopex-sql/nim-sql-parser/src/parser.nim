@@ -1478,12 +1478,12 @@ proc parseKnnQueryOptions(p: var Parser): SqlNode =
   while true:
     let key = p.expectIdent("kNN query option key")
     discard p.expect(tkEq)
-    if p.current.kind notin {tkInteger, tkTrue, tkFalse}:
-      p.error("expected integer or boolean kNN query option value")
-    let value = p.advance()
-    let option = newNode(nkIndexOption, spanThrough(tokenSpan(key), tokenSpan(value)))
+    if p.current.kind notin {tkInteger, tkTrue, tkFalse, tkQuestion}:
+      p.error("expected integer, boolean or positional parameter kNN query option value")
+    let value = p.parsePrimary()
+    let option = newNode(nkIndexOption, spanThrough(tokenSpan(key), value.span))
     option.children.add(newIdent(key.value, tokenSpan(key)))
-    option.children.add(newStringLit(value.value, tokenSpan(value)))
+    option.children.add(value)
     result.children.add(option)
     if not p.check(tkComma):
       break

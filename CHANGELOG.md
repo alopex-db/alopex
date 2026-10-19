@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Query-local HNSW `ef_search` and `enable_hnsw` controls accept typed prepared
+  parameters. Parser contract `0.28.0` carries expression values for these
+  options; DDL options remain strings. Mixed contracts fail before decoding (#671).
+
 - The Nim parser wire contract is `0.27.0`; JOIN nodes now carry their NATURAL
   attribute directly, and the contract covers UNIQUE indexes, CTAS, and
   unit-bearing INTERVAL literals. Incompatible parser/consumer versions are
