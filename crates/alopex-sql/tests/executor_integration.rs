@@ -322,6 +322,142 @@ fn create_executor() -> (
     (executor, catalog)
 }
 
+mod issue669 {
+    use super::*;
+    use alopex_sql::storage::SqlValue;
+    use alopex_sql::{AlopexDialect, Parser, Planner};
+
+    fn run(
+        engine: &mut Executor<MemoryKV, MemoryCatalog>,
+        catalog: &Arc<RwLock<MemoryCatalog>>,
+        sql: &str,
+    ) -> ExecutionResult {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statements[0])
+            .unwrap();
+        engine.execute(plan).unwrap()
+    }
+
+    fn text(result: ExecutionResult) -> String {
+        let ExecutionResult::Query(result) = result else {
+            panic!("query result required")
+        };
+        let SqlValue::Text(text) = &result.rows[0][0] else {
+            panic!("text required")
+        };
+        text.clone()
+    }
+
+    #[test]
+    fn btree_adaptive_explain_reports_actual_boundaries_and_results() {
+        let (mut engine, catalog) = create_executor();
+        run(
+            &mut engine,
+            &catalog,
+            "CREATE TABLE adaptive (id INT, v INT, g INT)",
+        );
+        for start in (0..5000).step_by(250) {
+            let values = (start..start + 250)
+                .map(|i| format!("({i},{i},1)"))
+                .collect::<Vec<_>>()
+                .join(",");
+            run(
+                &mut engine,
+                &catalog,
+                &format!("INSERT INTO adaptive VALUES {values}"),
+            );
+        }
+        run(
+            &mut engine,
+            &catalog,
+            "CREATE INDEX adaptive_v ON adaptive(v)",
+        );
+        run(
+            &mut engine,
+            &catalog,
+            "CREATE INDEX adaptive_g ON adaptive(g)",
+        );
+        for count in [100, 1024, 1025, 5000] {
+            let sql = format!("SELECT id FROM adaptive WHERE v < {count}");
+            let plan = text(run(&mut engine, &catalog, &format!("EXPLAIN {sql}")));
+            assert!(plan.contains("adaptive=true max_candidates=1024"), "{plan}");
+            assert!(plan.contains("fallback=Scan"), "{plan}");
+            let actual = text(run(
+                &mut engine,
+                &catalog,
+                &format!("EXPLAIN ANALYZE {sql}"),
+            ));
+            let fallback = if count > 1024 { "CandidateCap" } else { "none" };
+            let path = if count > 1024 { "Scan" } else { "IndexScan" };
+            assert!(actual.contains(&format!("actual_path={path}")), "{actual}");
+            assert!(actual.contains(&format!("fallback={fallback}")), "{actual}");
+            let json = text(run(
+                &mut engine,
+                &catalog,
+                &format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}"),
+            ));
+            let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let access = &json["physical_plan"]["access_path"];
+            assert_eq!(access["actual"]["path"], path);
+            assert_eq!(access["actual"]["fallback"], fallback);
+            assert_eq!(access["actual"]["candidates_examined"], count.min(1025));
+            assert_eq!(access["actual"]["loops"], 1);
+            let ExecutionResult::Query(rows) = run(&mut engine, &catalog, &sql) else {
+                panic!()
+            };
+            assert_eq!(rows.rows.len(), count as usize);
+            assert_eq!(
+                rows.rows,
+                (0..count)
+                    .map(|i| vec![SqlValue::Integer(i)])
+                    .collect::<Vec<_>>()
+            );
+        }
+        let actual = text(run(
+            &mut engine,
+            &catalog,
+            "EXPLAIN ANALYZE SELECT id FROM adaptive WHERE g = 1",
+        ));
+        assert!(
+            actual.contains("planned=IndexScan index=adaptive_g"),
+            "{actual}"
+        );
+        assert!(actual.contains("fallback=CandidateCap"), "{actual}");
+        // Two uses of one index with different bounds must retain distinct outcomes.
+        let json = text(run(
+            &mut engine,
+            &catalog,
+            "EXPLAIN (ANALYZE, FORMAT JSON) SELECT id FROM adaptive WHERE v < 100 UNION ALL SELECT id FROM adaptive WHERE v < 5000",
+        ));
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        fn paths(node: &serde_json::Value, out: &mut Vec<String>) {
+            if let Some(path) = node["actual"]["path"].as_str() {
+                out.push(path.to_owned());
+            }
+            for child in node["children"].as_array().unwrap() {
+                paths(child, out);
+            }
+        }
+        let mut actual = Vec::new();
+        paths(&json["physical_plan"]["root"], &mut actual);
+        assert_eq!(actual, ["IndexScan", "Scan"]);
+        run(&mut engine, &catalog, "CREATE TABLE adaptive_copy (id INT)");
+        let actual = text(run(
+            &mut engine,
+            &catalog,
+            "EXPLAIN ANALYZE INSERT INTO adaptive_copy SELECT id FROM adaptive WHERE v < 1025",
+        ));
+        assert!(actual.contains("fallback=CandidateCap"), "{actual}");
+        let ExecutionResult::Query(copied) =
+            run(&mut engine, &catalog, "SELECT id FROM adaptive_copy")
+        else {
+            panic!()
+        };
+        assert_eq!(copied.rows.len(), 1025);
+    }
+}
+
 fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
     TypedExpr {
         kind,

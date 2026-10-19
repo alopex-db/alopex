@@ -87,6 +87,7 @@ use std::time::Instant;
 #[derive(Clone, Copy)]
 pub(crate) struct ExplainAnalysis<'a> {
     pub(crate) knn_stats: Option<&'a query::KnnExecutionStats>,
+    pub(crate) btree_stats: Option<&'a [query::BtreeAccessStats]>,
     pub(crate) elapsed_ns: u64,
     pub(crate) rows: u64,
 }
@@ -94,13 +95,14 @@ pub(crate) struct ExplainAnalysis<'a> {
 pub(crate) fn explain_result(
     plan: &LogicalPlan,
     hnsw_path: Option<String>,
-    btree_indexes: &[Option<String>],
+    btree_indexes: &[Option<query::BtreeChoice>],
     format: ExplainFormat,
     analysis: Option<ExplainAnalysis<'_>>,
 ) -> ExecutionResult {
     let elapsed_ns = analysis.map(|analysis| analysis.elapsed_ns);
     let rows = analysis.map(|analysis| analysis.rows);
     let knn_stats = analysis.and_then(|analysis| analysis.knn_stats);
+    let btree_stats = analysis.and_then(|analysis| analysis.btree_stats);
     let (column, value) = match format {
         ExplainFormat::Text => {
             let mut text = plan.explain_text(elapsed_ns, rows);
@@ -126,11 +128,7 @@ pub(crate) fn explain_result(
                     if line.trim_start().starts_with("Scan table=")
                         && let Some(Some(index_name)) = indexes.next()
                     {
-                        return line.replacen(
-                            "Scan table=",
-                            &format!("IndexScan index={index_name} table="),
-                            1,
-                        );
+                        return index_name.annotate_text(line, btree_stats);
                     }
                     line.to_owned()
                 })
@@ -147,28 +145,31 @@ pub(crate) fn explain_result(
             }
             fn annotate_scans<'a>(
                 node: &mut serde_json::Value,
-                indexes: &mut impl Iterator<Item = &'a Option<String>>,
+                indexes: &mut impl Iterator<Item = &'a Option<query::BtreeChoice>>,
+                stats: Option<&[query::BtreeAccessStats]>,
             ) {
                 if node["node"] == "Scan"
                     && let Some(Some(index_name)) = indexes.next()
                 {
-                    node["node"] = serde_json::json!("IndexScan");
-                    node["index"] = serde_json::json!(index_name);
+                    index_name.annotate_json(node, stats);
                 }
                 if let Some(children) = node["children"].as_array_mut() {
                     for child in children {
-                        annotate_scans(child, indexes);
+                        annotate_scans(child, indexes, stats);
                     }
                 }
             }
             annotate_scans(
                 &mut document["physical_plan"]["root"],
                 &mut btree_indexes.iter(),
+                btree_stats,
             );
             if let [Some(index_name)] = btree_indexes {
                 document["physical_plan"]["access_path"] = serde_json::json!({
-                    "node": "IndexScan", "index": index_name,
+                    "node": "IndexScan",
                 });
+                index_name
+                    .annotate_json(&mut document["physical_plan"]["access_path"], btree_stats);
             }
             ("query_plan", document.to_string())
         }
@@ -401,7 +402,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             } => {
                 let btree_index = {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
-                    query::selected_btree_indexes(&input, &*catalog)
+                    query::selected_btree_indexes(&input, &*catalog, None)
                 };
                 let hnsw_path = self.run_in_write_txn(|txn| {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
@@ -417,6 +418,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     ));
                 }
                 let started = Instant::now();
+                let btree_trace = query::BtreeTrace::start();
                 let (result, knn_stats) = if hnsw_path.is_some() {
                     let _statement_timestamp = evaluator::begin_statement();
                     let execution = self.run_in_write_txn(|txn| {
@@ -430,6 +432,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 } else {
                     (self.execute((*input).clone())?, None)
                 };
+                let btree_stats = btree_trace.finish();
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
@@ -438,6 +441,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                     format,
                     Some(ExplainAnalysis {
                         knn_stats: knn_stats.as_ref(),
+                        btree_stats: Some(&btree_stats),
                         elapsed_ns,
                         rows: result_rows(&result),
                     }),
@@ -948,7 +952,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     let catalog = self.catalog.read().expect("catalog lock poisoned");
                     let view = TxnCatalogView::new(&*catalog, &*overlay);
                     (
-                        query::selected_btree_indexes(&input, &view),
+                        query::selected_btree_indexes(&input, &view, None),
                         query::explain_knn_path(&mut sql_txn, &view, &input)?,
                     )
                 };
@@ -962,6 +966,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     ));
                 }
                 let started = Instant::now();
+                let btree_trace = query::BtreeTrace::start();
                 let (result, knn_stats) = if hnsw_path.is_some() {
                     let _statement_timestamp = evaluator::begin_statement();
                     let execution = {
@@ -977,6 +982,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 } else {
                     (self.execute_in_txn((*input).clone(), txn)?, None)
                 };
+                let btree_stats = btree_trace.finish();
                 let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 return Ok(explain_result(
                     &input,
@@ -985,6 +991,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     format,
                     Some(ExplainAnalysis {
                         knn_stats: knn_stats.as_ref(),
+                        btree_stats: Some(&btree_stats),
                         elapsed_ns,
                         rows: result_rows(&result),
                     }),

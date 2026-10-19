@@ -25,6 +25,17 @@ Plan nodes contain operator and relation names, but never expression values,
 SQL literals, or prepared bind values. Applications must not treat EXPLAIN as
 an echo or logging surface for submitted SQL.
 
+B-tree access is adaptive: candidate materialization is bounded by 1,024 row
+IDs and 8 MiB, or a smaller execution memory policy. Plain EXPLAIN appends
+`adaptive=true`, the effective `max_candidates` and `max_bytes`, and
+`fallback=Scan` to an eligible `IndexScan`. ANALYZE records the executed path:
+`actual_path=IndexScan fallback=none`, or a `Scan` with `planned=IndexScan`
+and `fallback=CandidateCap` or `fallback=ByteBudget`. Candidate and loop
+counters aggregate repeated probes of the same index and predicate within
+the statement, including a SELECT source inside DML. JSON exposes these
+limits in `adaptive` and observed counters/path in `actual` on the physical
+scan node and the single-scan `access_path`; its logical tree stays unchanged.
+
 ## Side effects and failure boundaries
 
 - Plain `EXPLAIN` uses a read-only transaction even when the nested statement
