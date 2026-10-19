@@ -38,3 +38,35 @@ The release verifier runs the `EMB-11-prepared-statements` public Rust scenario
 from `demo-v08-embedded` and the owning Rust/Python suites. The CLI deliberately
 uses one-shot positional `--param` values because a process invocation has no
 statement lifetime in which reset or finalize could be meaningful.
+
+
+## Query-local HNSW controls
+
+`LIMIT` and HNSW `WITH` options accept native positional parameters:
+
+```python
+statement = db.prepare(
+    "SELECT id FROM items ORDER BY vector_distance(e, ?, 'l2') "
+    "LIMIT ? WITH (ef_search = ?, enable_hnsw = ?)"
+)
+results = statement.execute_many([
+    [[0.0, 0.0], 5, 16, True],
+    [[0.0, 0.0], 5, 256, True],
+])
+statement.finalize()
+```
+
+`ef_search` requires INTEGER/BIGINT in `1..=1_000_000`; `enable_hnsw`
+requires BOOLEAN. NULL, text and floating-point values are rejected. Errors
+identify the option and its positional parameter. Literal syntax still works;
+DDL index options retain their existing representation. No session-level SET
+syntax is added. Prepared batches remain atomic, including INSERT ... SELECT
+with query-local controls.
+
+The planner resolves the bound controls on each execution; Alopex currently
+has no plan cache. A future plan cache must include these values in its cache
+key or retain parameters for execution-time resolution. Parser producers and
+consumers must both use contract 0.28.0.
+
+This uses the same bound-value path as LIMIT, following ordinary typed request
+parameters such as [Qdrant's typed `SearchParams` implementation](https://github.com/qdrant/qdrant/blob/master/lib/segment/src/types.rs).

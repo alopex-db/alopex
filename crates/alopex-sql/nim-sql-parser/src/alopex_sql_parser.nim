@@ -26,7 +26,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.19.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.25.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.26.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.27.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.28.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -499,6 +499,20 @@ proc writeIndexOptions(s: Stream; node: SqlNode) =
   s.pack_array(node.children.len)
   for opt in node.children:
     s.writeIndexOption(opt)
+
+proc writeKnnOptions(s: Stream; node: SqlNode) =
+  if node == nil:
+    s.pack_array(0)
+    return
+  s.pack_array(node.children.len)
+  for option in node.children:
+    s.pack_map(3)
+    s.writeKey("key")
+    s.pack_type(option.children[0].firstIdent())
+    s.writeKey("value")
+    s.writeExpr(option.children[1])
+    s.writeKey("span")
+    s.writeSpan(option.span)
 
 proc referentialActionVariant(action: string): string =
   case action.toUpperAscii()
@@ -1329,7 +1343,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true; emitNatural
     s.writeKey("limit_with_ties")
     s.pack_type(limitNode != nil and limitNode.limitWithTies)
     s.writeKey("knn_options")
-    s.writeIndexOptions(knnOptionsNode)
+    s.writeKnnOptions(knnOptionsNode)
 
 proc writeSelectKind(s: Stream; node: SqlNode; emitNatural = true) =
   # 固定 16 キー(variant/distinct/distinct_on/projection/from/selection/

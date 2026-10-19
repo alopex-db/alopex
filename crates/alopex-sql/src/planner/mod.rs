@@ -39,11 +39,11 @@ pub use types::ResolvedType;
 
 use crate::ast::ddl::{
     AlterSequence, AlterTable, ColumnConstraint, ColumnDef, CreateIndex, CreateSequence,
-    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, IndexOption, Truncate,
+    CreateTable, CreateView, DropIndex, DropSequence, DropTable, DropView, Truncate,
 };
 use crate::ast::dml::{
     CopyDirection, CopySource, CopyTarget, Delete, FromItem, GroupByItem, Insert, InsertSource,
-    LITERAL_TABLE, Merge, MergeAction, OnConflictAction, OrderByExpr, QueryBody, Select,
+    KnnOption, LITERAL_TABLE, Merge, MergeAction, OnConflictAction, OrderByExpr, QueryBody, Select,
     SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
@@ -72,56 +72,6 @@ struct WindowSelectStages {
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
-
-fn parse_knn_query_options(
-    options: &[IndexOption],
-) -> Result<logical_plan::KnnQueryOptions, PlannerError> {
-    let mut parsed = logical_plan::KnnQueryOptions::default();
-    for option in options {
-        match option.key.to_ascii_lowercase().as_str() {
-            "ef_search" => {
-                let value = option
-                    .value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|value| (1..=MAX_HNSW_EF_SEARCH).contains(value))
-                    .ok_or_else(|| {
-                        PlannerError::invalid_expression(format!(
-                            "ef_search must be an integer between 1 and {MAX_HNSW_EF_SEARCH}"
-                        ))
-                    })?;
-                if parsed.ef_search.replace(value).is_some() {
-                    return Err(PlannerError::invalid_expression(
-                        "ef_search may be specified only once".to_string(),
-                    ));
-                }
-            }
-            "enable_hnsw" => {
-                let value = match option.value.to_ascii_lowercase().as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => {
-                        return Err(PlannerError::invalid_expression(
-                            "enable_hnsw must be true or false".to_string(),
-                        ));
-                    }
-                };
-                if parsed.enable_hnsw.replace(value).is_some() {
-                    return Err(PlannerError::invalid_expression(
-                        "enable_hnsw may be specified only once".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(PlannerError::invalid_expression(format!(
-                    "unknown kNN query option '{}'",
-                    option.key
-                )));
-            }
-        }
-    }
-    Ok(parsed)
-}
 
 fn metadata_schema(columns: &[(&str, ResolvedType)]) -> Vec<ColumnMetadata> {
     columns
@@ -2800,7 +2750,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         limit_with_ties: bool,
-        knn_options: &[IndexOption],
+        knn_options: &[KnnOption],
         outer_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
@@ -5999,6 +5949,74 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         rewrite_expr_with_maps(&expr, &group_key_map, &aggregate_map, output_names)
     }
 
+    fn parse_knn_query_options(
+        &self,
+        options: &[KnnOption],
+    ) -> Result<logical_plan::KnnQueryOptions, PlannerError> {
+        let mut parsed = logical_plan::KnnQueryOptions::default();
+        for option in options {
+            let key = option.key.to_ascii_lowercase();
+            if !matches!(key.as_str(), "ef_search" | "enable_hnsw") {
+                return Err(PlannerError::invalid_expression(format!(
+                    "unknown kNN query option '{}'",
+                    option.key
+                )));
+            }
+            let parameter = match option.value.kind {
+                ExprKind::Parameter { index } => format!(" (parameter ?{index})"),
+                _ => String::new(),
+            };
+            let context = format!("kNN option {key}{parameter}");
+            let typed = self
+                .type_checker
+                .infer_type_with_scope(&option.value, &[], &|stmt, _| {
+                    Err(PlannerError::unsupported_feature(
+                        "subquery in kNN option",
+                        "a future version",
+                        stmt.span(),
+                    ))
+                })
+                .map_err(|error| PlannerError::invalid_expression(format!("{context}: {error}")))?;
+            let value = crate::executor::evaluator::evaluate(
+                &typed,
+                &crate::executor::evaluator::EvalContext::new(&[]),
+            )
+            .map_err(|error| PlannerError::invalid_expression(format!("{context}: {error}")))?;
+            match key.as_str() {
+                "ef_search" => {
+                    let integer = match value {
+                        SqlValue::Integer(value) => usize::try_from(value).ok(),
+                        SqlValue::BigInt(value) => usize::try_from(value).ok(),
+                        _ => None,
+                    };
+                    let value = integer.filter(|value| (1..=MAX_HNSW_EF_SEARCH).contains(value)).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!("{context} must be an integer between 1 and {MAX_HNSW_EF_SEARCH}, got {}", typed.resolved_type.type_name()))
+                    })?;
+                    if parsed.ef_search.replace(value).is_some() {
+                        return Err(PlannerError::invalid_expression(
+                            "ef_search may be specified only once".to_string(),
+                        ));
+                    }
+                }
+                "enable_hnsw" => {
+                    let SqlValue::Boolean(value) = value else {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "{context} must be BOOLEAN, got {}",
+                            typed.resolved_type.type_name()
+                        )));
+                    };
+                    if parsed.enable_hnsw.replace(value).is_some() {
+                        return Err(PlannerError::invalid_expression(
+                            "enable_hnsw may be specified only once".to_string(),
+                        ));
+                    }
+                }
+                _ => unreachable!("known option was validated above"),
+            }
+        }
+        Ok(parsed)
+    }
+
     /// Resolve a LIMIT/OFFSET/FETCH count expression to a concrete value.
     ///
     /// The expression must be a constant scalar of an integer type
@@ -6090,7 +6108,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         limit: &Option<Expr>,
         offset: &Option<Expr>,
         with_ties: bool,
-        knn_options: &[IndexOption],
+        knn_options: &[KnnOption],
     ) -> Result<LogicalPlan, PlannerError> {
         self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None, knn_options)
     }
@@ -6109,7 +6127,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         offset: &Option<Expr>,
         with_ties: bool,
         tie_keys: Option<&[SortExpr]>,
-        raw_knn_options: &[IndexOption],
+        raw_knn_options: &[KnnOption],
     ) -> Result<LogicalPlan, PlannerError> {
         if limit.is_none() && offset.is_none() && !with_ties && raw_knn_options.is_empty() {
             return Ok(plan);
@@ -6141,7 +6159,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             limit: self.resolve_pagination_count(limit, "LIMIT")?,
             offset: self.resolve_pagination_count(offset, "OFFSET")?,
             ties,
-            knn_options: parse_knn_query_options(raw_knn_options)?,
+            knn_options: self.parse_knn_query_options(raw_knn_options)?,
         };
         if !raw_knn_options.is_empty() && knn_optimizer::detect_knn_pattern(&plan).is_none() {
             return Err(PlannerError::invalid_expression(

@@ -50,13 +50,13 @@ fn wire_contract_real_payload_carries_semantic_fields() {
 
 #[test]
 fn wire_contract_real_producer_exports_cutover() {
-    assert_eq!(contract_native::parser_contract_version(), "0.27.0");
+    assert_eq!(contract_native::parser_contract_version(), "0.28.0");
 }
 
 #[test]
 fn wire_contract_actual_payload_matches_versioned_golden_and_rust_decoder() {
     let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/parser_wire_v027.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/parser_wire_v028.json")).unwrap();
     assert_eq!(
         fixture["contract"],
         contract_native::parser_contract_version()
@@ -454,7 +454,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.27.0");
+    assert_eq!(parser_contract_version(), "0.28.0");
 }
 
 #[test]
@@ -596,7 +596,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.27.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.28.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -604,7 +604,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.27.0");
+    assert_eq!(parser_contract_version(), "0.28.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -1470,4 +1470,50 @@ fn parses_v0811_relational_sql_across_the_nim_boundary() {
         table.columns[1].constraints[0],
         ColumnConstraint::Identity { .. }
     ));
+}
+
+#[test]
+fn knn_bound_options_retain_scalar_types_and_parameter_positions() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT 1 LIMIT ? WITH (ef_search = ?, enable_hnsw = ?)",
+    )
+    .unwrap();
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("select");
+    };
+    assert!(matches!(
+        select.limit.as_ref().unwrap().kind,
+        ExprKind::Parameter { index: 1 }
+    ));
+    assert!(matches!(
+        select.knn_options[0].value.kind,
+        ExprKind::Parameter { index: 2 }
+    ));
+    assert!(matches!(
+        select.knn_options[1].value.kind,
+        ExprKind::Parameter { index: 3 }
+    ));
+    assert!(select.knn_options[0].value.span.start.column > 0);
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT 1 LIMIT 1 WITH (ef_search = 64, enable_hnsw = false)",
+    )
+    .unwrap();
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("select");
+    };
+    assert!(
+        matches!(&select.knn_options[0].value.kind, ExprKind::Literal { literal: Literal::Number(value) } if value == "64")
+    );
+    assert!(matches!(
+        &select.knn_options[1].value.kind,
+        ExprKind::Literal {
+            literal: Literal::Boolean(false)
+        }
+    ));
+    assert!(Parser::parse_sql(&AlopexDialect, "SELECT 1 LIMIT 1 WITH (ef_search = 'x')").is_err());
+    // A 0.27 library is rejected before the newly shaped option can be decoded.
+    assert!(contract_gate::ensure_linked_parser_contract("0.27.0").is_err());
+    assert!(contract_gate::ensure_parser_contract("0.27.0", "0.28.0").is_err());
 }
