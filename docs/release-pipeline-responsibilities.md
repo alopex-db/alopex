@@ -34,6 +34,15 @@ evidence remain tied to the exact commit SHA.
 Every job has exactly one responsibility. A workflow trigger does not change the
 job's owner.
 
+Post-release Verification executes the published packages as a downstream
+observation, after Development/Extended and RC qualification. It does not
+reauthorize publication or replace released bytes. Scenario failures identify
+both the package and verifier commit so stale harness expectations can be
+separated from product failures. A focused recheck may retain successful
+scenario records only when the reviewed baseline digest, public tag, toolchain
+and unchanged scenario/product inputs are checked; each retained step keeps its
+original run/attempt and verifier identity.
+
 | Job | Responsibility | Canonical evidence or output |
 |---|---|---|
 | `alopex-cli.yml:cli-check` | Development CI | exact-SHA CLI compile/lint result |
@@ -78,13 +87,16 @@ job's owner.
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
 | `parity-performance.yml:performance` | Extended Verification | exact-SHA canonical benchmark JSON/Markdown and raw evidence |
 | `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
-| `public-release-verification.yml:verify` | Stable Delivery | package reachability and minimal import |
+| `public-release-verification.yml:verify` | Post-release Verification | full seventeen-step published-package scenarios tied to public tag and verifier SHA |
+| `public-release-verification.yml:recheck` | Post-release Verification | dispatch a source-bound focused Embedded recheck independently of a full run's publisher |
+| `public-release-embedded-recheck.yml:verify` | Post-release Verification | reviewed baseline digest, sixteen retained successes and eleven rechecked Embedded scenarios |
+| `public-release-embedded-recheck.yml:publish` | Stable Delivery | immutable composed JSON/Markdown with per-step execution provenance |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
 | `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | validated projection of retained exact-SHA evidence into public docs |
 | `public-release-verification.yml:notify-vector-benchmark-failure` | Stable Delivery | version-scoped benchmark publication failure notification |
-| `public-release-verification.yml:publish-publication-failure-report` | Stable Delivery | immutable report-publication failure evidence |
+| `public-release-verification.yml:publish-publication-failure-report` | Stable Delivery | retain original verification artifact after report publication failure without rewriting its outcome |
 | `public-release-verification.yml:notify-publication-failure` | Stable Delivery | report-publication failure notification |
-| `public-release-verification.yml:notify-scheduled-failure` | Stable Delivery | scheduled reachability notification |
+| `public-release-verification.yml:notify-scheduled-failure` | Post-release Verification | scheduled public-package scenario failure notification |
 | `release-process.yml:contract` | Development CI | workflow contract tests |
 | `release-process.yml:parser-host` | Development CI | four native hosts: parser regression tests, real shared/static archives, strict target verification and native load smoke |
 | `release-process.yml:parser-manifest` | Development CI | complete four-target manifest and downloadable development assets tied to the workflow source SHA and run; not release qualification |
@@ -118,7 +130,7 @@ contract test then requires their new workflow-qualified names.
 | `.github/workflows/alopex-py-release.yml` | build and publish together | RC build plus stable promotion jobs | move | stable jobs consume candidate bytes | wheel digest comparison |
 | `scripts/release/safe-tag.sh` | main/worktree gate | commit-object and immutable-tag gate | replace | branch checks are absent | `test_safe_tag.sh` |
 | `candidate-manifest.json` | absent | canonical qualified artifact inventory | replace | never; retention is release evidence | schema and digest replay tests |
-| post-publication functionality demos | first-run correctness evidence | package reachability/minimal import only | shrink | every removed check has a commit-level owner | contract test and dead-path search |
+| post-publication functionality demos | published-package scenario observation | source-bound full scenarios with separately identified focused rechecks | retain | immutable reports and per-step provenance are stored in public docs | scenario, baseline-digest and input-invariance tests |
 | `performance-artifacts/hnsw/` | partial exact-SHA measurements | reviewable run-scoped raw/JSON/CSV/Markdown/environment benchmark evidence | replace | 30-day Actions retention expires after public JSON/Markdown byte verification | schema, identity, and render-hash validation |
 | `parity-performance-outcome-*` | absent | runner-independent exact-SHA run ID/attempt and terminal outcome | replace | 90-day Actions retention expires | dependent-job contract and outcome schema test |
 | `reports/vector-benchmarks/vX.Y.Z.{json,md}` | absent | public version view of retained exact-SHA evidence | replace | source evidence is withdrawn with a recorded correction | docs public-surface and byte comparison |

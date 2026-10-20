@@ -61,7 +61,7 @@ on:
     - cron: "23 3 * * 1"
 
 concurrency:
-  group: public-release-verification-${{ inputs.version || 'latest' }}
+  group: public-release-verification-${{ inputs.baseline_run_id && format('recheck-{0}-{1}', inputs.baseline_run_id, inputs.baseline_attempt) || inputs.version || 'latest' }}
   cancel-in-progress: false
 
 jobs:
@@ -660,10 +660,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          title="release verification: scheduled public-package availability failed"
+          title="release verification: scheduled public-package scenarios failed"
           existing="$(gh issue list --repo "${REPOSITORY}" --state open \
             --search "${title} in:title" --json number --jq '.[0].number // empty')"
-          body="v${VERSION:-unknown} の週次公開パッケージ到達性検証が失敗しました。不変Markdown/JSONの公開とActions artifactを確認してください: ${RUN_URL}"
+          body="v${VERSION:-unknown} の週次公開パッケージシナリオ検証が失敗しました。不変Markdown/JSONの公開とActions artifactを確認してください: ${RUN_URL}"
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
           else

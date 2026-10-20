@@ -76,7 +76,7 @@ def validate_input_changes(previous, current):
             ):
                 raise ValueError("passing scenario execution command changed")
         elif (
-            path != CLIENT
+            path not in {CLIENT, "docs/release-pipeline-responsibilities.md"}
             and not path.startswith("scripts/release/")
             and path != ".github/workflows/public-release-embedded-recheck.yml"
         ):
