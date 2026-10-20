@@ -215,7 +215,7 @@ fn build_encoding_hints(column: &Column, bitmap: Option<&Bitmap>) -> EncodingHin
             }
             hints.distinct_count = distinct_int.len();
             if hints.total_count > 0 {
-                hints.value_range = Some((max - min) as u64);
+                hints.value_range = Some(max.abs_diff(min));
             }
         }
         Column::Float64(values) => {
@@ -1285,6 +1285,39 @@ pub fn rewrite_footer_as_v2_for_test(segment: &mut ColumnSegmentV2) -> Result<()
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoding_hints_preserve_full_signed_range() {
+        let hints = build_encoding_hints(&Column::Int64(vec![i64::MIN, i64::MAX]), None);
+        assert_eq!(hints.value_range, Some(u64::MAX));
+        let bitmap = Bitmap::from_bools(&[false, true]);
+        let hints = build_encoding_hints(&Column::Int64(vec![i64::MIN, i64::MAX]), Some(&bitmap));
+        assert_eq!(hints.value_range, Some(0));
+        assert_eq!(hints.total_count, 1);
+    }
+
+    #[test]
+    fn encoding_hints_have_no_range_without_non_null_values() {
+        assert_eq!(
+            build_encoding_hints(&Column::Int64(vec![]), None).value_range,
+            None
+        );
+        let bitmap = Bitmap::from_bools(&[false]);
+        assert_eq!(
+            build_encoding_hints(&Column::Int64(vec![i64::MAX]), Some(&bitmap)).value_range,
+            None
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn encoding_hints_range_matches_wide_integer_reference(a: i64, b: i64) {
+            let hints = build_encoding_hints(&Column::Int64(vec![a, b]), None);
+            let range = (i128::from(a) - i128::from(b)).unsigned_abs() as u64;
+            proptest::prop_assert_eq!(hints.value_range, Some(range));
+        }
+    }
 
     fn simple_schema() -> Schema {
         Schema {
