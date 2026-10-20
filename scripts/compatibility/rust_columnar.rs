@@ -63,6 +63,10 @@ pub fn run(root: &Path, label: &str) {
     use alopex_core::columnar::segment_v2::{InMemorySegmentSource, RowGroupMeta, SegmentReaderV2};
     let data = fs::read(root.join("legacy-columnar.bin")).unwrap();
     assert!(data.len() < 16_384, "four-row fixture exceeded byte budget");
+    assert!(
+        data.starts_with(b"ALXC\x02\x00"),
+        "expected legacy V2 header"
+    );
     let metadata: Vec<RowGroupMeta> =
         serde_json::from_slice(&fs::read(root.join("legacy-columnar-metadata.json")).unwrap())
             .unwrap();
@@ -77,7 +81,6 @@ pub fn run(root: &Path, label: &str) {
             .unwrap()
             .with_legacy_row_group_metadata(&metadata)
             .unwrap();
-        assert_eq!(reader.header.format_version, 2);
         assert_eq!(reader.row_group_count(), 2);
         let batches = reader.read_columns(&[0]).unwrap();
         assert_eq!(batches.len(), 2);
