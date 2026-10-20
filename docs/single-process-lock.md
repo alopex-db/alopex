@@ -32,7 +32,11 @@ issue #181 本文は「WAL が `OpenOptions::append(true)` でないのが原因
 
 同じデータベースを 2 つ目のハンドルで開くと、開く側が
 `Error::AlreadyOpen`（Python では `AlopexError`、CLI では非ゼロ終了）で失敗する。
-メッセージには安定した検索可能文字列 `already open by another process` が含まれる。
+診断の共通部分は `already open`。別プロセスまたは保持者不明の場合は
+`already open by another process`、同一プロセスにハンドルが残る場合は
+`already open in this process` と、保持者を区別する。v0.8.16で同一プロセスの
+案内を追加したため、旧版の全文や `by another process` だけで二重オープンを
+判定しない。Rustでは `Error::AlreadyOpen` を扱い、ログ検索では両方の文言を対象にする。
 
 ```
 data directory ./data is already open by another process
@@ -132,7 +136,8 @@ CLI をローカルの組み込みモードで使いたいときは、サーバ�
   `X.alopex.lock` / `.alopex.lock` は排他状態を持たない**不活性な痕跡**であり、
   配布物は従来どおり `X.alopex` 1 本だけコピーすればよい。
 - **D9**: エラーは `alopex_core::Error::AlreadyOpen { path, lock_path, holder }`。Display に
-  安定した検索可能文字列 `already open by another process` を含める。
+  診断には共通の `already open` を含め、別プロセスは `by another process`、
+  同一プロセスは `in this process` と保持者を正確に案内する。
   上位クレートへは既存の `#[from]` 連鎖で伝播する。
 - **D10**: Windows では保持者診断が読めない。`std` の Windows 実装は
   `LockFileEx(handle, flags, 0, u32::MAX, u32::MAX, ...)` でファイル全域を強制ロックするため、

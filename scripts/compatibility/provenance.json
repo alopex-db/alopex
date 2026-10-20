@@ -1,0 +1,90 @@
+{
+  "schema": "alopex-cross-version-regression-v1",
+  "classification": "handwritten-regression",
+  "reference": {
+    "project": "alopex-db/alopex",
+    "version": "0.8.15",
+    "commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+    "source": [
+      "crates/alopex-core/src/columnar/segment_v2.rs",
+      "crates/alopex-core/src/vector/columnar.rs",
+      "crates/alopex-core/src/columnar/kvs_bridge.rs",
+      "crates/alopex-py/src/embedded/database.rs",
+      "crates/alopex-py/python/alopex/asyncio.py",
+      "crates/alopex-embedded/src/catalog_api.rs",
+      "crates/alopex-embedded/src/sql_api.rs"
+    ],
+    "test": "crates/alopex-core/src/columnar/segment_v2.rs#test_offset_table_random_access",
+    "relationship": "alopex-native"
+  },
+  "generation": {
+    "command": "python scripts/compatibility/run.py --old-python <0.8.15-venv>/bin/python --new-python <candidate-venv>/bin/python --candidate-wheel <candidate.whl> --old-rust target/debug/alopex-compat-baseline --new-rust target/debug/alopex-compat-candidate --output <empty-output>",
+    "result_format": "summary.json, per-phase logs and JSON; float32 little-endian bit patterns; SQL typed JSON and raw KV hex pairs"
+  },
+  "cases": [
+    {
+      "id": "direct-native",
+      "test": "native.py",
+      "contract": "Old database bytes -> new reader; SQL VECTOR 3/384, NULL, raw 3D vector, existing HNSW, V2 multi-row-group TEXT, second reopen. No export/import or index recreation."
+    },
+    {
+      "id": "logical-four-directions",
+      "test": "logical.py and rust_harness.rs",
+      "contract": "Python/Rust 0.8.15 export -> Python/Rust candidate import, typed SQL, KV, columnar logical CSV, HNSW and new writes."
+    },
+    {
+      "id": "direct-cross-language",
+      "test": "logical.py#direct and rust_harness.rs direct",
+      "contract": "Copies of Python/Rust 0.8.15 DB -> Python/Rust candidate; original index retained, forced HNSW and second reopen."
+    },
+    {
+      "id": "external-arrow",
+      "test": "arrow.py",
+      "contract": "All five Arrow representations, dimensions 3/384, exact float32 bits, NULL and TEXT, forced HNSW after explicit index recreation."
+    },
+    {
+      "id": "inherited-public-api",
+      "test": "api.py + api-cases.json + rust_api.rs",
+      "contract": "Replay fixed old Python API tests, compare runtime symbols and accepted call shapes, run the same Rust client against both exact baseline and local candidate dependencies. API removal or old-passing behavior regression fails CI. Baseline failures/skips and server exclusions remain explicit.",
+      "upstream_tests": [
+        "crates/alopex-py/tests/test_database.py",
+        "crates/alopex-py/tests/test_transaction.py",
+        "crates/alopex-py/tests/test_sql.py",
+        "crates/alopex-py/tests/test_copy_stream.py",
+        "crates/alopex-py/tests/test_catalog.py",
+        "crates/alopex-py/tests/test_catalog_consistency.py",
+        "crates/alopex-py/tests/test_dataframe_p3.py",
+        "crates/alopex-py/tests/test_compatibility_contract.py",
+        "crates/alopex-py/tests/test_connect_target.py",
+        "crates/alopex-py/tests/test_remote_client.py",
+        "crates/alopex-py/tests/test_credentials.py",
+        "crates/alopex-py/tests/test_shared_execution.py",
+        "crates/alopex-py/tests/test_surface_consistency.py",
+        "crates/alopex-py/tests/test_feature_flags.py",
+        "crates/alopex-py/tests/test_asyncio.py",
+        "crates/alopex-py/tests/test_polars_1432_reference.py",
+        "crates/alopex-embedded/tests/acceptance_embedded.rs",
+        "crates/alopex-embedded/tests/catalog_integration.rs",
+        "crates/alopex-embedded/tests/prepared_statement.rs"
+      ]
+    }
+  ],
+  "known_gaps": [
+    {
+      "issue": 691,
+      "contract": "Native CSV distinguishes NULL and empty TEXT",
+      "treatment": "record actual native probe; not certified by the successful logical route"
+    },
+    {
+      "issue": 692,
+      "contract": "Native columnar COPY TO Parquet exports all rows",
+      "treatment": "record actual native probe; logical SELECT/CSV route does not qualify native COPY"
+    },
+    {
+      "issue": 693,
+      "contract": "Native VECTOR Parquet COPY",
+      "treatment": "record actual native probes separately; external PyArrow success does not qualify native COPY"
+    }
+  ],
+  "limitations": "Local regression coverage, not another DB's conformance corpus, generic dump/restore certification, every legacy vector segment layout, or a performance test. New-writer -> old-reader is not a required contract."
+}
