@@ -135,6 +135,8 @@ class ScenarioTests(unittest.TestCase):
             markdown = (root / "v0.8.16.md").read_text()
             self.assertIn("下記の全シナリオを実行した", markdown)
             self.assertNotIn("最小importが成功している", markdown)
+            self.assertIn("crates.ioの公開crateをコンパイル", markdown)
+            self.assertNotIn("ソースビルド | なし", markdown)
 
 
 if __name__ == "__main__":

@@ -123,6 +123,7 @@ class RecheckTests(unittest.TestCase):
     def test_rejects_changed_passing_scenario_or_product_inputs(self):
         for path in [
             "scripts/demo/v08/demo_sql_v08.py",
+            "scripts/release/verify_python_vector_api.py",
             "crates/alopex-core/src/lib.rs",
         ]:
             with (

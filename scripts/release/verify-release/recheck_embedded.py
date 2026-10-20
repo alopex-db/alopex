@@ -75,15 +75,14 @@ def validate_input_changes(previous, current):
                 != new_workflow.split(start, 1)[1].split(end, 1)[0]
             ):
                 raise ValueError("passing scenario execution command changed")
-        elif (
-            path not in {CLIENT, "docs/release-pipeline-responsibilities.md"}
-            and not path.startswith("scripts/release/")
-            and path
-            not in {
-                ".github/workflows/public-release-embedded-recheck.yml",
-                ".github/workflows/publish-public-report.yml",
-            }
-        ):
+        elif path not in {
+            CLIENT,
+            "docs/release-pipeline-responsibilities.md",
+            "scripts/release/verify-release/report.py",
+            "scripts/release/verify-release/recheck_embedded.py",
+            ".github/workflows/public-release-embedded-recheck.yml",
+            ".github/workflows/publish-public-report.yml",
+        } and not path.startswith("scripts/release/tests/"):
             raise ValueError(
                 f"previous passing inputs or product source changed: {path}"
             )
