@@ -498,6 +498,14 @@ impl ImmutableMemTableCache {
 }
 
 impl ImmutableMemTable {
+    /// Persist every MVCC version, including tombstones, in SSTable order.
+    /// Snapshot reads may still need versions older than the newest value.
+    pub(crate) fn all_versions(&self) -> impl Iterator<Item = (Key, MemTableEntry)> + '_ {
+        self.data
+            .iter()
+            .map(|(key, entry)| (key.user_key.clone(), entry.clone()))
+    }
+
     /// Current approximate memory usage in bytes.
     ///
     /// This is best-effort accounting intended for coarse thresholds (e.g. flush triggers).

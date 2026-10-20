@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// LSM 用メトリクス（Atomic カウンタ）。
 #[derive(Debug, Default)]
 pub struct LsmMetrics {
+    checkpoint_count: AtomicU64,
+    checkpoint_reclaimed_bytes: AtomicU64,
+    checkpoint_duration_us: AtomicU64,
     wal_write_bytes: AtomicU64,
     wal_sync_duration_ms: AtomicU64,
     memtable_size_bytes: AtomicU64,
@@ -21,6 +24,23 @@ pub struct LsmMetrics {
 }
 
 impl LsmMetrics {
+    pub(crate) fn record_checkpoint(&self, reclaimed: u64, duration_us: u64) {
+        self.checkpoint_count.fetch_add(1, Ordering::Relaxed);
+        self.checkpoint_reclaimed_bytes
+            .fetch_add(reclaimed, Ordering::Relaxed);
+        self.checkpoint_duration_us
+            .fetch_add(duration_us, Ordering::Relaxed);
+    }
+
+    pub(crate) fn wal_checkpoint_stats(&self, used_bytes: u64) -> WalCheckpointStats {
+        WalCheckpointStats {
+            used_bytes,
+            checkpoint_count: self.checkpoint_count.load(Ordering::Relaxed),
+            reclaimed_bytes: self.checkpoint_reclaimed_bytes.load(Ordering::Relaxed),
+            duration_us: self.checkpoint_duration_us.load(Ordering::Relaxed),
+        }
+    }
+
     /// WAL 書き込みバイト数を加算する。
     pub fn add_wal_write_bytes(&self, bytes: u64) {
         self.wal_write_bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -88,6 +108,19 @@ impl LsmMetrics {
             rehydrate_bytes_read: self.rehydrate_bytes_read.load(Ordering::Relaxed),
         }
     }
+}
+
+/// WAL occupancy and checkpoint counters, independent of the legacy metrics schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalCheckpointStats {
+    /// Current logical WAL occupancy in bytes.
+    pub used_bytes: u64,
+    /// Successful checkpoints since this handle opened.
+    pub checkpoint_count: u64,
+    /// Total bytes reclaimed by those checkpoints.
+    pub reclaimed_bytes: u64,
+    /// Total checkpoint time in microseconds.
+    pub duration_us: u64,
 }
 
 /// メトリクススナップショット（Atomic カウンタの値のみ）。

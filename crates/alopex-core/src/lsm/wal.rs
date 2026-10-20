@@ -1436,7 +1436,11 @@ impl WalWriter {
             ));
         }
         let current = self.section_header.start_offset;
-        let distance = ring_distance(current, new_start, self.ring_len);
+        let distance = if self.section_header.is_full && new_start == current {
+            self.ring_len
+        } else {
+            ring_distance(current, new_start, self.ring_len)
+        };
         if distance > self.used_bytes {
             return Err(Error::InvalidFormat(
                 "WAL start offset advances beyond written data".into(),
