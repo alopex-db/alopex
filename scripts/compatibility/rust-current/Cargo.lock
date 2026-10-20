@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "alopex-core",
  "alopex-sql",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "bincode",
  "crc32fast",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "alopex-core",
  "arrow",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.8.16"
+version = "0.8.17"
 dependencies = [
  "alopex-core",
  "arrow-array",

@@ -291,6 +291,6 @@ fn main() {
             &root.join(format!("{label}-result.json")),
             &json!({"source":bundle["source"],"destination":"Rust candidate","logical_roundtrip_pass":true,"new_write_update_pass":true,"post_reopen_snapshot":actual,"limitations":bundle["limitations"]}),
         );
-        println!("Rust 0.8.16 import/reopen/query/new-write PASS");
+        println!("Rust candidate import/reopen/query/new-write PASS");
     }
 }
