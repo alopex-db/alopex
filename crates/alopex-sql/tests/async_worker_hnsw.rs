@@ -25,6 +25,34 @@ fn assert_only_committed_vector(store: &MemoryKV) {
 }
 
 #[tokio::test]
+async fn worker_drop_recreate_replaces_graph_before_next_update() {
+    let store = Arc::new(MemoryKV::new());
+    let adapter = AsyncKVStoreAdapter::from_arc(store.clone(), TxnMode::ReadWrite);
+    let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+        Arc::new(RwLock::new(MemoryCatalog::new()));
+    let txn = adapter.begin_async().await.unwrap();
+    let mut bridge = AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
+    for sql in [
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2,L2))",
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW",
+        "INSERT INTO items VALUES (1,[1,0]),(2,[5,0])",
+        "DELETE FROM items WHERE id = 2",
+        "DROP INDEX idx_items_embedding",
+        "CREATE INDEX idx_items_embedding ON items (embedding) USING HNSW",
+        "UPDATE items SET embedding = [0,0] WHERE id = 1",
+    ] {
+        bridge.async_execute(sql).await.unwrap();
+    }
+    bridge.async_commit().await.unwrap();
+    let mut read = store.begin(TxnMode::ReadOnly).unwrap();
+    let index = HnswIndex::load("idx_items_embedding", &mut read).unwrap();
+    assert_eq!(index.stats().node_count, 1);
+    assert_eq!(index.stats().deleted_count, 0);
+    assert_eq!(index.search(&[0.0, 0.0], 3, None).unwrap().0.len(), 1);
+    read.commit_self().unwrap();
+}
+
+#[tokio::test]
 async fn worker_sql_hnsw_commit_persists_and_rollback_discards() {
     let store = Arc::new(MemoryKV::new());
     let adapter = AsyncKVStoreAdapter::from_arc(store.clone(), TxnMode::ReadWrite);
