@@ -14,17 +14,17 @@ regressions, not external-product conformance tests.
 
 | Contract | Inputs and assertions |
 | --- | --- |
-| Inherited Python API behavior | Replay the exact v0.8.15 tests in 16 files against both isolated packages: SQL/DDL/DML/types/bindings, KV and transaction lifecycle, CSV streams, DataFrame and pinned Polars, catalog/metadata/errors, connection dispatch, async wrappers, credentials and remote-client local HTTP stubs. Every old-passing test must pass in the candidate; skipped/failed baseline cases are listed separately. |
+| Inherited Python API behavior | Replay an explicit case-ID allowlist from 16 v0.8.15 files against both isolated packages: SQL/DDL/DML/types/bindings, KV and transaction lifecycle, CSV streams, DataFrame and pinned Polars, catalog/metadata/errors, connection dispatch, async wrappers, credentials and remote-client local HTTP stubs. Every old-passing test must pass in the candidate; skipped/failed baseline cases are listed separately. |
 | Public Python surface | Compare all discovered public symbols from `alopex`, `alopex.asyncio`, `alopex.remote`, `alopex.protocols`, including classes/members, callable signatures where metadata exists, defaults and stable error-code preservation. Optional additions are allowed. Presence/signature coverage does not replace behavior assertions. |
 | Rust API source and behavior | Compile the same old client against frozen registry crates and candidate local-path crates. Ten groups exercise KV CRUD/scan, read-only/commit/rollback, SQL CRUD/constraints/metadata, prepared bind/reset/finalize, SQL sessions, CSV reader/writer, catalog hierarchy, DataFrame/SQL streaming, memory/config/clone/snapshot/clear, chunked Blob/Typed values and cancel. |
-| Direct same-DB upgrade | Old process writes, flushes, closes and reopens; candidate checks the original DB file hashes before opening the same path. SQL VECTOR(3/384), raw 3D vector, NULL, empty/NULL/Unicode/quoted/newline TEXT, old HNSW indexes without recreation; second reopen. |
-| Legacy columnar | 2,000 TEXT rows in two 1,000-row groups with different encodings. Record the old reader's result independently; candidate must read every expected row. |
+| Direct same-DB upgrade | Old process writes, flushes and closes; candidate checks the original DB file hashes before opening the same path. SQL VECTOR(3/384), raw 3D vector, NULL, empty/NULL/Unicode/quoted/newline TEXT, old HNSW indexes without recreation; second reopen. |
+| Legacy columnar | Four TEXT rows (`apple`, `apricot`, `zebra`, `yak`), SQL row-group size 1000 (the minimum accepted by the public API). Candidate must read all rows and reopen. No old-reader self-read diagnostic. This public SQL fixture does not certify a particular on-disk encoding; an independent Rust case writes two 2-row groups with the published old codec, asserts their different encodings, and reads those exact bytes with the candidate. |
 | Direct cross-language upgrade | Copies of DBs written by old Python and old Rust, opened by candidate Python and Rust. Typed scalar data, vectors, binary KV, existing HNSW with forced `HnswSearch`, second reopen. |
 | Logical export/import | Python→Python, Rust→Rust, Python→Rust, Rust→Python. Explicit schema/index recreation; typed SQL bundle, raw KV hex and columnar SELECT→CSV. Reopen, query, insert and update. Scalar Parquet must preserve values. |
 | External PyArrow | All five representations (List/FixedSizeList Float32/Float64 and JSON UTF8), both 3 and 384 dimensions. Exact original float32 bits, NULL and TEXT, reopen, exact nearest-neighbor oracle and forced HNSW. All ten cases must pass. |
 
 Native CSV NULL/empty handling (#691), columnar Parquet export (#692) and VECTOR
-Parquet COPY (#693) are separate probes in the report. A successful alternate route
+Parquet COPY (#693) have separate issue acceptance. Logical reports retain their existing native probes; the external Arrow cases no longer invoke unrelated native COPY diagnostics. A successful alternate route
 **does not certify those native APIs**. Their existing defects are not silently
 converted into successful compatibility results. No blanket export/reimport
 requirement follows from this matrix. The samples do not cover every historical
@@ -64,8 +64,10 @@ python scripts/compatibility/storage.py --log /tmp/alopex-compat-storage.jsonl \
 
 `api-cases.json` is the machine-readable behavior corpus inventory, provenance,
 required dependency set and explicit exclusions. The archived historical test
-files are executed unchanged except for the explicitly declared replacement of
-one old same-process ownership prose assertion. Its replacement preserves the
+files remain unchanged. Only explicit case IDs run, with declared replacements for
+the same-process ownership prose assertion and two configurable streaming cases.
+The 34,250-row case is excluded; fixed internal Arrow boundary cases retain
+1023/1024/1025 rows, while configurable streaming uses five rows and chunk size two. Its replacement preserves the
 exception class/code, second-open rejection and reopening after handle release;
 `api-cases.json` pins the implementation change and exact old/new case IDs.
 A missing family, failed collection or skipped case
@@ -130,3 +132,41 @@ It must not be reported as qualified or silently worked around by replacing the
 old client's struct literal with a constructor. Resolving this requires a source
 API decision that accounts for clients of both already-published versions; merely
 removing the new fields would break clients that adopted them in 0.8.16.
+
+## Case size and execution budgets
+
+These are correctness checks, with one execution per writer/reader and no warmup,
+throughput, latency, scale, or load acceptance. Every native and external Arrow
+case has its own process, DB path, result, and log. Logical directions already
+have independent reader processes and databases. Python API behavior retains
+pytest case IDs and per-case outcomes; filenames cannot implicitly expand coverage.
+
+| Case IDs | Fixture budget | Reason |
+| --- | --- | --- |
+| native/sql-3, native/sql-384 | 5 rows each, 4 non-NULL + 1 NULL | Exact float32 bits, text variants, retained HNSW and NULL contract |
+| rust-columnar | 4 rows, 2 groups of 2, <16 KiB | Old codec V2 bytes plus metadata, asserted mixed encodings, candidate read and reopen |
+| native/raw-3 | 1 key, 3 floats | Raw vector API persistence |
+| native/columnar | 4 rows, SQL row-group size 1000 | TEXT persistence through public SQL, candidate read and reopen |
+| arrow/{list_f32,list_f64,fixed_f32,fixed_f64,json_utf8}-{3,384} | 5 rows each | Representation, precision, dimension, NULL and recreated HNSW contract |
+| logical/{Python,Rust}→{Python,Rust} | scalar 3, typed 1, vectors 2, columnar 2, KV 2 | Types and directional interoperability, not volume |
+| API configurable batches | 5 rows, chunk size 2 | Two full batches plus a tail |
+| API fixed Arrow batches | 1023 / 1024 / 1025 rows | Internal 1024-row boundary cannot be configured by this API |
+
+The driver runs children serially, with a 300-second fail-closed timeout per
+phase, and no retries. The CI wrapper caps additional storage at 2 GB and stops
+at the host's 40 GB threshold. Timeouts, aborts and missing receipts fail the run.
+Native logs flush before and after create/write/flush/close/open/read/reopen.
+DBs are removed in the driver's finally block; compact logs and receipts remain.
+Builds use the existing wheel and one shared Cargo target, not one build per case.
+
+To investigate a single contract after preparing environments, set
+`ALOPEX_COMPAT_OUTPUT` to a new owned directory and `ALOPEX_COMPAT_TARGET_VERSION`
+to the candidate version, then run `native.py old sql-3` with the old interpreter
+and `native.py new sql-3` with the candidate. Arrow accepts
+`arrow.py export list_f32 3` / `arrow.py import list_f32 3` similarly. A focused
+case is not a full-matrix pass. Remove its owned DB after retaining the receipt.
+
+Normal Python CI explicitly ignores `tests/benchmarks` and `test_benchmark_nfr13.py`.
+Performance workflows are manual only, require an owning issue, and must have
+separate input/resource/cleanup budgets before dispatch. Their results do not
+qualify ordinary correctness CI.

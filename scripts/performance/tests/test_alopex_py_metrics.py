@@ -543,20 +543,23 @@ def test_regular_python_ci_does_not_gate_on_benchmark_job():
         encoding="utf-8"
     )
 
-    assert "needs: [rust-check, test, polars-test, typecheck]" in workflow
     assert "needs.benchmarks.result" not in workflow
-    benchmark_job = workflow.split("  benchmarks:\n", 1)[1].split(
-        "  ci-success:\n", 1
-    )[0]
-    assert "continue-on-error: true" in benchmark_job
-    polars_job = workflow.split("  polars-test:\n", 1)[1].split(
-        "  typecheck:\n", 1
-    )[0]
-    assert "python -m pip install pytest-benchmark" in polars_job
+    assert "  benchmarks:" not in workflow
+    for name in ["alopex-performance.yml", "parity-performance.yml"]:
+        performance = (repository_root / ".github/workflows" / name).read_text()
+        triggers = performance.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+        assert "workflow_dispatch:" in triggers
+        assert "issue_number:" in triggers
+        assert not any(
+            trigger in triggers for trigger in ["push:", "pull_request:", "schedule:"]
+        )
+    polars_job = workflow.split("  polars-test:\n", 1)[1].split("  typecheck:\n", 1)[0]
+    assert "pytest-benchmark" not in polars_job
+    assert "--ignore=crates/alopex-py/tests/benchmarks" in polars_job
+    assert "--ignore=crates/alopex-py/tests/test_benchmark_nfr13.py" in polars_job
 
     source = (
-        repository_root
-        / "crates/alopex-py/tests/benchmarks/test_performance.py"
+        repository_root / "crates/alopex-py/tests/benchmarks/test_performance.py"
     ).read_text(encoding="utf-8")
     assert "min(overheads)" not in source
     assert source.count("statistics.median(overheads)") == 2

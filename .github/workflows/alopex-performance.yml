@@ -1,12 +1,12 @@
 name: Alopex Python Performance Advisory
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*", "alopex-py-v*"]
-  schedule:
-    - cron: "17 3 * * 2,5"
   workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Owning issue with input, CPU/memory/storage budget and cleanup plan
+        required: true
+        type: string
 
 permissions:
   contents: read

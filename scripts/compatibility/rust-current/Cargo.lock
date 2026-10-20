@@ -62,6 +62,7 @@ dependencies = [
 name = "alopex-compat-candidate"
 version = "0.1.0"
 dependencies = [
+ "alopex-core",
  "alopex-embedded",
  "alopex-sql",
  "chrono",

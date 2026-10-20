@@ -25,7 +25,7 @@
     {
       "id": "direct-native",
       "test": "native.py",
-      "contract": "Old database bytes -> new reader; SQL VECTOR 3/384, NULL, raw 3D vector, existing HNSW, V2 multi-row-group TEXT, second reopen. No export/import or index recreation."
+      "contract": "Independent SQL VECTOR 3/384 (5 rows each), raw 3D vector (1 key), public SQL columnar (4 rows), plus Rust old V2 writer -> candidate decoder (4 rows, two groups with asserted different encodings). No old columnar self-read, export/import or index recreation."
     },
     {
       "id": "logical-four-directions",
@@ -83,7 +83,7 @@
     {
       "issue": 693,
       "contract": "Native VECTOR Parquet COPY",
-      "treatment": "record actual native probes separately; external PyArrow success does not qualify native COPY"
+      "treatment": "Tracked by #693 acceptance; external PyArrow cases do not invoke native COPY diagnostics or qualify native COPY."
     }
   ],
   "limitations": "Local regression coverage, not another DB's conformance corpus, generic dump/restore certification, every legacy vector segment layout, or a performance test. New-writer -> old-reader is not a required contract."
