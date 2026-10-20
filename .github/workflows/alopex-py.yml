@@ -298,7 +298,7 @@ jobs:
           mkdir -p "$compat_root"
           cleanup() { rm -rf -- "$old_env"; }
           trap cleanup EXIT
-          python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api
+          python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api scripts.compatibility.test_legacy_probe
           baseline_commit='d3917e1fa21d41097742a971e14094c0d6ae397e'
           if ! git cat-file -e "$baseline_commit^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth=1 origin "$baseline_commit"

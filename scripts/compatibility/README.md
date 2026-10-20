@@ -30,6 +30,15 @@ converted into successful compatibility results. No blanket export/reimport
 requirement follows from this matrix. The samples do not cover every historical
 DB/segment layout or performance.
 
+The old reader's self-read of the legacy mixed-row-group TEXT fixture is a
+diagnostic observation. Some 0.8.15 Linux wheels abort while requesting about
+42 GiB instead of returning the decoder error seen on macOS. Run only this
+observation in a separate process (30-second timeout, no core dumps, 4 GiB
+address-space limit on Linux), and record its error/exit status without counting
+it as a successful read. Fixture creation, old SQL/raw-vector checks, and the
+candidate's exact 2,000-row read and reopen remain mandatory. The original DB
+file hashes are captured after the diagnostic and verified before candidate open.
+
 ## Run locally
 
 Python 3.11+ is needed for the harness. Prepare two isolated virtual environments

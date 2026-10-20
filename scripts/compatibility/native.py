@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import os
 from common import seed
+from legacy_probe import observe
 
 import alopex
 import numpy as np
@@ -123,13 +124,20 @@ def old():
     db.copy_from_csv("legacy_text", io.BytesIO(csv_data.encode()), header=True)
     db.flush()
     db.close()
+    print("Old fixture persisted; verifying SQL/raw vectors", flush=True)
     db = alopex.Database.open(str(DB))
     receipt = {
         "version": version("alopex"),
         "snapshot": snapshot(db),
-        "columnar": columnar(db),
     }
     db.close()
+    print("Old SQL/raw vectors verified; observing legacy columnar reader", flush=True)
+    # The old decoder is already known to fail on mixed row-group metadata.
+    # On Linux it can abort instead of raising a catchable Python exception.
+    # Close all handles before the isolated diagnostic opens the same fixture.
+    receipt["columnar"] = observe(
+        [sys.executable, str(Path(__file__).resolve()), "legacy"]
+    )
     receipt["files_before_new_open"] = files()
     (OUT / "old.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
     print("Old persisted/reopened SQL and raw vectors verified", flush=True)
@@ -182,4 +190,12 @@ def new():
 
 
 if __name__ == "__main__":
-    old() if sys.argv[1] == "old" else new()
+    if sys.argv[1] == "legacy":
+        db = alopex.Database.open(str(DB))
+        result = columnar(db)
+        db.close()
+        print(json.dumps(result, ensure_ascii=False))
+    elif sys.argv[1] == "old":
+        old()
+    else:
+        new()
