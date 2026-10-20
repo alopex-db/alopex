@@ -213,7 +213,9 @@ def render(args: argparse.Namespace) -> None:
             f"| 開始日時 (UTC) | {payload['started_at']} |",
             f"| 終了日時 (UTC) | {payload['completed_at'] or 'incomplete'} |",
             f"| パッケージ取得元 | {environment['package_source']} |",
-            "| ソースビルド | なし(公開パッケージのみ使用) |",
+            "| Rust製品の導入 | crates.ioの公開crateをコンパイル（作業コピーの製品コードは使用しない） |"
+            if payload.get("suite") == "scenarios"
+            else "| ソースビルド | なし(公開パッケージのみ使用) |",
             f"| Rust | `{environment['rust']}` |",
             f"| Nim(ビルド専用イメージ) | `{environment['nim']}` |",
             f"| Python | `{environment['python']}` |",
