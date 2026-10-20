@@ -1,12 +1,17 @@
 //! Manual six-row WAL capacity comparison; never run by ordinary CI.
 //! Run on each source revision with the same command and retain stdout.
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::lsm::wal::{
     SyncMode, WalBatchOp, WalConfig, WalEntry, WalOpType, WAL_SEGMENT_HEADER_SIZE,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::lsm::{CheckpointConfig, LsmKV, LsmKVConfig};
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::{KVStore, KVTransaction, TxnMode};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let batch = WalEntry::batch(
         1,
@@ -65,3 +70,8 @@ fn main() {
         }
     }
 }
+
+// The file-backed diagnostic is native-only. Cargo also compiles examples when
+// running the core WASM contract suite, where tempfile is deliberately absent.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
