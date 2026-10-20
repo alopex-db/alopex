@@ -291,11 +291,11 @@ run_step() {
 
 # ログファイルから末尾 N 行を Markdown コードブロックとして整形する。
 write_report() {
+    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
     if [ "${DO_REPORT}" -eq 0 ]; then
         log_info "--no-report 指定により Markdown 生成をスキップします(JSON は保存済み)"
         return 0
     fi
-    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
     python3 "${SCRIPT_DIR}/report.py" render \
         --results "${RESULTS_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
 }
