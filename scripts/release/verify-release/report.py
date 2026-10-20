@@ -69,6 +69,8 @@ def init(args: argparse.Namespace) -> None:
                 "run_url": args.run_url,
                 "responsibility": args.responsibility,
             },
+            "suite": args.suite,
+            "verifier_commit": args.verifier_commit,
             "steps": [],
         },
     )
@@ -137,7 +139,15 @@ def render(args: argparse.Namespace) -> None:
         f"> 総合結果: **{summaries[status]}**",
         "",
     ]
-    if status == "success":
+    if status == "success" and payload.get("suite") == "scenarios":
+        lines.extend(
+            [
+                f"v{version} の crates.io / PyPI 公開パッケージを使い、下記の全シナリオを実行した。",
+                "ライブラリ、ファイル永続化、CLI、HTTP、gRPC、単一メンバーのcluster-aware経路を確認した。",
+                "各ステップの説明と実測ログを以下に示す。",
+            ]
+        )
+    elif status == "success":
         lines.extend(
             [
                 f"v{version} は、PyPIから完全一致wheelを取得し、隔離先への導入と",
@@ -153,9 +163,7 @@ def render(args: argparse.Namespace) -> None:
         )
     lines.extend(["", "## ステップ", ""])
     for index, step in enumerate(payload["steps"], start=1):
-        mark = {"success": "✅", "failure": "❌", "incomplete": "⚠️"}[
-            step["status"]
-        ]
+        mark = {"success": "✅", "failure": "❌", "incomplete": "⚠️"}[step["status"]]
         lines.extend(
             [
                 f"### {index}. {step['name']} {mark}",
@@ -192,6 +200,8 @@ def render(args: argparse.Namespace) -> None:
             "",
             "| 項目 | 値 |",
             "|---|---|",
+            f"| 検証スイート | {payload.get('suite', 'availability')} |",
+            f"| Verifier commit | `{payload.get('verifier_commit', 'unknown')}` |",
             f"| Commit | `{identity.get('commit', 'unknown')}` |",
             f"| Tag | `{identity.get('tag', 'unknown')}` |",
             f"| Run | `{identity.get('run_id', 'unknown')}` / attempt "
@@ -255,7 +265,24 @@ def validate_report_payload(payload: dict[str, Any]) -> None:
         "workflow orchestration" if not steps else None,
     )
     if payload.get("failure_stage") != expected_stage:
-        raise SystemExit("release verification report failure stage does not match its outcome")
+        raise SystemExit(
+            "release verification report failure stage does not match its outcome"
+        )
+
+    if payload.get("suite") == "scenarios" and expected == "success":
+        names = [step["name"] for step in steps]
+        if (
+            len(names) != 17
+            or len(set(names)) != 17
+            or not {
+                "mode-parity 検証 (verify.py)",
+                "mode-parity デモ (demo.py)",
+                "公開版 SQL transaction failure conformance",
+                f"v{payload['version']} Embedded API 全シナリオ",
+                f"v{payload['version']} public vector scenario",
+            }.issubset(names)
+        ):
+            raise SystemExit("successful scenario report lacks the complete suite")
 
 
 def validate_report(args: argparse.Namespace) -> None:
@@ -278,6 +305,10 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--run-attempt", type=int, default=1)
     initialize.add_argument("--run-url", default="unknown")
     initialize.add_argument("--responsibility", default="unknown")
+    initialize.add_argument(
+        "--suite", choices=("availability", "scenarios"), default="availability"
+    )
+    initialize.add_argument("--verifier-commit", default="unknown")
     initialize.set_defaults(func=init)
 
     append = commands.add_parser("record")

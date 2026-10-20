@@ -18,7 +18,7 @@
 # 必ず添える(結果一覧だけのステップを増やさない)。
 #
 # Usage:
-#   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
+#   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--native] [--no-report]
 #       [--results-file PATH] [--report-dir DIR]
 #   ./scripts/release/verify-release/run.sh --report-only RESULTS.json
 #       [--report-dir DIR]
@@ -39,12 +39,14 @@ with pathlib.Path(sys.argv[1]).open("rb") as stream:
 PY
 )"
 DO_REPORT=1
+NATIVE=0
 JOIN_FILE=""
 REPORT_ONLY_FILE=""
 RESULTS_FILE=""
 REPORT_OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --native) NATIVE=1; shift ;;
         --no-report) DO_REPORT=0; shift ;;
         --results-file)
             [[ $# -ge 2 ]] || { echo "--results-file requires a path" >&2; exit 64; }
@@ -89,7 +91,10 @@ fi
 IMAGE_TAG="alopex-verify-release:${ALOPEX_VERSION}"
 LOG_DIR="$(mktemp -d)"
 TOOLS_TARGET_DIR=""
-cleanup() { rm -rf "${LOG_DIR}" "${TOOLS_TARGET_DIR}"; }
+cleanup() {
+    rm -rf "${LOG_DIR}"
+    if [[ "${NATIVE}" -eq 0 ]]; then rm -rf "${TOOLS_TARGET_DIR}"; fi
+}
 trap cleanup EXIT
 
 RED='\033[0;31m'
@@ -286,22 +291,57 @@ run_step() {
 
 # ログファイルから末尾 N 行を Markdown コードブロックとして整形する。
 write_report() {
+    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
     if [ "${DO_REPORT}" -eq 0 ]; then
         log_info "--no-report 指定により Markdown 生成をスキップします(JSON は保存済み)"
         return 0
     fi
-    python3 "${SCRIPT_DIR}/report.py" finalize --results "${RESULTS_FILE}"
     python3 "${SCRIPT_DIR}/report.py" render \
         --results "${RESULTS_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
 }
 
 rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
 nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
+if [[ "${NATIVE}" -eq 1 ]]; then
+    rust_version="$(rustc --version)"
+    nim_image='not used (parser bundled in public crates)'
+fi
 python3 "${SCRIPT_DIR}/report.py" init --results "${RESULTS_FILE}" \
-    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}"
+    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}" \
+    --commit "${REPORT_COMMIT:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}" \
+    --tag "${REPORT_TAG:-alopex-py-v${ALOPEX_VERSION}}" \
+    --run-id "${GITHUB_RUN_ID:-local}" --run-attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+    --run-url "https://github.com/${GITHUB_REPOSITORY:-alopex-db/alopex}/actions/runs/${GITHUB_RUN_ID:-local}" \
+    --responsibility 'Public package scenarios' --suite scenarios \
+    --verifier-commit "$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
+if [[ "${NATIVE}" -eq 1 ]]; then
+    : "${CARGO_TARGET_DIR:?--native requires one shared CARGO_TARGET_DIR}"
+    : "${ALOPEX_VERIFY_NATIVE_ROOT:?--native requires an isolated output root}"
+    export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+    export CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0
+    export VERIFY_TOOLS_TARGET="${CARGO_TARGET_DIR}"
+    export ALOPEX_VERSION ALOPEX_BINARY_SOURCE=released
+    export PATH="${ALOPEX_VERIFY_NATIVE_ROOT}/venv/bin:${ALOPEX_VERIFY_NATIVE_ROOT}/bin:${CARGO_TARGET_DIR}/release:${PATH}"
+    unset ALOPEX_SQL_PARSER_LIB_DIR ALOPEX_SQL_PARSER_LIB_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+    native_setup() (
+        set -e
+        python3 -m venv "${ALOPEX_VERIFY_NATIVE_ROOT}/venv"
+        "${ALOPEX_VERIFY_NATIVE_ROOT}/venv/bin/python" -m pip install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" "alopex==${ALOPEX_VERSION}"
+        cargo install alopex-cli --version "=${ALOPEX_VERSION}" --locked --root "${ALOPEX_VERIFY_NATIVE_ROOT}"
+        cargo install alopex-server --version "=${ALOPEX_VERSION}" --locked --root "${ALOPEX_VERIFY_NATIVE_ROOT}"
+        alopex --version
+        alopex-server --version
+        "${ALOPEX_VERIFY_NATIVE_ROOT}/venv/bin/python" -c 'import alopex; from importlib.metadata import version; print("PyPI alopex", version("alopex"))'
+    )
+    run_in_container() { (cd "${REPO_ROOT}" && "$@"); }
+    build_tools_in_container() { run_in_container "$@"; }
+    run_step "公開パッケージの隔離インストール" \
+        "crates.io の完全一致 CLI/server と PyPI wheel を隔離先へインストールする。製品コードはリポジトリからビルドせず、Cargo の出力先を全シナリオで共有する。" \
+        -- native_setup
+else
 run_step "コンテナイメージビルド" \
     "検証専用の Docker イメージをビルドする。alopex-cli/alopex-server は \`cargo install\`、alopex(Python) は \`pip install\` で crates.io/PyPI から取得する(このイメージには alopex のソースコードを一切 COPY しない)。" \
     -- docker build \
@@ -352,6 +392,8 @@ build_tools_in_container() {
         "${IMAGE_TAG}" \
         "$@"
 }
+
+fi
 
 run_step "verify-release-embedded ビルド" \
     "公開検証用の3つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
@@ -413,7 +455,7 @@ alopex-embedded = { version = "=${ALOPEX_VERSION}" }
 alopex-core = { version = "=${ALOPEX_VERSION}" }
 alopex-sql = { version = "=${ALOPEX_VERSION}" }
 EOF
-CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+CARGO_TARGET_DIR="${VERIFY_TOOLS_TARGET:-/tools-target}" cargo build --manifest-path "${tool_source}/Cargo.toml" --release
 cargo generate-lockfile --manifest-path "${tool_source}/Cargo.toml"
 python3 - "${tool_source}/Cargo.lock" "${ALOPEX_VERSION}" <<'PY'
 import sys
@@ -444,11 +486,11 @@ PY
 run_step "公開版 alopex-embedded 実行時依存 smoke" \
     "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
     -- run_in_container bash -c \
-    'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH /tools-target/release/embedded-dependency-smoke'
+    'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "${VERIFY_TOOLS_TARGET:-/tools-target}/release/embedded-dependency-smoke"'
 
 run_step "公開版 SQL transaction failure conformance" \
     "公開版 alopex-embedded の別プロセスを transaction 中に強制終了し、未 commit/rollback 済み書込みの不可視性、acknowledged commit の再起動後可視性、savepoint failure recovery、並行 session 競合を再検証する。" \
-    -- run_in_container /tools-target/release/verify-sql-transaction-failures
+    -- run_in_container "${VERIFY_TOOLS_TARGET:-/tools-target}/release/verify-sql-transaction-failures"
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
@@ -642,7 +684,18 @@ run_step "v${ALOPEX_VERSION} Embedded API 全シナリオ" \
     "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の10シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
     -- run_in_container bash scripts/demo/v08/demo_embedded_v08.sh
 
+run_step "v${ALOPEX_VERSION} public vector scenario" \
+    "PyPI wheel の get_vectors、HNSW バッチ投入、重複キーの原子的な拒否、kNN EXPLAIN と streaming を自己検証する。" \
+    -- run_in_container python3 scripts/release/verify_python_vector_api.py
+
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
 
 write_report
+python3 "${SCRIPT_DIR}/report.py" validate-report --results "${RESULTS_FILE}"
+python3 - "${RESULTS_FILE}" <<'PY_RESULT'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+if result["outcome"] != "success":
+    raise SystemExit("scenario verification is not complete: " + str(result["failure_stage"]))
+PY_RESULT
