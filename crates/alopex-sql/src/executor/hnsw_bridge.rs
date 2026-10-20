@@ -11,10 +11,22 @@ use crate::storage::{SqlTxn, SqlValue};
 
 type KnnSearchResult = (Vec<(u64, f32)>, SearchStats, usize);
 
+#[cfg(test)]
+mod ddl_cache_tests;
+
 /// SQL と HNSW の橋渡しを行うユーティリティ。
 pub struct HnswBridge;
 
 impl HnswBridge {
+    /// DDL writes graph keys directly. Flush all staged graphs before clearing
+    /// cached identities, so unrelated index writes survive and a later DML
+    /// statement cannot publish the graph that DDL replaced or removed.
+    fn prepare_ddl<'txn, S: KVStore + 'txn>(txn: &mut impl SqlTxn<'txn, S>) -> Result<()> {
+        txn.flush_hnsw()?;
+        txn.abandon_hnsw()?;
+        Ok(())
+    }
+
     /// Returns the index-default search breadth, if configured.
     pub(crate) fn search_ef(index: &IndexMetadata) -> Result<Option<usize>> {
         index
@@ -41,6 +53,7 @@ impl HnswBridge {
         let (column, col_idx) = vector_column(table, index)?;
         let config = build_config(index, column)?;
         config.validate().map_err(ExecutorError::from)?;
+        Self::prepare_ddl(txn)?;
 
         let mut hnsw = HnswIndex::create(&index.name, config).map_err(ExecutorError::from)?;
 
@@ -71,6 +84,7 @@ impl HnswBridge {
         if_exists: bool,
     ) -> Result<()> {
         txn.ensure_write_txn().map_err(ExecutorError::from)?;
+        Self::prepare_ddl(txn)?;
         match HnswIndex::load(&index.name, txn.inner_mut()) {
             Ok(index) => index.drop(txn.inner_mut()).map_err(ExecutorError::from),
             Err(CoreError::IndexNotFound { .. }) if if_exists => Ok(()),
