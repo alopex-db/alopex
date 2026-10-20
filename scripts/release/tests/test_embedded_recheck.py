@@ -157,21 +157,21 @@ class RecheckTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "commands changed"):
                 RECHECK.validate_input_changes("old", "new")
 
-    def test_focused_publisher_matches_primary_publication_contract(self):
+    def test_focused_and_full_publishers_share_data_only_transport(self):
         workflows = DIRECTORY.parents[2] / ".github/workflows"
-        primary = (
-            (workflows / "public-release-verification.yml")
-            .read_text()
-            .split("  publish:\n", 1)[1]
-            .split("  publish-vector-benchmark:\n", 1)[0]
-        )
-        focused = (
-            (workflows / "public-release-embedded-recheck.yml")
-            .read_text()
-            .split("  publish:\n", 1)[1]
-        )
-        primary = primary.replace(" && inputs.baseline_run_id == ''", "")
-        self.assertEqual(primary, focused)
+        for name in [
+            "public-release-verification.yml",
+            "public-release-embedded-recheck.yml",
+        ]:
+            text = (workflows / name).read_text()
+            self.assertIn("uses: ./.github/workflows/publish-public-report.yml", text)
+            self.assertIn(
+                "artifact_name: ${{ needs.verify.outputs.report_artifact }}", text
+            )
+        publisher = (workflows / "publish-public-report.yml").read_text()
+        self.assertIn("ref: main", publisher)
+        self.assertIn('origin["head_sha"] == payload["verifier_commit"]', publisher)
+        self.assertNotIn("DOCS_REPO_TOKEN", publisher)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,8 @@ original run/attempt and verifier identity.
 | `public-release-verification.yml:recheck` | Post-release Verification | dispatch a source-bound focused Embedded recheck independently of a full run's publisher |
 | `public-release-embedded-recheck.yml:verify` | Post-release Verification | reviewed baseline digest, sixteen retained successes and eleven rechecked Embedded scenarios |
 | `public-release-embedded-recheck.yml:publish` | Stable Delivery | immutable composed JSON/Markdown with per-step execution provenance |
+| `publish-public-report.yml:publish` | Stable Delivery | source-run-bound JSON/Markdown published on a data-only branch based on current main; no workflow commits transported |
+| `public-release-verification.yml:publish-retained` | Stable Delivery | publish an existing qualified report artifact without rerunning scenarios |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
 | `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | validated projection of retained exact-SHA evidence into public docs |
 | `public-release-verification.yml:notify-vector-benchmark-failure` | Stable Delivery | version-scoped benchmark publication failure notification |

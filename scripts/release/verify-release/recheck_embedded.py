@@ -78,7 +78,11 @@ def validate_input_changes(previous, current):
         elif (
             path not in {CLIENT, "docs/release-pipeline-responsibilities.md"}
             and not path.startswith("scripts/release/")
-            and path != ".github/workflows/public-release-embedded-recheck.yml"
+            and path
+            not in {
+                ".github/workflows/public-release-embedded-recheck.yml",
+                ".github/workflows/publish-public-report.yml",
+            }
         ):
             raise ValueError(
                 f"previous passing inputs or product source changed: {path}"
