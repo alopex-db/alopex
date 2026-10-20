@@ -65,6 +65,50 @@ class ScenarioTests(unittest.TestCase):
             self.assertEqual(result.returncode, 9)
             self.assertEqual((root / "calls").read_text().splitlines(), ["cargo"])
 
+    def test_functional_failure_is_recorded_and_remaining_scenario_runs(self):
+        script = (ROOT / "scripts/release/verify-release/run.sh").read_text()
+        function = (
+            "run_step() {"
+            + script.split("run_step() {", 1)[1].split("\n}\n\n#", 1)[0]
+            + "\n}"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results = root / "result.json"
+            results.write_text(json.dumps({"schema": REPORT.SCHEMA, "steps": []}))
+            prefix = f"SCRIPT_DIR={ROOT / 'scripts/release/verify-release'}\nRESULTS_FILE={results}\nLOG_DIR={root}\nSTEP_INDEX=0\nOVERALL_STATUS=ok\n"
+            setup = "date() { echo 1000000; }\nlog_info() { :; }\nlog_ok() { :; }\nlog_fail() { :; }\nwrite_report() { :; }\n"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    prefix
+                    + setup
+                    + function
+                    + "\nSCENARIOS_STARTED=1\nrun_step first first -- bash -c 'exit 3'\nrun_step second second -- true",
+                ],
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                [step["status"] for step in json.loads(results.read_text())["steps"]],
+                ["failure", "success"],
+            )
+            results.write_text(json.dumps({"schema": REPORT.SCHEMA, "steps": []}))
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    prefix
+                    + setup
+                    + function
+                    + "\nSCENARIOS_STARTED=0\nrun_step install install -- bash -c 'exit 3'\necho should-not-run",
+                ],
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertNotIn(b"should-not-run", result.stdout)
+
     def test_scenario_markdown_describes_executed_scope(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -253,6 +253,7 @@ fi
 
 OVERALL_STATUS="ok"
 STEP_INDEX=0
+SCENARIOS_STARTED=0
 
 # run_step NAME DESCRIPTION -- CMD...
 # CMD の標準出力/標準エラーをログファイルへも複製しつつ画面に表示する
@@ -284,8 +285,12 @@ run_step() {
         OVERALL_STATUS="fail"
         python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
             --name "${name}" --status failure --description "${description}" --duration-ms "${duration_ms}" --log "${logfile}"
-        write_report
-        exit "${status}"
+        if [[ "${SCENARIOS_STARTED}" -eq 0 ]]; then
+            write_report
+            exit "${status}"
+        fi
+        # Record functional failures and run the remaining independent scenarios.
+        return 0
     fi
 }
 
@@ -483,6 +488,8 @@ if not any(p["name"] == "alopex-embedded" for p in alopex):
 PY
 '
 
+SCENARIOS_STARTED=1
+
 run_step "公開版 alopex-embedded 実行時依存 smoke" \
     "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
     -- run_in_container bash -c \
@@ -511,7 +518,7 @@ run_step "v0.7 機能デモ: demo_routing.py" \
     -- run_in_container python3 scripts/demo/v07/demo_routing.py
 
 run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
-    "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Rust と Python の両サーフェスで決定的に(同一入力に対して常にバイト単位で同一の出力を)動作することを確認する(D4)。" \
+    "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Python API の実測値を期待値と比較する(D4)。to_dict(as_series=False)で通常のリストを明示し、Rustの呼び出し例も表示する。" \
     -- run_in_container python3 scripts/demo/v07/demo_dataframe_p3.py
 
 run_step "v${ALOPEX_VERSION} 回帰保証: alopex-sql aggregate state/distinct/parallel" \
@@ -689,7 +696,11 @@ run_step "v${ALOPEX_VERSION} public vector scenario" \
     -- run_in_container python3 scripts/release/verify_python_vector_api.py
 
 echo ""
-log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
+if [[ "${OVERALL_STATUS}" == ok ]]; then
+    log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
+else
+    log_fail "全シナリオの実行を終えました。失敗の詳細はレポートに保存しました。"
+fi
 
 write_report
 python3 "${SCRIPT_DIR}/report.py" validate-report --results "${RESULTS_FILE}"

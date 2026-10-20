@@ -53,7 +53,9 @@ REEXEC_MARKER = "V074_DEMO_VECTOR_REEXEC"
 # 状態(= 99_verify.sql が検証する 4 行)をそのまま再現する。
 # ---------------------------------------------------------------------------
 
-CORPUS_DDL = "CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, embedding VECTOR(3, L2))"
+CORPUS_DDL = (
+    "CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, embedding VECTOR(3, L2))"
+)
 
 CORPUS_DML = (
     "INSERT INTO docs (id, title, embedding) VALUES "
@@ -131,9 +133,7 @@ def ensure_alopex_importable(repo: Path) -> Any:
             )
             sys.stdout.flush()
             os.execve(sys.executable, [sys.executable, *sys.argv], env)
-        raise EnvError(
-            f"alopex 拡張モジュールの import に失敗: {exc}。"
-        ) from exc
+        raise EnvError(f"alopex 拡張モジュールの import に失敗: {exc}。") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +189,13 @@ def scene2_python_native(alopex: Any) -> bool:
     banner(2, "Python 組み込み API — ネイティブベクトル API")
 
     missing = [
-        f"Database.{m}" for m in DATABASE_VECTOR_METHODS
+        f"Database.{m}"
+        for m in DATABASE_VECTOR_METHODS
         if not hasattr(alopex.Database, m)
     ]
     missing += [
-        f"Transaction.{m}" for m in TRANSACTION_VECTOR_METHODS
+        f"Transaction.{m}"
+        for m in TRANSACTION_VECTOR_METHODS
         if not hasattr(alopex.Transaction, m)
     ]
 
@@ -210,8 +212,12 @@ def scene2_python_native(alopex: Any) -> bool:
 
     db = alopex.Database.new()
     try:
-        show_call("db.create_hnsw_index('idx_docs_embedding', alopex.HnswConfig(3))")
-        db.create_hnsw_index("idx_docs_embedding", alopex.HnswConfig(3))
+        show_call(
+            "db.create_hnsw_index('idx_docs_embedding', alopex.HnswConfig(3, metric=alopex.Metric.L2))"
+        )
+        db.create_hnsw_index(
+            "idx_docs_embedding", alopex.HnswConfig(3, metric=alopex.Metric.L2)
+        )
 
         show_call("db.begin(alopex.TxnMode.READ_WRITE)")
         tx = db.begin(alopex.TxnMode.READ_WRITE)
@@ -235,9 +241,16 @@ def scene2_python_native(alopex: Any) -> bool:
         show_call("db.search_hnsw('idx_docs_embedding', query, 2)")
         results, stats = db.search_hnsw("idx_docs_embedding", query, 2)
         show_rows(results)
-        print(f"       node_count={stats.node_count}")
+        assert [result.key for result in results] == [b"point", b"quarter"]
+        np.testing.assert_allclose([result.score for result in results], [0.0, 0.25])
+        assert stats.nodes_visited >= len(results)
+        for result in results:
+            print(f"       key={result.key!r} distance={result.score}")
+        print(f"       nodes_visited={stats.nodes_visited}")
         show_call("db.get_hnsw_stats('idx_docs_embedding')")
-        print(f"       node_count={db.get_hnsw_stats('idx_docs_embedding').node_count}")
+        index_stats = db.get_hnsw_stats("idx_docs_embedding")
+        assert index_stats.node_count == 2
+        print(f"       node_count={index_stats.node_count}")
 
         tx = db.begin(alopex.TxnMode.READ_WRITE)
         show_call("tx.delete_from_hnsw('idx_docs_embedding', b'quarter')")

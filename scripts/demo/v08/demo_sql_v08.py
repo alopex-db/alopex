@@ -103,6 +103,14 @@ def main() -> int:
         # These queries have an explicit or single-row order contract.
         ordered_checks: list[tuple[str, list[Row]]] = [
             (
+                "SELECT region AS area, COUNT(*) AS cnt FROM sales GROUP BY area ORDER BY area",
+                [
+                    {"area": "east", "cnt": 2},
+                    {"area": "north", "cnt": 1},
+                    {"area": "west", "cnt": 2},
+                ],
+            ),
+            (
                 "SELECT TRUE IS TRUE AS truth_value, NULL IS DISTINCT FROM 1 AS distinct_null, "
                 "(1, 2) < (1, 3) AS row_less, (1, NULL) = (1, NULL) AS row_unknown",
                 [
@@ -304,7 +312,13 @@ def main() -> int:
             ),
             (
                 "SELECT amount AS id FROM sales ORDER BY id",
-                [{"id": 50.0}, {"id": 100.0}, {"id": 150.0}, {"id": 150.0}, {"id": 200.0}],
+                [
+                    {"id": 50.0},
+                    {"id": 100.0},
+                    {"id": 150.0},
+                    {"id": 150.0},
+                    {"id": 200.0},
+                ],
             ),
             (
                 "SELECT id, amount FROM sales ORDER BY id",
@@ -316,8 +330,14 @@ def main() -> int:
                     {"id": 5, "amount": 50.0},
                 ],
             ),
-            ("SELECT pg_typeof(amount) AS kind FROM sales WHERE id = 1", [{"kind": "real"}]),
-            ("SELECT amount + 0.5 AS adjusted FROM sales WHERE id = 1", [{"adjusted": 100.5}]),
+            (
+                "SELECT pg_typeof(amount) AS kind FROM sales WHERE id = 1",
+                [{"kind": "real"}],
+            ),
+            (
+                "SELECT amount + 0.5 AS adjusted FROM sales WHERE id = 1",
+                [{"adjusted": 100.5}],
+            ),
             (
                 "SELECT id, CASE WHEN qty > 2 THEN 'bulk' ELSE 'small' END AS band FROM sales ORDER BY id",
                 [
@@ -380,7 +400,11 @@ def main() -> int:
             ),
             (
                 "WITH high AS (SELECT id, amount FROM sales WHERE amount >= 150) SELECT id, amount FROM high ORDER BY id",
-                [{"id": 2, "amount": 200.0}, {"id": 3, "amount": 150.0}, {"id": 4, "amount": 150.0}],
+                [
+                    {"id": 2, "amount": 200.0},
+                    {"id": 3, "amount": 150.0},
+                    {"id": 4, "amount": 150.0},
+                ],
             ),
             (
                 "WITH renamed(identifier, territory) AS (SELECT id, region FROM sales WHERE id = 1) SELECT territory, identifier FROM renamed",
@@ -715,9 +739,11 @@ def main() -> int:
         error_checks = [
             ("SELECT * FROM ints AS x JOIN doubles AS x ON x.id = x.id", "ALOPEX-C004"),
             ("SELECT amount AS ident FROM sales WHERE ident > 100", "ALOPEX-C003"),
-            ("SELECT region AS area, COUNT(*) FROM sales GROUP BY area", "ALOPEX-C003"),
             ("SELECT CASE WHEN TRUE THEN 1 ELSE 'text' END", "type mismatch"),
-            ("SELECT id FROM sales UNION SELECT id, region FROM sales", "column count mismatch"),
+            (
+                "SELECT id FROM sales UNION SELECT id, region FROM sales",
+                "column count mismatch",
+            ),
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
             ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
@@ -748,7 +774,9 @@ def main() -> int:
             completed += 1
 
         if completed != 81:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 81")
+            raise AssertionError(
+                f"v0.8 SQL demo check count changed: {completed} != 81"
+            )
     finally:
         db.close()
 
