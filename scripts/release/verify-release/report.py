@@ -168,7 +168,7 @@ def render(args: argparse.Namespace) -> None:
                 "",
                 "## 実行証跡の統合",
                 "",
-                f"元の全体実行 [run {baseline['run_id']}]({baseline['run_url']}) で成功した16項目を保持し、",
+                f"継承元の検証記録 [run {baseline['run_id']}]({baseline['run_url']}) で成功した16項目を保持し、",
                 "修正したRust Embeddedデモだけを同じ公開版・Linux・Rustツールチェーンで再検証した。",
                 "各ステップの出所を以下に記録する。元runの失敗記録は変更していない。",
                 f"元JSON SHA-256: `{baseline['sha256']}`",

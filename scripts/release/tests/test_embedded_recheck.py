@@ -99,6 +99,27 @@ class RecheckTests(unittest.TestCase):
             self.assertEqual(evidence["run_id"], "123")
             self.assertEqual(retained, prior)
 
+    def test_repeated_recheck_preserves_original_passing_origin(self):
+        payload = copy.deepcopy(self.payload)
+        payload["steps"][0]["evidence"] = {
+            "run_id": "100",
+            "run_attempt": 1,
+            "run_url": "https://github.com/alopex-db/alopex/actions/runs/100",
+            "verifier_commit": "a" * 40,
+        }
+        context = {
+            "run_id": "456",
+            "run_attempt": 1,
+            "run_url": "https://github.com/alopex-db/alopex/actions/runs/456",
+            "verifier_commit": "c" * 40,
+        }
+        result = RECHECK.compose(payload, "f" * 64, context)
+        self.assertEqual(result["steps"][0]["evidence"]["run_id"], "100")
+        self.assertEqual(result["steps"][-1]["evidence"]["run_id"], "456")
+        self.assertEqual(result["steps"][-1]["status"], "incomplete")
+        self.assertEqual(result["steps"][-1]["log_excerpt"], [])
+        self.assertIsNone(result["steps"][-1]["duration_ms"])
+
     def test_rejects_changed_passing_scenario_or_product_inputs(self):
         for path in [
             "scripts/demo/v08/demo_sql_v08.py",

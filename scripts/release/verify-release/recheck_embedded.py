@@ -90,7 +90,16 @@ def compose(payload, digest, context):
     original = dict(payload["identity"], verifier_commit=payload["verifier_commit"])
     result["resumed_from"] = dict(original, sha256=digest)
     for step in result["steps"]:
-        step["evidence"] = original.copy()
+        if step["status"] == "success":
+            step.setdefault("evidence", original.copy())
+        else:
+            step.update(
+                status="incomplete",
+                evidence=context.copy(),
+                log_excerpt=[],
+                diagnostics=[],
+                duration_ms=None,
+            )
     result["identity"] = dict(
         payload["identity"],
         **context,
