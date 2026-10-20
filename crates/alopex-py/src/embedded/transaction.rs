@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use super::scan_cursor;
 use std::sync::{Arc, Mutex, Weak};
 
 use alopex_sql::{AlopexDialect, Parser};
@@ -19,20 +19,24 @@ use alopex_core::Key;
 use pyo3::types::PyAnyMethods;
 
 // Python cursors are opaque versioned handles; native layers retain raw keys.
-fn decode_scan_cursor(cursor: Option<Vec<u8>>) -> PyResult<Option<Vec<u8>>> {
+fn decode_scan_cursor(cursor: Option<Vec<u8>>, scope: &[u8]) -> PyResult<Option<Vec<u8>>> {
     cursor
         .map(|cursor| {
-            let encoded = cursor.strip_prefix(b"alopex-scan-v1:").ok_or_else(|| {
-                PyValueError::new_err("invalid scan cursor; use next_cursor from a page")
-            })?;
-            URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| PyValueError::new_err("invalid scan cursor"))
+            scan_cursor::decode(&cursor, scope).map_err(|_| {
+                error::with_code(
+                    error::InvalidCursor::new_err(
+                        "InvalidCursor: invalid scan cursor or mismatched scan conditions",
+                    ),
+                    "ALOPEX-PY999",
+                )
+            })
         })
         .transpose()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn key_scan_options(
+    scope: &[u8],
     limit: usize,
     cursor: Option<Vec<u8>>,
     scan_budget: usize,
@@ -42,7 +46,7 @@ fn key_scan_options(
 ) -> PyResult<alopex_embedded::KeyScanOptions> {
     Ok(alopex_embedded::KeyScanOptions {
         limit,
-        cursor: decode_scan_cursor(cursor)?,
+        cursor: decode_scan_cursor(cursor, scope)?,
         scan_budget,
         max_bytes,
         include_internal,
@@ -50,7 +54,11 @@ fn key_scan_options(
     })
 }
 
-fn key_scan_page(py: Python<'_>, page: alopex_embedded::KeySearchPage) -> PyResult<Py<PyDict>> {
+fn key_scan_page(
+    py: Python<'_>,
+    page: alopex_embedded::KeySearchPage,
+    scope: &[u8],
+) -> PyResult<Py<PyDict>> {
     let response = PyDict::new(py);
     response.set_item(
         "entries",
@@ -59,9 +67,7 @@ fn key_scan_page(py: Python<'_>, page: alopex_embedded::KeySearchPage) -> PyResu
             .map(|e| (e.key, e.value))
             .collect::<Vec<_>>(),
     )?;
-    let cursor = page
-        .next_cursor
-        .map(|key| format!("alopex-scan-v1:{}", URL_SAFE_NO_PAD.encode(key)).into_bytes());
+    let cursor = page.next_cursor.map(|key| scan_cursor::encode(scope, &key));
     response.set_item("next_cursor", cursor)?;
     response.set_item("scanned", page.scanned)?;
     response.set_item("has_more", page.has_more)?;
@@ -378,7 +384,10 @@ impl PyTransaction {
         self.with_txn_mut(|txn| txn.delete(key))
     }
 
-    #[pyo3(signature = (prefix, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = 104_857_600, include_internal = false, strict_budget = false))]
+    #[pyo3(signature = (prefix, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = Some(104_857_600), include_internal = false, strict_budget = false))]
+    #[pyo3(
+        text_signature = "($self, /, prefix, *, limit=None, page_size=100, cursor=None, scan_budget=10000, max_bytes=16777216, max_total_bytes=104857600, include_internal=False, strict_budget=False)"
+    )]
     #[allow(clippy::too_many_arguments)]
     fn scan_prefix(
         &self,
@@ -389,12 +398,14 @@ impl PyTransaction {
         cursor: Option<Vec<u8>>,
         scan_budget: usize,
         max_bytes: usize,
-        max_total_bytes: usize,
+        max_total_bytes: Option<usize>,
         include_internal: bool,
         strict_budget: bool,
     ) -> PyResult<Py<PyAny>> {
         self.control.ensure_open()?;
+        let scope = scan_cursor::scope(0, include_internal, &[prefix]);
         let options = key_scan_options(
+            &scope,
             page_size,
             cursor,
             scan_budget,
@@ -403,7 +414,12 @@ impl PyTransaction {
             strict_budget,
         )?;
         let entries = with_prepared_transaction(py, &self.inner, true, |txn| {
-            txn.scan_prefix_all(prefix, &options, limit, max_total_bytes)
+            txn.scan_prefix_all(
+                prefix,
+                &options,
+                limit,
+                max_total_bytes.unwrap_or(usize::MAX),
+            )
         })?;
         Ok(
             PyList::new(py, entries.into_iter().map(|e| (e.key, e.value)))?
@@ -412,7 +428,10 @@ impl PyTransaction {
         )
     }
 
-    #[pyo3(signature = (start, end, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = 104_857_600, include_internal = false, strict_budget = false))]
+    #[pyo3(signature = (start, end, *, limit = None, page_size = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, max_total_bytes = Some(104_857_600), include_internal = false, strict_budget = false))]
+    #[pyo3(
+        text_signature = "($self, /, start, end, *, limit=None, page_size=100, cursor=None, scan_budget=10000, max_bytes=16777216, max_total_bytes=104857600, include_internal=False, strict_budget=False)"
+    )]
     #[allow(clippy::too_many_arguments)]
     fn scan_range(
         &self,
@@ -424,12 +443,14 @@ impl PyTransaction {
         cursor: Option<Vec<u8>>,
         scan_budget: usize,
         max_bytes: usize,
-        max_total_bytes: usize,
+        max_total_bytes: Option<usize>,
         include_internal: bool,
         strict_budget: bool,
     ) -> PyResult<Py<PyAny>> {
         self.control.ensure_open()?;
+        let scope = scan_cursor::scope(1, include_internal, &[start, end]);
         let options = key_scan_options(
+            &scope,
             page_size,
             cursor,
             scan_budget,
@@ -438,7 +459,13 @@ impl PyTransaction {
             strict_budget,
         )?;
         let entries = with_prepared_transaction(py, &self.inner, true, |txn| {
-            txn.scan_range_all(start, end, &options, limit, max_total_bytes)
+            txn.scan_range_all(
+                start,
+                end,
+                &options,
+                limit,
+                max_total_bytes.unwrap_or(usize::MAX),
+            )
         })?;
         Ok(
             PyList::new(py, entries.into_iter().map(|e| (e.key, e.value)))?
@@ -461,7 +488,9 @@ impl PyTransaction {
         strict_budget: bool,
     ) -> PyResult<Py<PyDict>> {
         self.control.ensure_open()?;
+        let scope = scan_cursor::scope(0, include_internal, &[prefix]);
         let options = key_scan_options(
+            &scope,
             limit,
             cursor,
             scan_budget,
@@ -472,7 +501,7 @@ impl PyTransaction {
         let page = with_prepared_transaction(py, &self.inner, true, |txn| {
             txn.scan_prefix_page(prefix, &options)
         })?;
-        key_scan_page(py, page)
+        key_scan_page(py, page, &scope)
     }
 
     #[pyo3(signature = (start, end, *, limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, include_internal = false, strict_budget = false))]
@@ -490,7 +519,9 @@ impl PyTransaction {
         strict_budget: bool,
     ) -> PyResult<Py<PyDict>> {
         self.control.ensure_open()?;
+        let scope = scan_cursor::scope(1, include_internal, &[start, end]);
         let options = key_scan_options(
+            &scope,
             limit,
             cursor,
             scan_budget,
@@ -501,7 +532,7 @@ impl PyTransaction {
         let page = with_prepared_transaction(py, &self.inner, true, |txn| {
             txn.scan_range_page(start, end, &options)
         })?;
-        key_scan_page(py, page)
+        key_scan_page(py, page, &scope)
     }
 
     #[pyo3(signature = (pattern, mode = "glob", limit = 100, cursor = None, scan_budget = 10_000, max_bytes = 16_777_216, *, include_internal = false, strict_budget = false))]
@@ -527,9 +558,17 @@ impl PyTransaction {
                 ));
             }
         };
+        let scope = match &pattern {
+            alopex_embedded::KeyPattern::Glob { pattern } => {
+                scan_cursor::scope(2, include_internal, &[pattern])
+            }
+            alopex_embedded::KeyPattern::Regex { pattern } => {
+                scan_cursor::scope(3, include_internal, &[pattern.as_bytes()])
+            }
+        };
         let request = alopex_embedded::KeySearchRequest {
             pattern,
-            cursor: decode_scan_cursor(cursor)?,
+            cursor: decode_scan_cursor(cursor, &scope)?,
             limit,
             scan_budget,
             max_bytes,
@@ -539,7 +578,7 @@ impl PyTransaction {
         let page = with_prepared_transaction(py, &self.inner, true, |txn| {
             txn.search_keys_visible(&request, include_internal)
         })?;
-        key_scan_page(py, page)
+        key_scan_page(py, page, &scope)
     }
 
     fn upsert_vector(

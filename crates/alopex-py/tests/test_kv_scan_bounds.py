@@ -81,7 +81,7 @@ def test_issue583_search_filters_before_limit_and_cursor(scan_db):
         txn.put(b"user:2", b"two")
         page = txn.search_keys(b"*", limit=1)
         assert page["entries"] == [(b"user:1", b"one")]
-        assert page["next_cursor"].startswith(b"alopex-scan-v1:")
+        assert page["next_cursor"].startswith(b"alopex-scan-v2:")
         assert page["has_more"]
         assert page["scanned"] > 1
         assert txn.search_keys(b"*", limit=1, cursor=page["next_cursor"])["entries"] == [(b"user:2", b"two")]
@@ -89,13 +89,14 @@ def test_issue583_search_filters_before_limit_and_cursor(scan_db):
             txn.search_keys(b"*", scan_budget=1, strict_budget=True)
 
 
-def test_issue583_search_cursor_before_prefix_is_clamped(scan_db):
+def test_issue678_search_rejects_cursor_from_another_scan(scan_db):
     with scan_db.begin(TxnMode.READ_WRITE) as txn:
         txn.put(b"b", b"unrelated")
         txn.put(b"user:1", b"value")
         cursor = txn.scan_prefix_page(b"", limit=1)["next_cursor"]
         assert cursor is not None
-        assert txn.search_keys(b"user:*", cursor=cursor)["entries"] == [(b"user:1", b"value")]
+        with pytest.raises(ValueError, match="InvalidCursor"):
+            txn.search_keys(b"user:*", cursor=cursor)
 
 
 def test_issue583_post_snapshot_candidates_consume_scan_budget(scan_db):
@@ -191,7 +192,7 @@ def test_binary_prefix_pages_resume_before_nul_extensions(scan_db, prefix, tmp_p
                     assert result["next_cursor"] is None
                     break
                 cursor = result["next_cursor"]
-                assert cursor.startswith(b"alopex-scan-v1:")
+                assert cursor.startswith(b"alopex-scan-v2:")
             else:
                 pytest.fail("enumeration did not terminate after the last key")
             assert found == expected

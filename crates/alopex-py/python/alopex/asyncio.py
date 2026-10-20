@@ -148,16 +148,24 @@ class AsyncTransaction(_AsyncLocalHandle):
     async def scan_prefix(
         self, prefix: bytes, *, limit: Optional[int] = None, page_size: int = 100,
         cursor: Optional[bytes] = None, scan_budget: int = 10_000,
-        max_bytes: int = 16_777_216, max_total_bytes: int = 104_857_600,
+        max_bytes: int = 16_777_216, max_total_bytes: Optional[int] = 104_857_600,
         include_internal: bool = False, strict_budget: bool = False,
     ) -> Iterator[Tuple[bytes, bytes]]:
-        """Collect a complete snapshot, or fail on its total byte budget."""
-        return self._handle.scan_prefix(
+        """Collect a snapshot, yielding between pages; fail atomically on total bytes."""
+        if max_total_bytes is not None and max_total_bytes < 1:
+            raise ValueError("max_total_bytes must be positive or None")
+        entries = []
+        total_bytes = 0
+        async for key, value in self.iter_prefix(
             prefix, limit=limit, page_size=page_size, cursor=cursor,
             scan_budget=scan_budget, max_bytes=max_bytes,
-            max_total_bytes=max_total_bytes, include_internal=include_internal,
-            strict_budget=strict_budget,
-        )
+            include_internal=include_internal, strict_budget=strict_budget,
+        ):
+            total_bytes += len(key) + len(value)
+            if max_total_bytes is not None and total_bytes > max_total_bytes:
+                raise _stream_error("ALOPEX-PY999", f"search response size exceeded: limit={max_total_bytes}, requested={total_bytes}")
+            entries.append((key, value))
+        return iter(entries)
 
     async def scan_prefix_page(
         self, prefix: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,
@@ -201,16 +209,24 @@ class AsyncTransaction(_AsyncLocalHandle):
     async def scan_range(
         self, start: bytes, end: bytes, *, limit: Optional[int] = None, page_size: int = 100,
         cursor: Optional[bytes] = None, scan_budget: int = 10_000,
-        max_bytes: int = 16_777_216, max_total_bytes: int = 104_857_600,
+        max_bytes: int = 16_777_216, max_total_bytes: Optional[int] = 104_857_600,
         include_internal: bool = False, strict_budget: bool = False,
     ) -> Iterator[Tuple[bytes, bytes]]:
-        """Collect a complete snapshot, or fail on its total byte budget."""
-        return self._handle.scan_range(
+        """Collect a snapshot, yielding between pages; fail atomically on total bytes."""
+        if max_total_bytes is not None and max_total_bytes < 1:
+            raise ValueError("max_total_bytes must be positive or None")
+        entries = []
+        total_bytes = 0
+        async for key, value in self.iter_range(
             start, end, limit=limit, page_size=page_size, cursor=cursor,
             scan_budget=scan_budget, max_bytes=max_bytes,
-            max_total_bytes=max_total_bytes, include_internal=include_internal,
-            strict_budget=strict_budget,
-        )
+            include_internal=include_internal, strict_budget=strict_budget,
+        ):
+            total_bytes += len(key) + len(value)
+            if max_total_bytes is not None and total_bytes > max_total_bytes:
+                raise _stream_error("ALOPEX-PY999", f"search response size exceeded: limit={max_total_bytes}, requested={total_bytes}")
+            entries.append((key, value))
+        return iter(entries)
 
     async def scan_range_page(
         self, start: bytes, end: bytes, *, limit: int = 100, cursor: Optional[bytes] = None,

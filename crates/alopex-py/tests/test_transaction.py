@@ -14,7 +14,7 @@ def test_issue582_prepared_and_kv_enumeration_share_transaction_owner(db, finish
     assert statement.execute_many([[2]]) == [1]
     txn.put(b"owner:2", b"second")
     expected = [(b"owner:1", b"first"), (b"owner:2", b"second")]
-    assert list(txn.scan_range(b"owner:", b"owner;", cursor=txn.scan_prefix_page(b"owner:", limit=1)["next_cursor"])) == expected[1:]
+    assert list(txn.scan_range(b"owner:", b"owner;", cursor=txn.scan_range_page(b"owner:", b"owner;", limit=1)["next_cursor"])) == expected[1:]
     assert txn.search_keys(b"owner:*")["entries"] == expected
     assert txn.execute_many("INSERT INTO shared_owner VALUES (?)", [[3]]) == [1]
     statement.finalize()

@@ -12,3 +12,5 @@ pub use database::PyDatabase;
 pub use thread_mode::PyThreadMode;
 #[allow(unused_imports)]
 pub use transaction::PyTransaction;
+
+mod scan_cursor;

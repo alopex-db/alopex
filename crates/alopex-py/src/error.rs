@@ -22,6 +22,9 @@ use pyo3::{PyErr, Python};
 ///     AlopexError: Raised when an operation fails with a generic error.
 create_exception!(crate::error, PyAlopexError, PyException);
 
+/// A malformed or mismatched Python scan continuation token.
+create_exception!(crate::error, InvalidCursor, PyValueError);
+
 /// Public stable error codes for the Python bindings.
 ///
 /// `ALOPEX-P` is already used by the SQL parser, so Python binding-specific
