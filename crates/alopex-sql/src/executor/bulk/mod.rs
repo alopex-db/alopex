@@ -1,8 +1,8 @@
 //! COPY / Bulk Load 実装。
 //!
 //! 現段階では CSV/Parquet を簡易的に読み込み、テーブルスキーマに従って
-//! `SqlValue` へ変換する。Columnar ストレージも Row ストレージと同じ経路で
-//! 取り込み、将来の columnar エンジン実装で差し替え可能な構造にしている。
+//! `SqlValue` へ変換する。取り込みとエクスポートはテーブルの storage 形式に
+//! 対応する経路を使用する。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -35,7 +35,9 @@ use crate::executor::Row;
 use crate::executor::columnar_constraints;
 use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
-use crate::executor::query::columnar_scan::{ColumnarScan, create_columnar_scan_iterator};
+use crate::executor::query::columnar_scan::{
+    ColumnarScan, create_columnar_scan_iterator, execute_columnar_scan,
+};
 use crate::executor::query::iterator::RowIterator;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::types::ResolvedType;
@@ -193,6 +195,36 @@ pub fn execute_copy_from_csv_reader<'txn, S: KVStore + 'txn, C: Catalog + ?Sized
     Ok(ExecutionResult::RowsAffected(rows))
 }
 
+/// Visit every table row using its storage format. Columnar reads use the
+/// fallible scan: a damaged row group must fail an export, never disappear.
+fn visit_copy_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table: &TableMetadata,
+    mut visit: impl FnMut(Vec<SqlValue>) -> Result<()>,
+) -> Result<u64> {
+    let mut count = 0u64;
+    match table.storage_options.storage_type {
+        crate::catalog::StorageType::Columnar => {
+            let scan = ColumnarScan::new(table.table_id, Vec::new(), None, None);
+            for row in execute_columnar_scan(txn, table, &scan)? {
+                visit(row.values)?;
+                count += 1;
+            }
+        }
+        crate::catalog::StorageType::Row => {
+            let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
+            for (key, encoded) in txn.inner_mut().scan_prefix(&prefix)? {
+                let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
+                if table_id == table.table_id {
+                    visit(crate::storage::RowCodec::decode(&encoded)?)?;
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
 /// Stream table rows as CSV to an application-owned writer.
 pub fn execute_copy_to_csv_writer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
@@ -205,8 +237,6 @@ pub fn execute_copy_to_csv_writer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .get_table(table_name)
         .cloned()
         .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
-    let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
-    let entries = txn.inner_mut().scan_prefix(&prefix)?;
     if options.header {
         writeln!(
             writer,
@@ -220,27 +250,21 @@ pub fn execute_copy_to_csv_writer<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         )
         .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
     }
-    let mut rows = 0u64;
-    for (key, encoded) in entries {
-        let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
-        if table_id == table.table_id {
-            let values = crate::storage::RowCodec::decode(&encoded)?;
-            writeln!(
-                writer,
-                "{}",
-                values.iter().map(csv_value).collect::<Vec<_>>().join(",")
-            )
-            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-            rows = rows.saturating_add(1);
-        }
-    }
+    let rows = visit_copy_rows(txn, &table, |values| {
+        writeln!(
+            writer,
+            "{}",
+            values.iter().map(csv_value).collect::<Vec<_>>().join(",")
+        )
+        .map_err(|error| ExecutorError::BulkLoad(error.to_string()))
+    })?;
     writer
         .flush()
         .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
     Ok(ExecutionResult::RowsAffected(rows))
 }
 
-/// COPY table rows to a local CSV file.
+/// COPY table rows to a local CSV or Parquet file.
 pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
@@ -272,15 +296,11 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     if format == FileFormat::Parquet {
         let (temporary_path, file) = create_copy_temp_file(file_path)?;
         let result = (|| {
-            let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
-            let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
             let mut rows = Vec::new();
-            for (key, encoded) in entries {
-                let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
-                if table_id == table.table_id {
-                    rows.push(crate::storage::RowCodec::decode(&encoded)?);
-                }
-            }
+            let count = visit_copy_rows(txn, &table, |values| {
+                rows.push(values);
+                Ok(())
+            })?;
             let batch = parquet_batch(&table, &rows)?;
             let schema = batch.schema();
             let mut writer = ArrowWriter::try_new(file, schema, None)
@@ -293,7 +313,7 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
                 .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
             fs::rename(&temporary_path, file_path)
                 .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-            Ok(ExecutionResult::RowsAffected(rows.len() as u64))
+            Ok(ExecutionResult::RowsAffected(count))
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary_path);
@@ -302,37 +322,10 @@ pub fn execute_copy_to<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
     let (temporary_path, mut file) = create_copy_temp_file(file_path)?;
     let result = (|| {
-        if options.header {
-            writeln!(
-                file,
-                "{}",
-                table
-                    .columns
-                    .iter()
-                    .map(|column| csv_escape(&column.name))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-        }
-        let mut rows = 0u64;
-        let prefix = crate::storage::KeyEncoder::table_prefix(table.table_id);
-        let entries: Vec<_> = txn.inner_mut().scan_prefix(&prefix)?.collect();
-        for (key, encoded) in entries {
-            let (table_id, _) = crate::storage::KeyEncoder::decode_row_key(&key)?;
-            if table_id != table.table_id {
-                continue;
-            }
-            let values = crate::storage::RowCodec::decode(&encoded)?;
-            let line = values.iter().map(csv_value).collect::<Vec<_>>().join(",");
-            writeln!(file, "{line}").map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-            rows = rows.saturating_add(1);
-        }
-        file.flush()
-            .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
+        let result = execute_copy_to_csv_writer(txn, catalog, table_name, &mut file, options)?;
         fs::rename(&temporary_path, file_path)
             .map_err(|error| ExecutorError::BulkLoad(error.to_string()))?;
-        Ok(ExecutionResult::RowsAffected(rows))
+        Ok(result)
     })();
     drop(file);
     if result.is_err() {
