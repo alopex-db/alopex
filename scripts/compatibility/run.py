@@ -20,6 +20,56 @@ else:
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+NATIVE_CASES = ("sql-3", "sql-384", "raw-3", "columnar")
+ARROW_FORMATS = ("list_f32", "list_f64", "fixed_f32", "fixed_f64", "json_utf8")
+
+
+def aggregate_native(output):
+    cases = []
+    for case in NATIVE_CASES:
+        result = json.loads((output / "native" / case / "result.json").read_text())
+        assert result["case"] == case
+        assert (
+            result["direct_same_database_open"] and result["second_target_reopen_pass"]
+        )
+        assert result["values_match_seed"] and result["index_recreated"] is False
+        assert result["rows"] == (
+            4 if case == "columnar" else 1 if case == "raw-3" else 5
+        )
+        cases.append(result)
+    return dict(
+        cases=cases,
+        direct_same_database_open=True,
+        second_target_reopen_pass=True,
+        sql_vectors_bits_equal=True,
+        raw_get_vector_bits_equal=True,
+        old_existing_hnsw_indexes_recreated_by_harness=False,
+    )
+
+
+def aggregate_arrow(output):
+    cases = []
+    for representation in ARROW_FORMATS:
+        dimensions = []
+        for dim in (3, 384):
+            result = json.loads(
+                (
+                    output / "arrow" / f"{representation}-{dim}" / "report.json"
+                ).read_text()
+            )
+            assert len(result["cases"]) == 1
+            case = result["cases"][0]
+            assert case["representation"] == representation and case["pass"]
+            assert (
+                len(case["dimensions"]) == 1
+                and case["dimensions"][0]["dimension"] == dim
+            )
+            dimensions.extend(case["dimensions"])
+        cases.append(
+            dict(representation=representation, dimensions=dimensions, pass_=True)
+        )
+        cases[-1]["pass"] = cases[-1].pop("pass_")
+    return dict(cases=cases)
 
 
 def sha(path):
@@ -38,6 +88,7 @@ def assert_complete(output, rust=True):
     ]
     if rust:
         expected += [
+            "rust-columnar-candidate-result.json",
             "python-from-rust-result.json",
             "rust-from-python-result.json",
             "rust-from-rust-result.json",
@@ -47,7 +98,15 @@ def assert_complete(output, rust=True):
         ]
     for name in expected:
         result = json.loads((output / name).read_text())
-        if name == "api-result.json":
+        if name == "rust-columnar-candidate-result.json":
+            assert result["values_match_seed"] and result["second_reopen_pass"]
+            assert (
+                result["mixed_encodings"]
+                and result["rows"] == 4
+                and result["row_groups"] == 2
+                and result["format"] == 2
+            )
+        elif name == "api-result.json":
             assert result["no_new_regressions"] and not result["surface_errors"]
             assert result["behavior"]["baseline_passed"] > 0
             assert not result["behavior"]["regressions"]
@@ -149,25 +208,33 @@ def main():
 
     def run(label, command):
         started = time.time()
+        timed_out = False
         with (output / (label + ".log")).open("w", encoding="utf-8") as log:
-            result = subprocess.run(
-                [str(x) for x in command],
-                env=env,
-                cwd=output,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                timeout=300,
-            )
+            try:
+                result = subprocess.run(
+                    [str(x) for x in command],
+                    env=env,
+                    cwd=output,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=300,
+                )
+                returncode = result.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                returncode = 124
+                log.write("\nFAIL: case exceeded 300 second correctness budget\n")
         phases.append(
             {
                 "label": label,
                 "command": [str(x) for x in command],
-                "returncode": result.returncode,
+                "returncode": returncode,
+                "timed_out": timed_out,
                 "seconds": time.time() - started,
             }
         )
-        print(f"{label}: exit {result.returncode}", flush=True)
-        if result.returncode:
+        print(f"{label}: exit {returncode}", flush=True)
+        if returncode:
             raise RuntimeError(f"{label} failed; see {output / (label + '.log')}")
 
     def python(label, interpreter, script, *arguments):
@@ -219,6 +286,7 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
             for path in [
                 HERE / "rust_harness.rs",
                 HERE / "rust_api.rs",
+                HERE / "rust_columnar.rs",
                 HERE / "legacy_config_literal.rs",
                 HERE / "rust-old/Cargo.toml",
                 HERE / "rust-old/Cargo.lock",
@@ -296,13 +364,42 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
             json.dumps(result, indent=2, ensure_ascii=False) + "\n"
         )
         assert result["no_new_regressions"], result
-        python("arrow-old", old_python, "arrow.py", "export")
-        python("native-old", old_python, "native.py", "old")
+        if not args.python_only:
+            rust("rust-columnar-old", args.old_rust, "columnar")
+            rust("rust-columnar-candidate", args.new_rust, "columnar")
+        for case in NATIVE_CASES:
+            python("native-" + case + "-old", old_python, "native.py", "old", case)
+            python(
+                "native-" + case + "-candidate", new_python, "native.py", "new", case
+            )
+        (output / "native/result.json").write_text(
+            json.dumps(aggregate_native(output), indent=2)
+        )
+        for representation in ARROW_FORMATS:
+            for dim in (3, 384):
+                case = f"{representation}-{dim}"
+                python(
+                    "arrow-" + case + "-old",
+                    old_python,
+                    "arrow.py",
+                    "export",
+                    representation,
+                    str(dim),
+                )
+                python(
+                    "arrow-" + case + "-candidate",
+                    new_python,
+                    "arrow.py",
+                    "import",
+                    representation,
+                    str(dim),
+                )
+        (output / "arrow/report.json").write_text(
+            json.dumps(aggregate_arrow(output), indent=2)
+        )
         python("logical-old", old_python, "logical.py", "export", "python15")
         if not args.python_only:
             rust("rust15", args.old_rust, "export")
-        python("native-candidate", new_python, "native.py", "new")
-        python("arrow-candidate", new_python, "arrow.py", "import")
         for source in ["python15"] + ([] if args.python_only else ["rust15"]):
             python(
                 source + "-python-direct", new_python, "logical.py", "direct", source
@@ -333,8 +430,8 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
         removed = []
         for path in [
             *output.glob("*-db"),
-            output / "native/old-created-db",
-            *output.glob("arrow/*-db"),
+            *output.glob("native/*/old-created-db"),
+            *output.glob("arrow/*/*-db"),
         ]:
             if path.is_dir():
                 shutil.rmtree(path)

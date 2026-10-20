@@ -27,9 +27,13 @@ def check(label):
 
 
 ROOT = Path(os.environ["ALOPEX_COMPAT_OUTPUT"]).resolve()
-OUT = ROOT / "arrow"
+CASE_FORMAT, CASE_DIM = sys.argv[2], int(sys.argv[3])
+OUT = ROOT / "arrow" / f"{CASE_FORMAT}-{CASE_DIM}"
+OUT.mkdir(parents=True, exist_ok=True)
 FORMATS = ["list_f32", "list_f64", "fixed_f32", "fixed_f64", "json_utf8"]
-DIMS = [3, 384]
+assert CASE_FORMAT in FORMATS and CASE_DIM in (3, 384)
+FORMATS = [CASE_FORMAT]
+DIMS = [CASE_DIM]
 
 
 def save(name, value):
@@ -171,28 +175,12 @@ def source_export():
     check("after-arrow-old-export")
 
 
-def native_probe(path, dim):
-    db = alopex.Database.new()
-    db.execute_sql(ddl("native_input", dim))
-    try:
-        count = db.execute_sql(
-            f"COPY native_input FROM {quoted(str(path))} WITH (FORMAT PARQUET)"
-        )
-        rows = db.execute_sql("SELECT * FROM native_input ORDER BY id")
-        return {"supported": True, "count": count, "actual_rows": rows}
-    except Exception as e:
-        return {"supported": False, "error": str(e)}
-    finally:
-        db.close()
-
-
 def migrate():
     assert version("alopex") == os.environ["ALOPEX_COMPAT_TARGET_VERSION"]
     check("before-arrow-new-import")
     export = json.loads((OUT / "export.json").read_text())
     expected = json.loads((OUT / "expected.json").read_text())
     results = []
-    native_output = None
     for representation in FORMATS:
         check("before-arrow-case-" + representation)
         path = OUT / f"{representation}-new-db"
@@ -209,8 +197,7 @@ def migrate():
                 assert info["write_pass"], info
                 file = OUT / info["path"]
                 assert hashlib.sha256(file.read_bytes()).hexdigest() == info["sha256"]
-                native = native_probe(file, dim)
-                dimension = {"dimension": dim, "native_copy_from": native}
+                dimension = {"dimension": dim}
                 case["dimensions"].append(dimension)
                 arrow_table = pq.read_table(file)
                 rows = arrow_table.to_pylist()
@@ -279,14 +266,6 @@ def migrate():
                         "null_vectors": sum(r["embedding"] is None for r in actual),
                     }
                 )
-            if native_output is None:
-                try:
-                    count = db.execute_sql(
-                        f"COPY vec3 TO {quoted(str(OUT / 'native-vector-output.parquet'))} WITH (FORMAT PARQUET)"
-                    )
-                    native_output = {"supported": True, "count": count}
-                except Exception as e:
-                    native_output = {"supported": False, "error": str(e)}
             case["pass"] = True
         except Exception as e:
             case.update(
@@ -323,7 +302,6 @@ def migrate():
         "non_null_vectors_per_dimension": 4,
         "null_vectors_per_dimension": 1,
         "cases": results,
-        "native_copy_to": native_output,
         "passed_representations": [x["representation"] for x in results if x["pass"]],
         "failed_representations": [
             x["representation"] for x in results if not x["pass"]

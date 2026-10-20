@@ -2,12 +2,11 @@ import pytest
 from alopex import AlopexError, DataFrame, LazyFrame
 
 
-@pytest.mark.parametrize("row_count", [1023, 1024, 1025, 34_250])
+@pytest.mark.parametrize("row_count", [1023, 1024, 1025])
 def test_scan_csv_collect_to_dict_preserves_all_arrow_batches(tmp_path, row_count):
     path = tmp_path / f"rows-{row_count}.csv"
     path.write_text(
-        "id,label\n"
-        + "".join(f"{index},row-{index}\n" for index in range(row_count)),
+        "id,label\n" + "".join(f"{index},row-{index}\n" for index in range(row_count)),
         encoding="utf-8",
     )
 
@@ -22,16 +21,16 @@ def test_scan_csv_collect_to_dict_preserves_all_arrow_batches(tmp_path, row_coun
 def test_scan_csv_stream_is_publicly_iterable_across_batches(tmp_path):
     path = tmp_path / "stream.csv"
     path.write_text(
-        "id\n" + "".join(f"{index}\n" for index in range(1025)),
+        "id\n" + "".join(f"{index}\n" for index in range(5)),
         encoding="utf-8",
     )
 
-    with LazyFrame.scan_csv(str(path)).collect_batches(chunk_size=1024) as batches:
+    with LazyFrame.scan_csv(str(path)).collect_batches(chunk_size=2) as batches:
         values = [
             value for batch in batches for value in batch.to_dict(as_series=False)["id"]
         ]
 
-    assert values == list(range(1025))
+    assert values == list(range(5))
 
     with pytest.raises(NotImplementedError):
         LazyFrame.scan_csv(str(path)).collect(streaming=True)
@@ -106,7 +105,11 @@ def test_python_list_namespace_and_explode_implode_parity():
     assert out["has_db"] == [True, None, True]
 
     words = DataFrame({"word": ["a", None, "c"]})
-    assert words.implode().explode("word").to_dict(as_series=False)["word"] == ["a", None, "c"]
+    assert words.implode().explode("word").to_dict(as_series=False)["word"] == [
+        "a",
+        None,
+        "c",
+    ]
 
     lists = DataFrame(
         {

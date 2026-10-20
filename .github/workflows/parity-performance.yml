@@ -1,8 +1,6 @@
 name: Required parity performance
 
 on:
-  schedule:
-    - cron: '23 2 * * 3'
   workflow_dispatch:
     inputs:
       issue_number:

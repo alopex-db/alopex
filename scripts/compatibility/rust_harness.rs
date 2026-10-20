@@ -1,6 +1,7 @@
 #[cfg(feature = "legacy-config-literal")]
 include!("legacy_config_literal.rs");
 mod rust_api;
+mod rust_columnar;
 use alopex_embedded::{Database, TxnMode};
 use alopex_sql::{ExecutionResult, SqlValue};
 use chrono::{Duration, NaiveDate};
@@ -115,7 +116,9 @@ fn main() {
     let mode = &args[2];
     let label = &args[3];
     let baseline = env!("CARGO_PKG_NAME").ends_with("baseline");
-    if mode == "api" {
+    if mode == "columnar" {
+        rust_columnar::run(root, label);
+    } else if mode == "api" {
         rust_api::run(root, label);
     } else if mode == "export" {
         assert!(baseline);

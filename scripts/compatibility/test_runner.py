@@ -124,3 +124,70 @@ class MatrixAcceptanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitCaseAcceptanceTests(unittest.TestCase):
+    def test_missing_native_case_cannot_pass(self):
+        from scripts.compatibility.run import aggregate_native
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(FileNotFoundError):
+                aggregate_native(Path(directory))
+
+    def test_wrong_native_values_or_case_identity_fail(self):
+        from scripts.compatibility.run import aggregate_native, NATIVE_CASES
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for case in NATIVE_CASES:
+                path = root / "native" / case / "result.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    json.dumps(
+                        dict(
+                            case=case,
+                            direct_same_database_open=True,
+                            second_target_reopen_pass=True,
+                            values_match_seed=True,
+                            index_recreated=False,
+                            rows=4
+                            if case == "columnar"
+                            else 1
+                            if case == "raw-3"
+                            else 5,
+                        )
+                    )
+                )
+            self.assertEqual(len(aggregate_native(root)["cases"]), 4)
+            path = root / "native/columnar/result.json"
+            result = json.loads(path.read_text())
+            result["values_match_seed"] = False
+            path.write_text(json.dumps(result))
+            with self.assertRaises(AssertionError):
+                aggregate_native(root)
+            result["values_match_seed"] = True
+            result["case"] = "raw-3"
+            path.write_text(json.dumps(result))
+            with self.assertRaises(AssertionError):
+                aggregate_native(root)
+
+    def test_missing_arrow_dimension_cannot_pass(self):
+        from scripts.compatibility.run import aggregate_arrow
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(FileNotFoundError):
+                aggregate_arrow(Path(directory))
+
+    def test_api_allowlist_excludes_volume_and_replaced_cases(self):
+        from scripts.compatibility.api import CONFIG
+
+        selected = CONFIG["selected_cases"]
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(all("::" in node for node in selected))
+        self.assertFalse(set(selected) & set(CONFIG["excluded_cases"]))
+        self.assertFalse(set(selected) & set(CONFIG["test_replacements"]))
+        self.assertFalse(any("34250" in node for node in selected))
+        for spec in CONFIG["test_replacements"].values():
+            self.assertEqual(
+                sum(node.endswith(spec["replacement"]) for node in selected), 1
+            )

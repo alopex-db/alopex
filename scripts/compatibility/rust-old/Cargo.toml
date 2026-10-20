@@ -11,6 +11,7 @@ name = "alopex-compat-baseline"
 path = "../rust_harness.rs"
 
 [features]
+candidate-reader = []
 legacy-config-literal = []
 
 [dependencies]

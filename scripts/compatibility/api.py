@@ -269,7 +269,6 @@ def replay(source, report):
             "local HTTP test stubs require loopback bind permission"
         ) from error
     plugin = ReplayPlugin()
-    base = source / "crates/alopex-py/tests"
     arguments = [
         "-q",
         "--tb=short",
@@ -282,18 +281,22 @@ def replay(source, report):
         "-m",
         CONFIG["markers"],
     ]
-    arguments += [str(base / name) for name in CONFIG["python_files"]]
-    arguments += ["--deselect=" + node for node in CONFIG.get("test_replacements", {})]
+    selected = CONFIG["selected_cases"]
+    assert selected and len(selected) == len(set(selected))
+    assert not set(selected) & (
+        set(CONFIG["test_replacements"]) | set(CONFIG["excluded_cases"])
+    )
     arguments += [
-        str(source / "tests/compatibility-extensions" / name)
-        for name in CONFIG.get("supplemental_files", [])
+        str(source / node.split("::", 1)[0]) + "::" + node.split("::", 1)[1]
+        for node in selected
     ]
     code = int(pytest.main(arguments, plugins=[plugin]))
     result = {
         "version": version("alopex"),
         "exit_code": code,
         "collected": plugin.collected,
-        "deselected": plugin.deselected,
+        "deselected": list(CONFIG["test_replacements"]),
+        "excluded_cases": CONFIG["excluded_cases"],
         "collection_errors": plugin.collection_errors,
         "tests": plugin.items,
         "baseline_commit": CONFIG["baseline_commit"],
@@ -301,6 +304,9 @@ def replay(source, report):
     }
     write(report, result)
     assert code in [0, 1] and plugin.collected and not plugin.collection_errors, result
+    assert set(plugin.collected) == set(selected), (
+        "case allowlist did not collect exactly"
+    )
     assert set(plugin.items) == set(plugin.collected), "not every selected test ran"
 
 

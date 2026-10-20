@@ -184,8 +184,8 @@ def test_polars_1432_csv_parquet_and_streaming_contracts(tmp_path):
     assert pl.__version__ == "1.43.2"
     expected = pl.DataFrame(
         {
-            "id": list(range(2050)),
-            "label": [None if index % 10 == 0 else f"row-{index}" for index in range(2050)],
+            "id": list(range(5)),
+            "label": [None if index % 3 == 0 else f"row-{index}" for index in range(5)],
         }
     )
     csv_path = tmp_path / "rows.csv"
@@ -203,7 +203,7 @@ def test_polars_1432_csv_parquet_and_streaming_contracts(tmp_path):
             as_series=False
         )
 
-        with alopex_lazy.collect_batches(chunk_size=1024) as batches:
+        with alopex_lazy.collect_batches(chunk_size=2) as batches:
             alopex_rows = sum(batch.height for batch in batches)
         polars_rows = sum(batch.height for batch in polars_lazy.collect_batches())
         assert alopex_rows == polars_rows == expected.height

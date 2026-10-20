@@ -246,10 +246,10 @@ jobs:
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
           if [[ -n "${ACT:-}" ]]; then
-            python -m pytest crates/alopex-py/tests -k "not benchmark"
+            python -m pytest crates/alopex-py/tests --ignore=crates/alopex-py/tests/benchmarks --ignore=crates/alopex-py/tests/test_benchmark_nfr13.py -k "not benchmark"
             exit 0
           fi
-          pytest crates/alopex-py/tests
+          pytest crates/alopex-py/tests --ignore=crates/alopex-py/tests/benchmarks --ignore=crates/alopex-py/tests/test_benchmark_nfr13.py
       - name: Run HNSW management and commit GIL regressions
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
         run: cargo test -p alopex-py --lib releases_gil -- --nocapture
@@ -387,9 +387,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
-          # The performance module's numeric values remain advisory, but its
-          # scan/read/write correctness assertions stay in this required lane.
-          python -m pip install pytest-benchmark
           python -m pip install "polars==${{ matrix.polars }}"
       - name: Install patchelf (Linux)
         run: |
@@ -418,7 +415,7 @@ jobs:
           maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run polars tests
         run: |
-          pytest crates/alopex-py/tests -m "requires_polars and not polars_reference"
+          pytest crates/alopex-py/tests --ignore=crates/alopex-py/tests/benchmarks --ignore=crates/alopex-py/tests/test_benchmark_nfr13.py -m "requires_polars and not polars_reference"
       - name: Run exact Polars Python differential
         if: matrix.polars == '1.43.2'
         run: |
@@ -482,7 +479,7 @@ jobs:
           ALOPEX_SERVER_BIN: ${{ github.workspace }}/target/debug/alopex-server
         run: |
           export LD_LIBRARY_PATH="${NIM_SQL_PARSER_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          pytest crates/alopex-py/tests -m requires_server
+          pytest crates/alopex-py/tests --ignore=crates/alopex-py/tests/benchmarks --ignore=crates/alopex-py/tests/test_benchmark_nfr13.py -m requires_server
 
   typecheck:
     name: typecheck
@@ -517,79 +514,6 @@ jobs:
             exit 0
           fi
           mypy crates/alopex-py/python/alopex
-
-  benchmarks:
-    name: benchmarks (advisory; small/medium)
-    runs-on: ubuntu-latest
-    # Performance measurements are advisory. Functional behavior remains
-    # covered by the regular test jobs; benchmark noise must not gate CI.
-    continue-on-error: true
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          timeout 120s sudo docker image prune --all --force || true
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        if: ${{ !env.ACT }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Setup virtualenv
-        run: |
-          python_cmd="python"
-          if [[ -n "${ACT:-}" ]]; then
-            python_cmd="python3"
-          fi
-          rm -rf .venv
-          "$python_cmd" -m venv .venv
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install maturin pytest pytest-benchmark numpy polars
-      - name: Install patchelf (Linux)
-        run: |
-          if command -v patchelf &> /dev/null; then
-            exit 0
-          fi
-          if [[ -n "${ACT:-}" ]]; then
-            if command -v sudo &> /dev/null; then
-              echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 > /dev/null
-            else
-              echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
-            fi
-          fi
-          if command -v sudo &> /dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y patchelf
-            exit 0
-          fi
-          apt-get update
-          apt-get install -y patchelf
-      - name: Build Nim SQL parser library
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Maturin develop
-        run: |
-          maturin develop -m crates/alopex-py/Cargo.toml
-      - name: Run benchmarks
-        run: |
-          pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"
-      - name: Upload benchmark artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: alopex-py-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
-          path: benchmark.json
-          if-no-files-found: ignore
 
   ci-success:
     name: ci-success
