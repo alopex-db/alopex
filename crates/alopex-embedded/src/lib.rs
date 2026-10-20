@@ -318,13 +318,16 @@ fn resolve_format_file_path(path: &Path) -> Option<PathBuf> {
 impl Database {
     /// Opens a database at the specified path.
     pub fn open(path: &Path) -> Result<Self> {
-        let data_dir = disk_data_dir_path(path);
-        let store = StorageFactory::create(alopex_core::StorageMode::Disk {
-            path: data_dir,
-            config: None,
-        })
-        .map_err(Error::Core)?;
-        let mut db = Self::init(store, StorageMode::Disk, None, SegmentConfigV2::default());
+        Self::open_with_options(path, DatabaseOptions::new())
+    }
+
+    /// Opens a database with extensible, builder-based options.
+    ///
+    /// Disk mode uses `path`; in-memory mode ignores it. For in-memory databases
+    /// without a path, use [`Self::open_in_memory_with_options`].
+    /// Invalid cache limits are rejected before storage is created.
+    pub fn open_with_options(path: &Path, opts: DatabaseOptions) -> Result<Self> {
+        let mut db = Self::open_with_config(opts.into_embedded_config(Some(path)))?;
         db.load_sql_catalog()?;
         Ok(db)
     }
@@ -352,13 +355,7 @@ impl Database {
                 "memory_mode must be enabled for in-memory open".into(),
             )));
         }
-        let store = StorageFactory::create(opts.to_storage_mode(None)).map_err(Error::Core)?;
-        let mut db = Self::init(
-            store,
-            StorageMode::InMemory,
-            opts.memory_limit(),
-            SegmentConfigV2::default(),
-        );
+        let mut db = Self::open_with_config(opts.into_embedded_config(None))?;
         db.load_sql_catalog()?;
         Ok(db)
     }

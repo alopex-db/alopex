@@ -13,6 +13,7 @@ path = "../rust_harness.rs"
 [features]
 candidate-reader = []
 legacy-config-literal = []
+source-config-clients = []
 
 [dependencies]
 alopex-embedded = "=0.8.15"
@@ -27,3 +28,18 @@ csv = "1"
 [profile.dev]
 debug = 0
 incremental = false
+
+[[bin]]
+name = "config-constructor"
+path = "../config_constructor_client.rs"
+required-features = ["source-config-clients"]
+
+[[bin]]
+name = "config-literal-v0815"
+path = "../config_literal_v0815_client.rs"
+required-features = ["source-config-clients"]
+
+[[bin]]
+name = "config-literal-v0816"
+path = "../config_literal_v0816_client.rs"
+required-features = ["source-config-clients"]
