@@ -316,6 +316,14 @@ fn scenario_local_sql_matrix() -> DemoResult {
 
     let v08_matrix = vec![
         (
+            "SELECT region AS area, COUNT(*) AS cnt FROM sales GROUP BY area ORDER BY area",
+            vec![
+                vec![SqlValue::Text("east".into()), SqlValue::BigInt(2)],
+                vec![SqlValue::Text("north".into()), SqlValue::BigInt(1)],
+                vec![SqlValue::Text("west".into()), SqlValue::BigInt(2)],
+            ],
+        ),
+        (
             "SELECT TRUE IS TRUE AS truth_value, NULL IS DISTINCT FROM 1 AS distinct_null, (1, 2) < (1, 3) AS row_less, (1, NULL) = (1, NULL) AS row_unknown",
             vec![vec![
                 SqlValue::Boolean(true),
@@ -725,7 +733,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
     ];
     require(
-        v08_matrix.len() == 30,
+        v08_matrix.len() == 31,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -735,10 +743,6 @@ fn scenario_local_sql_matrix() -> DemoResult {
     let rejected_v08 = [
         (
             "SELECT amount AS ident FROM sales WHERE ident > 100",
-            "ALOPEX-C003",
-        ),
-        (
-            "SELECT region AS area, COUNT(*) FROM sales GROUP BY area",
             "ALOPEX-C003",
         ),
         ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
@@ -1188,65 +1192,113 @@ fn scenario_prepared_statements() -> DemoResult {
     )
 }
 
+type DemoScenario = (&'static str, &'static str, fn() -> DemoResult);
+
+fn run_all_scenarios(scenarios: &[DemoScenario]) -> DemoResult {
+    let mut failures = Vec::new();
+    for (id, title, scenario) in scenarios {
+        if let Err(error) = run_scenario(id, title, *scenario) {
+            eprintln!("FAIL {id}: {error}");
+            failures.push(format!("{id}: {error}"));
+        }
+    }
+    require(failures.is_empty(), &failures.join("; "))
+}
+
 fn run() -> DemoResult {
     println!("AlopexDB v0.8.x complete embedded-local API demo");
-    run_scenario(
-        "EMB-01-storage-durability",
-        "storage modes and durability",
-        scenario_storage_durability,
-    )?;
-    run_scenario(
-        "EMB-02-kv-transactions",
-        "borrowed KV transactions",
-        scenario_kv_transactions,
-    )?;
-    run_scenario(
-        "EMB-03-persisted-transaction-manager",
-        "persisted transaction manager",
-        scenario_persisted_transaction_manager,
-    )?;
-    run_scenario(
-        "EMB-04-local-sql-matrix",
-        "complete inherited local SQL matrix",
-        scenario_local_sql_matrix,
-    )?;
-    run_scenario(
-        "EMB-05-catalog-cluster-diagnostics",
-        "catalog and single-node cluster diagnostics",
-        scenario_catalog_cluster_diagnostics,
-    )?;
-    run_scenario(
-        "EMB-06-owned-and-sql-streams",
-        "owned sessions and SQL streams",
-        scenario_owned_and_sql_streams,
-    )?;
-    run_scenario(
-        "EMB-07-dataframe-columnar",
-        "DataFrame and columnar APIs",
-        scenario_dataframe_columnar,
-    )?;
-    run_scenario(
-        "EMB-08-vector-hnsw",
-        "Vector and HNSW APIs",
-        scenario_vector_hnsw,
-    )?;
-    run_scenario(
-        "EMB-09-large-values",
-        "chunked large values",
-        scenario_large_values,
-    )?;
-    run_scenario(
-        "EMB-10-fail-closed-boundaries",
-        "unsupported and external-prerequisite boundaries",
-        scenario_fail_closed_boundaries,
-    )?;
-    run_scenario(
-        "EMB-11-prepared-statements",
-        "prepared statement lifecycle",
-        scenario_prepared_statements,
-    )?;
+    run_all_scenarios(&[
+        (
+            "EMB-01-storage-durability",
+            "storage modes and durability",
+            scenario_storage_durability,
+        ),
+        (
+            "EMB-02-kv-transactions",
+            "borrowed KV transactions",
+            scenario_kv_transactions,
+        ),
+        (
+            "EMB-03-persisted-transaction-manager",
+            "persisted transaction manager",
+            scenario_persisted_transaction_manager,
+        ),
+        (
+            "EMB-04-local-sql-matrix",
+            "complete inherited local SQL matrix",
+            scenario_local_sql_matrix,
+        ),
+        (
+            "EMB-05-catalog-cluster-diagnostics",
+            "catalog and single-node cluster diagnostics",
+            scenario_catalog_cluster_diagnostics,
+        ),
+        (
+            "EMB-06-owned-and-sql-streams",
+            "owned sessions and SQL streams",
+            scenario_owned_and_sql_streams,
+        ),
+        (
+            "EMB-07-dataframe-columnar",
+            "DataFrame and columnar APIs",
+            scenario_dataframe_columnar,
+        ),
+        (
+            "EMB-08-vector-hnsw",
+            "Vector and HNSW APIs",
+            scenario_vector_hnsw,
+        ),
+        (
+            "EMB-09-large-values",
+            "chunked large values",
+            scenario_large_values,
+        ),
+        (
+            "EMB-10-fail-closed-boundaries",
+            "unsupported and external-prerequisite boundaries",
+            scenario_fail_closed_boundaries,
+        ),
+        (
+            "EMB-11-prepared-statements",
+            "prepared statement lifecycle",
+            scenario_prepared_statements,
+        ),
+    ])?;
     println!("\nAll 11 embedded-local scenarios passed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod demo_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn runs_remaining_scenarios_but_preserves_failure() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        fn first() -> DemoResult {
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn failed() -> DemoResult {
+            require(false, "intentional check failure")
+        }
+        fn last() -> DemoResult {
+            COMPLETED.fetch_add(10, Ordering::SeqCst);
+            Ok(())
+        }
+        let result = run_all_scenarios(&[
+            ("first", "first", first),
+            ("failed", "failed", failed),
+            ("last", "last", last),
+        ]);
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 11);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("intentional check failure"));
+        assert!(run_all_scenarios(&[]).is_ok());
+    }
 }
 
 fn main() {

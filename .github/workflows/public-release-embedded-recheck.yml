@@ -1,0 +1,115 @@
+name: Public release Embedded recheck
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: 'Full public scenario run with exactly one failed Embedded step'
+        required: true
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline artifact'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      baseline_run_id:
+        description: 'Full public scenario run with exactly one failed Embedded step'
+        required: true
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline artifact'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: true
+        type: string
+
+jobs:
+  verify:
+    name: Recheck published Rust Embedded scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.recheck.outputs.version }}
+      commit: ${{ steps.recheck.outputs.commit }}
+      report_artifact: ${{ steps.context.outputs.artifact }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      REPORT_ROOT: ${{ github.workspace }}/release-verification-output
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Bind current artifact identity
+        id: context
+        shell: bash
+        run: echo "artifact=release-verification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.baseline_run_id }}
+          name: release-verification-${{ inputs.baseline_run_id }}-${{ inputs.baseline_attempt }}
+          path: baseline
+      - name: Recheck only the failed Embedded scenario
+        id: recheck
+        env:
+          BASELINE_RUN: ${{ inputs.baseline_run_id }}
+          BASELINE_ATTEMPT: ${{ inputs.baseline_attempt }}
+          BASELINE_SHA256: ${{ inputs.baseline_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Unresolved: Embedded demo only; retain sixteen source-bound passing scenarios.'
+          echo 'Bound: 6 GB additional storage; one serialized target; cleanup after upload.'
+          python3 scripts/compatibility/storage.py --log "${REPORT_ROOT}/storage.jsonl" \
+            --additional-bytes 6000000000 -- \
+            python3 scripts/release/verify-release/recheck_embedded.py \
+              --baseline-dir baseline --baseline-run "${BASELINE_RUN}" \
+              --baseline-attempt "${BASELINE_ATTEMPT}" --baseline-sha256 "${BASELINE_SHA256}" \
+              --output-dir "${REPORT_ROOT}"
+      - name: Finalize retained result after interruption
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$(find "${REPORT_ROOT}" -name 'v*.json' -type f -print -quit 2>/dev/null || true)"
+          if [[ -n "${results}" ]]; then
+            python3 scripts/release/verify-release/report.py finalize --results "${results}"
+            python3 scripts/release/verify-release/report.py render --results "${results}" --output-dir "${REPORT_ROOT}"
+          fi
+      - name: Retain composed report and focused execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.REPORT_ROOT }}
+          if-no-files-found: error
+      - name: Remove regenerable client build outputs
+        if: always()
+        shell: bash
+        run: rm -rf "${GITHUB_WORKSPACE}/target"
+
+  publish:
+    needs: verify
+    if: ${{ always() && needs.verify.result != 'cancelled' }}
+    uses: ./.github/workflows/publish-public-report.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      artifact_run_id: ${{ github.run_id }}
+      artifact_name: ${{ needs.verify.outputs.report_artifact }}

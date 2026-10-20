@@ -16,6 +16,9 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         cls.publish = cls.text.split("  publish:\n", 1)[1].split(
             "  publish-vector-benchmark:\n", 1
         )[0]
+        cls.publish += (
+            ROOT / ".github/workflows/publish-public-report.yml"
+        ).read_text()
 
     def test_complete_scenarios_execute_after_exact_version_resolution(self):
         self.assertIn("workflow_call:", self.text)
@@ -36,7 +39,9 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "report_artifact: ${{ steps.report_context.outputs.artifact }}", self.verify
         )
-        self.assertIn("name: ${{ needs.verify.outputs.report_artifact }}", self.publish)
+        self.assertIn(
+            "artifact_name: ${{ needs.verify.outputs.report_artifact }}", self.publish
+        )
         self.assertIn("REPORT_RUN_ATTEMPT=", self.publish)
         self.assertIn(
             'report_id="run-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"', self.publish
@@ -48,7 +53,8 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_docs_pulls_immutable_pair_without_cross_repo_secret(self):
         self.assertIn(
-            "if: ${{ always() && needs.verify.result != 'cancelled' }}", self.publish
+            "if: ${{ always() && needs.verify.result != 'cancelled' && inputs.baseline_run_id == '' && inputs.publication_run_id == '' }}",
+            self.publish,
         )
         self.assertIn("report.py validate-report", self.publish)
         self.assertIn("for ext in md json; do", self.publish)
@@ -56,7 +62,7 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("refusing to overwrite immutable report", self.publish)
         self.assertIn("cmp -s", self.publish)
         self.assertNotIn("DOCS_REPO_TOKEN", self.publish)
-        self.assertNotIn("gh api", self.publish)
+        self.assertNotIn("repos/alopex-db/docs/dispatches", self.publish)
         self.assertNotIn("git push --force", self.publish)
 
     def test_publication_failure_cannot_change_package_result(self):
