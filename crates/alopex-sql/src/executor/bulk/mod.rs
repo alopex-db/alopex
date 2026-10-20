@@ -665,7 +665,15 @@ fn validate_output_path(file_path: &str, config: &CopySecurityConfig) -> Result<
 }
 
 fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+    if value.is_empty()
+        || value.starts_with('\u{feff}')
+        || value == r"\N"
+        || value.trim().eq_ignore_ascii_case("null")
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+    {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()
@@ -674,7 +682,7 @@ fn csv_escape(value: &str) -> String {
 
 fn csv_value(value: &SqlValue) -> String {
     match value {
-        SqlValue::Null => String::new(),
+        SqlValue::Null => r"\N".into(),
         SqlValue::Integer(value) => value.to_string(),
         SqlValue::BigInt(value) => value.to_string(),
         SqlValue::Float(value) => value.to_string(),
@@ -1620,10 +1628,6 @@ fn persist_segment<'txn, S: KVStore + 'txn>(
 /// テキストをテーブル型に合わせて `SqlValue` へ変換する。
 pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
     let trimmed = raw.trim();
-    if trimmed.eq_ignore_ascii_case("null") {
-        return Ok(SqlValue::Null);
-    }
-
     match ty {
         ResolvedType::Integer => trimmed
             .parse::<i32>()
@@ -1671,8 +1675,8 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
         ResolvedType::Array(_) | ResolvedType::Map { .. } | ResolvedType::Struct(_) => {
             crate::executor::evaluator::nested::parse_typed_json(trimmed, ty)
         }
-        ResolvedType::Text => Ok(SqlValue::Text(trimmed.to_string())),
-        ResolvedType::Blob => Ok(SqlValue::Blob(trimmed.as_bytes().to_vec())),
+        ResolvedType::Text => Ok(SqlValue::Text(raw.to_string())),
+        ResolvedType::Blob => Ok(SqlValue::Blob(raw.as_bytes().to_vec())),
         ResolvedType::Vector { dimension, .. } => {
             let body = trimmed.trim_matches(['[', ']']);
             if body.is_empty() {
