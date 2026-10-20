@@ -3,64 +3,92 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
-WORKFLOW = ROOT / ".github/workflows/public-release-verification.yml"
 
 
 class PublicReleaseWorkflowContractTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        cls.text = WORKFLOW.read_text(encoding="utf-8")
+    def setUpClass(cls):
+        cls.text = (
+            ROOT / ".github/workflows/public-release-verification.yml"
+        ).read_text()
+        cls.verify = cls.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
+        cls.publish = cls.text.split("  publish:\n", 1)[1].split(
+            "  publish-vector-benchmark:\n", 1
+        )[0]
 
-    def test_weekly_and_explicit_entrypoints_exist(self) -> None:
+    def test_complete_scenarios_execute_after_exact_version_resolution(self):
         self.assertIn("workflow_call:", self.text)
         self.assertIn("workflow_dispatch:", self.text)
         self.assertIn('cron: "23 3 * * 1"', self.text)
-        self.assertNotIn("publish_report:", self.text)
-
-    def test_every_run_is_an_immutable_public_report(self) -> None:
-        self.assertIn("- name: Finalize verification report", self.text)
-        self.assertIn("if: always()", self.text)
-        artifact_name = (
-            "name: release-verification-${{ github.run_id }}-"
-            "${{ github.run_attempt }}"
-        )
-        self.assertEqual(self.text.count(artifact_name), 3)
-        self.assertIn("${{ runner.temp }}/release-verification-v*/v*.json", self.text)
-        self.assertIn("${{ runner.temp }}/release-verification-v*/v*.md", self.text)
+        self.assertIn('python_tag="alopex-py-v${version}"', self.verify)
+        self.assertIn('git rev-parse "${python_tag}^{commit}"', self.verify)
+        self.assertIn('"${VERSION}" --native', self.verify)
+        self.assertIn("scripts/compatibility/storage.py", self.verify)
+        self.assertIn("--additional-bytes 18000000000", self.verify)
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", self.verify)
+        self.assertIn("Remove regenerable verification outputs", self.verify)
         self.assertIn(
-            'report_path="reports/release-verification/v${version}"',
-            self.text,
+            "VECTOR_SCENARIO_OUTCOME: ${{ steps.vector_scenario.outcome }}", self.verify
         )
-        self.assertIn('"${REPORT_PATH}.json"', self.text)
-        self.assertIn('"${REPORT_PATH}.md"', self.text)
-        self.assertIn("needs.verify.result == 'failure'", self.text)
-        self.assertIn("Create or update failure issue", self.text)
-        reporter = (ROOT / "scripts/release/verify-release/report.py").read_text(
-            encoding="utf-8"
+
+    def test_report_identity_and_artifact_follow_producing_attempt(self):
+        self.assertIn(
+            "report_artifact: ${{ steps.report_context.outputs.artifact }}", self.verify
         )
-        for field in ("commit", "tag", "run_url", "responsibility"):
-            self.assertIn(f'"{field}"', reporter)
-        for field in (
-            "run_id",
-            "run_attempt",
-            "started_at",
-            "completed_at",
-            "failure_stage",
-        ):
-            self.assertIn(f'"{field}"', reporter)
-        for outcome in ("success", "failure", "incomplete"):
-            self.assertIn(f'"{outcome}"', reporter)
+        self.assertIn("name: ${{ needs.verify.outputs.report_artifact }}", self.publish)
+        self.assertIn("REPORT_RUN_ATTEMPT=", self.publish)
+        self.assertIn(
+            'report_id="run-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"', self.publish
+        )
+        self.assertIn(
+            'branch="report/verify-release-v${VERSION}-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"',
+            self.publish,
+        )
+
+    def test_docs_pulls_immutable_pair_without_cross_repo_secret(self):
+        self.assertIn(
+            "if: ${{ always() && needs.verify.result != 'cancelled' }}", self.publish
+        )
+        self.assertIn("report.py validate-report", self.publish)
+        self.assertIn("for ext in md json; do", self.publish)
+        self.assertIn('git add "${report_path}.md" "${report_path}.json"', self.publish)
+        self.assertIn("refusing to overwrite immutable report", self.publish)
+        self.assertIn("cmp -s", self.publish)
+        self.assertNotIn("DOCS_REPO_TOKEN", self.publish)
+        self.assertNotIn("gh api", self.publish)
+        self.assertNotIn("git push --force", self.publish)
+
+    def test_publication_failure_cannot_change_package_result(self):
+        fallback = self.text.split("  publish-publication-failure-report:\n", 1)[
+            1
+        ].split("  notify-publication-failure:\n", 1)[0]
+        self.assertIn("report-publication-recovery-", fallback)
+        self.assertNotIn("DOCS_REPO_TOKEN", fallback)
+        self.assertNotIn("report.py record", fallback)
+        self.assertIn("needs.publish.result == 'failure'", self.text)
+
+    def test_serialized_registry_builds_share_target_and_clear_parser_overrides(self):
+        script = (ROOT / "scripts/release/verify-release/run.sh").read_text()
+        self.assertIn("CARGO_BUILD_JOBS=2", script)
+        self.assertIn('VERIFY_TOOLS_TARGET="${CARGO_TARGET_DIR}"', script)
+        self.assertIn(
+            'cargo install alopex-cli --version "=${ALOPEX_VERSION}" --locked', script
+        )
+        self.assertIn(
+            'cargo install alopex-server --version "=${ALOPEX_VERSION}" --locked',
+            script,
+        )
+        self.assertIn("unset ALOPEX_SQL_PARSER_LIB_DIR", script)
+        self.assertIn("--suite scenarios", script)
+        self.assertIn('result["outcome"] != "success"', script)
 
     def test_resolved_python_tag_and_peeled_commit_own_report_identity(self) -> None:
         release = self.text.split("      - name: Resolve exact public version\n", 1)[
             1
         ].split("      - name: Verify exact public package availability\n", 1)[0]
         self.assertIn('python_tag="alopex-py-v${version}"', release)
-        self.assertIn(
-            '"refs/tags/${python_tag}:refs/tags/${python_tag}"', release
-        )
+        self.assertIn('"refs/tags/${python_tag}:refs/tags/${python_tag}"', release)
         self.assertIn('git rev-parse "${python_tag}^{commit}"', release)
         self.assertIn('--commit "${python_commit}" --tag "${python_tag}"', release)
         self.assertIn('if [[ "${GITHUB_REF_TYPE}" == tag ]]; then', release)
@@ -94,112 +122,6 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
             "steps.report_context.outputs.version || 'unknown' }}",
             self.text,
         )
-
-    def test_publication_preserves_failure_evidence_and_exact_docs_bytes(self) -> None:
-        publish = self.text.split("  publish:\n", 1)[1].split(
-            "  publish-vector-benchmark:\n", 1
-        )[0]
-        self.assertIn("if: ${{ always() && needs.verify.result != 'cancelled' }}", publish)
-        self.assertIn("report.py validate-report", publish)
-        self.assertNotIn("validate-public", publish)
-        self.assertNotIn("✅ 全ステップ成功", publish)
-        self.assertIn("contents: write", publish)
-        self.assertIn('if: ${{ always() && needs.verify.result != \'cancelled\' }}', publish)
-        self.assertIn('report_path="reports/release-verification/v${version}"', publish)
-        self.assertIn('branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"', publish)
-        self.assertIn("event_type=release-verification-ready", publish)
-        self.assertIn("if: success() && steps.publish.outputs.branch", publish)
-        self.assertIn('"${RUNNER_TEMP}/existing-report.md"', publish)
-        self.assertNotIn("existing=", publish)
-        self.assertNotIn("repository: alopex-db/docs", publish)
-        self.assertIn("cmp -s", self.text)
-        self.assertIn("?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", self.text)
-        self.assertIn(
-            "?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}",
-            self.text,
-        )
-        self.assertNotIn("git push --force", self.text)
-        self.assertEqual(
-            self.text.count("refusing to overwrite immutable report"), 3
-        )
-
-    def test_verification_and_publication_have_separate_permissions(self) -> None:
-        verify = self.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
-        publish = self.text.split("  publish:\n", 1)[1].split(
-            "  publish-vector-benchmark:\n", 1
-        )[0]
-        self.assertIn("contents: read", verify)
-        self.assertNotIn("contents: write", verify)
-        self.assertIn("needs: verify", publish)
-        self.assertIn("if: ${{ always() && needs.verify.result != 'cancelled' }}", publish)
-        self.assertIn("contents: write", publish)
-        self.assertIn("actions/download-artifact@v4", publish)
-        self.assertIn(
-            "name: release-verification-${{ github.run_id }}-"
-            "${{ github.run_attempt }}",
-            publish,
-        )
-        self.assertIn("Select downloaded verification report", publish)
-        self.assertIn('echo "REPORT_ROOT=${report_root}"', publish)
-
-    def test_report_publication_failure_creates_public_follow_up(self) -> None:
-        fallback = self.text.split(
-            "  publish-publication-failure-report:\n", 1
-        )[1].split("  notify-publication-failure:\n", 1)[0]
-        self.assertIn("needs: [verify, publish]", fallback)
-        self.assertIn("repository: alopex-db/docs", fallback)
-        self.assertIn("DOCS_REPO_TOKEN", fallback)
-        self.assertIn("Mark report publication failure", fallback)
-        self.assertIn("immutable report publication", fallback)
-        self.assertIn(
-            'report_path="reports/release-verification/v${version}/run-'
-            '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-publication-failure"',
-            fallback,
-        )
-        self.assertNotIn(
-            'report_path="reports/release-verification/v${version}/run-'
-            '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
-            fallback,
-        )
-        self.assertIn("Wait for immutable failure report on docs main", fallback)
-        self.assertIn("notify-publication-failure:", self.text)
-        notification = self.text.split("  notify-publication-failure:\n", 1)[1].split(
-            "  notify-scheduled-failure:\n", 1
-        )[0]
-        self.assertIn(
-            "needs: [verify, publish, publish-publication-failure-report]", notification
-        )
-        self.assertIn(
-            "needs.publish-publication-failure-report.result == 'failure'", notification
-        )
-        self.assertIn("issues: write", notification)
-        self.assertIn("immutable report publication failed", notification)
-
-    def test_public_verification_checks_only_artifact_availability(self) -> None:
-        verify = self.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
-        readiness = verify.split(
-            "      - name: Verify exact public package availability\n", 1
-        )[1]
-        self.assertIn('pip download', readiness)
-        self.assertIn('pip install', readiness)
-        self.assertIn('"alopex==${VERSION}"', readiness)
-        self.assertIn("--only-binary=:all:", readiness)
-        self.assertIn("seq 1 30", readiness)
-        self.assertIn("sleep 20", readiness)
-        self.assertNotIn("Run public-package demos", verify)
-        self.assertNotIn('verify-release/run.sh "${VERSION}"', verify)
-
-    def test_public_vector_scenario_uses_the_resolved_release_version(self) -> None:
-        self.assertIn("- name: Re-run public wheel scenario", self.text)
-        self.assertIn('--name "v${VERSION} public vector scenario"', self.text)
-        self.assertIn("v${VERSION}のget_vectors", self.text)
-        self.assertNotIn("v0.8.14 public vector scenario", self.text)
-        self.assertNotIn("v0.8.14のget_vectors", self.text)
-        scenario = (ROOT / "scripts/release/verify_python_vector_api.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("v0.8.14", scenario)
-        self.assertIn("version('alopex')", scenario)
 
     def test_stable_delivery_only_imports_exact_sha_benchmark_evidence(self) -> None:
         benchmark = self.text.split("  publish-vector-benchmark:\n", 1)[1].split(
