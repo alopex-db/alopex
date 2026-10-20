@@ -10,6 +10,9 @@ publish = false
 name = "alopex-compat-candidate"
 path = "../rust_harness.rs"
 
+[features]
+legacy-config-literal = []
+
 [dependencies]
 alopex-embedded = { path = "../../../crates/alopex-embedded" }
 alopex-sql = { path = "../../../crates/alopex-sql" }

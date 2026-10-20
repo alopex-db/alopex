@@ -1,0 +1,63 @@
+{
+  "baseline_commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+  "python_files": {
+    "test_database.py": "database constructors, persistence, memory, lifecycle and diagnostics",
+    "test_transaction.py": "KV CRUD, transaction modes, commit, rollback, context managers and SQL transaction control",
+    "test_sql.py": "DDL/DML/query results, typed values, bindings, prepared statements, metadata, expressions, errors and reopen",
+    "test_copy_stream.py": "file-like CSV COPY, streaming SQL and source lifecycle",
+    "test_catalog.py": "catalog/namespace/table CRUD and real Polars table reads and writes",
+    "test_catalog_consistency.py": "catalog values, metadata, errors and Python table IO contracts",
+    "test_dataframe_p3.py": "DataFrame construction, lazy execution, string/datetime/list expressions and batches",
+    "test_compatibility_contract.py": "stable exception types and error codes, default KV and DataFrame contracts",
+    "test_connect_target.py": "embedded/remote dispatch, constructor options and structural protocols",
+    "test_remote_client.py": "remote client HTTP wire handling, transactions, errors, lifecycle and connection management using local stubs",
+    "test_credentials.py": "credential provider validation and environment behavior with mocks",
+    "test_shared_execution.py": "ordered statements, commit barriers and shared execution reports",
+    "test_surface_consistency.py": "cross-surface result and schema consistency",
+    "test_feature_flags.py": "public feature behavior with fixed optional dependencies",
+    "test_asyncio.py": "async database, transaction, SQL and streaming wrappers",
+    "test_polars_1432_reference.py": "pinned Polars-backed DataFrame expression and result contracts"
+  },
+  "excluded_files": {
+    "benchmarks/": "Performance measurements are not API compatibility assertions; bounded upgrade correctness is covered separately.",
+    "test_benchmark_nfr13.py": "Performance/resource acceptance has its own owner; excluded from this API replay.",
+    "test_hnsw.py": "Vector APIs already have the dedicated upgrade matrix; this replay expands the other API families.",
+    "test_vector.py": "Vector APIs already have the dedicated upgrade matrix.",
+    "test_native_discovery.py": "Packaging/library producer identity is version-specific; existing wheel verification owns it.",
+    "test_remote_e2e.py": "Requires real old/new server executables; this lane covers the remote Python client with local HTTP stubs, not server backward compatibility."
+  },
+  "markers": "not requires_server",
+  "intentional_changes": [],
+  "required_dependencies": {
+    "pytest": "9.1.1",
+    "polars": "1.43.2",
+    "numpy": "2.2.1",
+    "pyarrow": "26.0.0"
+  },
+  "comparison": "Every baseline-passing test must still pass. All selected test identities and non-server skips must agree. Baseline failures are reported separately, never counted as verified compatibility. Runtime symbol and call-shape preservation is a separate necessary check, not a substitute for behavior tests.",
+  "test_replacements": {
+    "crates/alopex-py/tests/test_database.py::test_second_open_of_one_database_is_rejected": {
+      "replacement": "test_api_runtime.py::test_second_open_keeps_exception_code_refusal_and_release_contract",
+      "implementation_commit": "0c407adfd62ba2116de88b83041e2c2c1bbbf0e1",
+      "reason": "The old assertion describes a same-process holder as another process. v0.8.16 intentionally identifies retained local handles. Preserve and check exception class/code, rejection, common diagnostic prefix and reopening after release, without requiring inaccurate ownership prose.",
+      "classification": "explicit diagnostic wording difference; not an API removal or lock-behavior waiver",
+      "reference": {
+        "project": "alopex-db/alopex",
+        "version": "0.8.15",
+        "commit": "d3917e1fa21d41097742a971e14094c0d6ae397e",
+        "source": "crates/alopex-core/src/error.rs",
+        "test": "crates/alopex-py/tests/test_database.py::test_second_open_of_one_database_is_rejected",
+        "relationship": "extended"
+      },
+      "extension": {
+        "base_case": "crates/alopex-py/tests/test_database.py::test_second_open_of_one_database_is_rejected",
+        "change": "Replace only the owner prose assertion with error-code/common-prefix checks and reopen-after-release assertions. The second-open operation and exception class assertion are retained.",
+        "reason": "The v0.8.16 implementation accurately distinguishes local retained handles from another process. Replay API behavior without requiring an inaccurate owner description.",
+        "expected_difference": "Old and new owner wording may differ; AlopexError, ALOPEX-PY999, refusal to open while held and successful reopen after close must remain identical."
+      }
+    }
+  },
+  "supplemental_files": [
+    "test_api_runtime.py"
+  ]
+}

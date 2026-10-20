@@ -14,6 +14,9 @@ regressions, not external-product conformance tests.
 
 | Contract | Inputs and assertions |
 | --- | --- |
+| Inherited Python API behavior | Replay the exact v0.8.15 tests in 16 files against both isolated packages: SQL/DDL/DML/types/bindings, KV and transaction lifecycle, CSV streams, DataFrame and pinned Polars, catalog/metadata/errors, connection dispatch, async wrappers, credentials and remote-client local HTTP stubs. Every old-passing test must pass in the candidate; skipped/failed baseline cases are listed separately. |
+| Public Python surface | Compare all discovered public symbols from `alopex`, `alopex.asyncio`, `alopex.remote`, `alopex.protocols`, including classes/members, callable signatures where metadata exists, defaults and stable error-code preservation. Optional additions are allowed. Presence/signature coverage does not replace behavior assertions. |
+| Rust API source and behavior | Compile the same old client against frozen registry crates and candidate local-path crates. Ten groups exercise KV CRUD/scan, read-only/commit/rollback, SQL CRUD/constraints/metadata, prepared bind/reset/finalize, SQL sessions, CSV reader/writer, catalog hierarchy, DataFrame/SQL streaming, memory/config/clone/snapshot/clear, chunked Blob/Typed values and cancel. |
 | Direct same-DB upgrade | Old process writes, flushes, closes and reopens; candidate checks the original DB file hashes before opening the same path. SQL VECTOR(3/384), raw 3D vector, NULL, empty/NULL/Unicode/quoted/newline TEXT, old HNSW indexes without recreation; second reopen. |
 | Legacy columnar | 2,000 TEXT rows in two 1,000-row groups with different encodings. Record the old reader's result independently; candidate must read every expected row. |
 | Direct cross-language upgrade | Copies of DBs written by old Python and old Rust, opened by candidate Python and Rust. Typed scalar data, vectors, binary KV, existing HNSW with forced `HnswSearch`, second reopen. |
@@ -32,6 +35,8 @@ DB/segment layout or performance.
 Python 3.11+ is needed for the harness. Prepare two isolated virtual environments
 with `numpy==2.2.1` and `pyarrow==26.0.0`; install `alopex==0.8.15` from a binary wheel
 in the old environment and the checkout's built wheel in the candidate environment.
+Both environments also need `pytest==9.1.1` and `polars==1.43.2` for the frozen API
+corpus. The pinned v0.8.15 Git commit must exist locally (CI fetches it once if missing).
 Do not install the published candidate as a substitute for a source-build CI check.
 
 Before building, measure the entire host's Alopex working storage, including other
@@ -45,7 +50,7 @@ It records the inventory and monitors child commands every 15 seconds.
 export CARGO_TARGET_DIR="$PWD/target"
 python scripts/compatibility/storage.py --log /tmp/alopex-compat-storage.jsonl \
   --additional-bytes 20000000000 -- bash scripts/compatibility/build-rust.sh
-python -m unittest scripts.compatibility.test_runner
+python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api
 python scripts/compatibility/storage.py --log /tmp/alopex-compat-storage.jsonl \
   --additional-bytes 2000000000 -- \
   python scripts/compatibility/run.py \
@@ -56,6 +61,20 @@ python scripts/compatibility/storage.py --log /tmp/alopex-compat-storage.jsonl \
     --new-rust target/debug/alopex-compat-candidate \
     --output /tmp/alopex-compat-results
 ```
+
+`api-cases.json` is the machine-readable behavior corpus inventory, provenance,
+required dependency set and explicit exclusions. The archived historical test
+files are executed unchanged except for the explicitly declared replacement of
+one old same-process ownership prose assertion. Its replacement preserves the
+exception class/code, second-open rejection and reopening after handle release;
+`api-cases.json` pins the implementation change and exact old/new case IDs.
+A missing family, failed collection or skipped case
+that used to pass cannot silently reduce coverage. The driver records the test
+source hashes and old/new per-case setup/call/teardown outcomes. It also records
+baseline failures and skips without counting them as verified compatibility.
+The remote client is exercised against local HTTP stubs. Real old/new server
+wire compatibility and the whole public Rust API are not certified by these
+curated cases; existing server CI remains separate.
 
 The output directory must be empty. `--python-only` explicitly excludes Rust for a
 focused check; CI always uses the full matrix. Missing Rust binaries, a missing
@@ -84,3 +103,30 @@ regenerate its lockfile (`cargo generate-lockfile --manifest-path
 scripts/compatibility/rust-current/Cargo.toml`) in the same change and review the
 diff. CI builds both with `--locked` so dependency drift cannot change a passing
 result silently. Do not replace the old writer with the candidate writer.
+
+## Known Rust source incompatibility: #696
+
+The runtime cases above do **not** mean that every old Rust source program builds.
+The unchanged public-struct client in `legacy_config_literal.rs` builds against
+0.8.15 but fails against 0.8.16 with `E0063`: `EmbeddedConfig` gained the public
+`hnsw_cache_bytes` and `hnsw_cache_entries` fields. The candidate source file is
+identical to the one in the published 0.8.16 crate. This is tracked in
+https://github.com/alopex-db/alopex/issues/696 (v0.8.17).
+
+With the same host budget guard and shared target used above, reproduce it with:
+
+```bash
+# Historical writer/client: compiles (unset candidate parser overrides first).
+env -u NIM_SQL_PARSER_LIB_DIR -u ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD \
+  cargo check --locked --manifest-path scripts/compatibility/rust-old/Cargo.toml \
+  --features legacy-config-literal
+# Candidate: currently fails with E0063; this is not a passing compatibility case.
+cargo check --locked --manifest-path scripts/compatibility/rust-current/Cargo.toml \
+  --features legacy-config-literal
+```
+
+The failing compile witness is opt-in, separate from the passing runtime matrix.
+It must not be reported as qualified or silently worked around by replacing the
+old client's struct literal with a constructor. Resolving this requires a source
+API decision that accounts for clients of both already-published versions; merely
+removing the new fields would break clients that adopted them in 0.8.16.

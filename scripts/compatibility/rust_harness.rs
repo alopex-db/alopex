@@ -1,3 +1,6 @@
+#[cfg(feature = "legacy-config-literal")]
+include!("legacy_config_literal.rs");
+mod rust_api;
 use alopex_embedded::{Database, TxnMode};
 use alopex_sql::{ExecutionResult, SqlValue};
 use chrono::{Duration, NaiveDate};
@@ -105,12 +108,16 @@ fn write(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
 }
 fn main() {
+    #[cfg(feature = "legacy-config-literal")]
+    let _ = legacy_config_literal();
     let args: Vec<_> = env::args().collect();
     let root = Path::new(&args[1]);
     let mode = &args[2];
     let label = &args[3];
     let baseline = env!("CARGO_PKG_NAME").ends_with("baseline");
-    if mode == "export" {
+    if mode == "api" {
+        rust_api::run(root, label);
+    } else if mode == "export" {
         assert!(baseline);
         let fixture = read(&root.join("fixture.json"));
         let path = root.join(format!("{label}-source-db"));

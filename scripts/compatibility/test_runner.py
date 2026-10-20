@@ -15,6 +15,12 @@ class MatrixAcceptanceTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.results = {
+            "api-result.json": {
+                "no_new_regressions": True,
+                "rust_api": {"identical": True, "cases": 10},
+                "surface_errors": [],
+                "behavior": {"baseline_passed": 258, "regressions": []},
+            },
             "native/result.json": {
                 "direct_same_database_open": True,
                 "second_target_reopen_pass": True,
@@ -64,7 +70,7 @@ class MatrixAcceptanceTests(unittest.TestCase):
 
     def test_all_required_cases_pass(self):
         self.write()
-        self.assertEqual(len(assert_complete(self.root, rust=False)), 4)
+        self.assertEqual(len(assert_complete(self.root, rust=False)), 5)
 
     def test_one_successful_arrow_format_cannot_hide_failed_formats(self):
         self.results["arrow/report.json"]["cases"][1]["pass"] = False

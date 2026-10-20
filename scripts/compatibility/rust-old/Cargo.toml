@@ -10,6 +10,9 @@ publish = false
 name = "alopex-compat-baseline"
 path = "../rust_harness.rs"
 
+[features]
+legacy-config-literal = []
+
 [dependencies]
 alopex-embedded = "=0.8.15"
 alopex-core = "=0.8.15"

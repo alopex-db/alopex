@@ -13,6 +13,11 @@ import subprocess
 import time
 import zipfile
 
+if __package__:
+    from . import api
+else:
+    import api
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 
@@ -29,6 +34,7 @@ def assert_complete(output, rust=True):
         "arrow/report.json",
         "python-from-python-result.json",
         "python15-python-direct-result.json",
+        "api-result.json",
     ]
     if rust:
         expected += [
@@ -41,7 +47,16 @@ def assert_complete(output, rust=True):
         ]
     for name in expected:
         result = json.loads((output / name).read_text())
-        if name == "arrow/report.json":
+        if name == "api-result.json":
+            assert result["no_new_regressions"] and not result["surface_errors"]
+            assert result["behavior"]["baseline_passed"] > 0
+            assert not result["behavior"]["regressions"]
+            if rust:
+                assert (
+                    result["rust_api"]["identical"]
+                    and result["rust_api"]["cases"] == 10
+                )
+        elif name == "arrow/report.json":
             cases = result["cases"]
             required = {"list_f32", "list_f64", "fixed_f32", "fixed_f64", "json_utf8"}
             assert {c["representation"] for c in cases} == required and len(cases) == 5
@@ -110,6 +125,9 @@ def main():
     env = dict(os.environ, ALOPEX_COMPAT_OUTPUT=str(output))
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PYTEST_PLUGINS", None)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     phases = []
     report = {
         "status": "failed",
@@ -121,6 +139,7 @@ def main():
         ).strip(),
         "scripts": {p.name: sha(p) for p in HERE.glob("*.py")},
         "provenance_sha256": sha(HERE / "provenance.json"),
+        "json_inputs": {p.name: sha(p) for p in HERE.glob("*.json")},
         "tracked_diff_sha256": hashlib.sha256(
             subprocess.check_output(
                 ["git", "-C", str(REPO), "diff", "HEAD", "--binary"]
@@ -199,6 +218,8 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
             str(path.relative_to(HERE)): sha(path)
             for path in [
                 HERE / "rust_harness.rs",
+                HERE / "rust_api.rs",
+                HERE / "legacy_config_literal.rs",
                 HERE / "rust-old/Cargo.toml",
                 HERE / "rust-old/Cargo.lock",
                 HERE / "rust-current/Cargo.toml",
@@ -215,6 +236,66 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
                     ("candidate", args.new_rust),
                 ]
             }
+        source = api.baseline_source(output)
+        for owner, interpreter in [("old", old_python), ("candidate", new_python)]:
+            python(
+                "api-" + owner + "-surface",
+                interpreter,
+                "api.py",
+                "surface",
+                "--output",
+                output / (owner + "-surface.json"),
+            )
+            python(
+                "api-" + owner + "-behavior",
+                interpreter,
+                "api.py",
+                "replay",
+                "--source",
+                source,
+                "--output",
+                output / (owner + "-api.json"),
+            )
+        old_surface = json.loads((output / "old-surface.json").read_text())
+        new_surface = json.loads((output / "candidate-surface.json").read_text())
+        errors = api.compare_surfaces(old_surface, new_surface)
+        old_behavior = json.loads((output / "old-api.json").read_text())
+        new_behavior = json.loads((output / "candidate-api.json").read_text())
+        behavior = api.compare_reports(old_behavior, new_behavior)
+        result = {
+            "baseline_commit": api.CONFIG["baseline_commit"],
+            "surface_symbols": len(old_surface["symbols"]),
+            "surface_errors": errors,
+            "behavior": behavior,
+            "no_new_regressions": not errors and not behavior["regressions"],
+            "baseline_tests": {
+                name: sha(source / "crates/alopex-py/tests" / name)
+                for name in api.CONFIG["python_files"]
+            },
+            "coverage": api.CONFIG["python_files"],
+            "exclusions": api.CONFIG["excluded_files"],
+        }
+        if not args.python_only:
+            rust("rust-old-api", args.old_rust, "api")
+            rust("rust-candidate-api", args.new_rust, "api")
+            old_api = json.loads((output / "rust-old-api-result.json").read_text())
+            new_api = json.loads(
+                (output / "rust-candidate-api-result.json").read_text()
+            )
+            identical = (
+                old_api == new_api
+                and old_api["status"] == "passed"
+                and len(old_api["cases"]) == 10
+            )
+            result["rust_api"] = {
+                "identical": identical,
+                "cases": len(old_api["cases"]),
+            }
+            result["no_new_regressions"] = result["no_new_regressions"] and identical
+        (output / "api-result.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+        )
+        assert result["no_new_regressions"], result
         python("arrow-old", old_python, "arrow.py", "export")
         python("native-old", old_python, "native.py", "old")
         python("logical-old", old_python, "logical.py", "export", "python15")
@@ -259,6 +340,13 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
                 shutil.rmtree(path)
                 removed.append(str(path.relative_to(output)))
         report["removed_databases"] = removed
+        for path in [
+            output / "baseline-source",
+            *output.glob("*-api-temp"),
+            *output.glob("*-api-cache"),
+        ]:
+            if path.is_dir():
+                shutil.rmtree(path)
         (output / "summary.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False) + "\n"
         )

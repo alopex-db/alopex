@@ -298,17 +298,21 @@ jobs:
           mkdir -p "$compat_root"
           cleanup() { rm -rf -- "$old_env"; }
           trap cleanup EXIT
-          python -m unittest scripts.compatibility.test_runner
+          python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api
+          baseline_commit='d3917e1fa21d41097742a971e14094c0d6ae397e'
+          if ! git cat-file -e "$baseline_commit^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$baseline_commit"
+          fi
           python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
             --additional-bytes 20000000000 -- bash scripts/compatibility/build-rust.sh
           python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
             --additional-bytes 2000000000 -- python -m venv "$old_env"
           python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
             --additional-bytes 2000000000 -- "$old_env/bin/python" -m pip install \
-            --only-binary=:all: 'alopex==0.8.15' 'numpy==2.2.1' 'pyarrow==26.0.0'
+            --only-binary=:all: 'alopex==0.8.15' 'numpy==2.2.1' 'pyarrow==26.0.0' 'pytest==9.1.1' 'polars==1.43.2'
           python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
             --additional-bytes 2000000000 -- "$candidate_python" -m pip install \
-            --only-binary=:all: 'numpy==2.2.1' 'pyarrow==26.0.0'
+            --only-binary=:all: 'numpy==2.2.1' 'pyarrow==26.0.0' 'pytest==9.1.1' 'polars==1.43.2'
           python scripts/compatibility/storage.py --log "$compat_root/storage.jsonl" \
             --additional-bytes 2000000000 -- python scripts/compatibility/run.py \
             --old-python "$old_env/bin/python" --new-python "$candidate_python" \

@@ -46,8 +46,11 @@ def allocated_bytes(roots):
             seen.add(key)
             total += info.st_blocks * 512
             if stat.S_ISDIR(info.st_mode):
-                with os.scandir(path) as entries:
-                    pending.extend(Path(entry.path) for entry in entries)
+                try:
+                    with os.scandir(path) as entries:
+                        pending.extend(Path(entry.path) for entry in entries)
+                except FileNotFoundError:
+                    continue  # Concurrent cleanup removed this directory; other IO errors still abort.
     return total
 
 
