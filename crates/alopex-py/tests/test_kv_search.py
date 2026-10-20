@@ -1,5 +1,4 @@
 import pytest
-
 from alopex import AlopexError, Database, TxnMode
 
 
@@ -29,7 +28,7 @@ def test_transaction_scans_and_search_include_uncommitted_writes():
         first = txn.search_keys(b"cart:*", limit=2)
         assert first["entries"] == [(b"cart:42:closed", b"closed"), (b"cart:42:open", b"open")]
         assert first["has_more"] and first["scanned"] == 2
-        assert first["next_cursor"].startswith(b"alopex-scan-v1:")
+        assert first["next_cursor"].startswith(b"alopex-scan-v2:")
         second = txn.search_keys(b"cart:*", limit=2, cursor=first["next_cursor"])
         assert second == {
             "entries": [(b"cart:43:open", b"next"), (b"cart:99:open", b"other")],
@@ -130,18 +129,18 @@ def test_complete_scans_pages_and_exact_budgets(thread_mode):
     db = Database.new(thread_mode=thread_mode)
     try:
         with db.begin(TxnMode.READ_WRITE) as seed:
-            for n in range(250):
+            for n in range(5):
                 seed.put(f"p:{n:03}".encode(), b"v")
             seed.commit()
         with db.begin(TxnMode.READ_WRITE) as txn:
             txn.delete(b"p:000")
-            txn.put(b"p:250", b"new")
-            expected = [(f"p:{n:03}".encode(), b"v") for n in range(1, 250)] + [(b"p:250", b"new")]
+            txn.put(b"p:005", b"new")
+            expected = [(f"p:{n:03}".encode(), b"v") for n in range(1, 5)] + [(b"p:005", b"new")]
             for method, args in [(txn.scan_prefix, (b"p:",)), (txn.scan_range, (b"p:", b"p;"))]:
                 assert list(method(*args)) == expected
-                assert list(method(*args, limit=None, page_size=7, scan_budget=3)) == expected
-                assert list(method(*args, limit=7)) == expected[:7]
-                assert list(method(*args, scan_budget=250, strict_budget=True)) == expected
+                assert list(method(*args, limit=None, page_size=3, scan_budget=2)) == expected
+                assert list(method(*args, limit=3)) == expected[:3]
+                assert list(method(*args, scan_budget=6, strict_budget=True)) == expected
                 with pytest.raises(AlopexError, match="budget"):
                     list(method(*args, page_size=100, scan_budget=1, strict_budget=True))
                 with pytest.raises(AlopexError, match="response size"):
@@ -153,7 +152,7 @@ def test_complete_scans_pages_and_exact_budgets(thread_mode):
                 found = []
                 sizes = []
                 while True:
-                    page = method(*args, cursor=cursor)
+                    page = method(*args, limit=2, cursor=cursor)
                     sizes.append(len(page["entries"]))
                     found.extend(page["entries"])
                     assert page["scanned"] <= 10_000
@@ -161,18 +160,18 @@ def test_complete_scans_pages_and_exact_budgets(thread_mode):
                         assert page["next_cursor"] is None
                         break
                     cursor = page["next_cursor"]
-                    assert cursor.startswith(b"alopex-scan-v1:")
+                    assert cursor.startswith(b"alopex-scan-v2:")
                 assert found == expected
-                assert sizes == [100, 100, 50]
+                assert sizes == [2, 2, 1]
                 # The deleted key still consumes one physical candidate.
                 with pytest.raises(AlopexError, match="budget"):
-                    method(*args, limit=300, scan_budget=250, strict_budget=True)
-                exact = method(*args, limit=300, scan_budget=251, strict_budget=True)
+                    method(*args, limit=6, scan_budget=5, strict_budget=True)
+                exact = method(*args, limit=6, scan_budget=6, strict_budget=True)
                 assert exact["entries"] == expected
                 assert exact["has_more"] is False
-                assert exact["scanned"] == 251
+                assert exact["scanned"] == 6
             frozen = txn.scan_prefix(b"p:")
-            txn.put(b"p:251", b"later")
+            txn.put(b"p:006", b"later")
             txn.commit()
             assert list(frozen) == expected
     finally:

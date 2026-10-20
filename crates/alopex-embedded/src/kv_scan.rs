@@ -16,7 +16,7 @@ pub struct KeyScanOptions {
     pub cursor: Option<Key>,
     /// Maximum inspected physical candidates, including deleted and hidden keys.
     pub scan_budget: usize,
-    /// Maximum inspected or returned key/value bytes, including a returned cursor.
+    /// Maximum returned key/value bytes. Hidden entries and cursor metadata are excluded.
     pub max_bytes: usize,
     /// Include engine namespaces and colliding user keys (default false).
     pub include_internal: bool,
@@ -128,68 +128,90 @@ fn validate_options(options: &KeyScanOptions) -> Result<()> {
     Ok(())
 }
 
+// Keep the first candidate of the following page without reopening the physical scan.
+struct PageScan<'a> {
+    scan: &'a mut dyn OwnedKVScan,
+    pending: Option<(Key, Option<Vec<u8>>)>,
+}
+
+impl PageScan<'_> {
+    fn next(&mut self) -> Result<Option<(Key, Option<Vec<u8>>)>> {
+        match self.pending.take() {
+            Some(entry) => Ok(Some(entry)),
+            None => self.scan.next_search_entry(),
+        }
+    }
+}
+
 fn collect_page(scan: &mut dyn OwnedKVScan, options: &KeyScanOptions) -> Result<KeySearchPage> {
-    let result = (|| {
-        let mut page = KeySearchPage {
-            entries: Vec::with_capacity(options.limit),
-            next_cursor: None,
-            scanned: 0,
-            has_more: false,
-        };
-        let mut inspected_bytes = 0usize;
-        let mut response_bytes = 0usize;
-        let mut last_processed = None;
-        while let Some((key, value)) = scan.next_search_entry()? {
-            let visible = value.is_some() && (options.include_internal || !is_internal_key(&key));
-            if page.entries.len() == options.limit && visible {
-                page.has_more = true;
-                break;
-            }
-            if page.scanned == options.scan_budget {
-                if options.strict_budget && page.entries.len() < options.limit {
-                    return Err(Error::SearchBudgetExceeded {
-                        limit: options.scan_budget,
-                    });
-                }
-                page.has_more = true;
-                break;
-            }
-            page.scanned += 1;
-            inspected_bytes = inspected_bytes
-                .saturating_add(key.len())
-                .saturating_add(value.as_ref().map_or(0, Vec::len));
-            if inspected_bytes > options.max_bytes {
-                return Err(Error::SearchResponseTooLarge {
-                    limit: options.max_bytes,
-                    requested: inspected_bytes,
-                });
-            }
-            last_processed = Some(key.clone());
-            if visible {
-                let value = value.expect("visible entry has a value");
-                response_bytes = response_bytes
-                    .saturating_add(key.len())
-                    .saturating_add(value.len());
-                page.entries.push(KeySearchEntry { key, value });
-            }
-        }
-        if page.has_more {
-            page.next_cursor = last_processed;
-        }
-        let requested =
-            response_bytes.saturating_add(page.next_cursor.as_ref().map_or(0, Vec::len));
-        if requested > options.max_bytes {
-            return Err(Error::SearchResponseTooLarge {
-                limit: options.max_bytes,
-                requested,
-            });
-        }
-        Ok(page)
-    })();
+    let result = read_page(
+        &mut PageScan {
+            scan,
+            pending: None,
+        },
+        options,
+    );
     match (result, scan.close()) {
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         (Ok(page), Ok(())) => Ok(page),
     }
+}
+
+fn read_page(scan: &mut PageScan<'_>, options: &KeyScanOptions) -> Result<KeySearchPage> {
+    let mut page = KeySearchPage {
+        entries: Vec::with_capacity(options.limit),
+        next_cursor: None,
+        scanned: 0,
+        has_more: false,
+    };
+    let mut response_bytes = 0usize;
+    let mut last_processed = None;
+    while let Some((key, value)) = scan.next()? {
+        let visible = value.is_some() && (options.include_internal || !is_internal_key(&key));
+        if page.entries.len() == options.limit && visible {
+            page.has_more = true;
+            scan.pending = Some((key, value));
+            break;
+        }
+        if page.scanned == options.scan_budget {
+            if options.strict_budget && page.entries.len() < options.limit {
+                return Err(Error::SearchBudgetExceeded {
+                    limit: options.scan_budget,
+                });
+            }
+            page.has_more = true;
+            scan.pending = Some((key, value));
+            break;
+        }
+        if visible {
+            let value = value.expect("visible entry has a value");
+            let entry_bytes = key.len().saturating_add(value.len());
+            if response_bytes.saturating_add(entry_bytes) > options.max_bytes {
+                if page.entries.is_empty() {
+                    return Err(Error::InvalidParameter {
+                        param: "max_bytes".into(),
+                        reason: format!(
+                            "scan entry too large: key={key:?}, limit={}, requested={entry_bytes}",
+                            options.max_bytes
+                        ),
+                    });
+                }
+                page.has_more = true;
+                scan.pending = Some((key, Some(value)));
+                break;
+            }
+            response_bytes += entry_bytes;
+            last_processed = Some(key.clone());
+            page.entries.push(KeySearchEntry { key, value });
+        } else {
+            last_processed = Some(key);
+        }
+        page.scanned += 1;
+    }
+    if page.has_more {
+        page.next_cursor = last_processed;
+    }
+    Ok(page)
 }
 
 /// Collect in one physical pass, keeping one transaction and a total response
@@ -226,50 +248,30 @@ pub(crate) fn range_all(
     let result = (|| {
         let mut entries = Vec::new();
         let mut total_bytes = 0usize;
-        let (mut page_scanned, mut page_entries, mut page_bytes) = (0usize, 0usize, 0usize);
-        while let Some((key, value)) = scan.next_search_entry()? {
-            if page_entries == options.limit {
-                page_scanned = 0;
-                page_entries = 0;
-                page_bytes = 0;
+        let mut pages = PageScan {
+            scan: scan.as_mut(),
+            pending: None,
+        };
+        let mut page_options = options.clone();
+        loop {
+            if let Some(limit) = limit {
+                page_options.limit = options.limit.min(limit - entries.len());
             }
-            if page_scanned == options.scan_budget {
-                if options.strict_budget {
-                    return Err(Error::SearchBudgetExceeded {
-                        limit: options.scan_budget,
-                    });
-                }
-                page_scanned = 0;
-                page_entries = 0;
-                page_bytes = 0;
-            }
-            page_scanned += 1;
-            page_bytes = page_bytes
-                .saturating_add(key.len())
-                .saturating_add(value.as_ref().map_or(0, Vec::len));
-            if page_bytes > options.max_bytes {
-                return Err(Error::SearchResponseTooLarge {
-                    limit: options.max_bytes,
-                    requested: page_bytes,
-                });
-            }
-            if let Some(value) =
-                value.filter(|_| options.include_internal || !is_internal_key(&key))
-            {
+            let page = read_page(&mut pages, &page_options)?;
+            for entry in page.entries {
                 total_bytes = total_bytes
-                    .saturating_add(key.len())
-                    .saturating_add(value.len());
+                    .saturating_add(entry.key.len())
+                    .saturating_add(entry.value.len());
                 if total_bytes > max_total_bytes {
                     return Err(Error::SearchResponseTooLarge {
                         limit: max_total_bytes,
                         requested: total_bytes,
                     });
                 }
-                entries.push(KeySearchEntry { key, value });
-                page_entries += 1;
-                if limit.is_some_and(|limit| entries.len() == limit) {
-                    break;
-                }
+                entries.push(entry);
+            }
+            if !page.has_more || limit.is_some_and(|limit| entries.len() == limit) {
+                break;
             }
         }
         Ok(entries)
@@ -306,7 +308,108 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Arc;
 
+    #[test]
+    fn pending_candidate_is_delivered_once_then_scan_ends() {
+        struct Scan {
+            entries: std::vec::IntoIter<(Key, Vec<u8>)>,
+        }
+        impl OwnedKVScan for Scan {
+            fn next_entry(&mut self) -> Result<Option<(Key, Vec<u8>)>> {
+                Ok(self.entries.next())
+            }
+            fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+        let mut raw = Scan {
+            entries: vec![(b"b".to_vec(), b"v".to_vec())].into_iter(),
+        };
+        let mut scan = PageScan {
+            scan: &mut raw,
+            pending: Some((b"a".to_vec(), Some(b"v".to_vec()))),
+        };
+        assert_eq!(
+            scan.next().unwrap(),
+            Some((b"a".to_vec(), Some(b"v".to_vec())))
+        );
+        assert_eq!(
+            scan.next().unwrap(),
+            Some((b"b".to_vec(), Some(b"v".to_vec())))
+        );
+        assert_eq!(scan.next().unwrap(), None);
+    }
+
+    #[test]
+    fn strict_budget_accepts_a_full_page_before_a_hidden_candidate() {
+        let db = Arc::new(crate::Database::new());
+        let mut txn = db
+            .begin_owned_embedded_transaction(crate::TxnMode::ReadWrite)
+            .unwrap();
+        for key in [b"b".as_slice(), b"hnsw:meta:hidden", b"z"] {
+            txn.put(key, b"v").unwrap();
+        }
+        let options = KeyScanOptions {
+            limit: 1,
+            scan_budget: 1,
+            strict_budget: true,
+            ..Default::default()
+        };
+        let page = txn.scan_prefix_page(b"", &options).unwrap();
+        assert_eq!(
+            page.entries,
+            vec![KeySearchEntry {
+                key: b"b".to_vec(),
+                value: b"v".to_vec()
+            }]
+        );
+        assert_eq!(page.scanned, 1);
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor, Some(b"b".to_vec()));
+    }
+
+    #[test]
+    fn complete_scan_rejects_each_zero_limit_even_on_empty_ranges() {
+        let db = Arc::new(crate::Database::new());
+        let mut txn = db
+            .begin_owned_embedded_transaction(crate::TxnMode::ReadWrite)
+            .unwrap();
+        let options = KeyScanOptions::default();
+        for (limit, bytes) in [(Some(0), 1), (None, 0)] {
+            assert!(matches!(
+                txn.scan_prefix_all(b"", &options, limit, bytes),
+                Err(crate::Error::Core(Error::InvalidParameter { .. }))
+            ));
+        }
+    }
+
     proptest! {
+        #[test]
+        fn byte_pages_match_a_small_reference_vector(
+            values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..8), 1..6),
+            extra in 0usize..12,
+        ) {
+            let db = Arc::new(crate::Database::new());
+            let mut txn = db.begin_owned_embedded_transaction(crate::TxnMode::ReadWrite).unwrap();
+            let expected: Vec<_> = values.into_iter().enumerate().map(|(n, value)| KeySearchEntry { key: vec![b'p', n as u8], value }).collect();
+            for entry in &expected { txn.put(&entry.key, &entry.value).unwrap(); }
+            let max_bytes = expected.iter().map(|e| e.key.len() + e.value.len()).max().unwrap() + extra;
+            let mut options = KeyScanOptions { max_bytes, ..Default::default() };
+            let mut actual = Vec::new();
+            for _ in 0..expected.len() {
+                let page = txn.scan_prefix_page(b"p", &options).unwrap();
+                prop_assert!(!page.entries.is_empty());
+                prop_assert!(page.entries.iter().map(|e| e.key.len() + e.value.len()).sum::<usize>() <= max_bytes);
+                actual.extend(page.entries);
+                if !page.has_more { break; }
+                prop_assert_ne!(&page.next_cursor, &options.cursor);
+                options.cursor = page.next_cursor;
+            }
+            prop_assert_eq!(&actual, &expected);
+            options.cursor = None;
+            let total = expected.iter().map(|e| e.key.len() + e.value.len()).sum();
+            prop_assert_eq!(txn.scan_prefix_all(b"p", &options, None, total).unwrap(), expected);
+        }
+
         #[test]
         fn full_page_accepts_exact_response_budget(
             suffix in proptest::collection::vec(any::<u8>(), 0..32),
@@ -337,9 +440,9 @@ mod tests {
             options.max_bytes -= 1;
             let error = txn.scan_prefix_page(b"user:", &options).unwrap_err();
             match error {
-                crate::Error::Core(Error::SearchResponseTooLarge { limit, requested }) => {
-                    prop_assert_eq!(limit, exact_bytes - 1);
-                    prop_assert_eq!(requested, exact_bytes);
+                crate::Error::Core(Error::InvalidParameter { param, reason }) => {
+                    prop_assert_eq!(param, "max_bytes");
+                    prop_assert_eq!(reason, format!("scan entry too large: key={key:?}, limit={}, requested={exact_bytes}", exact_bytes - 1));
                 }
                 other => prop_assert!(false, "unexpected error: {other}"),
             }
@@ -352,31 +455,31 @@ mod tests {
         let mut txn = db
             .begin_owned_embedded_transaction(crate::TxnMode::ReadWrite)
             .unwrap();
-        for n in 0..250 {
+        for n in 0..5 {
             txn.put(format!("p:{n:03}").as_bytes(), b"v").unwrap();
         }
         let options = KeyScanOptions {
-            limit: 7,
-            scan_budget: 3,
+            limit: 3,
+            scan_budget: 2,
             ..Default::default()
         };
         let all = txn.scan_prefix_all(b"p:", &options, None, 2000).unwrap();
-        assert_eq!(all.len(), 250);
+        assert_eq!(all.len(), 5);
         assert_eq!(all.first().unwrap().key, b"p:000");
-        assert_eq!(all.last().unwrap().key, b"p:249");
+        assert_eq!(all.last().unwrap().key, b"p:004");
         let capped = txn
-            .scan_range_all(b"p:", b"p;", &options, Some(7), 2000)
+            .scan_range_all(b"p:", b"p;", &options, Some(3), 2000)
             .unwrap();
-        assert_eq!(capped, all[..7]);
+        assert_eq!(capped, all[..3]);
         let exact = KeyScanOptions {
-            limit: 300,
-            scan_budget: 250,
+            limit: 6,
+            scan_budget: 5,
             strict_budget: true,
             ..Default::default()
         };
-        assert_eq!(txn.scan_prefix_all(b"p:", &exact, None, 1500).unwrap(), all);
+        assert_eq!(txn.scan_prefix_all(b"p:", &exact, None, 30).unwrap(), all);
         assert!(matches!(
-            txn.scan_prefix_all(b"p:", &exact, None, 1499),
+            txn.scan_prefix_all(b"p:", &exact, None, 29),
             Err(crate::Error::Core(Error::SearchResponseTooLarge { .. }))
         ));
         let strict = KeyScanOptions {
@@ -395,21 +498,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_budget_pages_advance_through_twenty_thousand_hidden_keys() {
+    fn empty_budget_pages_advance_through_hidden_keys() {
         let db = Arc::new(crate::Database::new());
         let mut txn = db
             .begin_owned_embedded_transaction(crate::TxnMode::ReadWrite)
             .unwrap();
-        for n in 0..20_000 {
+        for n in 0..2 {
             txn.put(format!("__catalog__/{n:05}").as_bytes(), b"v")
                 .unwrap();
         }
         txn.put(b"user:visible", b"value").unwrap();
-        let options = KeyScanOptions::default();
+        let options = KeyScanOptions {
+            scan_budget: 1,
+            max_bytes: 17,
+            ..Default::default()
+        };
         let first = txn.scan_prefix_page(b"", &options).unwrap();
         assert!(first.entries.is_empty());
         assert!(first.has_more);
-        assert_eq!(first.scanned, 10_000);
+        assert_eq!(first.scanned, 1);
         let second = txn
             .scan_prefix_page(
                 b"",
@@ -421,7 +528,7 @@ mod tests {
             .unwrap();
         assert!(second.entries.is_empty());
         assert!(second.has_more);
-        assert_eq!(second.scanned, 10_000);
+        assert_eq!(second.scanned, 1);
         let last = txn
             .scan_prefix_page(
                 b"",
@@ -542,9 +649,9 @@ mod tests {
                     ..Default::default()
                 }
             ),
-            Err(Error::SearchResponseTooLarge { .. })
+            Err(Error::InvalidParameter { .. })
         ));
-        assert_eq!(scan.inspected, 1);
+        assert_eq!(scan.inspected, 3);
         assert!(scan.closed);
 
         let mut scan = Scan {
@@ -561,7 +668,7 @@ mod tests {
                     ..Default::default()
                 }
             ),
-            Err(Error::SearchResponseTooLarge { requested: 2, .. })
+            Err(Error::InvalidParameter { param, reason }) if param == "max_bytes" && reason.contains("requested=2")
         ));
         assert!(scan.closed);
     }

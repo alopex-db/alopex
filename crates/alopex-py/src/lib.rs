@@ -22,6 +22,7 @@ mod test_harness {
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("AlopexError", py.get_type::<error::PyAlopexError>())?;
+    m.add("InvalidCursor", py.get_type::<error::InvalidCursor>())?;
     m.add("ALOPEX_ERROR_CODES", error::ERROR_CODES.to_vec())?;
     m.add_class::<catalog::PyCatalog>()?;
     m.add_class::<catalog::PyCatalogInfo>()?;
