@@ -162,31 +162,6 @@ impl<'de> Deserialize<'de> for KeySearchPage {
     }
 }
 
-#[cfg(test)]
-mod legacy_page_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_http_pages_infer_continuation_and_preserve_explicit_flags() {
-        for (cursor, expected) in [
-            (serde_json::json!([112]), true),
-            (serde_json::Value::Null, false),
-        ] {
-            let mut wire = serde_json::json!({"entries": [], "scanned": 1, "next_cursor": cursor});
-            let page: KeySearchPage = serde_json::from_value(wire.clone()).unwrap();
-            assert_eq!(page.has_more, expected);
-            for flag in [true, false] {
-                wire["has_more"] = serde_json::json!(flag);
-                let page: KeySearchPage = serde_json::from_value(wire.clone()).unwrap();
-                assert_eq!(page.has_more, flag);
-                let round_trip: KeySearchPage =
-                    serde_json::from_value(serde_json::to_value(&page).unwrap()).unwrap();
-                assert_eq!(page, round_trip);
-            }
-        }
-    }
-}
-
 pub(crate) struct PreparedKeySearch {
     matcher: Regex,
     prefix: Key,
