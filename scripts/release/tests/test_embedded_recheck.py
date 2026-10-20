@@ -149,6 +149,7 @@ class RecheckTests(unittest.TestCase):
             .read_text()
             .split("  publish:\n", 1)[1]
         )
+        primary = primary.replace(" && inputs.baseline_run_id == ''", "")
         self.assertEqual(primary, focused)
 
 

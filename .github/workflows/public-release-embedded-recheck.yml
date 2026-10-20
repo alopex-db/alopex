@@ -16,6 +16,21 @@ on:
         required: true
         type: string
 
+  workflow_call:
+    inputs:
+      baseline_run_id:
+        description: 'Full public scenario run with exactly one failed Embedded step'
+        required: true
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline artifact'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: true
+        type: string
+
 jobs:
   verify:
     name: Recheck published Rust Embedded scenarios

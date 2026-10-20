@@ -48,7 +48,8 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_docs_pulls_immutable_pair_without_cross_repo_secret(self):
         self.assertIn(
-            "if: ${{ always() && needs.verify.result != 'cancelled' }}", self.publish
+            "if: ${{ always() && needs.verify.result != 'cancelled' && inputs.baseline_run_id == '' }}",
+            self.publish,
         )
         self.assertIn("report.py validate-report", self.publish)
         self.assertIn("for ext in md json; do", self.publish)

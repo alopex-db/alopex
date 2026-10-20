@@ -3,6 +3,21 @@ name: Public release verification
 on:
   workflow_call:
     inputs:
+      baseline_run_id:
+        description: 'Optional full run whose sole failed Embedded scenario should be rechecked'
+        required: false
+        default: ''
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline'
+        required: false
+        default: '1'
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: false
+        default: ''
+        type: string
       version:
         description: "Release version or tag"
         required: true
@@ -17,6 +32,21 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      baseline_run_id:
+        description: 'Optional full run whose sole failed Embedded scenario should be rechecked'
+        required: false
+        default: ''
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline'
+        required: false
+        default: '1'
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: false
+        default: ''
+        type: string
       version:
         description: "Release version or tag; empty resolves the latest PyPI version"
         required: false
@@ -35,7 +65,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  recheck:
+    if: inputs.baseline_run_id != ''
+    uses: ./.github/workflows/public-release-embedded-recheck.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      baseline_run_id: ${{ inputs.baseline_run_id }}
+      baseline_attempt: ${{ inputs.baseline_attempt }}
+      baseline_sha256: ${{ inputs.baseline_sha256 }}
+
   verify:
+    if: inputs.baseline_run_id == ''
     name: Verify public package scenarios
     timeout-minutes: 90
     runs-on: ubuntu-latest
@@ -281,7 +323,7 @@ jobs:
     name: Publish immutable verification report
     needs: verify
     # Publish both successful and failed terminal verification reports.
-    if: ${{ always() && needs.verify.result != 'cancelled' }}
+    if: ${{ always() && needs.verify.result != 'cancelled' && inputs.baseline_run_id == '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

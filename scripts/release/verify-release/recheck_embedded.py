@@ -65,6 +65,16 @@ def validate_input_changes(previous, current):
             new = git("show", f"{current}:{path}")
             if new != old.replace("10シナリオ", "11シナリオ"):
                 raise ValueError("passing scenario commands changed")
+        elif path == ".github/workflows/public-release-verification.yml":
+            old_workflow = git("show", f"{previous}:{path}")
+            new_workflow = git("show", f"{current}:{path}")
+            start = "      - name: Run complete public-package scenarios\n"
+            end = "      - name: Finalize verification report"
+            if (
+                old_workflow.split(start, 1)[1].split(end, 1)[0]
+                != new_workflow.split(start, 1)[1].split(end, 1)[0]
+            ):
+                raise ValueError("passing scenario execution command changed")
         elif (
             path != CLIENT
             and not path.startswith("scripts/release/")
