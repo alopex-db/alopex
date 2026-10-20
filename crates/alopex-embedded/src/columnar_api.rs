@@ -82,6 +82,11 @@ pub struct ColumnarIndexInfo {
 }
 
 /// カラムナー関連設定。
+///
+/// The six public fields published in 0.8.16 are retained for source compatibility.
+/// New settings belong on [`crate::DatabaseOptions`], whose fields are private.
+/// A four-field literal from 0.8.15 requires migration to a constructor or builder;
+/// adding methods cannot make that unchanged literal compile.
 #[derive(Debug, Clone)]
 pub struct EmbeddedConfig {
     /// Optional estimated HNSW graph byte budget (default 256 MiB, zero disables).

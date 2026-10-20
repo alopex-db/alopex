@@ -111,8 +111,8 @@ result silently. Do not replace the old writer with the candidate writer.
 The runtime cases above do **not** mean that every old Rust source program builds.
 The unchanged public-struct client in `legacy_config_literal.rs` builds against
 0.8.15 but fails against 0.8.16 with `E0063`: `EmbeddedConfig` gained the public
-`hnsw_cache_bytes` and `hnsw_cache_entries` fields. The candidate source file is
-identical to the one in the published 0.8.16 crate. This is tracked in
+`hnsw_cache_bytes` and `hnsw_cache_entries` fields. The candidate preserves the
+six-field shape published in 0.8.16. This is tracked in
 https://github.com/alopex-db/alopex/issues/696 (v0.8.17).
 
 With the same host budget guard and shared target used above, reproduce it with:
@@ -127,11 +127,21 @@ cargo check --locked --manifest-path scripts/compatibility/rust-current/Cargo.to
   --features legacy-config-literal
 ```
 
-The failing compile witness is opt-in, separate from the passing runtime matrix.
-It must not be reported as qualified or silently worked around by replacing the
-old client's struct literal with a constructor. Resolving this requires a source
-API decision that accounts for clients of both already-published versions; merely
-removing the new fields would break clients that adopted them in 0.8.16.
+The failing compile witness remains separate from the passing runtime matrix.
+It must not be reported as qualified or silently replaced with a constructor.
+The [v0.8.17 source policy](../../docs/rust-config-compatibility.md) preserves
+the published six-field shape and existing constructors, and routes new settings
+through the private-field `DatabaseOptions` builder. Four-field clients require
+the documented migration.
+
+`source_config.py --output <directory>` records nine compile-only cases using
+the same shared target and storage guard as above. Its locked `rust-v0816`
+registry graph adds the second published version; `rust-old` stays frozen at
+0.8.15. The report distinguishes seven supported cases from two
+`known_incompatible` four-field cases (exact E0063, exit 101). The overall
+`declared_contracts_match` status does not mean all old source is compatible.
+Ordinary Linux CI retains this report alongside, but separately from, the
+runtime matrix. No database data is created by these clients.
 
 ## Case size and execution budgets
 

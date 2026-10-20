@@ -1,0 +1,36 @@
+[package]
+name = "alopex-config-v0816"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+source-config-clients = []
+
+[dependencies]
+alopex-embedded = "=0.8.16"
+alopex-core = "=0.8.16"
+alopex-sql = "=0.8.16"
+alopex-cluster = "=0.8.16"
+alopex-dataframe = "=0.8.16"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[[bin]]
+name = "config-constructor"
+path = "../config_constructor_client.rs"
+required-features = ["source-config-clients"]
+
+[[bin]]
+name = "config-literal-v0815"
+path = "../config_literal_v0815_client.rs"
+required-features = ["source-config-clients"]
+
+[[bin]]
+name = "config-literal-v0816"
+path = "../config_literal_v0816_client.rs"
+required-features = ["source-config-clients"]

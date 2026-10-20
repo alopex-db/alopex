@@ -298,7 +298,7 @@ jobs:
           mkdir -p "$compat_root"
           cleanup() { rm -rf -- "$old_env"; }
           trap cleanup EXIT
-          python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api
+          python -m unittest scripts.compatibility.test_runner scripts.compatibility.test_api scripts.compatibility.test_source_config
           baseline_commit='d3917e1fa21d41097742a971e14094c0d6ae397e'
           if ! git cat-file -e "$baseline_commit^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth=1 origin "$baseline_commit"
@@ -320,6 +320,15 @@ jobs:
             --old-rust "$CARGO_TARGET_DIR/debug/alopex-compat-baseline" \
             --new-rust "$CARGO_TARGET_DIR/debug/alopex-compat-candidate" \
             --output "$compat_root/results"
+      - name: Check declared Rust config source contracts
+        if: ${{ !env.ACT && matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          python scripts/compatibility/storage.py \
+            --log "${RUNNER_TEMP}/alopex-upgrade-compatibility/storage.jsonl" \
+            --additional-bytes 3000000000 -- python scripts/compatibility/source_config.py \
+            --output "${RUNNER_TEMP}/alopex-upgrade-compatibility/results/source-config"
       - name: Upload cross-version compatibility evidence
         if: ${{ always() && !env.ACT && matrix.os == 'ubuntu-latest' && matrix.numpy_runtime == 'with-numpy' }}
         uses: actions/upload-artifact@v4
