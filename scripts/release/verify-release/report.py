@@ -161,6 +161,19 @@ def render(args: argparse.Namespace) -> None:
         lines.append(
             f"v{version} の確認は完了していない。完了済みの証跡と中断段階を下記に残す。"
         )
+    if payload.get("resumed_from"):
+        baseline = payload["resumed_from"]
+        lines.extend(
+            [
+                "",
+                "## 実行証跡の統合",
+                "",
+                f"元の全体実行 [run {baseline['run_id']}]({baseline['run_url']}) で成功した16項目を保持し、",
+                "修正したRust Embeddedデモだけを同じ公開版・Linux・Rustツールチェーンで再検証した。",
+                "各ステップの出所を以下に記録する。元runの失敗記録は変更していない。",
+                f"元JSON SHA-256: `{baseline['sha256']}`",
+            ]
+        )
     lines.extend(["", "## ステップ", ""])
     for index, step in enumerate(payload["steps"], start=1):
         mark = {"success": "✅", "failure": "❌", "incomplete": "⚠️"}[step["status"]]
@@ -172,6 +185,15 @@ def render(args: argparse.Namespace) -> None:
                 "",
             ]
         )
+        if step.get("evidence"):
+            evidence = step["evidence"]
+            lines.extend(
+                [
+                    f"> 証跡: [run {evidence['run_id']}]({evidence['run_url']}) / attempt {evidence['run_attempt']}; "
+                    f"検証コード `{evidence['verifier_commit']}`",
+                    "",
+                ]
+            )
         duration_ms = step.get("duration_ms")
         if duration_ms is not None:
             lines.extend([f"> 実行時間: **{duration_ms / 1000:.3f} 秒**", ""])

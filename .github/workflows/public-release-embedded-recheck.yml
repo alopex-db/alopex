@@ -1,0 +1,205 @@
+name: Public release Embedded recheck
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: 'Full public scenario run with exactly one failed Embedded step'
+        required: true
+        type: string
+      baseline_attempt:
+        description: 'Exact producing attempt of the baseline artifact'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Reviewed baseline JSON SHA-256'
+        required: true
+        type: string
+
+jobs:
+  verify:
+    name: Recheck published Rust Embedded scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.recheck.outputs.version }}
+      commit: ${{ steps.recheck.outputs.commit }}
+      report_artifact: ${{ steps.context.outputs.artifact }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      REPORT_ROOT: ${{ github.workspace }}/release-verification-output
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Bind current artifact identity
+        id: context
+        shell: bash
+        run: echo "artifact=release-verification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.baseline_run_id }}
+          name: release-verification-${{ inputs.baseline_run_id }}-${{ inputs.baseline_attempt }}
+          path: baseline
+      - name: Recheck only the failed Embedded scenario
+        id: recheck
+        env:
+          BASELINE_RUN: ${{ inputs.baseline_run_id }}
+          BASELINE_ATTEMPT: ${{ inputs.baseline_attempt }}
+          BASELINE_SHA256: ${{ inputs.baseline_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Unresolved: Embedded demo only; retain sixteen source-bound passing scenarios.'
+          echo 'Bound: 6 GB additional storage; one serialized target; cleanup after upload.'
+          python3 scripts/compatibility/storage.py --log "${REPORT_ROOT}/storage.jsonl" \
+            --additional-bytes 6000000000 -- \
+            python3 scripts/release/verify-release/recheck_embedded.py \
+              --baseline-dir baseline --baseline-run "${BASELINE_RUN}" \
+              --baseline-attempt "${BASELINE_ATTEMPT}" --baseline-sha256 "${BASELINE_SHA256}" \
+              --output-dir "${REPORT_ROOT}"
+      - name: Finalize retained result after interruption
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$(find "${REPORT_ROOT}" -name 'v*.json' -type f -print -quit 2>/dev/null || true)"
+          if [[ -n "${results}" ]]; then
+            python3 scripts/release/verify-release/report.py finalize --results "${results}"
+            python3 scripts/release/verify-release/report.py render --results "${results}" --output-dir "${REPORT_ROOT}"
+          fi
+      - name: Retain composed report and focused execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.REPORT_ROOT }}
+          if-no-files-found: error
+      - name: Remove regenerable client build outputs
+        if: always()
+        shell: bash
+        run: rm -rf "${GITHUB_WORKSPACE}/target"
+
+  publish:
+    name: Publish immutable verification report
+    needs: verify
+    # Publish both successful and failed terminal verification reports.
+    if: ${{ always() && needs.verify.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      REPORT_ROOT: release-verification-output
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download reviewed verification result
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.verify.outputs.report_artifact }}
+          path: ${{ env.REPORT_ROOT }}
+
+      - name: Select downloaded verification report
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$(find "${REPORT_ROOT}" -type f -name 'v*.json' -print -quit)"
+          test -n "${results}"
+          report_root="$(dirname "${results}")"
+          version="$(python3 - "${results}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
+          PY
+          )"
+          report_path="reports/release-verification/v${version}"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
+          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+          python3 - "${results}" >> "${GITHUB_ENV}" <<'PY_ENV'
+          import json, sys
+          identity = json.load(open(sys.argv[1], encoding="utf-8"))["identity"]
+          print("REPORT_RUN_ID=" + identity["run_id"])
+          print("REPORT_RUN_ATTEMPT=" + str(identity["run_attempt"]))
+          PY_ENV
+
+      - name: Validate complete publication report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/verify-release/report.py validate-report \
+            --results "${REPORT_ROOT}/v${VERSION}.json"
+
+      - name: Publish candidate branch for docs ingestion
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_id="run-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"
+          branch="report/verify-release-v${VERSION}-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"
+          report_path="reports/release-verification/v${VERSION}/${report_id}"
+          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            for ext in md json; do
+              git show "refs/remotes/origin/${branch}:${report_path}.${ext}" > "${RUNNER_TEMP}/existing-report.${ext}"
+              cmp -s "${REPORT_ROOT}/v${VERSION}.${ext}" "${RUNNER_TEMP}/existing-report.${ext}" || {
+                echo "refusing to overwrite immutable report: ${branch}" >&2
+                exit 1
+              }
+            done
+            echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          mkdir -p "$(dirname "${report_path}")"
+          for ext in md json; do
+            test ! -e "${report_path}.${ext}"
+            cp "${REPORT_ROOT}/v${VERSION}.${ext}" "${report_path}.${ext}"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add "${report_path}.md" "${report_path}.json"
+          git commit -m "docs(release): retain v${VERSION} verification report"
+          git push origin "${branch}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      # docs imports public report branches on its schedule (or workflow_dispatch).
+      # No cross-repository PAT or repository_dispatch is required.
+      - name: Wait for identical bytes on docs main
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            matched=true
+            for ext in md json; do
+              if ! curl -fsSL \
+                "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.${ext}?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+                -o "${RUNNER_TEMP}/docs-report.${ext}" || \
+                ! cmp -s "${REPORT_ROOT}/v${VERSION}.${ext}" "${RUNNER_TEMP}/docs-report.${ext}"; then
+                matched=false
+                break
+              fi
+            done
+            if [[ "${matched}" == true ]]; then exit 0; fi
+            sleep 30
+          done
+          echo "docs main did not publish the exact report bytes" >&2
+          exit 1
+
+      - name: Cleanup publication branch
+        if: success() && steps.publish.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.publish.outputs.branch }}
+        shell: bash
+        run: git push origin --delete "${BRANCH}"
+

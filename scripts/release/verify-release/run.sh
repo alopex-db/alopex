@@ -688,7 +688,7 @@ run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
     -- run_in_container python3 scripts/demo/v074/demo_vector_api.py
 
 run_step "v${ALOPEX_VERSION} Embedded API 全シナリオ" \
-    "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の10シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
+    "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の11シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
     -- run_in_container bash scripts/demo/v08/demo_embedded_v08.sh
 
 run_step "v${ALOPEX_VERSION} public vector scenario" \
