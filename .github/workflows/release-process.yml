@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Classify native parser inputs
         id: parser-scope
         env:
@@ -55,6 +55,14 @@ jobs:
           base_sha="${PUSH_BEFORE_SHA}"
           if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
             base_sha="${PR_BASE_SHA}"
+          fi
+          if [[ "${base_sha}" =~ ^[0-9a-f]{40}$ &&
+                "${base_sha}" != '0000000000000000000000000000000000000000' ]]; then
+            if ! git fetch --no-tags --depth=1 origin "${base_sha}"; then
+              echo 'Base fetch failed; native parser checks are required.' >&2
+              echo 'parser=true' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
           python3 scripts/release/classify_parser_changes.py \
             "${base_sha}" "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"

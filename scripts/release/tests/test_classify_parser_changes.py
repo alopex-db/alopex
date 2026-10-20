@@ -143,13 +143,35 @@ class ParserScopeTests(unittest.TestCase):
         ):
             self.assertTrue(self.required(self.base))
 
+    def test_shallow_checkout_needs_only_the_base_commit(self):
+        self.write("scripts/release/verify-release/report.py")
+        head = self.commit()
+        shallow = self.repo / "shallow"
+        subprocess.run(
+            ["git", "clone", "--quiet", "--depth=1", self.repo.as_uri(), str(shallow)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertTrue(SCOPE.needs_native_parser(self.base, head, shallow))
+        subprocess.run(
+            ["git", "fetch", "--quiet", "--no-tags", "--depth=1", "origin", self.base],
+            cwd=shallow,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertFalse(SCOPE.needs_native_parser(self.base, head, shallow))
+
     def test_workflow_selects_both_native_jobs_and_keeps_version_trigger(self):
         workflow = (ROOT / ".github/workflows/release-process.yml").read_text()
         self.assertEqual(workflow.count("- 'Cargo.toml'"), 2)
         contract = workflow.split("\n  contract:\n", 1)[1].split("\n  parser-host:", 1)[
             0
         ]
-        self.assertIn("fetch-depth: 0", contract)
+        self.assertIn("fetch-depth: 1", contract)
+        self.assertIn('git fetch --no-tags --depth=1 origin "${base_sha}"', contract)
+        self.assertIn("echo 'parser=true'", contract)
         self.assertIn("parser: ${{ steps.parser-scope.outputs.parser }}", contract)
         self.assertIn('"${PR_BASE_SHA}"', contract)
         self.assertIn('"${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"', contract)
