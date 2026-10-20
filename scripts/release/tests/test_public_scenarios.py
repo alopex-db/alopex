@@ -43,7 +43,7 @@ class ScenarioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name, body in {
-                "python3": "exit 0",
+                "python3": 'if [[ "$2" == venv ]]; then mkdir -p "$3/bin"; cp "$0" "$3/bin/python"; fi\nexit 0',
                 "cargo": 'echo cargo >> "$INSTALL_CALL_LOG"\nexit 9',
             }.items():
                 path = root / name

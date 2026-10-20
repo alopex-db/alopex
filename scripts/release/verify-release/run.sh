@@ -329,12 +329,12 @@ if [[ "${NATIVE}" -eq 1 ]]; then
     native_setup() (
         set -e
         python3 -m venv "${ALOPEX_VERIFY_NATIVE_ROOT}/venv"
-        python3 -m pip install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" "alopex==${ALOPEX_VERSION}"
+        "${ALOPEX_VERIFY_NATIVE_ROOT}/venv/bin/python" -m pip install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" "alopex==${ALOPEX_VERSION}"
         cargo install alopex-cli --version "=${ALOPEX_VERSION}" --locked --root "${ALOPEX_VERIFY_NATIVE_ROOT}"
         cargo install alopex-server --version "=${ALOPEX_VERSION}" --locked --root "${ALOPEX_VERIFY_NATIVE_ROOT}"
         alopex --version
         alopex-server --version
-        python3 -c 'import alopex; from importlib.metadata import version; print("PyPI alopex", version("alopex"))'
+        "${ALOPEX_VERIFY_NATIVE_ROOT}/venv/bin/python" -c 'import alopex; from importlib.metadata import version; print("PyPI alopex", version("alopex"))'
     )
     run_in_container() { (cd "${REPO_ROOT}" && "$@"); }
     build_tools_in_container() { run_in_container "$@"; }
@@ -692,6 +692,7 @@ echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
 
 write_report
+python3 "${SCRIPT_DIR}/report.py" validate-report --results "${RESULTS_FILE}"
 python3 - "${RESULTS_FILE}" <<'PY_RESULT'
 import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
