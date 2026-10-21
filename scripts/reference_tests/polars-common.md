@@ -38,3 +38,9 @@ The audit can remain red while product gaps are open. Passing the audit's
 unit tests proves the result classifier, not product compatibility. Issue
 #722 must retain the full matrix as a regression requirement and must not be
 closed merely because its initially reported six examples have been fixed.
+
+The exact-version `polars-test` job runs this matrix against its built Alopex
+package and uploads the evidence even when the contract step fails. No
+continue-on-error or passing skip is applied. The CI change must remain in
+a draft PR until the candidate's required contract checks pass; a
+known failing contract must not be merged as a false green acceptance gate.
