@@ -11,6 +11,10 @@ use std::path::Path;
 pub struct DatabaseOptions {
     /// Whether to use in-memory mode.
     memory_mode: bool,
+    pub(crate) wal_overflow: Option<(
+        alopex_core::lsm::overflow::LsmOverflowConfig,
+        alopex_core::lsm::wal::WalConfig,
+    )>,
     /// Optional memory limit for in-memory mode (bytes).
     memory_limit: Option<usize>,
     segment_config: SegmentConfigV2,
@@ -52,6 +56,18 @@ impl DatabaseOptions {
     pub fn with_hnsw_cache_limits(mut self, bytes: u64, entries: Option<usize>) -> Self {
         self.hnsw_cache_bytes = Some(bytes);
         self.hnsw_cache_entries = entries;
+        self
+    }
+
+    /// Enable bounded overflow commits for a local disk database. Reopening
+    /// requires these explicit budgets again. Windows currently rejects this
+    /// opt-in before creating storage; in-memory mode also rejects it.
+    pub fn with_wal_overflow(
+        mut self,
+        overflow: alopex_core::lsm::overflow::LsmOverflowConfig,
+        wal: alopex_core::lsm::wal::WalConfig,
+    ) -> Self {
+        self.wal_overflow = Some((overflow, wal));
         self
     }
 

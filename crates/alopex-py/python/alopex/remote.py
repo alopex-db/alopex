@@ -1163,6 +1163,12 @@ class RemoteDatabase:
             "durability is the server's own concern and it exposes no client-triggered flush",
         )
 
+    def wal_overflow_stats(self) -> dict[str, int] | None:
+        raise _unsupported(
+            "Database.wal_overflow_stats",
+            "the server does not expose the embedded WAL overflow accounting",
+        )
+
     def memory_usage(self, *_args: Any, **_kwargs: Any) -> Any:
         raise _unsupported(
             "Database.memory_usage",

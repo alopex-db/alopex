@@ -759,6 +759,7 @@ UNSUPPORTED_DATABASE_CALLS = [
     ("copy_to_csv", ("items", None)),
     ("list_sequences", ()),
     ("flush", ()),
+    ("wal_overflow_stats", ()),
     ("memory_usage", ()),
     ("routing_diagnostics", ()),
     ("create_hnsw_index", ("idx", None)),

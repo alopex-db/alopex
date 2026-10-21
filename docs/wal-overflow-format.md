@@ -187,11 +187,46 @@ that health before publishing metadata, including converge on Drop. Otherwise a
 checkpoint could incorrectly cover the uncertain commit while its values were
 absent from memory. Reopen resolves that outcome through the durable reference.
 
-Spool files, including abandoned preparations, remain counted after checkpoint
-and converge until full sidecar pruning. Fine-grained GC is not implemented yet;
-a full directory budget produces an error, never unlimited disk growth. Metrics
-currently report reference ring bytes; spool statistics and publication of the
-full budget/error contract through Database/Python remain separate work.
+After durable checkpoint metadata publication and successful WAL reclamation,
+checkpoint/converge collect canonical sealed spool names whose LSN is at or below
+the checkpoint, and canonical abandoned `.tmp` preparations. Collection runs under
+the owner/commit locks. Unknown names and later sealed files remain charged; the
+collector never follows symlinks or recursively deletes directories. A cleanup
+failure does not change the outcome of an already durable checkpoint: it increments
+`gc_failures`, retains any undeleted files, and can be retried by checkpoint. A
+failed inventory is an error, never zero usage. Directory pressure checkpoints
+previous commits before reserving the next spool. A single spool larger than the
+directory budget is rejected before that checkpoint.
+
+Rust `DatabaseOptions::with_wal_overflow(limits, wal)` and Python
+`Database.open(path, wal_overflow=WalOverflowOptions(...))` enable the same explicit
+local-disk path, including SQL transactions. Reopen requires the opt-in again.
+Defaults and the published `EmbeddedConfig` fields remain unchanged; memory mode
+rejects overflow options. `wal_overflow_stats()` reports logical directory bytes,
+replay charge, their limits, and cleanup failures since open. These counts do not
+represent filesystem allocation or process RSS. Individually oversized Put/Delete
+operations are rejected before entering either borrowed or owned write sets.
+Aggregate transaction budgets are still checked at commit; incremental aggregate
+accounting and a dedicated public capacity-error code remain outstanding.
+
+### Windows publication prerequisites
+
+Windows writes are still rejected before I/O, including the public Database and
+Python opt-in. `WalOverflowOptions.writes_supported()` reports this explicitly.
+Read-only low-level v3 recovery remains available. Supporting Windows requires a
+single reviewed publication protocol for spool sealing, container fencing,
+checkpoint metadata, SST publication, WAL activation and newly created ancestors.
+The current Windows container directory-sync helper is a no-op; removing the
+opt-in refusal alone would incorrectly assert durability across those boundaries.
+
+Microsoft documents `MOVEFILE_WRITE_THROUGH` for [MoveFileEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+and [directory moves](https://learn.microsoft.com/en-us/windows/win32/fileio/moving-directories).
+That is a candidate building block, not proof that ordinary `create_dir_all`, file
+replacement and checkpoint publication already satisfy this protocol. Before
+activation, validate each boundary on Windows with tiny fixtures, including nested
+new directories, replaced files, open-handle sharing, injected publication failures
+and process termination. No Windows host validation is claimed by Unix tests.
+Power-loss guarantees must be justified separately from process-crash tests.
 
 ## Delivery and acceptance
 

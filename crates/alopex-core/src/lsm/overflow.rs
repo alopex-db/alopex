@@ -1,8 +1,9 @@
 //! Explicit LSM integration for bounded WAL overflow.
 //!
-//! This opt-in does not change default LSM configuration or enable Python/SQL
-//! configuration. Spools remain charged until sidecar pruning; checkpoint-aware
-//! garbage collection is a separate step.
+//! This opt-in preserves default LSM configuration. Collection follows durable
+//! checkpoint publication; retained files always count against disk budgets.
+
+mod gc;
 
 use super::*;
 use crate::storage::format::{
@@ -43,9 +44,44 @@ pub struct LsmOverflowConfig {
 pub(super) struct OverflowState {
     config: LsmOverflowConfig,
     pub(super) charged: std::sync::atomic::AtomicUsize,
+    gc_failures: AtomicU64,
+}
+
+/// A snapshot of explicit overflow budgets and current usage. Byte counts are
+/// logical file lengths / replay accounting, not allocated disk blocks or RSS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LsmOverflowStats {
+    /// All regular files, including abandoned temporary and unknown files.
+    pub directory_bytes: u64,
+    /// Configured spool directory limit.
+    pub directory_limit_bytes: u64,
+    /// Charged live replay bytes (key/value plus 128 bytes per version).
+    pub replay_bytes: usize,
+    /// Configured private replay budget.
+    pub replay_limit_bytes: usize,
+    /// Cleanup attempts that failed since open; checkpoints remain committed.
+    pub gc_failures: u64,
 }
 
 impl OverflowState {
+    pub(super) fn validate_operation(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        let value_len = value.map_or(0, <[u8]>::len);
+        let payload = self
+            .config
+            .operations
+            .check_single_operation(key.len(), value_len)?;
+        disk::reservation_bytes(payload, self.config.fragment_bytes, self.config.limits()?)?;
+        let charge = key
+            .len()
+            .checked_add(value_len)
+            .and_then(|n| n.checked_add(128))
+            .ok_or_else(|| full("operation replay accounting overflow"))?;
+        if charge > self.config.replay_bytes {
+            return Err(full("operation exceeds replay budget"));
+        }
+        Ok(())
+    }
+
     pub(super) fn new(config: LsmOverflowConfig, recovered: &MemTable) -> Result<Self> {
         let charged = recovered
             .version_count()
@@ -58,6 +94,7 @@ impl OverflowState {
         Ok(Self {
             config,
             charged: std::sync::atomic::AtomicUsize::new(charged),
+            gc_failures: AtomicU64::new(0),
         })
     }
 }
@@ -102,7 +139,8 @@ impl LsmOverflowConfig {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// Validate budgets and platform support without filesystem side effects.
+    pub fn validate(&self) -> Result<()> {
         disk::require_directory_sync()?;
         self.limits()?;
         if self.fragment_bytes == 0
@@ -385,6 +423,36 @@ pub(crate) fn recover(
 }
 
 impl LsmKV {
+    /// Return usage for an explicitly enabled overflow store, or `None` for v2.
+    /// A failed inventory is returned as an error, never reported as zero usage.
+    pub fn overflow_stats(&self) -> Result<Option<LsmOverflowStats>> {
+        let _guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
+        self.overflow
+            .as_ref()
+            .map(|state| {
+                Ok(LsmOverflowStats {
+                    directory_bytes: disk::directory_usage(&self.data_dir.join(SPOOL_DIRECTORY))?,
+                    directory_limit_bytes: state.config.directory_bytes,
+                    replay_bytes: state.charged.load(Ordering::Relaxed),
+                    replay_limit_bytes: state.config.replay_bytes,
+                    gc_failures: state.gc_failures.load(Ordering::Relaxed),
+                })
+            })
+            .transpose()
+    }
+
+    // Cleanup failure must not turn an already durable checkpoint into a failed
+    // transaction. Retained files remain in directory_usage and block new
+    // reservations if necessary. The next checkpoint retries collection.
+    pub(super) fn collect_overflow(&self, checkpoint: u64) {
+        if let Some(state) = &self.overflow {
+            if let Err(error) = gc::collect(&self.data_dir.join(SPOOL_DIRECTORY), checkpoint) {
+                state.gc_failures.fetch_add(1, Ordering::Relaxed);
+                warn!(%error, checkpoint, "Overflow cleanup failed; retained files remain charged");
+            }
+        }
+    }
+
     pub(super) fn append_overflow_write_set(
         &self,
         writes: &BTreeMap<Key, Option<Value>>,
@@ -394,6 +462,8 @@ impl LsmKV {
         // Every opt-in commit uses one reference; avoid an extra whole-batch Vec.
         let mut stream = OperationStream::new(writes, options.operations)?;
         let payload_bytes = stream.payload_bytes();
+        let reserved =
+            disk::reservation_bytes(payload_bytes, options.fragment_bytes, options.limits()?)?;
         let charged = writes.iter().try_fold(0usize, |total, (key, value)| {
             total
                 .checked_add(key.len())
@@ -404,7 +474,10 @@ impl LsmKV {
         if charged > options.replay_bytes {
             return Err(full("commit exceeds replay budget"));
         }
-        if state.charged.load(Ordering::Relaxed) > options.replay_bytes - charged {
+        let used = disk::directory_usage(&self.data_dir.join(SPOOL_DIRECTORY))?;
+        if state.charged.load(Ordering::Relaxed) > options.replay_bytes - charged
+            || used > options.directory_bytes - reserved
+        {
             self.checkpoint_locked()?;
         }
         self.prepare_wal_capacity(REFERENCE_BYTES as u64)?;

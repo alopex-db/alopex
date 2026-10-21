@@ -316,3 +316,65 @@ impl PyDatabaseOptions {
         }
     }
 }
+
+/// Explicit local-disk overflow budgets. This never silently enables Windows
+/// writes without durable publication support.
+#[pyclass(name = "WalOverflowOptions", frozen, from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyWalOverflowOptions {
+    pub(crate) limits: alopex_core::lsm::overflow::LsmOverflowConfig,
+    pub(crate) wal: alopex_core::lsm::wal::WalConfig,
+}
+
+#[pymethods]
+impl PyWalOverflowOptions {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (payload_bytes, spool_bytes, directory_bytes, replay_bytes, *, key_bytes = 1048576, value_bytes = 16777216, fragment_bytes = 65536, wal_segment_bytes = 67108864, wal_segments = 8, inline_bytes = 16777216, activation_bytes = 1073741824, container_fence_bytes = 67108864))]
+    fn new(
+        payload_bytes: u64,
+        spool_bytes: u64,
+        directory_bytes: u64,
+        replay_bytes: usize,
+        key_bytes: usize,
+        value_bytes: usize,
+        fragment_bytes: u32,
+        wal_segment_bytes: usize,
+        wal_segments: usize,
+        inline_bytes: usize,
+        activation_bytes: u64,
+        container_fence_bytes: u64,
+    ) -> PyResult<Self> {
+        use alopex_core::lsm::{
+            overflow::LsmOverflowConfig,
+            wal::{operations::OperationLimits, spool::SpoolLimits, SyncMode, WalConfig},
+        };
+        let limits = LsmOverflowConfig::new(
+            SpoolLimits::new(payload_bytes, spool_bytes, fragment_bytes)
+                .map_err(crate::error::core_err)?,
+            OperationLimits::new(payload_bytes, key_bytes, value_bytes)
+                .map_err(crate::error::core_err)?,
+            directory_bytes,
+            fragment_bytes,
+            replay_bytes,
+        )
+        .with_inline_bytes(inline_bytes)
+        .with_activation_bytes(activation_bytes)
+        .with_container_fence_bytes(container_fence_bytes);
+        Ok(Self {
+            limits,
+            wal: WalConfig {
+                segment_size: wal_segment_bytes,
+                max_segments: wal_segments,
+                sync_mode: SyncMode::EveryWrite,
+            },
+        })
+    }
+
+    /// Whether this build supports durable overflow writes. Unsupported platforms
+    /// still reject opt-in at open, before touching a database.
+    #[staticmethod]
+    fn writes_supported() -> bool {
+        !cfg!(windows)
+    }
+}

@@ -159,6 +159,43 @@ pub enum StorageMode {
 impl Database {
     /// 構成付きでデータベースを開く（カラムナー機能を初期化）。
     pub fn open_with_config(config: EmbeddedConfig) -> Result<Self> {
+        Self::open_config_inner(config, None)
+    }
+
+    pub(crate) fn open_options_config(
+        opts: crate::DatabaseOptions,
+        path: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let overflow = opts.wal_overflow.clone();
+        if overflow.is_some() && opts.memory_mode() {
+            return Err(Error::Core(alopex_core::Error::InvalidParameter {
+                param: "wal_overflow".into(),
+                reason: "requires local disk storage".into(),
+            }));
+        }
+        if let Some((limits, _)) = &overflow {
+            limits.validate()?;
+        }
+        Self::open_config_inner(opts.into_embedded_config(path), overflow)
+    }
+
+    /// Current spool usage and configured bounds, or `None` for stores without overflow.
+    pub fn wal_overflow_stats(
+        &self,
+    ) -> Result<Option<alopex_core::lsm::overflow::LsmOverflowStats>> {
+        match self.store.as_ref() {
+            alopex_core::kv::AnyKV::Lsm(store) => Ok(store.overflow_stats()?),
+            _ => Ok(None),
+        }
+    }
+
+    fn open_config_inner(
+        config: EmbeddedConfig,
+        overflow: Option<(
+            alopex_core::lsm::overflow::LsmOverflowConfig,
+            alopex_core::lsm::wal::WalConfig,
+        )>,
+    ) -> Result<Self> {
         if config.hnsw_cache_entries == Some(0) {
             return Err(Error::Core(alopex_core::Error::InvalidParameter {
                 param: "hnsw_cache_entries".into(),
@@ -173,8 +210,18 @@ impl Database {
                     ))
                 })?;
                 let path = crate::disk_data_dir_path(&path);
-                StorageFactory::create(CoreStorageMode::Disk { path, config: None })
-                    .map_err(Error::Core)?
+                if let Some((limits, wal)) = overflow {
+                    let config = alopex_core::lsm::LsmKVConfig {
+                        wal,
+                        ..Default::default()
+                    };
+                    let (store, _) =
+                        alopex_core::lsm::LsmKV::open_with_overflow(path, config, limits)?;
+                    alopex_core::kv::AnyKV::Lsm(Box::new(store))
+                } else {
+                    StorageFactory::create(CoreStorageMode::Disk { path, config: None })
+                        .map_err(Error::Core)?
+                }
             }
             StorageMode::InMemory => StorageFactory::create(CoreStorageMode::Memory {
                 max_size: config.memory_limit,

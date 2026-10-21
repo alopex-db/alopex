@@ -11,6 +11,7 @@ mod results;
 pub use catalog::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
 pub use config::{
     PyDatabaseOptions, PyEmbeddedConfig, PyHnswConfig, PyMetric, PyStorageMode, PyTxnMode,
+    PyWalOverflowOptions,
 };
 pub(crate) use dataframe::{streaming_dataframe_err, DataFrameStreamRegistry};
 pub use dataframe::{
@@ -29,6 +30,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHnswConfig>()?;
     m.add_class::<PyEmbeddedConfig>()?;
     m.add_class::<PyDatabaseOptions>()?;
+    m.add_class::<PyWalOverflowOptions>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PySeries>()?;
     m.add_class::<PyExpr>()?;

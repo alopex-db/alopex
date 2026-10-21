@@ -543,6 +543,21 @@ impl LsmKV {
         }
     }
 
+    /// Reject individually oversized writes before retaining them in a transaction.
+    /// Aggregate write-set budgets remain checked at commit.
+    pub(crate) fn validate_overflow_operation(
+        &self,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = &self.overflow {
+            return state.validate_operation(key, value);
+        }
+        let _ = (key, value);
+        Ok(())
+    }
+
     /// Open with explicitly bounded WAL overflow. Reopening requires the same
     /// opt-in; the durable container/WAL fence intentionally excludes old readers.
     /// Windows activation remains unsupported until durable publication is available.
@@ -553,6 +568,7 @@ impl LsmKV {
         overflow: overflow::LsmOverflowConfig,
     ) -> Result<(Self, RecoveryResult)> {
         overflow.validate()?;
+        wal::overflow::validate_wal_config(&config.wal)?;
         Self::open_inner(path, config, Some(overflow))
     }
 
@@ -947,6 +963,9 @@ impl LsmKV {
         wal.advance_start(end_offset)?;
         self.wal_used_bytes
             .store(wal.used_bytes(), Ordering::Relaxed);
+        drop(wal);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.collect_overflow(checkpoint_lsn);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(state) = &self.overflow {
             state.charged.store(0, Ordering::Relaxed);
@@ -1048,6 +1067,7 @@ impl LsmKV {
             self.wal_used_bytes
                 .store(wal.used_bytes(), Ordering::Relaxed);
         }
+        self.collect_overflow(converged_lsn);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(state) = &self.overflow {
             state.charged.store(0, Ordering::Relaxed);
@@ -2175,6 +2195,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.store.validate_overflow_operation(&key, Some(&value))?;
         self.write_set.insert(key, Some(value));
         Ok(())
     }
@@ -2183,6 +2204,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
+        self.store.validate_overflow_operation(&key, None)?;
         self.write_set.insert(key, None);
         Ok(())
     }

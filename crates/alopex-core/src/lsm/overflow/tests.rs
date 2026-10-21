@@ -388,3 +388,148 @@ proptest! {
         for (key, value) in values.iter().enumerate() { prop_assert_eq!(self::value(&reopened, key as u8), Some(vec![*value; 40])); }
     }
 }
+
+#[test]
+fn checkpoint_gc_preserves_unknown_and_future_files_and_removes_abandoned_temps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![1; 40]))]).unwrap();
+    let spool = dir.path().join(SPOOL_DIRECTORY);
+    let future = format!("{}-ffffffffffffffff.spool", "01".repeat(16));
+    let temporary = format!("{}-ffffffffffffffff.tmp", "02".repeat(16));
+    fs::write(spool.join(&future), b"future").unwrap();
+    fs::write(spool.join(&temporary), b"temp").unwrap();
+    fs::write(spool.join("foreign.tmp"), b"unknown").unwrap();
+    store.checkpoint().unwrap();
+    assert!(!spool.join(temporary).exists());
+    assert!(spool.join(future).exists());
+    let stats = store.overflow_stats().unwrap().unwrap();
+    assert_eq!(stats.directory_bytes, 13);
+    assert_eq!(stats.replay_bytes, 0);
+    assert_eq!(stats.gc_failures, 0);
+    drop(store);
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    assert_eq!(value(&store, 0), Some(vec![1; 40]));
+}
+
+#[test]
+fn failed_checkpoint_does_not_collect_committed_spool() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![1; 40]))]).unwrap();
+    let before = store.overflow_stats().unwrap().unwrap().directory_bytes;
+    super::super::checkpoint::FAIL_CHECKPOINT_STAGE.set(1);
+    let result = store.checkpoint();
+    super::super::checkpoint::FAIL_CHECKPOINT_STAGE.set(0);
+    assert!(result.is_err());
+    assert_eq!(
+        store.overflow_stats().unwrap().unwrap().directory_bytes,
+        before
+    );
+    store.checkpoint().unwrap();
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+}
+
+#[test]
+fn gc_failure_is_observable_and_retained_bytes_are_not_discounted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = limits();
+    options.directory_bytes = 300;
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+    write(&store, &[(0, Some(vec![1; 40]))]).unwrap();
+    let before = store.overflow_stats().unwrap().unwrap().directory_bytes;
+    FAIL_STAGE.set(5);
+    store.checkpoint().unwrap();
+    assert!(write(&store, &[(1, Some(vec![2; 40]))]).is_err());
+    FAIL_STAGE.set(0);
+    let stats = store.overflow_stats().unwrap().unwrap();
+    assert_eq!(stats.directory_bytes, before);
+    assert_eq!(stats.gc_failures, 2);
+    assert_eq!(value(&store, 0), Some(vec![1; 40]));
+    assert_eq!(value(&store, 1), None);
+    // Retry collects the old file before reserving another spool.
+    write(&store, &[(1, Some(vec![2; 40]))]).unwrap();
+    assert_eq!(
+        store.overflow_stats().unwrap().unwrap().directory_bytes,
+        before
+    );
+}
+
+#[test]
+fn converge_collects_spools_without_losing_container_only_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.alopex.d");
+    let (store, _) = LsmKV::open_with_overflow(&path, config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![7; 40]))]).unwrap();
+    store.converge().unwrap();
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+    let copy = tempfile::tempdir().unwrap();
+    fs::copy(dir.path().join("db.alopex"), copy.path().join("db.alopex")).unwrap();
+    let (restored, _) =
+        LsmKV::open_with_overflow(copy.path().join("db.alopex.d"), config(), limits()).unwrap();
+    assert_eq!(value(&restored, 0), Some(vec![7; 40]));
+}
+
+#[test]
+fn oversized_put_is_rejected_before_retention_for_borrowed_and_owned_transactions() {
+    use crate::kv::OwnedKVStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    assert!(tx.put(vec![0], vec![1; 65]).is_err());
+    tx.put(vec![0], vec![2]).unwrap();
+    tx.commit_self().unwrap();
+    let store = Arc::new(crate::kv::AnyKV::Lsm(Box::new(store)));
+    let mut tx = store
+        .clone()
+        .begin_owned_kv_transaction(TxnMode::ReadWrite)
+        .unwrap();
+    assert!(tx.put(vec![0], vec![3; 65]).is_err());
+    assert!(tx.delete(vec![0; 9]).is_err());
+    assert_eq!(tx.get(&vec![0]).unwrap(), Some(vec![2]));
+}
+
+#[test]
+fn single_spool_too_large_is_rejected_before_checkpointing_previous_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = limits();
+    options.directory_bytes = 300;
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+    write(&store, &[(0, Some(vec![1; 40]))]).unwrap();
+    let before = store.overflow_stats().unwrap().unwrap();
+    let wal_before = store.wal_checkpoint_stats().used_bytes;
+    assert!(write(&store, &[(1, Some(vec![2; 64]))]).is_err());
+    assert_eq!(store.overflow_stats().unwrap().unwrap(), before);
+    assert_eq!(store.wal_checkpoint_stats().used_bytes, wal_before);
+    assert_eq!(value(&store, 0), Some(vec![1; 40]));
+    assert_eq!(value(&store, 1), None);
+}
+
+#[test]
+fn gc_directory_sync_failure_is_reported_without_undoing_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![4; 40]))]).unwrap();
+    FAIL_STAGE.set(6);
+    store.checkpoint().unwrap();
+    FAIL_STAGE.set(0);
+    assert_eq!(store.overflow_stats().unwrap().unwrap().gc_failures, 1);
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+    drop(store);
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    assert_eq!(value(&store, 0), Some(vec![4; 40]));
+}
+
+#[test]
+fn single_operation_payload_limit_is_checked_at_put_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = limits();
+    options.operations = OperationLimits::new(40, 8, 64).unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    assert!(tx.put(vec![0], vec![1; 7]).is_err());
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+    tx.put(vec![0], vec![2; 6]).unwrap();
+    tx.commit_self().unwrap();
+    assert_eq!(value(&store, 0), Some(vec![2; 6]));
+}
