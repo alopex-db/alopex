@@ -23,13 +23,16 @@ identity = {"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=Tr
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "platform": sys.platform,
-            "writer_supported": False}
+            "writer_supported": False,
+            "lowlevel_wal_writer_supported": True}
 (output / "source.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
 commands = [
     ("release-build", ["cargo", "build", "--release", "--locked", "--all-features"]),
     ("readonly-recovery", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                            "--lib", "lsm::wal::overflow::recovery_portability_tests::"]),
-    ("writer-refusal", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+    ("lowlevel-writer", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                          "--lib", "lsm::wal::overflow::tests::"]),
+    ("windows-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "lsm::wal::overflow::windows_tests::"]),
 ]
 for name, command in commands:
@@ -42,6 +45,7 @@ for name, command in commands:
     print_log_tail(contents)
     if result.returncode:
         raise SystemExit(result.returncode)
-    required = {"readonly-recovery": "3 passed; 0 failed", "writer-refusal": "2 passed; 0 failed"}
+    required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "27 passed; 0 failed",
+                "windows-publication": "6 passed; 0 failed"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

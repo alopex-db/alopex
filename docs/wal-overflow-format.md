@@ -2,7 +2,7 @@
 
 Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
 native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
-WAL v2 and the v0.1 container writer. Windows durable publication and full public acceptance remain follow-up work. This is not release acceptance for #682.
+WAL v2 and the v0.1 container writer. Windows LSM publication and full public acceptance remain follow-up work. This is not release acceptance for #682.
 
 ## Commit boundary
 
@@ -42,12 +42,14 @@ Spool filenames derive from transaction ID and LSN; the record carries no path.
 Native `create_overflow`/`open_overflow` explicitly opt in to v3. `append_spool`
 requires an exclusively owned, durably created directory and increasing LSNs.
 It preflights independent per-spool and total-directory budgets plus the 53-byte
-ring reservation, then syncs the spool, renames it, syncs the directory, appends
-the reference and forces WAL sync even under `NoSync`. Uncertain reference I/O
+ring reservation, then syncs and durably publishes the spool (rename plus
+directory sync on Unix; write-through move on Windows), appends the reference
+and forces WAL sync even under `NoSync`. Uncertain reference I/O
 retains the spool and prevents further writer mutation until recovery/reopen.
 
-The writer/activation primitives require real directory sync. Windows currently
-returns `Unsupported` before creating or modifying files, because the existing
+The writer/activation primitives require durable file publication. Windows uses
+synced closed files and same-volume `MoveFileExW(MOVEFILE_WRITE_THROUGH)` in
+already durable, exclusively owned parent directories. The existing
 container directory-sync helper is a no-op there. Explicit v3 read/recovery is
 available. Implement and verify Windows durable publication before enabling
 database overflow on that platform; the no-op is not durability evidence.
@@ -58,7 +60,7 @@ overhead and the caller's private recovery state must also fit its memory budget
 
 `activate` requires all old WAL handles closed and the container fence already
 durable. It reserves a separate full-file temporary budget, stream-copies a v2
-WAL and changes only its segment versions/CRCs before sync/rename/directory sync.
+WAL and changes only its segment versions/CRCs before sync and durable publication.
 It preserves the ring and checkpoint metadata. This primitive does not fence
 the container itself and must not be used alone to activate a database.
 
@@ -242,18 +244,27 @@ already-exceeded recovery budget.
 
 ### Windows publication prerequisites
 
-Windows writes are still rejected before I/O, including the public Database and
-Python opt-in. `WalOverflowOptions.writes_supported()` reports this explicitly.
-Read-only low-level v3 recovery remains available. Supporting Windows requires a
-single reviewed publication protocol for spool sealing, container fencing,
+Windows LSM writes are still rejected before I/O, including the public Database
+and Python opt-in. `WalOverflowOptions.writes_supported()` reports this explicitly.
+Low-level WAL v3 create/open/append/activation now use write-through file moves.
+They require pre-existing durable parent/spool directories and exclusive ownership.
+Creation stages one complete synced WAL in `.overflow-create`, closes its handle,
+and publishes without replacement; a stale temp blocks creation without deletion.
+Spool sealing and v2-to-v3 activation close source/output handles before replacing
+the destination. Failed publication never acknowledges a commit. These primitives
+do not create directories or qualify the public database writer. Supporting Windows
+LSM requires a single reviewed publication protocol for spool sealing, container fencing,
 checkpoint metadata, SST publication, WAL activation and newly created ancestors.
 The current Windows container directory-sync helper is a no-op; removing the
 opt-in refusal alone would incorrectly assert durability across those boundaries.
 
 Microsoft documents `MOVEFILE_WRITE_THROUGH` for [MoveFileEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
 and [directory moves](https://learn.microsoft.com/en-us/windows/win32/fileio/moving-directories).
-That is a candidate building block, not proof that ordinary `create_dir_all`, file
-replacement and checkpoint publication already satisfy this protocol. Before
+The low-level WAL uses that building block with `MOVEFILE_REPLACE_EXISTING` only
+for spool/upgrade publication, never for fresh WAL creation. No cross-volume copy
+is allowed. Paths use the canonical parent plus a UTF-16 filename, preserving
+Unicode/long paths and rejecting embedded NUL. This does not prove that ordinary
+`create_dir_all`, container replacement and checkpoint publication satisfy the protocol. Before
 activation, validate each boundary on Windows with tiny fixtures, including nested
 new directories, replaced files, open-handle sharing, injected publication failures
 and process termination. No Windows host validation is claimed by Unix tests.
@@ -265,8 +276,10 @@ mutation, missing referenced spool, and truncated referenced spool without prefi
 delivery. They construct a v3 fixture through private test helpers; they do not
 enable or qualify a production Windows writer. The test directory contains a
 Unicode component and all fixture writer handles close before reader open.
-The Windows build job now runs these three reader tests and two writer-refusal
-tests after its existing release build, reusing the same target directory. It
+The Windows build job runs these three reader tests, 27 shared low-level writer
+and recovery tests, and six Windows publication/LSM-refusal cases after its
+existing release build, reusing the same target directory. Fixtures contain
+3-byte payloads or a 65-byte payload just beyond a 64-byte ring, not workloads. It
 requires nonzero expected test counts and saves SHA/tree, raw logs and native
 allocation measurements. The watchdog measures before/during/after Cargo, stops
 at 40 GB host use or 20 GB additional use, and kills the owned process tree on
@@ -281,7 +294,7 @@ The remaining writer decision must cover both renames and directory creation.
 requires a writable file handle; [File Caching](https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching)
 separately describes cached metadata and explicit flushing. This is insufficient
 evidence to treat the existing no-op directory helper as durable. Do not enable
-Windows by merely replacing the spool rename or removing the platform guard.
+Windows LSM by merely replacing the spool rename or removing the platform guard.
 
 ## Delivery and acceptance
 
