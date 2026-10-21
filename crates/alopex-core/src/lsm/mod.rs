@@ -58,6 +58,16 @@ pub enum ThreadMode {
     SingleThread,
 }
 
+/// Logical bytes of the live write set. Savepoint copies and allocator overhead
+/// are separate; the payload count excludes the single 16-byte stream header.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WriteSetUsage {
+    #[cfg(not(target_arch = "wasm32"))]
+    encoded: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    replay: usize,
+}
+
 /// LSM-Tree の設定。
 #[derive(Debug, Clone)]
 pub struct LsmKVConfig {
@@ -543,19 +553,21 @@ impl LsmKV {
         }
     }
 
-    /// Reject individually oversized writes before retaining them in a transaction.
-    /// Aggregate write-set budgets remain checked at commit.
-    pub(crate) fn validate_overflow_operation(
+    /// Preflight the replacement against individual and aggregate write-set
+    /// budgets. Publish the returned counters only with a successful insertion.
+    pub(crate) fn validate_overflow_write(
         &self,
+        usage: WriteSetUsage,
         key: &[u8],
         value: Option<&[u8]>,
-    ) -> Result<()> {
+        previous: Option<&Option<Value>>,
+    ) -> Result<WriteSetUsage> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(state) = &self.overflow {
-            return state.validate_operation(key, value);
+            return state.validate_write(usage, key, value, previous);
         }
-        let _ = (key, value);
-        Ok(())
+        let _ = (key, value, previous);
+        Ok(usage)
     }
 
     /// Open with explicitly bounded WAL overflow. Reopening requires the same
@@ -609,6 +621,8 @@ impl LsmKV {
         fs::create_dir_all(&sst_dir)?;
         let checkpoint_path = data_dir.join(container::SIDECAR_CHECKPOINT_FILE);
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut recovered_references = None;
         let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = {
             #[cfg(not(target_arch = "wasm32"))]
             let is_overflow = overflow.is_some()
@@ -620,7 +634,10 @@ impl LsmKV {
             if is_overflow {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    overflow::recover(&data_dir, &config.wal, overflow.as_ref().unwrap())?
+                    let (recovered, references) =
+                        overflow::recover(&data_dir, &config.wal, overflow.as_ref().unwrap())?;
+                    recovered_references = references;
+                    recovered
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -768,6 +785,10 @@ impl LsmKV {
             _open_lock: open_lock,
         };
         store.refresh_memtable_size_metrics();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(references) = recovered_references {
+            store.collect_recovered_overflow(&references);
+        }
         Ok((store, recovery))
     }
 
@@ -2040,6 +2061,7 @@ pub struct LsmTransaction<'a> {
     read_set: HashSet<Vec<u8>>,
     /// 書き込みセット（`None` は tombstone）。
     write_set: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    write_usage: WriteSetUsage,
     /// KV ストア参照。
     store: &'a LsmKV,
 }
@@ -2052,6 +2074,7 @@ impl<'a> LsmTransaction<'a> {
             mode,
             read_set: HashSet::new(),
             write_set: BTreeMap::new(),
+            write_usage: WriteSetUsage::default(),
             store,
         }
     }
@@ -2060,6 +2083,7 @@ impl<'a> LsmTransaction<'a> {
     pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
         self.read_set.clear();
         self.write_set.clear();
+        self.write_usage = WriteSetUsage::default();
         Ok(())
     }
 
@@ -2195,7 +2219,12 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
-        self.store.validate_overflow_operation(&key, Some(&value))?;
+        self.write_usage = self.store.validate_overflow_write(
+            self.write_usage,
+            &key,
+            Some(&value),
+            self.write_set.get(&key),
+        )?;
         self.write_set.insert(key, Some(value));
         Ok(())
     }
@@ -2204,7 +2233,12 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
-        self.store.validate_overflow_operation(&key, None)?;
+        self.write_usage = self.store.validate_overflow_write(
+            self.write_usage,
+            &key,
+            None,
+            self.write_set.get(&key),
+        )?;
         self.write_set.insert(key, None);
         Ok(())
     }
@@ -2334,6 +2368,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
 
     fn rollback_self(mut self) -> Result<()> {
         self.write_set.clear();
+        self.write_usage = WriteSetUsage::default();
         Ok(())
     }
 }

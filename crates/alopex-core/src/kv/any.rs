@@ -18,6 +18,7 @@ use crate::kv::{
 use crate::lsm::sstable::{SSTableCursor, SSTableEntry};
 use crate::lsm::{
     LsmKV, LsmTransaction, LsmTxnManagerRef, OwnedLsmScanBounds, OwnedLsmSnapshotReader,
+    WriteSetUsage,
 };
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
@@ -152,8 +153,9 @@ struct OwnedLsmTransactionState {
     start_timestamp: u64,
     read_set: HashSet<Key>,
     write_set: BTreeMap<Key, Option<Value>>,
+    write_usage: WriteSetUsage,
     next_savepoint_id: u64,
-    savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>)>,
+    savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>, WriteSetUsage)>,
     cursor_open: bool,
 }
 
@@ -171,6 +173,7 @@ impl OwnedLsmTransaction {
                 start_timestamp,
                 read_set: HashSet::new(),
                 write_set: BTreeMap::new(),
+                write_usage: WriteSetUsage::default(),
                 next_savepoint_id: 1,
                 savepoints: Vec::new(),
                 cursor_open: false,
@@ -275,7 +278,12 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
-        Self::lsm_from(&self.store)?.validate_overflow_operation(&key, Some(&value))?;
+        state.write_usage = Self::lsm_from(&self.store)?.validate_overflow_write(
+            state.write_usage,
+            &key,
+            Some(&value),
+            state.write_set.get(&key),
+        )?;
         state.write_set.insert(key, Some(value));
         Ok(())
     }
@@ -292,7 +300,12 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
-        Self::lsm_from(&self.store)?.validate_overflow_operation(&key, None)?;
+        state.write_usage = Self::lsm_from(&self.store)?.validate_overflow_write(
+            state.write_usage,
+            &key,
+            None,
+            state.write_set.get(&key),
+        )?;
         state.write_set.insert(key, None);
         Ok(())
     }
@@ -312,7 +325,8 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
             reason: "savepoint identifier overflow".into(),
         })?;
         let write_set = state.write_set.clone();
-        state.savepoints.push((id, write_set));
+        let usage = state.write_usage;
+        state.savepoints.push((id, write_set, usage));
         Ok(id)
     }
 
@@ -328,12 +342,13 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         let position = state
             .savepoints
             .iter()
-            .rposition(|(candidate, _)| *candidate == id)
+            .rposition(|(candidate, _, _)| *candidate == id)
             .ok_or_else(|| Error::InvalidParameter {
                 param: "savepoint".into(),
                 reason: "unknown savepoint identifier".into(),
             })?;
         state.write_set = state.savepoints[position].1.clone();
+        state.write_usage = state.savepoints[position].2;
         state.savepoints.truncate(position + 1);
         Ok(())
     }
@@ -350,7 +365,7 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         let position = state
             .savepoints
             .iter()
-            .rposition(|(candidate, _)| *candidate == id)
+            .rposition(|(candidate, _, _)| *candidate == id)
             .ok_or_else(|| Error::InvalidParameter {
                 param: "savepoint".into(),
                 reason: "unknown savepoint identifier".into(),
@@ -418,6 +433,7 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         }
         state.read_set.clear();
         state.write_set.clear();
+        state.write_usage = WriteSetUsage::default();
         state.state = TxnState::RolledBack;
         Ok(())
     }

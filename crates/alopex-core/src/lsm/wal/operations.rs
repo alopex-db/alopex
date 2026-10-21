@@ -45,6 +45,13 @@ impl OperationLimits {
         Ok((key, value))
     }
 
+    pub(crate) fn check_payload(self, bytes: u64) -> Result<()> {
+        if bytes > self.payload_bytes {
+            return Err(invalid("operation stream exceeds payload budget"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_single_operation(self, key: usize, value: usize) -> Result<u64> {
         self.check_lengths(key as u64, value as u64)?;
         let payload = (STREAM_HEADER as u64 + OP_HEADER as u64)

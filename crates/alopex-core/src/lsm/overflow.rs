@@ -64,22 +64,40 @@ pub struct LsmOverflowStats {
 }
 
 impl OverflowState {
-    pub(super) fn validate_operation(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+    pub(super) fn validate_write(
+        &self,
+        usage: WriteSetUsage,
+        key: &[u8],
+        value: Option<&[u8]>,
+        previous: Option<&Option<Value>>,
+    ) -> Result<WriteSetUsage> {
         let value_len = value.map_or(0, <[u8]>::len);
-        let payload = self
+        let single = self
             .config
             .operations
             .check_single_operation(key.len(), value_len)?;
+        let old_bytes = previous.map(|old| key.len() + old.as_ref().map_or(0, Vec::len));
+        let encoded = usage
+            .encoded
+            .checked_sub(old_bytes.map_or(0, |n| n as u64 + 17))
+            .and_then(|n| n.checked_add(single - 16))
+            .ok_or_else(|| full("write-set payload accounting overflow"))?;
+        let payload = encoded
+            .checked_add(16)
+            .ok_or_else(|| full("write-set payload accounting overflow"))?;
+        self.config.operations.check_payload(payload)?;
         disk::reservation_bytes(payload, self.config.fragment_bytes, self.config.limits()?)?;
-        let charge = key
-            .len()
-            .checked_add(value_len)
+        let replay = usage
+            .replay
+            .checked_sub(old_bytes.map_or(0, |n| n + 128))
+            .and_then(|n| n.checked_add(key.len()))
+            .and_then(|n| n.checked_add(value_len))
             .and_then(|n| n.checked_add(128))
-            .ok_or_else(|| full("operation replay accounting overflow"))?;
-        if charge > self.config.replay_bytes {
-            return Err(full("operation exceeds replay budget"));
+            .ok_or_else(|| full("write-set replay accounting overflow"))?;
+        if replay > self.config.replay_bytes {
+            return Err(full("write-set exceeds replay budget"));
         }
-        Ok(())
+        Ok(WriteSetUsage { encoded, replay })
     }
 
     pub(super) fn new(config: LsmOverflowConfig, recovered: &MemTable) -> Result<Self> {
@@ -317,12 +335,13 @@ pub(crate) fn recover(
     data: &Path,
     config: &WalConfig,
     options: &LsmOverflowConfig,
-) -> Result<OpenRecovery> {
+) -> Result<(OpenRecovery, Option<Vec<gc::Reference>>)> {
     let checkpoint = load_checkpoint_meta(&data.join(container::SIDECAR_CHECKPOINT_FILE))?;
     let checkpoint_lsn = checkpoint.as_ref().map(|m| m.checkpoint_lsn);
     let mut reader =
         WalReader::open_overflow(&data.join(container::SIDECAR_WAL_FILE), config.clone())?;
     let mem = MemTable::new();
+    let mut references = Vec::new();
     let mut decoder = None;
     let mut lsn = 0;
     let mut sequence = 0;
@@ -349,6 +368,20 @@ pub(crate) fn recover(
         |event| {
             match event {
                 RecoveryEvent::Begin(descriptor) => {
+                    // One valid nonempty write set already charges >=128 bytes.
+                    // Bound even foreign empty streams without reserving the full
+                    // configured budget up front. At most 24 bytes per identity;
+                    // Vec geometric growth remains below the replay budget.
+                    if references.len() >= options.replay_bytes / 128 {
+                        return Err(full("recovery reference index exceeds budget"));
+                    }
+                    references
+                        .try_reserve(1)
+                        .map_err(|_| full("cannot reserve recovery reference index"))?;
+                    references.push((
+                        descriptor.identity().transaction(),
+                        descriptor.identity().lsn(),
+                    ));
                     lsn = descriptor.identity().lsn();
                     sequence = 1;
                     decoder = Some(OperationDecoder::new(
@@ -413,16 +446,38 @@ pub(crate) fn recover(
             .map(|_| "incomplete overflow WAL tail".into()),
         checkpoint_lsn,
     };
+    // A torn/corrupt tail leaves uncertain evidence. Repair it durably, but
+    // defer orphan deletion until a subsequent complete replay succeeds.
+    let references = if outcome.stopped_at.is_none() {
+        references.sort_unstable();
+        Some(references)
+    } else {
+        None
+    };
     Ok((
-        writer,
-        mem,
-        outcome.last_lsn.saturating_add(1).max(1),
-        recovery,
-        checkpoint.map_or(0, |m| m.created_at),
+        (
+            writer,
+            mem,
+            outcome.last_lsn.saturating_add(1).max(1),
+            recovery,
+            checkpoint.map_or(0, |m| m.created_at),
+        ),
+        references,
     ))
 }
 
 impl LsmKV {
+    pub(super) fn collect_recovered_overflow(&self, references: &[gc::Reference]) {
+        if let Some(state) = &self.overflow {
+            if let Err(error) =
+                gc::collect_recovered(&self.data_dir.join(SPOOL_DIRECTORY), references)
+            {
+                state.gc_failures.fetch_add(1, Ordering::Relaxed);
+                warn!(%error, "Recovery cleanup failed; retained files remain charged");
+            }
+        }
+    }
+
     /// Return usage for an explicitly enabled overflow store, or `None` for v2.
     /// A failed inventory is returned as an error, never reported as zero usage.
     pub fn overflow_stats(&self) -> Result<Option<LsmOverflowStats>> {
