@@ -496,9 +496,9 @@ pub(crate) fn rehydrate(
             .truncate(true)
             .open(&tmp)?;
         file.write_all(&bytes)?;
-        file.sync_data()?;
+        file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, &target)?;
+        crate::storage::publication::replace_file(&tmp, &target)?;
     }
     sync_dir(&sst_dir)?;
 

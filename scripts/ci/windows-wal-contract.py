@@ -37,6 +37,8 @@ commands = [
                         "--lib", "lsm::wal::overflow::windows_tests::"]),
     ("lsm-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                          "--lib", "lsm::publication_tests::"]),
+    ("container-fence", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                        "--lib", "lsm::overflow::fence_tests::"]),
 ]
 for name, command in commands:
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
@@ -49,6 +51,7 @@ for name, command in commands:
     if result.returncode:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "27 passed; 0 failed",
-                "windows-publication": "6 passed; 0 failed", "lsm-publication": "6 passed; 0 failed"}
+                "windows-publication": "6 passed; 0 failed", "lsm-publication": "7 passed; 0 failed",
+                "container-fence": "7 passed; 0 failed"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

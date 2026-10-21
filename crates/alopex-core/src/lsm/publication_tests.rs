@@ -77,6 +77,31 @@ fn container_replacement_reopens_complete_new_contents() {
     assert_eq!(reader.read_section(0).unwrap(), b"new");
 }
 
+#[test]
+fn container_rehydrate_publishes_sst_before_wal_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.alopex.d");
+    let cfg = LsmKVConfig {
+        converge: ConvergePolicy::SidecarOnly,
+        ..config()
+    };
+    let (store, _) = LsmKV::open_with_config(&source, cfg.clone()).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit_self().unwrap();
+    store.converge().unwrap();
+    drop(store);
+    let path = dir.path().join("source.alopex");
+    let restored = dir.path().join("restored");
+    let outcome = container::rehydrate(&path, &restored, &cfg.wal).unwrap();
+    assert_eq!(outcome.tables_restored, 1);
+    assert_eq!(fs::read_dir(restored.join("sst")).unwrap().count(), 1);
+    let (store, recovery) = LsmKV::open_with_config(&restored, cfg).unwrap();
+    assert_eq!(recovery.entries_recovered, 0);
+    let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(tx.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_checkpoint_sharing_failure_preserves_old_metadata() {

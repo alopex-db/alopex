@@ -263,9 +263,10 @@ pub(crate) fn check_container_access(path: Option<&Path>, enabled: bool) -> Resu
     Ok(())
 }
 
-// Copy + patch + fsync + rename + parent fsync; never modify the live header in
-// place. A failed fence must not permit WAL activation. A retry after rename
-// syncs the file and parent again before considering the fence durable.
+// Copy + patch + sync + publish; never modify the live header in place.
+// A failed fence must not permit WAL activation. Unix retries sync the file and
+// parent. Windows retries repeat the bounded copy and write-through publication:
+// a read-only handle cannot flush, nor can it complete an uncertain publication.
 fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Result<()> {
     let absent = match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {
@@ -297,10 +298,12 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
     let reader = AlopexFileReader::open(FileSource::Path(path.to_path_buf()))?;
     let mut header = *reader.header();
     drop(reader);
+    #[cfg(not(windows))]
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    #[cfg(not(windows))]
     if header.version == FileVersion::WAL_OVERFLOW {
         File::open(path)?.sync_all()?;
         return disk::sync_dir(parent);
@@ -321,9 +324,11 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
         output.sync_all()?;
         drop(output);
         fault(1)?;
-        fs::rename(&temporary, path)?;
+        crate::storage::publication::replace_file(&temporary, path)?;
         fault(2)?;
-        disk::sync_dir(parent)
+        #[cfg(not(windows))]
+        disk::sync_dir(parent)?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -575,3 +580,6 @@ fn fault(_stage: u8) -> Result<()> {
 
 #[cfg(all(test, not(windows)))]
 mod tests;
+
+#[cfg(test)]
+mod fence_tests;
