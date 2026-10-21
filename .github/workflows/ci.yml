@@ -486,7 +486,10 @@ jobs:
         if: runner.os == 'Windows'
         # Reuse this job's release target. Only 3-byte reader fixtures and
         # fail-before-I/O writer contracts; no load/performance workload.
-        run: python scripts/ci/windows-wal-contract.py
+        run: |
+          python scripts/ci/test_windows_wal_console.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/ci/windows-wal-contract.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

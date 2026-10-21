@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from windows_wal_console import print_log_tail
 
 repo = Path(__file__).resolve().parents[2]
 output = repo / "artifacts/windows-wal"
@@ -38,7 +39,7 @@ for name, command in commands:
                                  "--additional-bytes", "20000000000", "--", *command],
                                 cwd=repo, stdout=log, stderr=subprocess.STDOUT)
     contents = (output / (name + ".log")).read_text(encoding="utf-8")
-    print(contents[-6000:])
+    print_log_tail(contents)
     if result.returncode:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "writer-refusal": "2 passed; 0 failed"}
