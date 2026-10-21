@@ -8,7 +8,8 @@ fn framed(body: &[u8]) -> Vec<u8> {
     bytes
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn hostile_batch_count_is_rejected_before_reservation() {
     // 27-byte record: no large allocation or workload is needed.
     let mut body = vec![WalEntryType::Batch as u8];
@@ -19,7 +20,8 @@ fn hostile_batch_count_is_rejected_before_reservation() {
     ));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn oversized_key_and_value_lengths_are_errors_not_panics() {
     for tag in [WalEntryType::Put, WalEntryType::Delete, WalEntryType::Batch] {
         let mut prefix = vec![tag as u8];
@@ -36,7 +38,8 @@ fn oversized_key_and_value_lengths_are_errors_not_panics() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn varint_rejects_bits_outside_u64() {
     let mut encoded = vec![0xff; 9];
     encoded.push(1);
@@ -45,6 +48,7 @@ fn varint_rejects_bits_outside_u64() {
     assert!(decode_varint(&encoded).is_err());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(8))]
     #[test]
@@ -62,7 +66,8 @@ proptest::proptest! {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn empty_batch_and_minimum_sized_operations_remain_valid() {
     for count in [0u8, 1] {
         let mut body = vec![WalEntryType::Batch as u8, count];
@@ -77,6 +82,7 @@ fn empty_batch_and_minimum_sized_operations_remain_valid() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(8))]
     #[test]
@@ -100,7 +106,8 @@ proptest::proptest! {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn accepts_four_byte_key_with_empty_value() {
     let bytes = framed(&[WalEntryType::Put as u8, 4, 1, 2, 3, 4, 0]);
     assert_eq!(
