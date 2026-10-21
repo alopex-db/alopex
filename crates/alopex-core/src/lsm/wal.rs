@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
-/// Bounded overflow spool framing; not yet connected to the live WAL writer.
+/// Explicit native WAL v3 reference writing and bounded spool recovery.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod overflow;
+/// Bounded overflow spool framing, shared by the explicit native v3 APIs.
 pub mod spool;
 
 #[cfg(test)]
@@ -196,12 +199,16 @@ impl WalSegmentHeader {
 
     /// Deserialize and validate a header.
     pub fn from_bytes(bytes: &[u8; WAL_SEGMENT_HEADER_SIZE]) -> Result<Self> {
+        Self::from_bytes_version(bytes, WAL_VERSION)
+    }
+
+    fn from_bytes_version(bytes: &[u8; WAL_SEGMENT_HEADER_SIZE], expected: u16) -> Result<Self> {
         if bytes[0..4] != WAL_MAGIC {
             return Err(Error::InvalidFormat("WAL magic mismatch".into()));
         }
 
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if version != WAL_VERSION {
+        if version != expected {
             return Err(Error::InvalidFormat(format!(
                 "unsupported WAL version: {version}"
             )));
@@ -429,7 +436,9 @@ impl WalEntry {
         let lsn = u64::from_le_bytes(buf[0..8].try_into().expect("fixed slice length"));
         let payload_and_crc_len =
             u32::from_le_bytes(buf[8..12].try_into().expect("fixed slice length")) as usize;
-        let total_len = WAL_ENTRY_FIXED_HEADER + payload_and_crc_len;
+        let total_len = WAL_ENTRY_FIXED_HEADER
+            .checked_add(payload_and_crc_len)
+            .ok_or_else(|| Error::InvalidFormat("WAL entry length overflow".into()))?;
         if buf.len() < total_len {
             return Err(Error::InvalidFormat(
                 "buffer truncated for WAL entry payload".into(),
@@ -458,8 +467,9 @@ impl WalEntry {
             WalEntryType::Put => {
                 let (key_len, key_len_bytes) = decode_varint(&body[cursor..])?;
                 cursor += key_len_bytes;
-                let key_len = key_len as usize;
-                if body_len < cursor + key_len {
+                let key_len = usize::try_from(key_len)
+                    .map_err(|_| Error::InvalidFormat("WAL key length overflow".into()))?;
+                if key_len > body_len - cursor {
                     return Err(Error::InvalidFormat("WAL entry truncated (key)".into()));
                 }
                 let key = body[cursor..cursor + key_len].to_vec();
@@ -467,8 +477,9 @@ impl WalEntry {
 
                 let (val_len, val_len_bytes) = decode_varint(&body[cursor..])?;
                 cursor += val_len_bytes;
-                let val_len = val_len as usize;
-                if body_len < cursor + val_len {
+                let val_len = usize::try_from(val_len)
+                    .map_err(|_| Error::InvalidFormat("WAL value length overflow".into()))?;
+                if val_len > body_len - cursor {
                     return Err(Error::InvalidFormat("WAL entry truncated (value)".into()));
                 }
                 let value = body[cursor..cursor + val_len].to_vec();
@@ -485,8 +496,9 @@ impl WalEntry {
             WalEntryType::Delete => {
                 let (key_len, key_len_bytes) = decode_varint(&body[cursor..])?;
                 cursor += key_len_bytes;
-                let key_len = key_len as usize;
-                if body_len < cursor + key_len {
+                let key_len = usize::try_from(key_len)
+                    .map_err(|_| Error::InvalidFormat("WAL key length overflow".into()))?;
+                if key_len > body_len - cursor {
                     return Err(Error::InvalidFormat("WAL entry truncated (key)".into()));
                 }
                 let key = body[cursor..cursor + key_len].to_vec();
@@ -509,8 +521,11 @@ impl WalEntry {
             WalEntryType::Batch => {
                 let (op_count, op_count_bytes) = decode_varint(&body[cursor..])?;
                 cursor += op_count_bytes;
-                let op_count = op_count as usize;
-                let mut ops = Vec::with_capacity(op_count);
+                let op_count = usize::try_from(op_count)
+                    .map_err(|_| Error::InvalidFormat("WAL operation count overflow".into()))?;
+                // Never reserve from an untrusted count. Only validated operations
+                // grow this vector; malformed counts stop at the bounded body.
+                let mut ops = Vec::new();
                 for _ in 0..op_count {
                     if cursor >= body_len {
                         return Err(Error::InvalidFormat(
@@ -522,8 +537,9 @@ impl WalEntry {
 
                     let (key_len, key_len_bytes) = decode_varint(&body[cursor..])?;
                     cursor += key_len_bytes;
-                    let key_len = key_len as usize;
-                    if body_len < cursor + key_len {
+                    let key_len = usize::try_from(key_len)
+                        .map_err(|_| Error::InvalidFormat("WAL key length overflow".into()))?;
+                    if key_len > body_len - cursor {
                         return Err(Error::InvalidFormat("WAL batch truncated (key)".into()));
                     }
                     let key = body[cursor..cursor + key_len].to_vec();
@@ -531,8 +547,9 @@ impl WalEntry {
 
                     let (val_len, val_len_bytes) = decode_varint(&body[cursor..])?;
                     cursor += val_len_bytes;
-                    let val_len = val_len as usize;
-                    if body_len < cursor + val_len {
+                    let val_len = usize::try_from(val_len)
+                        .map_err(|_| Error::InvalidFormat("WAL value length overflow".into()))?;
+                    if val_len > body_len - cursor {
                         return Err(Error::InvalidFormat("WAL batch truncated (value)".into()));
                     }
                     let value = if op_type == WalOpType::Delete {
@@ -581,6 +598,9 @@ fn decode_varint(data: &[u8]) -> Result<(u64, usize)> {
     let mut shift = 0;
     for (i, &byte) in data.iter().enumerate() {
         let bits = (byte & 0x7F) as u64;
+        if shift == 63 && bits > 1 {
+            return Err(Error::InvalidFormat("varint overflow".into()));
+        }
         result |= bits << shift;
         if byte & 0x80 == 0 {
             return Ok((result, i + 1));
@@ -647,16 +667,26 @@ fn segment_header_offset(segment_size: u64, segment_index: u64) -> u64 {
     (WAL_SECTION_HEADER_SIZE as u64) + (segment_index * segment_size)
 }
 
+#[cfg(test)]
 fn read_segment_header(
     file: &mut File,
     segment_size: u64,
     segment_index: u64,
 ) -> Result<WalSegmentHeader> {
+    read_segment_header_version(file, segment_size, segment_index, WAL_VERSION)
+}
+
+fn read_segment_header_version(
+    file: &mut File,
+    segment_size: u64,
+    segment_index: u64,
+    version: u16,
+) -> Result<WalSegmentHeader> {
     let off = segment_header_offset(segment_size, segment_index);
     file.seek(SeekFrom::Start(off))?;
     let mut bytes = [0u8; WAL_SEGMENT_HEADER_SIZE];
     file.read_exact(&mut bytes)?;
-    WalSegmentHeader::from_bytes(&bytes).map_err(|err| Error::CorruptedSegment {
+    WalSegmentHeader::from_bytes_version(&bytes, version).map_err(|err| Error::CorruptedSegment {
         segment_id: segment_index,
         reason: format!("WAL segment header invalid: {err}"),
     })
@@ -746,7 +776,10 @@ impl WalWriter {
             let offset_in_segment = logical_offset % self.segment_data_len;
             if offset_in_segment == 0 {
                 let segment_index = logical_offset / self.segment_data_len;
-                let header = WalSegmentHeader::new(self.segment_id_base + segment_index, entry_lsn);
+                let mut header =
+                    WalSegmentHeader::new(self.segment_id_base + segment_index, entry_lsn);
+                header.version = self.format_version;
+                header.crc32 = header.compute_crc();
                 write_segment_header(&mut self.file, self.segment_size, segment_index, &header)?;
             }
             let remaining_in_segment = (self.segment_data_len - offset_in_segment) as usize;
@@ -1285,6 +1318,8 @@ impl WalSectionHeader {
 #[derive(Debug)]
 pub struct WalWriter {
     file: File,
+    format_version: u16,
+    poisoned: bool,
     config: WalConfig,
     section_header: WalSectionHeader,
     segment_id_base: u64,
@@ -1324,6 +1359,16 @@ impl WalWriter {
         segment_id_base: u64,
         first_lsn: u64,
     ) -> Result<Self> {
+        Self::create_version(path, config, segment_id_base, first_lsn, WAL_VERSION)
+    }
+
+    fn create_version(
+        path: &Path,
+        config: WalConfig,
+        segment_id_base: u64,
+        first_lsn: u64,
+        format_version: u16,
+    ) -> Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -1347,13 +1392,18 @@ impl WalWriter {
 
         for segment_index in 0..max_segments {
             let header_first_lsn = if segment_index == 0 { first_lsn } else { 0 };
-            let header = WalSegmentHeader::new(segment_id_base + segment_index, header_first_lsn);
+            let mut header =
+                WalSegmentHeader::new(segment_id_base + segment_index, header_first_lsn);
+            header.version = format_version;
+            header.crc32 = header.compute_crc();
             write_segment_header(&mut file, segment_size, segment_index, &header)?;
         }
         sync_file(&file)?;
 
         Ok(Self {
             file,
+            format_version,
+            poisoned: false,
             config,
             section_header,
             segment_id_base,
@@ -1368,6 +1418,10 @@ impl WalWriter {
 
     /// Open an existing WAL writer, resuming from the stored end offset.
     pub fn open(path: &Path, config: WalConfig) -> Result<Self> {
+        Self::open_version(path, config, WAL_VERSION)
+    }
+
+    fn open_version(path: &Path, config: WalConfig, format_version: u16) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let (segment_size, segment_data_len, max_segments, ring_len) =
             compute_ring_layout(&config)?;
@@ -1400,7 +1454,12 @@ impl WalWriter {
         // Validate all segment headers (magic/version/crc).
         let mut segment_id_base: Option<u64> = None;
         for segment_index in 0..max_segments {
-            let header = read_segment_header(&mut file, segment_size, segment_index)?;
+            let header = read_segment_header_version(
+                &mut file,
+                segment_size,
+                segment_index,
+                format_version,
+            )?;
             if segment_index == 0 {
                 segment_id_base = Some(header.segment_id);
             } else if let Some(base) = segment_id_base {
@@ -1419,6 +1478,8 @@ impl WalWriter {
 
         Ok(Self {
             file,
+            format_version,
+            poisoned: false,
             config,
             section_header,
             segment_id_base: segment_id_base.unwrap_or(0),
@@ -1433,6 +1494,7 @@ impl WalWriter {
 
     /// Advance the read pointer (start_offset) after a checkpoint.
     pub fn advance_start(&mut self, new_start: u64) -> Result<()> {
+        self.ensure_healthy()?;
         if new_start >= self.ring_len {
             return Err(Error::InvalidFormat(
                 "WAL start offset exceeds ring length".into(),
@@ -1472,6 +1534,7 @@ impl WalWriter {
     /// landing behind that corrupt tail, which would otherwise hide newly-written
     /// records on the next replay.
     pub fn truncate_tail_to(&mut self, new_end: u64) -> Result<()> {
+        self.ensure_healthy()?;
         if new_end >= self.ring_len {
             return Err(Error::InvalidFormat(
                 "WAL end offset exceeds ring length".into(),
@@ -1494,7 +1557,22 @@ impl WalWriter {
 
     /// WAL へ追記しつつ、メトリクス用の統計も返す。
     pub fn append_with_stats(&mut self, entry: &WalEntry) -> Result<WalAppendStats> {
+        self.ensure_healthy()?;
         let encoded = entry.encode()?;
+        self.append_encoded(&encoded, entry.lsn)
+    }
+
+    fn ensure_healthy(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::InvalidFormat(
+                "WAL outcome uncertain; reopen before further writes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn append_encoded(&mut self, encoded: &[u8], lsn: u64) -> Result<WalAppendStats> {
+        self.ensure_healthy()?;
         let entry_len = encoded.len() as u64;
         if entry_len > self.ring_len {
             return Err(Error::InvalidFormat(
@@ -1518,7 +1596,7 @@ impl WalWriter {
         let write_offset = self.section_header.end_offset;
         let file_offset =
             ring_logical_to_physical(write_offset, self.segment_size, self.segment_data_len)?;
-        self.write_ring(write_offset, &encoded, entry.lsn)?;
+        self.write_ring(write_offset, encoded, lsn)?;
 
         let new_end = write_offset + entry_len;
         self.section_header.end_offset = new_end % self.ring_len;
@@ -1572,6 +1650,7 @@ impl WalWriter {
 
     /// Force fsync regardless of configured SyncMode.
     pub fn force_sync(&mut self) -> Result<u64> {
+        self.ensure_healthy()?;
         let start = Instant::now();
         sync_file(&self.file)?;
         let ms = start.elapsed().as_millis() as u64;
@@ -1613,6 +1692,7 @@ pub struct WalReplay {
 #[derive(Debug)]
 pub struct WalReader {
     file: File,
+    format_version: u16,
     config: WalConfig,
     section_header: WalSectionHeader,
     segment_id_base: u64,
@@ -1628,6 +1708,10 @@ impl WalReader {
     /// The reader replays entries from `start_offset` (inclusive) up to `end_offset` (exclusive)
     /// within the logical ring.
     pub fn open(path: &Path, config: WalConfig) -> Result<Self> {
+        Self::open_version(path, config, WAL_VERSION)
+    }
+
+    fn open_version(path: &Path, config: WalConfig, format_version: u16) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).open(path)?;
 
         let (segment_size, segment_data_len, max_segments, ring_len) =
@@ -1677,7 +1761,12 @@ impl WalReader {
 
         let mut segment_id_base: Option<u64> = None;
         for segment_index in 0..max_segments {
-            let header = read_segment_header(&mut file, segment_size, segment_index)?;
+            let header = read_segment_header_version(
+                &mut file,
+                segment_size,
+                segment_index,
+                format_version,
+            )?;
             if segment_index == 0 {
                 segment_id_base = Some(header.segment_id);
             } else if let Some(base) = segment_id_base {
@@ -1696,6 +1785,7 @@ impl WalReader {
 
         Ok(Self {
             file,
+            format_version,
             config,
             section_header,
             segment_id_base: segment_id_base.unwrap_or(0),
@@ -1776,6 +1866,7 @@ impl WalReader {
 
         Ok(Self {
             file,
+            format_version: WAL_FORMAT_VERSION_V04,
             config,
             section_header,
             segment_id_base: segment_id_base.unwrap_or(0),
@@ -1805,6 +1896,11 @@ impl WalReader {
     /// scans forward up to that many bytes (bounded by remaining bytes) to find the next valid
     /// entry boundary by validating entry framing and CRC.
     pub fn replay_with_resync(&mut self, max_resync_scan_bytes: usize) -> Result<WalReplay> {
+        if self.format_version > WAL_VERSION {
+            return Err(Error::InvalidFormat(
+                "use overflow recovery for WAL v3".into(),
+            ));
+        }
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
         let mut cursor = self.section_header.start_offset;
@@ -2165,3 +2261,6 @@ mod reader {
         assert!(!replay.warnings.is_empty());
     }
 }
+
+#[cfg(test)]
+mod decode_bounds_tests;

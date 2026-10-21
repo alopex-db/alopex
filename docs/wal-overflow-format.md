@@ -1,10 +1,10 @@
 # Atomic WAL overflow: format and recovery contract
 
-Status: the first stage for #682 implements the standalone `lsm::wal::spool`
-codec described below. The current writer remains WAL v2 and still rejects a
-single entry larger than its ring. Overflow commits are not enabled. Activation,
-commit references, database recovery and public configuration below are the
-contract for the remaining integration stages.
+Status: #682 provides the standalone `lsm::wal::spool` codec and native low-level
+`lsm::wal::overflow` APIs for WAL v3 activation, durable references and streaming
+recovery. Default WAL APIs and `LsmKV` still use v2. Database overflow commits
+are not enabled: container fencing, LSM commit/replay integration, checkpoint
+reclamation and public configuration remain follow-up work.
 
 ## Commit boundary
 
@@ -33,7 +33,51 @@ supplies separate payload/file/buffer budgets; the codec also caps a fragment at
 1 MiB. File reservation is `56 + payload + 12 * ceil(payload / fragment) + 16`,
 computed with checked arithmetic. The descriptor stores identity, payload length,
 fragment bound and whole-stream CRC, independently of the spool bytes. Wire
-encoding of the future ring reference is not part of this stage.
+encoding of the ring reference is specified below.
+
+The v3 ring reference is exactly 53 bytes: LSN u64, record length u32 (41),
+entry tag u8 (3), reference version u16 (1), zero flags u16, transaction ID
+(16), payload length u64, fragment bound u32, spool whole-stream CRC u32,
+and record CRC u32 over the preceding 49 bytes. All fields are little-endian.
+Spool filenames derive from transaction ID and LSN; the record carries no path.
+
+Native `create_overflow`/`open_overflow` explicitly opt in to v3. `append_spool`
+requires an exclusively owned, durably created directory and increasing LSNs.
+It preflights independent per-spool and total-directory budgets plus the 53-byte
+ring reservation, then syncs the spool, renames it, syncs the directory, appends
+the reference and forces WAL sync even under `NoSync`. Uncertain reference I/O
+retains the spool and prevents further writer mutation until recovery/reopen.
+
+The writer/activation primitives require real directory sync. Windows currently
+returns `Unsupported` before creating or modifying files, because the existing
+container directory-sync helper is a no-op there. Explicit v3 read/recovery is
+available. Implement and verify Windows durable publication before enabling
+database overflow on that platform; the no-op is not durability evidence.
+Directory budgets count logical file lengths (including framing and temporary
+files); filesystem block/metadata overhead needs separate host headroom. The
+inline limit bounds encoded record bytes; decoded key/value and operation-vector
+overhead and the caller's private recovery state must also fit its memory budget.
+
+`activate` requires all old WAL handles closed and the container fence already
+durable. It reserves a separate full-file temporary budget, stream-copies a v2
+WAL and changes only its segment versions/CRCs before sync/rename/directory sync.
+It preserves the ring and checkpoint metadata. This primitive does not fence
+the container itself and must not be used alone to activate a database.
+
+`recover_overflow` scans with a fixed reference buffer, a separately bounded
+inline-record buffer and one bounded spool fragment. It delivers inline records
+or begin/fragment/end events into private caller state. Any error requires that
+state to be discarded. Missing/corrupt referenced spools are hard errors; torn
+ring tails return an explicit truncation position. Covered checkpoint LSNs do
+not require their spool files. Orphans and temporary files still count against
+disk limits and are not deleted by these primitives. Existing default v2
+readers reject v3; even an explicitly opened v3 reader rejects legacy replay.
+
+The shared inline decoder grows the batch only after each operation is validated;
+it never reserves memory from the untrusted operation count. It validates key/value
+lengths without unchecked cursor addition and rejects overflowing varints. Tiny
+valid-CRC corrupt records exercise these checks; hostile lengths never require
+allocating their declared sizes.
 
 `write_spool` reads exactly the declared payload, rejects extra input and does not
 return a descriptor for incomplete output. It does not fsync or publish a file.

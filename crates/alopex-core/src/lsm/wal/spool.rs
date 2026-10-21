@@ -42,7 +42,7 @@ impl SpoolLimits {
         })
     }
 
-    fn check(&self, payload: u64, fragment: u32) -> Result<u32> {
+    pub(super) fn check(&self, payload: u64, fragment: u32) -> Result<u32> {
         let (count, file_bytes) = layout(payload, fragment)?;
         if payload > self.payload_bytes
             || fragment > self.fragment_bytes
