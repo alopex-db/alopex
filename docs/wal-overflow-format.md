@@ -1,10 +1,10 @@
 # Atomic WAL overflow: format and recovery contract
 
-Status: #682 provides the standalone `lsm::wal::spool` codec and native low-level
-`lsm::wal::overflow` APIs for WAL v3 activation, durable references and streaming
-recovery. Default WAL APIs and `LsmKV` still use v2. Database overflow commits
-are not enabled: container fencing, LSM commit/replay integration, checkpoint
-reclamation and public configuration remain follow-up work.
+Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
+native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
+WAL v2 and the v0.1 container writer. Windows durable publication, checkpoint-aware
+spool GC, Database/Python/SQL configuration, early write-set accounting and full
+public acceptance remain follow-up work. This is not release acceptance for #682.
 
 ## Commit boundary
 
@@ -16,7 +16,7 @@ Use checked size accounting when a put/delete enters or replaces a write-set ite
 
 ## Spool identity and framing
 
-A spool header contains magic, exact format version, zero reserved bits, a random 128-bit transaction ID, nonzero commit LSN, exact payload length, fragment payload bound, fragment count and header CRC. All integer fields have explicit little-endian widths. Ring references use a fixed descriptor, never a pathname from a file.
+A spool header contains magic, exact format version, zero reserved bits, a nonzero 128-bit transaction ID, nonzero commit LSN, exact payload length, fragment payload bound, fragment count and header CRC. All integer fields have explicit little-endian widths. Ring references use a fixed descriptor, never a pathname from a file.
 
 Each fragment carries ordinal, payload length and CRC covering its ordinal/length/payload. The expected fragment count and final-fragment length derive from the exact payload length. Reject empty intermediate fragments, reorder, duplicate, omission and extra trailing bytes. The seal's whole-stream CRC binds the header identity/count/length and every complete fragment. The reference binds the expected identity and checksum; valid standalone spool bytes alone cannot authorize replay. CRC32 detects accidental corruption; it does not authenticate a file against an adversary who can rewrite both it and the reference.
 
@@ -93,9 +93,8 @@ Lengths are validated against independently supplied limits before allocation. V
 
 ### Operation payload (explicit v1)
 
-The native `wal::operations` codec supplies the operation stream that a future
-LSM commit/replay integration will place inside the spool. It does not activate
-overflow in `LsmKV`. Its layout is independent of physical spool fragments:
+The native `wal::operations` codec supplies the operation stream used by the
+explicit LSM overflow path. Its layout is independent of physical spool fragments:
 
 - `ALPXOPS1` (8 bytes), then a little-endian `u64` operation count.
 - For each operation: tag (`0` Put, `1` Delete), key length (`u64` LE), value
@@ -111,7 +110,8 @@ arbitrary fragments, checks lengths against independent limits and the remaining
 payload before accumulating an operation, and never reserves memory from a count.
 It holds one operation at a time, plus allocation capacity and the owned operation
 delivered to the sink; it does not bound the sink's total retained memory. The LSM
-integration must separately budget the write set/private recovery MemTable.
+integration separately charges the private recovery MemTable; early write-set
+accounting in the public transaction API remains follow-up work.
 
 Every sink operation is provisional until `finish()` and the enclosing WAL/spool
 recovery succeed. After any decoder or sink error, the decoder stays failed and
@@ -141,6 +141,57 @@ Do not merely increment WAL_FORMAT_VERSION: current migration would route every 
 A new entry kind in a v2 file or an ignored flag cannot fence old readers. Before the first overflow commit, atomically publish and sync a version/capability that the old WAL reader rejects, and fence the formal container entrypoint as well. The current container manifest rejects a newer manifest version but does not reject an unsupported wal_format_version by itself. Design activation so each crash point leaves either the intact readable old state or an explicit new-reader requirement, never an old reader silently opening stale container data.
 
 Keep non-overflow stores in the old format until activation. No downgrade of a database with new committed references. Document whether convergence retains the new requirement, and expose the format transition before the first write. Existing durability guarantees must not be weakened to enable overflow.
+
+## Explicit LSM connection
+
+`LsmKV::open_with_overflow(path, config, LsmOverflowConfig)` is an explicit native
+opt-in. Existing `LsmKVConfig` fields are unchanged; overflow options have private
+fields and budget builders. The owner lock precedes all restore/activation mutation. Before directory
+creation, open records the first existing ancestors; new sidecar/container parent
+entries are synced child-first up to those ancestors before v3 activation.
+Windows returns Unsupported before opening or changing database files.
+
+For a sidecar, activation first atomically stream-copies its valid container and
+patches only the header version to **0.2.0**, syncs the file, renames and syncs the
+parent. Only then may WAL v2 be atomically upgraded to v3. An absent/zero-byte
+container can be initialized for an empty database; a legacy nonempty database
+without a valid container must first be converged with its existing v2 reader.
+An interrupted fence can leave a fenced v2 WAL; retry with explicit budgets is
+supported. Existing fence/activation temp files are not overwritten.
+
+`FileVersion::CURRENT` remains 0.1.0 for ordinary writers; `MAX_SUPPORTED` is
+0.2.0 for readers. Old readers reject 0.2.0 before restoring a container, and
+reject v3 when the live sidecar takes priority. Current default LSM open also
+requires explicit overflow options for a fenced container. Converge preserves
+both the 0.2 header and WAL v3 manifest; container-only rehydrate recreates v3.
+The manifest WAL version may not exceed its container fence. There is no downgrade.
+
+Each nonempty opt-in commit streams its borrowed write set into one spool and
+force-syncs one 53-byte WAL reference before publishing the MemTable changes.
+Snapshot gate → commit lock → WAL lock ordering is retained. Transaction IDs are
+`ALPXLSM1` plus the little-endian LSN: database ownership and monotonic LSNs provide
+local uniqueness; these IDs are not random or globally unique. Ring pressure can
+checkpoint prior commits, without splitting the pending transaction.
+
+Replay holds a private MemTable until every inline record, spool and decoder
+finish succeeds. Its budget charges key/value bytes plus 128 bytes per operation,
+including MVCC versions, and rejects before insertion. This is deterministic
+accounting, **not a bound on process RSS**; allocator, fragment/decoder, inline
+buffer and original write-set overhead require separate headroom. A commit above
+the replay budget is rejected before WAL changes; accumulated pending charges
+trigger a checkpoint before the next commit would exceed that budget. The counter
+resumes from recovered MVCC versions and resets only after successful reclamation.
+
+An uncertain reference write poisons the WAL. Checkpoint and converge inspect
+that health before publishing metadata, including converge on Drop. Otherwise a
+checkpoint could incorrectly cover the uncertain commit while its values were
+absent from memory. Reopen resolves that outcome through the durable reference.
+
+Spool files, including abandoned preparations, remain counted after checkpoint
+and converge until full sidecar pruning. Fine-grained GC is not implemented yet;
+a full directory budget produces an error, never unlimited disk growth. Metrics
+currently report reference ring bytes; spool statistics and publication of the
+full budget/error contract through Database/Python remain separate work.
 
 ## Delivery and acceptance
 

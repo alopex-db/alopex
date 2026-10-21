@@ -152,7 +152,7 @@ impl AlopexFileReader {
         let mut buf = [0u8; HEADER_SIZE];
         buf.copy_from_slice(&mmap[..HEADER_SIZE]);
         let header = FileHeader::from_bytes(&buf)?;
-        header.check_compatibility(&FileVersion::CURRENT)?;
+        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
         Ok(header)
     }
 
@@ -401,7 +401,7 @@ impl AlopexFileReader {
             .try_into()
             .map_err(|_| FormatError::IncompleteWrite)?;
         let header = FileHeader::from_bytes(&header_array)?;
-        header.check_compatibility(&FileVersion::CURRENT)?;
+        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
 
         Ok(Self {
             buffer: None,
@@ -431,7 +431,7 @@ impl AlopexFileReader {
         let mut buf = [0u8; HEADER_SIZE];
         buf.copy_from_slice(&buffer[..HEADER_SIZE]);
         let header = FileHeader::from_bytes(&buf)?;
-        header.check_compatibility(&FileVersion::CURRENT)?;
+        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
         Ok(header)
     }
 

@@ -302,11 +302,32 @@ pub(crate) fn write_container(
     tables: &[SSTableMeta],
     converged_lsn: u64,
 ) -> Result<ConvergeResult> {
+    write_container_version(
+        container,
+        sst_dir,
+        tables,
+        converged_lsn,
+        WAL_FORMAT_VERSION,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_container_version(
+    container: &Path,
+    sst_dir: &Path,
+    tables: &[SSTableMeta],
+    converged_lsn: u64,
+    wal_format_version: u16,
+) -> Result<ConvergeResult> {
+    let version = if wal_format_version == super::wal::overflow::FORMAT_VERSION {
+        FileVersion::WAL_OVERFLOW
+    } else {
+        FileVersion::CURRENT
+    };
     let started = std::time::Instant::now();
     let created_at_ms = now_ms();
 
-    let mut writer =
-        AlopexFileWriter::new(container.to_path_buf(), FileVersion::CURRENT, FileFlags(0))?;
+    let mut writer = AlopexFileWriter::new(container.to_path_buf(), version, FileFlags(0))?;
 
     let mut manifest_tables = Vec::with_capacity(tables.len());
     let mut total_entries = 0u64;
@@ -344,7 +365,7 @@ pub(crate) fn write_container(
             next_timestamp: converged_lsn.saturating_add(1),
             created_at_ms,
             sstable_format_version: sstable_format_version(),
-            wal_format_version: WAL_FORMAT_VERSION,
+            wal_format_version,
             tables: manifest_tables.clone(),
         };
         writer.add_section_with_compression(
@@ -401,7 +422,14 @@ pub(crate) fn rehydrate(
     wal_config: &WalConfig,
 ) -> Result<RehydrateOutcome> {
     let reader = AlopexFileReader::open(FileSource::Path(container.to_path_buf()))?;
-    reader.header().check_compatibility(&FileVersion::CURRENT)?;
+    reader
+        .header()
+        .check_compatibility(&FileVersion::MAX_SUPPORTED)?;
+    let wal_version = if reader.header().version == FileVersion::WAL_OVERFLOW {
+        super::wal::overflow::FORMAT_VERSION
+    } else {
+        WAL_FORMAT_VERSION
+    };
 
     let entries = reader.section_index().entries.clone();
     let sstable_count = entries
@@ -421,7 +449,7 @@ pub(crate) fn rehydrate(
             // shape the v0.1 compatibility fixtures use.
             fs::create_dir_all(data_dir.join(SIDECAR_SST_DIR))?;
             let converged_lsn = reader.footer().wal_sequence_number;
-            finish_rehydrate(data_dir, wal_config, converged_lsn)?;
+            finish_rehydrate(data_dir, wal_config, converged_lsn, wal_version)?;
             return Ok(RehydrateOutcome {
                 converged_lsn,
                 tables_restored: 0,
@@ -437,6 +465,11 @@ pub(crate) fn rehydrate(
         }
     };
 
+    if manifest.wal_format_version > wal_version {
+        return Err(Error::InvalidFormat(
+            "container manifest WAL version exceeds its fence".into(),
+        ));
+    }
     let sst_dir = data_dir.join(SIDECAR_SST_DIR);
     fs::create_dir_all(&sst_dir)?;
 
@@ -469,7 +502,7 @@ pub(crate) fn rehydrate(
     }
     sync_dir(&sst_dir)?;
 
-    finish_rehydrate(data_dir, wal_config, manifest.converged_lsn)?;
+    finish_rehydrate(data_dir, wal_config, manifest.converged_lsn, wal_version)?;
     Ok(RehydrateOutcome {
         converged_lsn: manifest.converged_lsn,
         tables_restored: manifest.tables.len(),
@@ -512,7 +545,12 @@ fn read_manifest(
 /// Recreate `checkpoint.meta` and a fresh empty WAL so the normal recovery path
 /// resumes the timestamp oracle above `converged_lsn` (裁定 D5).
 #[cfg(not(target_arch = "wasm32"))]
-fn finish_rehydrate(data_dir: &Path, wal_config: &WalConfig, converged_lsn: u64) -> Result<()> {
+fn finish_rehydrate(
+    data_dir: &Path,
+    wal_config: &WalConfig,
+    converged_lsn: u64,
+    wal_version: u16,
+) -> Result<()> {
     let checkpoint_path = data_dir.join(SIDECAR_CHECKPOINT_FILE);
     save_checkpoint_meta(
         &checkpoint_path,
@@ -520,12 +558,22 @@ fn finish_rehydrate(data_dir: &Path, wal_config: &WalConfig, converged_lsn: u64)
     )?;
 
     let wal_path = data_dir.join(SIDECAR_WAL_FILE);
-    let writer = WalWriter::create(
-        &wal_path,
-        wal_config.clone(),
-        1,
-        converged_lsn.saturating_add(1),
-    )?;
+    let writer = if wal_version == super::wal::overflow::FORMAT_VERSION {
+        fs::create_dir_all(data_dir.join(super::overflow::SPOOL_DIRECTORY))?;
+        WalWriter::create_overflow(
+            &wal_path,
+            wal_config.clone(),
+            1,
+            converged_lsn.saturating_add(1),
+        )?
+    } else {
+        WalWriter::create(
+            &wal_path,
+            wal_config.clone(),
+            1,
+            converged_lsn.saturating_add(1),
+        )?
+    };
     drop(writer);
     sync_parent_dir(&wal_path)?;
     Ok(())
