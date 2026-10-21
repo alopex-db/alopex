@@ -667,7 +667,7 @@ fn segment_header_offset(segment_size: u64, segment_index: u64) -> u64 {
     (WAL_SECTION_HEADER_SIZE as u64) + (segment_index * segment_size)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn read_segment_header(
     file: &mut File,
     segment_size: u64,
