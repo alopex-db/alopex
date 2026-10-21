@@ -20,7 +20,7 @@ trap 'command rm -rf -- "$sandbox"' EXIT
 """
         + cleanup
         + r"""
-for scenario in transient silent_transient permanent original_error unowned; do
+for scenario in transient silent_transient permanent original_error unowned recreated_temp; do
   build_root="$sandbox/$scenario"
   build_lock="$build_root.lock"
   OUTPUT="$sandbox/output-$scenario"
@@ -32,6 +32,10 @@ for scenario in transient silent_transient permanent original_error unowned; do
     build_root_created=1
     build_lock_created=1
     build_succeeded=1
+    cleanup_environment=("HOME=$sandbox" "USERPROFILE" "XDG_CACHE_HOME=" "TEMP=$sandbox" "TMP=$sandbox" "TMPDIR=$sandbox")
+    export HOME="$build_root/home" USERPROFILE="$build_root/home"
+    export XDG_CACHE_HOME="$build_root/cache" TEMP="$build_root/tmp"
+    export TMP="$build_root/tmp" TMPDIR="$build_root/tmp"
     count=0
     if [[ "$scenario" == unowned ]]; then
       build_root_created=0
@@ -50,6 +54,16 @@ for scenario in transient silent_transient permanent original_error unowned; do
       fi
       command rm "$@"
     }
+    rmdir() {
+      # Reproduce a Windows cleanup child recreating its configured temp dir
+      # after rm has already removed the root successfully.
+      if [[ "$scenario" == recreated_temp ]]; then
+        mkdir -p "$TEMP"
+        [[ "$HOME" == "$sandbox" && "${USERPROFILE+x}" != x && "$XDG_CACHE_HOME" == "" ]] || return 1
+        [[ "$TMP" == "$sandbox" && "$TMPDIR" == "$sandbox" ]] || return 1
+      fi
+      command rmdir "$@"
+    }
     sleep() { :; }
     trap cleanup_host_build EXIT
     if [[ "$scenario" == original_error ]]; then exit 23; fi
@@ -61,6 +75,10 @@ for scenario in transient silent_transient permanent original_error unowned; do
     transient|silent_transient)
       [[ "$status" == 0 && ! -e "$build_root" && ! -e "$build_lock" ]] || exit 1
       [[ "$(cat "$attempts")" == 2 && -e "$OUTPUT" ]] || exit 1
+      ;;
+    recreated_temp)
+      [[ "$status" == 0 && ! -e "$build_root" && ! -e "$build_lock" ]] || exit 1
+      [[ "$(cat "$attempts")" == 1 && -e "$OUTPUT" ]] || exit 1
       ;;
     permanent)
       [[ "$status" == 1 && -e "$build_root/owned" && ! -e "$build_lock" ]] || exit 1
@@ -91,7 +109,7 @@ class ParserBuildCleanupTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("PASS "), 5)
+        self.assertEqual(result.stdout.count("PASS "), 6)
 
 
 if __name__ == "__main__":
