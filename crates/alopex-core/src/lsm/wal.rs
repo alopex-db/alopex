@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
+/// Bounded overflow spool framing; not yet connected to the live WAL writer.
+pub mod spool;
+
 #[cfg(test)]
 thread_local! {
     static WAL_SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
