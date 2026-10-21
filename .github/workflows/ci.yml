@@ -462,7 +462,14 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        if: runner.environment != 'self-hosted'
+        if: runner.environment != 'self-hosted' && runner.os != 'Windows'
+
+      - name: Verify Windows storage inventory before compilation
+        if: runner.os == 'Windows'
+        run: |
+          python scripts/compatibility/test_storage.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/compatibility/storage.py --log artifacts/windows-wal/storage.jsonl
 
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
@@ -471,7 +478,15 @@ jobs:
         run: bash scripts/build-nim-parser.sh --backend host
 
       - name: Build
+        if: runner.os != 'Windows'
         run: cargo build --release --all-features
+
+      - name: Bounded Windows build and native WAL contracts
+        timeout-minutes: 45
+        if: runner.os == 'Windows'
+        # Reuse this job's release target. Only 3-byte reader fixtures and
+        # fail-before-I/O writer contracts; no load/performance workload.
+        run: python scripts/ci/windows-wal-contract.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -480,6 +495,20 @@ jobs:
           path: |
             target/release/alopex-cli
             target/release/alopex-cli.exe
+
+      - name: Clean Windows validation outputs
+        if: always() && runner.os == 'Windows'
+        run: |
+          if (Test-Path target) { Remove-Item -Recurse -Force target }
+          python scripts/compatibility/storage.py --log artifacts/windows-wal/storage-cleanup.jsonl
+
+      - name: Upload Windows WAL source and storage evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wal-contract
+          path: artifacts/windows-wal/
+          if-no-files-found: error
 
   v08-release-gate:
     name: v0.8 Implementation Surface Contract (${{ matrix.os }})

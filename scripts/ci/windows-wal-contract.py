@@ -1,0 +1,46 @@
+"""Run the existing release build and tiny Windows WAL contracts serially.
+
+Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
+storage is bounded to 20 GB per command, 40 GB host stop, using one target.
+Artifacts contain source identity and raw results; the workflow removes target
+only after artifact upload. No durability/power-loss claim for the writer.
+"""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+repo = Path(__file__).resolve().parents[2]
+output = repo / "artifacts/windows-wal"
+output.mkdir(parents=True, exist_ok=True)
+if sys.platform != "win32" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+    raise SystemExit("requires an inventoried, isolated GitHub-hosted Windows runner")
+os.environ["CARGO_TARGET_DIR"] = str(repo / "target")
+identity = {"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+            "tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "platform": sys.platform,
+            "writer_supported": False}
+(output / "source.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
+commands = [
+    ("release-build", ["cargo", "build", "--release", "--locked", "--all-features"]),
+    ("readonly-recovery", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--lib", "lsm::wal::overflow::recovery_portability_tests::"]),
+    ("writer-refusal", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                        "--lib", "lsm::wal::overflow::windows_tests::"]),
+]
+for name, command in commands:
+    with (output / (name + ".log")).open("w", encoding="utf-8") as log:
+        result = subprocess.run([sys.executable, str(repo / "scripts/compatibility/storage.py"),
+                                 "--log", str(output / "storage.jsonl"),
+                                 "--additional-bytes", "20000000000", "--", *command],
+                                cwd=repo, stdout=log, stderr=subprocess.STDOUT)
+    contents = (output / (name + ".log")).read_text(encoding="utf-8")
+    print(contents[-6000:])
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    required = {"readonly-recovery": "3 passed; 0 failed", "writer-refusal": "2 passed; 0 failed"}
+    if name in required and required[name] not in contents:
+        raise SystemExit(f"{name}: expected native tests did not run")

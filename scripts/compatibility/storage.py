@@ -20,6 +20,9 @@ import time
 REPO = Path(__file__).resolve().parents[2]
 STOP_BYTES = 40_000_000_000
 
+if os.name == "nt":
+    from storage_windows import allocation_size
+
 
 def allocated_bytes(roots):
     roots = sorted(
@@ -40,12 +43,18 @@ def allocated_bytes(roots):
                 info = path.lstat()
             except FileNotFoundError:
                 continue  # Another process removed this pathname; it no longer consumes space here.
+            if os.name == "nt" and not info.st_ino:
+                raise RuntimeError(f"missing native file identity: {path}")
             key = (info.st_dev, info.st_ino)
             if key in seen:
                 continue
             seen.add(key)
-            total += info.st_blocks * 512
-            if stat.S_ISDIR(info.st_mode):
+            try:
+                total += allocation_size(path) if os.name == "nt" else info.st_blocks * 512
+            except FileNotFoundError:
+                continue
+            reparse = getattr(info, "st_file_attributes", 0) & 0x400
+            if stat.S_ISDIR(info.st_mode) and not reparse:
                 try:
                     with os.scandir(path) as entries:
                         pending.extend(Path(entry.path) for entry in entries)
@@ -81,6 +90,15 @@ def inventory(extra=()):
     for name in ["CARGO_TARGET_DIR", "RUNNER_TEMP", "ALOPEX_COMPAT_OUTPUT"]:
         if os.environ.get(name):
             roots.add(Path(os.environ[name]))
+    for name in ["CARGO_HOME", "UV_CACHE_DIR", "NIMBLE_DIR"]:
+        if os.environ.get(name):
+            roots.add(Path(os.environ[name]))
+    if os.environ.get("ALOPEX_NIM_BIN"):
+        roots.add(Path(os.environ["ALOPEX_NIM_BIN"]).resolve().parent.parent)
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        cache = Path(os.environ["LOCALAPPDATA"])
+        roots.add(cache / "uv/cache")
+        roots.update(p for p in cache.iterdir() if "alopex" in p.name.lower())
     roots.update(Path(p) for p in extra)
     # Discover all linked worktrees, including locations outside the workspace.
     for repo in [REPO, *REPO.parent.iterdir()]:
@@ -109,7 +127,7 @@ def inventory(extra=()):
     return {
         "allocated_bytes": allocated_bytes(roots),
         "time_unix": time.time(),
-        "method": "allocated blocks, unique inodes, no symlink traversal",
+        "method": "native allocated bytes, unique file identities, no reparse traversal",
         "roots": sorted(str(p) for p in roots if p.exists()),
     }
 
@@ -140,6 +158,8 @@ def main():
     if not command:
         print(json.dumps({"allocated_bytes": initial}))
         return
+    if args.additional_bytes <= 0 or initial + args.additional_bytes > STOP_BYTES:
+        raise RuntimeError("declared additional storage does not fit below the host stop budget")
     env = dict(
         os.environ,
         CARGO_INCREMENTAL="0",
@@ -148,7 +168,7 @@ def main():
         CARGO_BUILD_JOBS="2",
         PIP_NO_CACHE_DIR="1",
     )
-    child = subprocess.Popen(command, env=env, start_new_session=True)
+    child = subprocess.Popen(command, env=env, start_new_session=os.name != "nt")
     try:
         while child.poll() is None:
             try:
@@ -158,12 +178,17 @@ def main():
         check(args.log, args.root, limit)
     except BaseException:
         if child.poll() is None:
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
+            if os.name == "nt":
+                # Stop the owned Cargo/rustc tree, not just its parent process.
+                subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], check=True)
                 child.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+            else:
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
         raise
     sys.exit(child.returncode)
 

@@ -1702,13 +1702,11 @@ impl LsmKV {
             (wal.ring_len(), wal.used_bytes())
         };
         if requested > capacity {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::StorageFull,
-                format!(
+            return Err(Error::WalCapacityExceeded {
+                reason: format!(
                     "WAL entry exceeds ring capacity: requested={requested}, capacity={capacity}"
                 ),
-            )
-            .into());
+            });
         }
         // Capacity pressure overrides the advisory threshold/interval, including
         // auto_checkpoint=false: that switch disables proactive work only.
@@ -1716,11 +1714,9 @@ impl LsmKV {
             self.checkpoint_locked()?;
             let wal = self.wal.read().expect("lsm wal lock poisoned");
             if requested > wal.ring_len() - wal.used_bytes() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::StorageFull,
-                    format!("WAL remains full after one checkpoint: requested={requested}, used={}, capacity={}", wal.used_bytes(), wal.ring_len()),
-                )
-                .into());
+                return Err(Error::WalCapacityExceeded {
+                    reason: format!("WAL remains full after one checkpoint: requested={requested}, used={}, capacity={}", wal.used_bytes(), wal.ring_len()),
+                });
             }
         }
         Ok(())

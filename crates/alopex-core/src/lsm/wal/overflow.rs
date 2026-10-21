@@ -68,7 +68,9 @@ fn invalid(message: &str) -> Error {
     Error::InvalidFormat(message.into())
 }
 fn full(message: &str) -> Error {
-    std::io::Error::new(std::io::ErrorKind::StorageFull, message).into()
+    Error::WalCapacityExceeded {
+        reason: message.into(),
+    }
 }
 
 fn reference(descriptor: SpoolDescriptor) -> [u8; REFERENCE_BYTES] {

@@ -48,8 +48,7 @@ impl SpoolLimits {
             || fragment > self.fragment_bytes
             || file_bytes > self.file_bytes
         {
-            return Err(std::io::Error::new(std::io::ErrorKind::StorageFull,
-                format!("overflow spool exceeds budget: payload={payload}, file={file_bytes}, fragment={fragment}")).into());
+            return Err(Error::WalCapacityExceeded { reason: format!("overflow spool exceeds budget: payload={payload}, file={file_bytes}, fragment={fragment}") });
         }
         Ok(count)
     }

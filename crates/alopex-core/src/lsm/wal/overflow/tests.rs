@@ -350,9 +350,10 @@ fn directory_budget_counts_orphans_and_temporary_files() {
         .file_bytes()
         .unwrap();
     let budget = OverflowLimits::new(limits().spool, reserved, 128).unwrap();
-    assert!(
-        matches!(writer.append_spool(&mut &b"abc"[..], &f.spools, id(1), 3, 2, budget), Err(Error::Io(e)) if e.kind()==std::io::ErrorKind::StorageFull)
-    );
+    assert!(matches!(
+        writer.append_spool(&mut &b"abc"[..], &f.spools, id(1), 3, 2, budget),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
     assert_eq!(writer.used_bytes(), 0);
     assert_eq!(directory_usage(&f.spools).unwrap(), 1);
     assert_eq!(f.recover(0).unwrap().0.records, 0);

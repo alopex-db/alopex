@@ -111,7 +111,7 @@ fn oversized_entry_does_not_checkpoint_or_publish() {
     let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
     tx.put(vec![1], vec![2, 3]).unwrap();
     let err = tx.commit_self().unwrap_err();
-    assert!(matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::StorageFull));
+    assert!(matches!(&err, Error::WalCapacityExceeded { .. }));
     assert!(err.to_string().contains("exceeds ring capacity"));
     assert_eq!(store.wal_checkpoint_stats(), before);
     assert_eq!(get(&store, 1), None);

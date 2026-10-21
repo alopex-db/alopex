@@ -30,6 +30,16 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A WAL record or overflow operation exceeds an explicit capacity budget.
+    ///
+    /// Match this variant, not the diagnostic text. This is distinct from
+    /// malformed data and actual filesystem errors (including OS disk-full).
+    #[error("WAL capacity exceeded: {reason}")]
+    WalCapacityExceeded {
+        /// Human-readable budget or representation limit; not a stable code.
+        reason: String,
+    },
+
     /// The on-disk format is invalid or corrupted.
     #[error("invalid format: {0}")]
     InvalidFormat(String),
