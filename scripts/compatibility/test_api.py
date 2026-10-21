@@ -2,6 +2,7 @@
 
 import copy
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.compatibility import api
@@ -29,6 +30,20 @@ class APIAcceptanceTests(unittest.TestCase):
             )
             with self.assertRaises(PermissionError):
                 api.probe_loopback()
+
+    def test_capacity_registry_extension_preserves_baseline_codes(self):
+        from scripts.compatibility.test_api_runtime import (
+            test_known_error_codes_preserved_with_explicit_capacity_addition as verify,
+        )
+        baseline = {"ALOPEX-PY001", "ALOPEX-PY999"}
+        with patch("pathlib.Path.read_text", return_value="EXPECTED_ERROR_CODES = " + repr(baseline)):
+            for actual in [baseline, baseline | {"ALOPEX-S004"}]:
+                with patch.dict("sys.modules", {"alopex": SimpleNamespace(ALOPEX_ERROR_CODES=actual)}):
+                    verify()
+            for actual in [baseline - {"ALOPEX-PY001"}, baseline | {"unexpected"}]:
+                with patch.dict("sys.modules", {"alopex": SimpleNamespace(ALOPEX_ERROR_CODES=actual)}):
+                    with self.assertRaises(AssertionError):
+                        verify()
 
     def test_optional_keyword_parameter_is_additive(self):
         before = [parameter("path")]

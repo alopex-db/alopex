@@ -70,3 +70,25 @@ def test_polars_io_with_two_row_chunks(tmp_path):
             alopex_rows = sum(batch.height for batch in batches)
         polars_rows = sum(batch.height for batch in polars_lazy.collect_batches())
         assert alopex_rows == polars_rows == expected.height
+
+
+def test_known_error_codes_preserved_with_explicit_capacity_addition():
+    import ast
+    from pathlib import Path
+
+    import alopex
+
+    # Read the immutable baseline corpus, not the candidate's expected registry.
+    baseline = Path(__file__).resolve().parents[2] / "crates/alopex-py/tests/test_compatibility_contract.py"
+    assignments = [
+        node.value for node in ast.parse(baseline.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "EXPECTED_ERROR_CODES"
+                for target in node.targets)
+    ]
+    assert len(assignments) == 1
+    expected = ast.literal_eval(assignments[0])
+    assert isinstance(expected, set) and expected
+    actual = set(alopex.ALOPEX_ERROR_CODES)
+    assert expected <= actual, ("baseline codes removed", expected - actual)
+    assert actual - expected <= {"ALOPEX-S004"}, ("unapproved additions", actual - expected)
