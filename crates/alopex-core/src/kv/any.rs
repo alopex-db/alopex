@@ -275,6 +275,7 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
+        Self::lsm_from(&self.store)?.validate_overflow_operation(&key, Some(&value))?;
         state.write_set.insert(key, Some(value));
         Ok(())
     }
@@ -291,6 +292,7 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
+        Self::lsm_from(&self.store)?.validate_overflow_operation(&key, None)?;
         state.write_set.insert(key, None);
         Ok(())
     }

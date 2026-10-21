@@ -114,7 +114,7 @@ fn spool_path(directory: &Path, identity: SpoolIdentity) -> PathBuf {
     directory.join(format!("{transaction}-{:016x}.spool", identity.lsn()))
 }
 
-fn directory_usage(directory: &Path) -> Result<u64> {
+pub(crate) fn directory_usage(directory: &Path) -> Result<u64> {
     if !fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(invalid(
             "spool directory must be an exclusively owned directory",
@@ -129,6 +129,22 @@ fn directory_usage(directory: &Path) -> Result<u64> {
         bytes = bytes
             .checked_add(entry.metadata()?.len())
             .ok_or_else(|| full("spool accounting overflow"))?;
+    }
+    Ok(bytes)
+}
+
+/// Validate and calculate a reservation without opening a spool or allocating
+/// its payload. Used by the LSM owner before deciding to checkpoint for space.
+pub(crate) fn reservation_bytes(
+    payload: u64,
+    fragment: u32,
+    limits: OverflowLimits,
+) -> Result<u64> {
+    limits.spool.check(payload, fragment)?;
+    let bytes = SpoolDescriptor::from_parts(SpoolIdentity::new([1; 16], 1)?, payload, fragment, 0)?
+        .file_bytes()?;
+    if bytes > limits.directory_bytes {
+        return Err(full("single spool exceeds directory budget"));
     }
     Ok(bytes)
 }
@@ -163,6 +179,15 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     sync_dir(parent)
+}
+
+/// Validate that a configured ring can hold a reference before creating storage.
+pub(crate) fn validate_wal_config(config: &WalConfig) -> Result<()> {
+    let (_, _, _, ring_len) = compute_ring_layout(config)?;
+    if ring_len < REFERENCE_BYTES as u64 {
+        return Err(full("WAL ring cannot hold an overflow reference"));
+    }
+    Ok(())
 }
 
 /// Detect v3 explicitly without weakening the legacy v1/v2 reader fence.

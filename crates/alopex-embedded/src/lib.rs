@@ -32,6 +32,14 @@ pub use crate::columnar_api::{
 };
 pub use crate::kv_scan::KeyScanOptions;
 pub use crate::options::DatabaseOptions;
+/// Explicit local-disk WAL overflow configuration and usage types.
+pub mod wal_overflow {
+    pub use alopex_core::lsm::overflow::{LsmOverflowConfig, LsmOverflowStats};
+    pub use alopex_core::lsm::wal::{
+        operations::OperationLimits, spool::SpoolLimits, SyncMode, WalConfig,
+    };
+}
+
 pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
 pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
 pub use crate::prepared::{
@@ -327,7 +335,7 @@ impl Database {
     /// without a path, use [`Self::open_in_memory_with_options`].
     /// Invalid cache limits are rejected before storage is created.
     pub fn open_with_options(path: &Path, opts: DatabaseOptions) -> Result<Self> {
-        let mut db = Self::open_with_config(opts.into_embedded_config(Some(path)))?;
+        let mut db = Self::open_options_config(opts, Some(path))?;
         db.load_sql_catalog()?;
         Ok(db)
     }
@@ -355,7 +363,7 @@ impl Database {
                 "memory_mode must be enabled for in-memory open".into(),
             )));
         }
-        let mut db = Self::open_with_config(opts.into_embedded_config(None))?;
+        let mut db = Self::open_options_config(opts, None)?;
         db.load_sql_catalog()?;
         Ok(db)
     }

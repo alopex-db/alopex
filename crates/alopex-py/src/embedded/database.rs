@@ -18,7 +18,7 @@ use crate::embedded::transaction::{
 use crate::error;
 use crate::types::{
     DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PySharedExecutionReport,
-    PySharedExecutionStep, PyTxnMode,
+    PySharedExecutionStep, PyTxnMode, PyWalOverflowOptions,
 };
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult, PySearchStats};
 use crate::vector;
@@ -417,22 +417,48 @@ impl PyDatabase {
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
-    #[pyo3(signature = (path, *, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None))]
+    #[pyo3(signature = (path, *, thread_mode = None, hnsw_cache_bytes = None, hnsw_cache_entries = None, wal_overflow = None))]
     fn open(
         path: &str,
         thread_mode: Option<&str>,
         hnsw_cache_bytes: Option<u64>,
         hnsw_cache_entries: Option<usize>,
+        wal_overflow: Option<PyWalOverflowOptions>,
     ) -> PyResult<Self> {
         let thread_mode = ThreadMode::parse(thread_mode)?;
         Self::validate_cache_entries(hnsw_cache_entries)?;
-        let db = alopex_embedded::Database::open(Path::new(path)).map_err(error::embedded_err)?;
+        let mut options = alopex_embedded::DatabaseOptions::new();
+        if let Some(overflow) = wal_overflow {
+            options = options.with_wal_overflow(overflow.limits, overflow.wal);
+        }
+        let db = alopex_embedded::Database::open_with_options(Path::new(path), options)
+            .map_err(error::embedded_err)?;
         Self::configure_cache(&db, hnsw_cache_bytes, hnsw_cache_entries)?;
         Ok(Self::from_db(
             db,
             alopex_embedded::StorageMode::Disk,
             thread_mode,
         ))
+    }
+
+    /// Logical file bytes / replay charge, not physical disk allocation or RSS.
+    fn wal_overflow_stats(&self) -> PyResult<Option<std::collections::BTreeMap<String, u64>>> {
+        let db = self.ensure_open()?;
+        Ok(db
+            .wal_overflow_stats()
+            .map_err(error::embedded_err)?
+            .map(|stats| {
+                [
+                    ("directory_bytes", stats.directory_bytes),
+                    ("directory_limit_bytes", stats.directory_limit_bytes),
+                    ("replay_bytes", stats.replay_bytes as u64),
+                    ("replay_limit_bytes", stats.replay_limit_bytes as u64),
+                    ("gc_failures", stats.gc_failures),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()
+            }))
     }
 
     #[staticmethod]
