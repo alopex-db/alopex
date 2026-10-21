@@ -4,6 +4,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -14,6 +19,48 @@ FLOATING_SETUP = "uses: jiro4989/setup-nim-action@"
 
 
 class CiWorkflowContractTests(unittest.TestCase):
+    def test_toolchain_identity_checks_drain_output_and_preserve_failures(self) -> None:
+        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
+            encoding="utf-8"
+        )
+        # Exercise the real final verification block without building Nim or
+        # downloading packages. Two small writes reproduce an early reader exit.
+        block = textwrap.dedent(action.rsplit('} >>"${GITHUB_OUTPUT}"', 1)[1].split(
+            '        cleanup_ephemeral', 1
+        )[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            producer = root / "producer.py"
+            producer.write_text(
+                "import os, sys, time\n"
+                "kind = sys.argv[1]\n"
+                "line = 'git hash: pinned' if kind == 'nimble' else "
+                "'Nim Compiler Version ' + os.environ.get('TEST_VERSION', '2.2.10')\n"
+                "os.write(1, (line + '\\n').encode())\n"
+                "time.sleep(0.1)\n"
+                "os.write(1, b'trailing version metadata\\n')\n"
+                "sys.exit(int(os.environ.get('TEST_EXIT', '0')))\n",
+                encoding="utf-8",
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(producer))}"
+            shim = root / "nimble"
+            shim.write_text(f"#!/bin/bash\nexec {command} nimble\n", encoding="utf-8")
+            shim.chmod(0o755)
+            setup = (
+                "set -euo pipefail\n"
+                f"shim_dir={shlex.quote(directory)}\n"
+                "nim_path_native=unused\nnimble_dir_native=unused\n"
+                "required_nimble_sha=pinned\nrequired_nim_version=2.2.10\n"
+                f"run_setup_nim() {{ {command} nim; }}\n"
+            )
+            for version, exit_code, expected in [("2.2.10", 0, 0), ("9.9.9", 0, 1), ("2.2.10", 9, 9)]:
+                with self.subTest(version=version, producer_exit=exit_code):
+                    result = subprocess.run(
+                        ["bash", "-c", setup + f"export TEST_VERSION={version} TEST_EXIT={exit_code}\n" + block],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+
     def workflow(self, name: str) -> str:
         return (WORKFLOW_DIR / name).read_text(encoding="utf-8")
 

@@ -497,13 +497,15 @@ runs:
           echo "nimble-dir=${nimble_dir_native}"
         } >>"${GITHUB_OUTPUT}"
 
-        PATH="${shim_dir}:${PATH}" \
+        # Capture complete output before matching: grep -q on a live pipe can
+        # close it while Nim is still writing, producing a spurious EPIPE.
+        verified_nimble_identity="$(PATH="${shim_dir}:${PATH}" \
           ALOPEX_NIM_BIN="${nim_path_native}" \
           ALOPEX_NIMBLE_DIR="${nimble_dir_native}" \
-          "${shim_dir}/nimble" --version | \
-          grep -Fqx "git hash: ${required_nimble_sha}"
-        run_setup_nim --version | \
-          grep -Fq "Nim Compiler Version ${required_nim_version}"
+          "${shim_dir}/nimble" --version)"
+        grep -Fqx "git hash: ${required_nimble_sha}" <<<"${verified_nimble_identity}"
+        verified_nim_identity="$(run_setup_nim --version)"
+        grep -Fq "Nim Compiler Version ${required_nim_version}" <<<"${verified_nim_identity}"
 
         cleanup_ephemeral
 
