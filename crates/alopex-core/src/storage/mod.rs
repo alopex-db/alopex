@@ -5,6 +5,7 @@ pub mod compression;
 pub mod flush;
 pub mod format;
 pub mod large_value;
+pub(crate) mod publication;
 pub mod sstable;
 
 // Re-export V2 compression types for columnar storage

@@ -484,8 +484,8 @@ jobs:
       - name: Bounded Windows build and native WAL contracts
         timeout-minutes: 45
         if: runner.os == 'Windows'
-        # Reuse this job's release target. Only 3-byte reader fixtures and
-        # fail-before-I/O writer contracts; no load/performance workload.
+        # Reuse this job's release target. Tiny WAL/LSM publication fixtures
+        # and fail-before-I/O public API contracts; no load/performance workload.
         run: |
           python scripts/ci/test_windows_wal_console.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

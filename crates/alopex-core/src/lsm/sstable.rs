@@ -820,7 +820,7 @@ impl SSTableWriter {
         // Footer is not part of file CRC.
         self.file.seek(SeekFrom::Start(footer_offset))?;
         self.file.write_all(&footer.to_bytes())?;
-        self.file.sync_data()?;
+        self.file.sync_all()?;
         Ok(())
     }
 }

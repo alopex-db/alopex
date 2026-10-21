@@ -1,7 +1,7 @@
 //! Checkpoint metadata persistence for WAL recovery.
 
 use std::convert::TryInto;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -92,10 +92,11 @@ pub fn save_checkpoint_meta(path: &Path, meta: &CheckpointMeta) -> Result<()> {
     file.write_all(&meta.to_bytes())?;
     #[cfg(test)]
     injected_failure(1)?;
-    file.sync_data()?;
+    file.sync_all()?;
     #[cfg(test)]
     injected_failure(2)?;
-    fs::rename(&tmp_path, path)?;
+    drop(file);
+    crate::storage::publication::replace_file(&tmp_path, path)?;
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(parent) = path.parent() {
         super::container::sync_dir(parent)?;

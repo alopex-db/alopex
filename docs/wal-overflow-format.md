@@ -263,8 +263,12 @@ and [directory moves](https://learn.microsoft.com/en-us/windows/win32/fileio/mov
 The low-level WAL uses that building block with `MOVEFILE_REPLACE_EXISTING` only
 for spool/upgrade publication, never for fresh WAL creation. No cross-volume copy
 is allowed. Paths use the canonical parent plus a UTF-16 filename, preserving
-Unicode/long paths and rejecting embedded NUL. This does not prove that ordinary
-`create_dir_all`, container replacement and checkpoint publication satisfy the protocol. Before
+Unicode/long paths and rejecting embedded NUL. The same private storage helper
+also publishes LSM SSTables, checkpoint metadata and finalized containers. Each
+caller syncs the complete file (including metadata), closes its handle and then
+publishes; Unix callers retain their parent-directory sync boundaries. This does
+not prove that ordinary `create_dir_all`, container fencing/retry or sidecar
+pruning satisfy the complete overflow protocol. Before
 activation, validate each boundary on Windows with tiny fixtures, including nested
 new directories, replaced files, open-handle sharing, injected publication failures
 and process termination. No Windows host validation is claimed by Unix tests.
@@ -278,7 +282,14 @@ enable or qualify a production Windows writer. The test directory contains a
 Unicode component and all fixture writer handles close before reader open.
 The Windows build job runs these three reader tests, 27 shared low-level writer
 and recovery tests, and six Windows publication/LSM-refusal cases after its
-existing release build, reusing the same target directory. Fixtures contain
+existing release build, reusing the same target directory. Six additional native
+LSM publication cases cover a 24-byte checkpoint replacement and a failure
+injected after sync, one key/value flushed to an SST and reopened with no WAL replay, a
+3-byte container replacement, Windows sharing failures, and public LSM overflow
+refusal without creating ancestors or changing existing files. Windows LSM
+overflow remains Unsupported until all publication boundaries are implemented
+and qualified; successful legacy-LSM file tests do not remove that guard.
+Fixtures contain
 3-byte payloads or a 65-byte payload just beyond a 64-byte ring, not workloads. It
 requires nonzero expected test counts and saves SHA/tree, raw logs and native
 allocation measurements. The watchdog measures before/during/after Cargo, stops
