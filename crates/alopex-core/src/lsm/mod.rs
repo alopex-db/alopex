@@ -14,6 +14,8 @@ pub mod memtable;
 pub mod metrics;
 pub mod sstable;
 pub mod wal;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod wal_capacity_tests;
 
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -823,6 +825,11 @@ impl LsmKV {
     pub fn checkpoint(&self) -> Result<CheckpointResult> {
         let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
         let _guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
+        self.checkpoint_locked()
+    }
+
+    /// Caller owns snapshot writer gate and commit lock, but no WAL lock.
+    fn checkpoint_locked(&self) -> Result<CheckpointResult> {
         let start = Instant::now();
 
         self.flush_inner()?;
@@ -844,12 +851,20 @@ impl LsmKV {
         self.wal_used_bytes
             .store(wal.used_bytes(), Ordering::Relaxed);
         self.last_checkpoint_ms.store(created_at, Ordering::Relaxed);
+        self.metrics
+            .record_checkpoint(wal_bytes_reclaimed, start.elapsed().as_micros() as u64);
 
         Ok(CheckpointResult {
             checkpoint_lsn,
             wal_bytes_reclaimed,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    /// WAL occupancy and successful checkpoint work since this handle opened.
+    pub fn wal_checkpoint_stats(&self) -> metrics::WalCheckpointStats {
+        self.metrics
+            .wal_checkpoint_stats(self.wal_used_bytes.load(Ordering::Relaxed))
     }
 
     /// 単一 `.alopex` ファイルへ収束する。
@@ -1067,7 +1082,12 @@ impl LsmKV {
     }
 
     fn persist_immutable_memtables(&self) -> Result<()> {
-        self.drain_immutables_while(|len| len > 0)
+        self.drain_immutables_while(|len| len > 0)?;
+        // Both checkpoint and converge publish recovery metadata next. Table
+        // directory entries must be durable before either watermark is saved.
+        #[cfg(not(target_arch = "wasm32"))]
+        container::sync_dir(&self.sst_dir)?;
+        Ok(())
     }
 
     /// Persist immutable MemTables from the front of the queue while `keep_going`
@@ -1116,14 +1136,16 @@ impl LsmKV {
 
     /// Write one immutable MemTable to an SSTable and register it at level 0.
     fn persist_immutable_table(&self, mem: &ImmutableMemTable) -> Result<()> {
-        let entries = mem.scan_prefix(b"", u64::MAX);
-        if entries.is_empty() {
+        let mut entries = mem.all_versions().peekable();
+        if entries.peek().is_none() {
             return Ok(());
         }
 
         let file_id = self.next_sstable_id.fetch_add(1, Ordering::Relaxed);
         let path = self.sstable_path_for(file_id);
-        let mut writer = SSTableWriter::create(&path, self.config.sstable)?;
+        // Incomplete SSTables are never discovered during reopen.
+        let temporary = path.with_extension("sst.tmp");
+        let mut writer = SSTableWriter::create(&temporary, self.config.sstable)?;
 
         let mut first_key: Option<Key> = None;
         let mut last_key: Option<Key> = None;
@@ -1140,6 +1162,7 @@ impl LsmKV {
             })?;
         }
         writer.finish()?;
+        fs::rename(&temporary, &path)?;
         let size_bytes = fs::metadata(&path)?.len();
 
         let meta = SSTableMeta {
@@ -1428,7 +1451,6 @@ impl LsmKV {
             }
         }
 
-        let commit_ts = self.ts_oracle.next_timestamp();
         let mut ops = Vec::with_capacity(write_set.len());
         for (key, value) in &write_set {
             ops.push(match value {
@@ -1444,8 +1466,12 @@ impl LsmKV {
                 },
             });
         }
+        let mut entry = WalEntry::batch(0, ops);
+        self.prepare_wal_capacity(entry.encoded_len() as u64)?;
+        // Allocate only after checkpoint: its watermark must exclude this write.
+        let commit_ts = self.ts_oracle.next_timestamp();
+        entry.lsn = commit_ts;
         {
-            let entry = WalEntry::batch(commit_ts, ops);
             let mut wal = self.wal.write().expect("lsm wal lock poisoned");
             let stats = wal.append_with_stats(&entry)?;
             self.metrics.add_wal_write_bytes(stats.bytes_written);
@@ -1489,6 +1515,38 @@ impl LsmKV {
             >= self.config.memtable.flush_threshold
         {
             self.flush_inner()?;
+        }
+        Ok(())
+    }
+
+    /// At most one checkpoint and one recheck, before any part of this write
+    /// reaches the WAL. Never retry an append after an I/O error.
+    fn prepare_wal_capacity(&self, requested: u64) -> Result<()> {
+        let (capacity, used) = {
+            let wal = self.wal.read().expect("lsm wal lock poisoned");
+            (wal.ring_len(), wal.used_bytes())
+        };
+        if requested > capacity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                format!(
+                    "WAL entry exceeds ring capacity: requested={requested}, capacity={capacity}"
+                ),
+            )
+            .into());
+        }
+        // Capacity pressure overrides the advisory threshold/interval, including
+        // auto_checkpoint=false: that switch disables proactive work only.
+        if requested > capacity - used || self.should_checkpoint() {
+            self.checkpoint_locked()?;
+            let wal = self.wal.read().expect("lsm wal lock poisoned");
+            if requested > wal.ring_len() - wal.used_bytes() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    format!("WAL remains full after one checkpoint: requested={requested}, used={}, capacity={}", wal.used_bytes(), wal.ring_len()),
+                )
+                .into());
+            }
         }
         Ok(())
     }

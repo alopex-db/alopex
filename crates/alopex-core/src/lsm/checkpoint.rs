@@ -90,8 +90,29 @@ pub fn save_checkpoint_meta(path: &Path, meta: &CheckpointMeta) -> Result<()> {
         .truncate(true)
         .open(&tmp_path)?;
     file.write_all(&meta.to_bytes())?;
+    #[cfg(test)]
+    injected_failure(1)?;
     file.sync_data()?;
+    #[cfg(test)]
+    injected_failure(2)?;
     fs::rename(&tmp_path, path)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(parent) = path.parent() {
+        super::container::sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_CHECKPOINT_STAGE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn injected_failure(stage: u8) -> Result<()> {
+    if FAIL_CHECKPOINT_STAGE.get() == stage {
+        return Err(std::io::Error::other("injected checkpoint persistence failure").into());
+    }
     Ok(())
 }
 

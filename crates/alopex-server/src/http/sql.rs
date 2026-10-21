@@ -39,6 +39,13 @@ use crate::ops::memory::MemoryControlPolicy;
 use crate::server::{CatalogTxnOperation, ServerState};
 use crate::session::{CatalogRollbackEffect, SessionCatalogTxnGuardKind, SessionId, TxnHandle};
 
+#[cfg(test)]
+thread_local! {
+    // Current-thread tests can hold the coordinator alive after its response.
+    static CATALOG_RESPONSE_BARRIER: std::cell::RefCell<Option<tokio::sync::oneshot::Receiver<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SqlRequest {
     pub sql: String,
@@ -957,10 +964,20 @@ async fn execute_non_session_statements_with_routing_inner(
                 }
             }
         };
+        // Completion is observable on another runtime worker as soon as we send.
+        // Release both gates first so a following session upgrade cannot mistake
+        // this completed DDL for a foreign writer waiting on its read guard.
+        drop(catalog_txn_operation);
         if let Some(response_tx) = response_tx.take() {
             let _ = response_tx.send(completion.map(|result| (result, diagnostics)));
         }
-        drop(catalog_txn_operation);
+        #[cfg(test)]
+        {
+            let barrier = CATALOG_RESPONSE_BARRIER.with(|slot| slot.borrow_mut().take());
+            if let Some(barrier) = barrier {
+                let _ = barrier.await;
+            }
+        }
     });
     await_sql_coordinator_response_until(response_rx, deadline).await
 }
@@ -2423,6 +2440,30 @@ mod tests {
             .get(&KeyEncoder::sequence_key(table_id))
             .expect("sequence key")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn non_session_ddl_response_releases_both_catalog_gates() {
+        let (_temp_dir, state) = catalog_guard_test_server();
+        let (release, barrier) = tokio::sync::oneshot::channel();
+        CATALOG_RESPONSE_BARRIER.with(|slot| *slot.borrow_mut() = Some(barrier));
+        execute_non_session_statements_with_routing(
+            state.clone(),
+            "CREATE TABLE response_boundary (value INTEGER)",
+            "ddl-response-boundary",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("table creation");
+        // The coordinator cannot exit until we release it below. No sleeps or
+        // scheduler timing determine whether these assertions catch a held guard.
+        let _ordering = Arc::clone(&state.catalog_ddl_order_gate)
+            .try_lock_owned()
+            .expect("completed DDL must not look like a waiting foreign DDL");
+        let _catalog = Arc::clone(&state.catalog_txn_gate)
+            .try_write_owned()
+            .expect("completed DDL must release the catalog before responding");
+        release.send(()).expect("release coordinator");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
