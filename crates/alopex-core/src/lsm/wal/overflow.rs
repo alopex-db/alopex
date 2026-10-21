@@ -498,3 +498,6 @@ fn fault(_stage: u8) -> Result<()> {
 mod tests;
 #[cfg(all(test, windows))]
 mod windows_tests;
+
+#[cfg(test)]
+mod recovery_portability_tests;

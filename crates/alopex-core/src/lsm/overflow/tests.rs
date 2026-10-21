@@ -533,3 +533,293 @@ fn single_operation_payload_limit_is_checked_at_put_boundary() {
     tx.commit_self().unwrap();
     assert_eq!(value(&store, 0), Some(vec![2; 6]));
 }
+
+fn assert_two_entry_limit(options: LsmOverflowConfig) {
+    use crate::kv::OwnedKVStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(vec![0], vec![1]).unwrap();
+    tx.put(vec![1], vec![2]).unwrap();
+    assert!(tx.put(vec![2], vec![3]).is_err());
+    assert_eq!(tx.get(&vec![2]).unwrap(), None);
+    assert_eq!(store.wal_checkpoint_stats().used_bytes, 0);
+    tx.rollback_in_place().unwrap();
+    tx.put(vec![2], vec![3]).unwrap();
+    tx.put(vec![3], vec![4]).unwrap();
+    tx.commit_self().unwrap();
+    let store = Arc::new(crate::kv::AnyKV::Lsm(Box::new(store)));
+    let mut tx = store
+        .clone()
+        .begin_owned_kv_transaction(TxnMode::ReadWrite)
+        .unwrap();
+    tx.put(vec![0], vec![1]).unwrap();
+    tx.put(vec![1], vec![2]).unwrap();
+    assert!(tx.put(vec![2], vec![9]).is_err());
+    assert_eq!(tx.get(&vec![2]).unwrap(), Some(vec![3]));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn aggregate_payload_is_checked_before_retention() {
+    let mut options = limits();
+    options.operations = OperationLimits::new(54, 8, 64).unwrap();
+    assert_two_entry_limit(options);
+}
+
+#[test]
+fn aggregate_replay_is_checked_before_retention() {
+    let mut options = limits();
+    options.replay_bytes = 260;
+    assert_two_entry_limit(options);
+}
+
+#[test]
+fn aggregate_spool_file_is_checked_before_retention() {
+    let mut options = limits();
+    let bytes =
+        disk::reservation_bytes(54, options.fragment_bytes, options.limits().unwrap()).unwrap();
+    options.spool = SpoolLimits::new(512, bytes, 7).unwrap();
+    assert_two_entry_limit(options);
+}
+
+#[test]
+fn aggregate_directory_reservation_is_checked_before_retention() {
+    let mut options = limits();
+    options.directory_bytes =
+        disk::reservation_bytes(54, options.fragment_bytes, options.limits().unwrap()).unwrap();
+    assert_two_entry_limit(options);
+}
+
+#[test]
+fn overwrite_delete_and_savepoint_restore_capacity_without_double_charging() {
+    use crate::kv::OwnedKVStore;
+    let mut options = limits();
+    options.operations = OperationLimits::new(54, 8, 64).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(vec![0], vec![1]).unwrap();
+    tx.put(vec![1], vec![2]).unwrap();
+    tx.put(vec![0], vec![3]).unwrap();
+    assert!(tx.put(vec![0], vec![4, 5]).is_err());
+    assert_eq!(tx.get(&vec![0]).unwrap(), Some(vec![3]));
+    tx.delete(vec![1]).unwrap();
+    tx.put(vec![0], vec![4, 5]).unwrap();
+    assert!(tx.delete(vec![2]).is_err());
+    tx.commit_self().unwrap();
+    let store = Arc::new(crate::kv::AnyKV::Lsm(Box::new(store)));
+    let mut tx = store
+        .clone()
+        .begin_owned_kv_transaction(TxnMode::ReadWrite)
+        .unwrap();
+    tx.put(vec![0], vec![1]).unwrap();
+    let first = tx.create_savepoint().unwrap();
+    tx.put(vec![1], vec![2]).unwrap();
+    let full = tx.create_savepoint().unwrap();
+    tx.delete(vec![1]).unwrap();
+    tx.put(vec![0], vec![3, 4]).unwrap();
+    tx.rollback_to_savepoint(full).unwrap();
+    assert_eq!(tx.get(&vec![0]).unwrap(), Some(vec![1]));
+    assert!(tx.put(vec![0], vec![3, 4]).is_err());
+    tx.rollback_to_savepoint(first).unwrap();
+    tx.put(vec![2], vec![5]).unwrap();
+    tx.release_savepoint(first).unwrap();
+    assert!(tx.delete(vec![3]).is_err());
+    tx.commit().unwrap();
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+    #[test]
+    fn incremental_accounting_matches_full_encoding(ops in prop::collection::vec((0u8..4, prop::option::of(prop::collection::vec(any::<u8>(), 0..6))), 1..13)) {
+        let mut options = limits();
+        options.operations = OperationLimits::new(80, 8, 64).unwrap();
+        options.replay_bytes = 270;
+        let state = OverflowState::new(options, &MemTable::new()).unwrap();
+        let mut writes = BTreeMap::new();
+        let mut usage = WriteSetUsage::default();
+        for (key, value) in ops {
+            let key = vec![key];
+            let mut model = writes.clone();
+            model.insert(key.clone(), value.clone());
+            let replay: usize = model.iter().map(|(key, value)| key.len() + value.as_ref().map_or(0, Vec::len) + 128).sum();
+            let encoded = OperationStream::new(&model, options.operations);
+            let expected = encoded.is_ok() && replay <= options.replay_bytes;
+            let next = state.validate_write(usage, &key, value.as_deref(), writes.get(&key));
+            prop_assert_eq!(next.is_ok(), expected);
+            if let Ok(next) = next {
+                prop_assert_eq!(next.encoded + 16, encoded.unwrap().payload_bytes());
+                prop_assert_eq!(next.replay, replay);
+                usage = next;
+                writes = model;
+            }
+        }
+    }
+}
+
+fn add_orphan(directory: &Path) -> PathBuf {
+    let path = directory.join(format!("{}-ffffffffffffffff.spool", "03".repeat(16)));
+    fs::write(&path, b"unreferenced").unwrap();
+    path
+}
+
+#[test]
+fn recovery_collects_only_unreferenced_canonical_spools_after_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![1]))]).unwrap();
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let spool = crash.path().join(SPOOL_DIRECTORY);
+    let referenced = fs::read_dir(&spool)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let orphan = add_orphan(&spool);
+    let temporary = spool.join(format!("{}-ffffffffffffffff.tmp", "03".repeat(16)));
+    fs::write(&temporary, b"temp").unwrap();
+    fs::write(spool.join("unknown.spool"), b"keep").unwrap();
+    let (reopened, _) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
+    assert_eq!(value(&reopened, 0), Some(vec![1]));
+    assert!(referenced.exists());
+    assert!(!orphan.exists());
+    assert!(!temporary.exists());
+    assert!(spool.join("unknown.spool").exists());
+    assert_eq!(
+        reopened.overflow_stats().unwrap().unwrap().directory_bytes,
+        fs::metadata(referenced).unwrap().len() + 4
+    );
+}
+
+#[test]
+fn recovery_failure_preserves_orphan_and_corrupt_referenced_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![1]))]).unwrap();
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let spool = crash.path().join(SPOOL_DIRECTORY);
+    let referenced = fs::read_dir(&spool)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&referenced, b"corrupt").unwrap();
+    let orphan = add_orphan(&spool);
+    assert!(LsmKV::open_with_overflow(crash.path(), config(), limits()).is_err());
+    assert_eq!(fs::read(&referenced).unwrap(), b"corrupt");
+    assert!(orphan.exists());
+}
+
+#[test]
+fn incomplete_tail_defers_orphan_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(0, Some(vec![1]))]).unwrap();
+    store.wal.write().unwrap().truncate_tail_to(13).unwrap();
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+    let (reopened, recovery) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
+    assert!(recovery.stop_reason.is_some());
+    assert_eq!(value(&reopened, 0), None);
+    assert!(orphan.exists());
+}
+
+#[test]
+fn recovery_gc_failure_is_charged_and_retried_on_next_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+    FAIL_STAGE.set(5);
+    let opened = LsmKV::open_with_overflow(crash.path(), config(), limits());
+    FAIL_STAGE.set(0);
+    let (reopened, _) = opened.unwrap();
+    let stats = reopened.overflow_stats().unwrap().unwrap();
+    assert_eq!(stats.gc_failures, 1);
+    assert_eq!(stats.directory_bytes, 12);
+    assert!(orphan.exists());
+    drop(reopened);
+    let (reopened, _) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
+    assert!(!orphan.exists());
+    assert_eq!(
+        reopened.overflow_stats().unwrap().unwrap().directory_bytes,
+        0
+    );
+    drop(store);
+}
+
+#[test]
+fn recovery_reference_budget_bounds_empty_streams_before_orphan_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config();
+    cfg.wal.segment_size = wal::WAL_SEGMENT_HEADER_SIZE + 128;
+    let mut options = limits();
+    options.replay_bytes = 128; // One indexed reference, even if it has zero ops.
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), cfg.clone(), options).unwrap();
+    for lsn in 1..=2 {
+        let writes = BTreeMap::new();
+        let mut stream = OperationStream::new(&writes, options.operations).unwrap();
+        store
+            .wal
+            .write()
+            .unwrap()
+            .append_spool(
+                &mut stream,
+                &dir.path().join(SPOOL_DIRECTORY),
+                SpoolIdentity::new([lsn as u8; 16], lsn).unwrap(),
+                16,
+                options.fragment_bytes,
+                options.limits().unwrap(),
+            )
+            .unwrap();
+        let crash = tempfile::tempdir().unwrap();
+        copy_tree(dir.path(), crash.path());
+        let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+        let opened = LsmKV::open_with_overflow(crash.path(), cfg.clone(), options);
+        if lsn == 1 {
+            let (_, recovery) = opened.unwrap();
+            assert_eq!(recovery.entries_recovered, 1);
+            assert!(!orphan.exists());
+        } else {
+            assert!(
+                matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull)
+            );
+            assert!(orphan.exists());
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+    #[test]
+    fn empty_reference_recovery_obeys_configured_index_budget(slots in 1usize..4, extra in 0usize..2) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config();
+        cfg.wal.segment_size = wal::WAL_SEGMENT_HEADER_SIZE + 256;
+        let mut options = limits();
+        options.replay_bytes = slots * 128;
+        let (store, _) = LsmKV::open_with_overflow(dir.path(), cfg.clone(), options).unwrap();
+        for lsn in 1..=(slots + extra) as u64 {
+            let writes = BTreeMap::new();
+            let mut stream = OperationStream::new(&writes, options.operations).unwrap();
+            store.wal.write().unwrap().append_spool(
+                &mut stream, &dir.path().join(SPOOL_DIRECTORY),
+                SpoolIdentity::new([lsn as u8; 16], lsn).unwrap(),
+                16, options.fragment_bytes, options.limits().unwrap(),
+            ).unwrap();
+        }
+        let crash = tempfile::tempdir().unwrap();
+        copy_tree(dir.path(), crash.path());
+        let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+        let result = LsmKV::open_with_overflow(crash.path(), cfg, options);
+        prop_assert_eq!(result.is_ok(), extra == 0);
+        prop_assert_eq!(orphan.exists(), extra != 0);
+    }
+}

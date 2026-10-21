@@ -2,9 +2,8 @@
 
 Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
 native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
-WAL v2 and the v0.1 container writer. Windows durable publication, checkpoint-aware
-spool GC, Database/Python/SQL configuration, early write-set accounting and full
-public acceptance remain follow-up work. This is not release acceptance for #682.
+WAL v2 and the v0.1 container writer. Windows durable publication, dedicated public
+capacity errors and full public acceptance remain follow-up work. This is not release acceptance for #682.
 
 ## Commit boundary
 
@@ -110,8 +109,8 @@ arbitrary fragments, checks lengths against independent limits and the remaining
 payload before accumulating an operation, and never reserves memory from a count.
 It holds one operation at a time, plus allocation capacity and the owned operation
 delivered to the sink; it does not bound the sink's total retained memory. The LSM
-integration separately charges the private recovery MemTable; early write-set
-accounting in the public transaction API remains follow-up work.
+integration separately charges the private recovery MemTable and incrementally
+checks the live public transaction write set before retention (see below).
 
 Every sink operation is provisional until `finish()` and the enclosing WAL/spool
 recovery succeed. After any decoder or sink error, the decoder stays failed and
@@ -206,8 +205,31 @@ rejects overflow options. `wal_overflow_stats()` reports logical directory bytes
 replay charge, their limits, and cleanup failures since open. These counts do not
 represent filesystem allocation or process RSS. Individually oversized Put/Delete
 operations are rejected before entering either borrowed or owned write sets.
-Aggregate transaction budgets are still checked at commit; incremental aggregate
-accounting and a dedicated public capacity-error code remain outstanding.
+Borrowed and owned transactions also check the entire live write set before each
+Put/Delete is retained: encoded payload (one stream header), framed spool size,
+single-spool directory reservation, and key/value plus 128 bytes per entry. An
+O(log n) lookup and constant-size delta replace the previous key's charge; an
+oversized overwrite leaves both the data and counters unchanged. Savepoints save
+and restore the counters together with the map; rollback clears them. The commit
+stream independently rechecks the final map, including index/journal writes that
+enter through Put/Delete. These logical limits do not include cloned savepoint
+maps, caller buffers or allocator overhead and do not promise a process RSS cap.
+A dedicated public capacity-error code remains outstanding.
+
+After complete v3 replay and successful activation/SST discovery, open reconciles
+canonical spool identities with every live post-checkpoint WAL reference. It
+collects unreferenced sealed files and abandoned canonical tmp files, preserves
+referenced and unknown-name files, and validates the whole directory before any
+deletion. The temporary sorted identity index grows on demand, with at most
+`replay_bytes / 128` entries (24 bytes per identity, bounded geometric allocation);
+this also bounds foreign empty streams. Directory scanning is streaming, with
+binary searches rather than a WAL rescan per file. A referenced-spool error or
+index-budget error aborts before collection. A torn/CRC-invalid ring tail is
+repaired durably but defers collection for that open to retain uncertain evidence;
+a subsequent complete recovery may reclaim it. Cleanup failure increments
+`gc_failures` and leaves undeleted bytes charged; a later open retries. Existing
+directory budget checks still precede replay: cleanup does not bypass an
+already-exceeded recovery budget.
 
 ### Windows publication prerequisites
 
@@ -227,6 +249,24 @@ activation, validate each boundary on Windows with tiny fixtures, including nest
 new directories, replaced files, open-handle sharing, injected publication failures
 and process termination. No Windows host validation is claimed by Unix tests.
 Power-loss guarantees must be justified separately from process-crash tests.
+
+The portable read-only recovery tests define the same 3-byte/two-fragment fixture
+for all native targets, including Windows: successful replay without file
+mutation, missing referenced spool, and truncated referenced spool without prefix
+delivery. They construct a v3 fixture through private test helpers; they do not
+enable or qualify a production Windows writer. The test directory contains a
+Unicode component and all fixture writer handles close before reader open.
+The current ordinary CI runs Rust library tests on Linux/macOS; its Windows build
+job only builds release binaries. Windows execution of these fixtures therefore
+remains pending a measured, bounded Windows test host/job. Merely adding a native
+`#[test]` does not establish Windows runtime evidence.
+
+The remaining writer decision must cover both renames and directory creation.
+[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires a writable file handle; [File Caching](https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching)
+separately describes cached metadata and explicit flushing. This is insufficient
+evidence to treat the existing no-op directory helper as durable. Do not enable
+Windows by merely replacing the spool rename or removing the platform guard.
 
 ## Delivery and acceptance
 
