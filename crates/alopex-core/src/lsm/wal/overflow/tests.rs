@@ -2,6 +2,7 @@ use super::*;
 use tempfile::TempDir;
 
 #[test]
+#[cfg(not(windows))]
 fn directory_sync_requires_an_existing_directory() {
     let dir = tempfile::tempdir().unwrap();
     assert!(sync_dir(dir.path()).is_ok());
@@ -23,6 +24,7 @@ impl Fixture {
         let wal = dir.path().join("wal");
         let spools = dir.path().join("spools");
         fs::create_dir(&spools).unwrap();
+        #[cfg(not(windows))]
         sync_dir(dir.path()).unwrap();
         Self {
             dir,

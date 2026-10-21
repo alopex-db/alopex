@@ -4,8 +4,12 @@
 //! The caller must exclusively own the WAL and spool directory, allocate strictly
 //! increasing LSNs, and keep recovered state private until recovery succeeds.
 //! A database integration must also fence its container before activating v3.
-//! Windows writes/activation return Unsupported until durable directory publication
-//! is implemented; read-only recovery is available on all native targets.
+//! Windows publishes synced files using write-through moves in existing durable
+//! directories. LSM activation remains gated until its other files and directory
+//! creation use a durable publication protocol too.
+
+#[cfg(windows)]
+mod windows_publication;
 
 use super::spool::{read_verified_spool, write_spool, SpoolDescriptor, SpoolIdentity, SpoolLimits};
 use super::*;
@@ -175,12 +179,27 @@ pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn sync_parent_dir(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     sync_dir(parent)
+}
+
+// The source must already be synced and closed. A publication error can leave
+// either name installed; callers must not acknowledge a transaction on error.
+fn publish_file(temporary: &Path, path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        windows_publication::publish(temporary, path, true)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, path)?;
+        sync_parent_dir(path)
+    }
 }
 
 /// Validate that a configured ring can hold a reference before creating storage.
@@ -209,25 +228,62 @@ pub(crate) fn detect_version(path: &Path, config: &WalConfig) -> Result<u16> {
 impl WalWriter {
     /// Create a fresh v3 WAL. The caller must hold exclusive database ownership.
     /// This does not upgrade or fence an existing container/database.
+    /// The parent directory must already exist durably. On Windows, an owned
+    /// `.overflow-create` file stages one WAL before publication; a stale staging
+    /// file blocks creation and must be reconciled by the owner.
     pub fn create_overflow(
         path: &Path,
         config: WalConfig,
         segment_id_base: u64,
         first_lsn: u64,
     ) -> Result<Self> {
-        require_directory_sync()?;
         compute_ring_layout(&config)?;
-        // Refuse accidental truncation of an existing WAL, unlike legacy create.
-        OpenOptions::new().create_new(true).write(true).open(path)?;
-        let writer =
-            Self::create_version(path, config, segment_id_base, first_lsn, FORMAT_VERSION)?;
-        sync_parent_dir(path)?;
-        Ok(writer)
+        #[cfg(windows)]
+        {
+            if path.try_exists()? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "overflow WAL already exists",
+                )
+                .into());
+            }
+            let temporary = path.with_extension("overflow-create");
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            let result = (|| {
+                let writer = Self::create_version(
+                    &temporary,
+                    config.clone(),
+                    segment_id_base,
+                    first_lsn,
+                    FORMAT_VERSION,
+                )?;
+                // Publish the complete file and its metadata, independent of SyncMode.
+                writer.file.sync_all()?;
+                drop(writer);
+                windows_publication::publish(&temporary, path, false)?;
+                Self::open_version(path, config, FORMAT_VERSION)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&temporary);
+            }
+            result
+        }
+        #[cfg(not(windows))]
+        {
+            // Refuse accidental truncation of an existing WAL, unlike legacy create.
+            OpenOptions::new().create_new(true).write(true).open(path)?;
+            let writer =
+                Self::create_version(path, config, segment_id_base, first_lsn, FORMAT_VERSION)?;
+            sync_parent_dir(path)?;
+            Ok(writer)
+        }
     }
 
     /// Open v3 explicitly, after recovery resolved any uncertain append outcome.
     pub fn open_overflow(path: &Path, config: WalConfig) -> Result<Self> {
-        require_directory_sync()?;
         Self::open_version(path, config, FORMAT_VERSION)
     }
 
@@ -246,7 +302,6 @@ impl WalWriter {
         fragment_bytes: u32,
         limits: OverflowLimits,
     ) -> Result<SpoolDescriptor> {
-        require_directory_sync()?;
         self.ensure_healthy()?;
         if self.format_version != FORMAT_VERSION {
             return Err(invalid("overflow reference requires WAL v3"));
@@ -286,9 +341,8 @@ impl WalWriter {
             output.sync_all()?;
             drop(output);
             fault(2)?;
-            fs::rename(&temporary, &sealed)?;
+            publish_file(&temporary, &sealed)?;
             fault(3)?;
-            sync_dir(directory)?;
             Ok(descriptor)
         })();
         let descriptor = match prepared {
@@ -298,6 +352,7 @@ impl WalWriter {
                 // is included in the next reservation; it is never discounted.
                 let _ = fs::remove_file(&temporary);
                 let _ = fs::remove_file(&sealed);
+                #[cfg(not(windows))]
                 let _ = sync_dir(directory);
                 return Err(error);
             }
@@ -326,7 +381,6 @@ impl WalWriter {
 /// rather than retrying writes through an old handle. Existing temp files block
 /// activation and must be reconciled by the owning recovery layer.
 pub fn activate(path: &Path, config: WalConfig, max_temporary_bytes: u64) -> Result<WalWriter> {
-    require_directory_sync()?;
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(invalid("WAL must be a regular file"));
     }
@@ -346,6 +400,7 @@ pub fn activate(path: &Path, config: WalConfig, max_temporary_bytes: u64) -> Res
     let result = (|| {
         let mut input = File::open(path)?;
         std::io::copy(&mut input, &mut output)?;
+        drop(input);
         let (segment_size, _, segments, _) = compute_ring_layout(&config)?;
         for index in 0..segments {
             let mut header =
@@ -357,9 +412,8 @@ pub fn activate(path: &Path, config: WalConfig, max_temporary_bytes: u64) -> Res
         fault(6)?;
         output.sync_all()?;
         drop(output);
-        fs::rename(&temporary, path)?;
+        publish_file(&temporary, path)?;
         fault(7)?;
-        sync_parent_dir(path)?;
         WalWriter::open_overflow(path, config)
     })();
     if result.is_err() {
@@ -496,7 +550,7 @@ fn fault(_stage: u8) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests;
 #[cfg(all(test, windows))]
 mod windows_tests;

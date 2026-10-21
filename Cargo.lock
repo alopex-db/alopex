@@ -274,6 +274,7 @@ dependencies = [
  "url",
  "wasm-bindgen-test",
  "web-sys",
+ "windows-sys 0.61.2",
  "xxhash-rust",
  "zstd",
 ]
