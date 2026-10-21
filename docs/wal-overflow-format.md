@@ -91,6 +91,33 @@ Lengths are validated against independently supplied limits before allocation. V
 
 ## Durable states and recovery
 
+### Operation payload (explicit v1)
+
+The native `wal::operations` codec supplies the operation stream that a future
+LSM commit/replay integration will place inside the spool. It does not activate
+overflow in `LsmKV`. Its layout is independent of physical spool fragments:
+
+- `ALPXOPS1` (8 bytes), then a little-endian `u64` operation count.
+- For each operation: tag (`0` Put, `1` Delete), key length (`u64` LE), value
+  length (`u64` LE), key bytes, value bytes. Delete requires a zero value length.
+  Empty Put values and empty keys are supported. The empty stream has count zero.
+- Exact length and count are required; unknown tags, future versions, trailing
+  bytes and incomplete records are errors.
+
+`OperationStream` borrows the ordered write set and preflights the full payload
+and individual key/value limits before any spool I/O. Reading uses only a fixed
+17-byte scratch header, without cloning the batch. `OperationDecoder` accepts
+arbitrary fragments, checks lengths against independent limits and the remaining
+payload before accumulating an operation, and never reserves memory from a count.
+It holds one operation at a time, plus allocation capacity and the owned operation
+delivered to the sink; it does not bound the sink's total retained memory. The LSM
+integration must separately budget the write set/private recovery MemTable.
+
+Every sink operation is provisional until `finish()` and the enclosing WAL/spool
+recovery succeed. After any decoder or sink error, the decoder stays failed and
+the caller discards the entire private sink. A completed operation or spool is
+not permission to publish a partial database.
+
 | State | Durable evidence | Reopen behavior |
 | --- | --- | --- |
 | Old format | Existing v1/v2 WAL/container | Read according to that version, preserving checkpoint watermark |

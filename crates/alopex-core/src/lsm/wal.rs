@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod operations;
 /// Explicit native WAL v3 reference writing and bounded spool recovery.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod overflow;
