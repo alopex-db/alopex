@@ -12,6 +12,8 @@ pub mod free_space;
 mod lock;
 pub mod memtable;
 pub mod metrics;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod overflow;
 pub mod sstable;
 pub mod wal;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -486,6 +488,8 @@ pub struct LsmKV {
     pub last_checkpoint_ms: AtomicU64,
     /// 収束先の `.alopex` コンテナ（対象外なら `None`）。
     container_path: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    overflow: Option<overflow::OverflowState>,
     /// 直近の収束以降にコミットがあったか。
     dirty: AtomicBool,
     /// コンテナが現在の状態を完全に含んでいるか。
@@ -529,6 +533,34 @@ impl LsmKV {
         path: impl AsRef<Path>,
         config: LsmKVConfig,
     ) -> Result<(Self, RecoveryResult)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::open_inner(path, config, None)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::open_inner(path, config)
+        }
+    }
+
+    /// Open with explicitly bounded WAL overflow. Reopening requires the same
+    /// opt-in; the durable container/WAL fence intentionally excludes old readers.
+    /// Windows activation remains unsupported until durable publication is available.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_with_overflow(
+        path: impl AsRef<Path>,
+        config: LsmKVConfig,
+        overflow: overflow::LsmOverflowConfig,
+    ) -> Result<(Self, RecoveryResult)> {
+        overflow.validate()?;
+        Self::open_inner(path, config, Some(overflow))
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        config: LsmKVConfig,
+        #[cfg(not(target_arch = "wasm32"))] overflow: Option<overflow::LsmOverflowConfig>,
+    ) -> Result<(Self, RecoveryResult)> {
         let data_dir = path.as_ref().to_path_buf();
         let metrics = Arc::new(LsmMetrics::default());
 
@@ -539,11 +571,20 @@ impl LsmKV {
         #[cfg(target_arch = "wasm32")]
         let container_path: Option<PathBuf> = None;
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let publication_directories = if overflow.is_some() {
+            overflow::publication_directories(&data_dir, container_path.as_deref())?
+        } else {
+            Vec::new()
+        };
+
         // Single-process enforcement comes first: everything below this line,
         // starting with the rehydrate, is destructive.
         let open_lock =
             lock::acquire(&data_dir, &lock::lock_path_for(&data_dir, &config.converge))?;
 
+        #[cfg(not(target_arch = "wasm32"))]
+        overflow::check_container_access(container_path.as_deref(), overflow.is_some())?;
         Self::restore_from_container(&data_dir, container_path.as_deref(), &config, &metrics)?;
 
         fs::create_dir_all(&data_dir)?;
@@ -552,82 +593,132 @@ impl LsmKV {
         fs::create_dir_all(&sst_dir)?;
         let checkpoint_path = data_dir.join(container::SIDECAR_CHECKPOINT_FILE);
 
-        let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = if wal_path.exists() {
-            let wal_version = detect_wal_format_version(&wal_path, &config.wal)?;
-            if wal_version < WAL_FORMAT_VERSION {
-                Self::migrate_legacy_wal(&wal_path, &checkpoint_path, &config.wal)?;
-            }
-            let start = Instant::now();
-            let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
-            let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
-            let last_checkpoint_ms = checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
-            let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
-            let replay = reader.replay()?;
-            let mut mem = MemTable::new();
-            let entries: Vec<_> = if let Some(start_lsn) = checkpoint_lsn {
-                replay
-                    .entries
-                    .into_iter()
-                    .filter(|entry| entry.lsn > start_lsn)
-                    .collect()
-            } else {
-                replay.entries
-            };
-            let mut last_lsn = apply_wal_replay(&mut mem, &entries);
-            if let Some(start_lsn) = checkpoint_lsn {
-                last_lsn = last_lsn.max(start_lsn);
-            }
-            let next = last_lsn.saturating_add(1).max(1);
-            for warning in &replay.warnings {
-                warn!(warning = %warning, "WAL recovery warning");
-            }
-            if let Some(reason) = &replay.stop_reason {
-                warn!(stop_reason = %reason, "WAL recovery stopped early");
-            }
+        let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let is_overflow = overflow.is_some()
+                && wal_path.exists()
+                && wal::overflow::detect_version(&wal_path, &config.wal)?
+                    == wal::overflow::FORMAT_VERSION;
+            #[cfg(target_arch = "wasm32")]
+            let is_overflow = false;
+            if is_overflow {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    overflow::recover(&data_dir, &config.wal, overflow.as_ref().unwrap())?
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    unreachable!()
+                }
+            } else if wal_path.exists() {
+                let wal_version = detect_wal_format_version(&wal_path, &config.wal)?;
+                if wal_version < WAL_FORMAT_VERSION {
+                    Self::migrate_legacy_wal(&wal_path, &checkpoint_path, &config.wal)?;
+                }
+                let start = Instant::now();
+                let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
+                let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
+                let last_checkpoint_ms =
+                    checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
+                let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
+                let replay = reader.replay()?;
+                let mut mem = MemTable::new();
+                let entries: Vec<_> = if let Some(start_lsn) = checkpoint_lsn {
+                    replay
+                        .entries
+                        .into_iter()
+                        .filter(|entry| entry.lsn > start_lsn)
+                        .collect()
+                } else {
+                    replay.entries
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(options) = &overflow {
+                    if entries
+                        .iter()
+                        .any(|entry| entry.encoded_len() > options.inline_bytes)
+                    {
+                        return Err(Error::InvalidFormat(
+                            "legacy WAL record exceeds overflow inline budget".into(),
+                        ));
+                    }
+                }
+                let mut last_lsn = apply_wal_replay(&mut mem, &entries);
+                if let Some(start_lsn) = checkpoint_lsn {
+                    last_lsn = last_lsn.max(start_lsn);
+                }
+                let next = last_lsn.saturating_add(1).max(1);
+                for warning in &replay.warnings {
+                    warn!(warning = %warning, "WAL recovery warning");
+                }
+                if let Some(reason) = &replay.stop_reason {
+                    warn!(stop_reason = %reason, "WAL recovery stopped early");
+                }
 
-            let stopped_at = replay.stopped_at;
-            let recovery = RecoveryResult {
-                entries_recovered: entries.len(),
-                last_lsn,
-                warnings: replay.warnings,
-                stop_reason: replay.stop_reason,
-                checkpoint_lsn,
-            };
-            let duration_ms = start.elapsed().as_millis() as u64;
-            info!(
-                entries_recovered = recovery.entries_recovered,
-                checkpoint_lsn = ?recovery.checkpoint_lsn,
-                duration_ms,
-                "WAL recovery completed"
-            );
-            let mut wal_writer = WalWriter::open(&wal_path, config.wal.clone())?;
-            if let Some(valid_end) = stopped_at {
-                wal_writer.truncate_tail_to(valid_end)?;
-            }
-            (wal_writer, mem, next, recovery, last_checkpoint_ms)
-        } else {
-            // A missing WAL does not mean a fresh database: a checkpoint may have
-            // persisted everything into SSTables already. Resuming the timestamp
-            // oracle at 1 would hand out commit timestamps below the timestamps
-            // already stored in those SSTables, which surfaces as spurious
-            // `TxnConflict`s and reads that return stale values.
-            let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
-            let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
-            let last_checkpoint_ms = checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
-            let next = checkpoint_lsn.unwrap_or(0).saturating_add(1).max(1);
-            (
-                WalWriter::create(&wal_path, config.wal.clone(), 1, next)?,
-                MemTable::new(),
-                next,
-                RecoveryResult {
-                    entries_recovered: 0,
-                    last_lsn: checkpoint_lsn.unwrap_or(0),
-                    warnings: Vec::new(),
-                    stop_reason: None,
+                let stopped_at = replay.stopped_at;
+                let recovery = RecoveryResult {
+                    entries_recovered: entries.len(),
+                    last_lsn,
+                    warnings: replay.warnings,
+                    stop_reason: replay.stop_reason,
                     checkpoint_lsn,
-                },
-                last_checkpoint_ms,
-            )
+                };
+                let duration_ms = start.elapsed().as_millis() as u64;
+                info!(
+                    entries_recovered = recovery.entries_recovered,
+                    checkpoint_lsn = ?recovery.checkpoint_lsn,
+                    duration_ms,
+                    "WAL recovery completed"
+                );
+                let mut wal_writer = WalWriter::open(&wal_path, config.wal.clone())?;
+                if let Some(valid_end) = stopped_at {
+                    wal_writer.truncate_tail_to(valid_end)?;
+                }
+                (wal_writer, mem, next, recovery, last_checkpoint_ms)
+            } else {
+                // A missing WAL does not mean a fresh database: a checkpoint may have
+                // persisted everything into SSTables already. Resuming the timestamp
+                // oracle at 1 would hand out commit timestamps below the timestamps
+                // already stored in those SSTables, which surfaces as spurious
+                // `TxnConflict`s and reads that return stale values.
+                let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
+                let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
+                let last_checkpoint_ms =
+                    checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
+                let next = checkpoint_lsn.unwrap_or(0).saturating_add(1).max(1);
+                (
+                    WalWriter::create(&wal_path, config.wal.clone(), 1, next)?,
+                    MemTable::new(),
+                    next,
+                    RecoveryResult {
+                        entries_recovered: 0,
+                        last_lsn: checkpoint_lsn.unwrap_or(0),
+                        warnings: Vec::new(),
+                        stop_reason: None,
+                        checkpoint_lsn,
+                    },
+                    last_checkpoint_ms,
+                )
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let overflow_state = overflow
+            .map(|options| overflow::OverflowState::new(options, &recovered))
+            .transpose()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let wal_writer = if let Some(options) = &overflow {
+            // All old handles must close before atomic replacement. On failure
+            // no LsmKV is published and the exclusive owner lock is released.
+            drop(wal_writer);
+            options.activate(
+                &data_dir,
+                container_path.as_deref(),
+                &config.wal,
+                recovery.last_lsn,
+                &publication_directories,
+            )?
+        } else {
+            wal_writer
         };
         let wal_used_bytes = wal_writer.used_bytes();
         let next_sstable_id = next_sstable_id_from_dir(&sst_dir)?;
@@ -649,6 +740,8 @@ impl LsmKV {
             wal_used_bytes: AtomicU64::new(wal_used_bytes),
             last_checkpoint_ms: AtomicU64::new(last_checkpoint_ms),
             container_path,
+            #[cfg(not(target_arch = "wasm32"))]
+            overflow: overflow_state,
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -830,6 +923,10 @@ impl LsmKV {
 
     /// Caller owns snapshot writer gate and commit lock, but no WAL lock.
     fn checkpoint_locked(&self) -> Result<CheckpointResult> {
+        self.wal
+            .read()
+            .expect("lsm wal lock poisoned")
+            .ensure_healthy()?;
         let start = Instant::now();
 
         self.flush_inner()?;
@@ -850,6 +947,10 @@ impl LsmKV {
         wal.advance_start(end_offset)?;
         self.wal_used_bytes
             .store(wal.used_bytes(), Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = &self.overflow {
+            state.charged.store(0, Ordering::Relaxed);
+        }
         self.last_checkpoint_ms.store(created_at, Ordering::Relaxed);
         self.metrics
             .record_checkpoint(wal_bytes_reclaimed, start.elapsed().as_micros() as u64);
@@ -884,6 +985,10 @@ impl LsmKV {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn converge_locked(&self) -> Result<ConvergeResult> {
+        self.wal
+            .read()
+            .expect("lsm wal lock poisoned")
+            .ensure_healthy()?;
         let Some(container_path) = self.container_path.as_ref() else {
             self.flush_inner()?;
             self.persist_immutable_memtables()?;
@@ -922,8 +1027,17 @@ impl LsmKV {
             .flatten()
             .cloned()
             .collect();
-        let result =
-            container::write_container(container_path, &self.sst_dir, &tables, converged_lsn)?;
+        let result = container::write_container_version(
+            container_path,
+            &self.sst_dir,
+            &tables,
+            converged_lsn,
+            if self.overflow.is_some() {
+                wal::overflow::FORMAT_VERSION
+            } else {
+                WAL_FORMAT_VERSION
+            },
+        )?;
 
         // 4. Only now may the WAL be reclaimed. Truncating before the container is
         //    durable would turn converge into a data-loss device.
@@ -933,6 +1047,10 @@ impl LsmKV {
             wal.advance_start(end_offset)?;
             self.wal_used_bytes
                 .store(wal.used_bytes(), Ordering::Relaxed);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = &self.overflow {
+            state.charged.store(0, Ordering::Relaxed);
         }
         self.last_checkpoint_ms.store(created_at, Ordering::Relaxed);
         self.dirty.store(false, Ordering::Relaxed);
@@ -952,6 +1070,10 @@ impl LsmKV {
 
     #[cfg(target_arch = "wasm32")]
     fn converge_locked(&self) -> Result<ConvergeResult> {
+        self.wal
+            .read()
+            .expect("lsm wal lock poisoned")
+            .ensure_healthy()?;
         self.flush_inner()?;
         self.persist_immutable_memtables()?;
         self.dirty.store(false, Ordering::Relaxed);
@@ -1451,8 +1573,50 @@ impl LsmKV {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let commit_ts = if let Some(options) = &self.overflow {
+            self.append_overflow_write_set(&write_set, options)?
+        } else {
+            self.append_inline_write_set(&write_set)?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let commit_ts = self.append_inline_write_set(&write_set)?;
+        // The durable WAL record is what makes this commit real, so the container
+        // is stale from this point on.
+        self.dirty.store(true, Ordering::Relaxed);
+        self.container_current.store(false, Ordering::Relaxed);
+
+        {
+            let active = self
+                .active_memtable
+                .read()
+                .expect("lsm active_memtable lock poisoned");
+            let mut sequence = 1u64;
+            for (key, value) in write_set {
+                match value {
+                    Some(value) => active.put(key, value, commit_ts, sequence),
+                    None => active.delete(key, commit_ts, sequence),
+                }
+                sequence = sequence.wrapping_add(1);
+            }
+        }
+        self.refresh_memtable_size_metrics();
+
+        if self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .memory_usage_bytes()
+            >= self.config.memtable.flush_threshold
+        {
+            self.flush_inner()?;
+        }
+        Ok(())
+    }
+
+    fn append_inline_write_set(&self, write_set: &BTreeMap<Key, Option<Value>>) -> Result<u64> {
         let mut ops = Vec::with_capacity(write_set.len());
-        for (key, value) in &write_set {
+        for (key, value) in write_set {
             ops.push(match value {
                 Some(value) => WalBatchOp {
                     op_type: WalOpType::Put,
@@ -1486,37 +1650,7 @@ impl LsmKV {
             self.wal_used_bytes
                 .store(wal.used_bytes(), Ordering::Relaxed);
         }
-        // The durable WAL record is what makes this commit real, so the container
-        // is stale from this point on.
-        self.dirty.store(true, Ordering::Relaxed);
-        self.container_current.store(false, Ordering::Relaxed);
-
-        {
-            let active = self
-                .active_memtable
-                .read()
-                .expect("lsm active_memtable lock poisoned");
-            let mut sequence = 1u64;
-            for (key, value) in write_set {
-                match value {
-                    Some(value) => active.put(key, value, commit_ts, sequence),
-                    None => active.delete(key, commit_ts, sequence),
-                }
-                sequence = sequence.wrapping_add(1);
-            }
-        }
-        self.refresh_memtable_size_metrics();
-
-        if self
-            .active_memtable
-            .read()
-            .expect("lsm active_memtable lock poisoned")
-            .memory_usage_bytes()
-            >= self.config.memtable.flush_threshold
-        {
-            self.flush_inner()?;
-        }
-        Ok(())
+        Ok(commit_ts)
     }
 
     /// At most one checkpoint and one recheck, before any part of this write
@@ -2285,6 +2419,8 @@ mod kv_store {
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
             container_path: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            overflow: None,
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -2324,6 +2460,8 @@ mod kv_store {
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
             container_path: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            overflow: None,
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -2469,6 +2607,8 @@ mod txn {
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
             container_path: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            overflow: None,
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),

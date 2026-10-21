@@ -1564,7 +1564,7 @@ impl WalWriter {
         self.append_encoded(&encoded, entry.lsn)
     }
 
-    fn ensure_healthy(&self) -> Result<()> {
+    pub(crate) fn ensure_healthy(&self) -> Result<()> {
         if self.poisoned {
             return Err(Error::InvalidFormat(
                 "WAL outcome uncertain; reopen before further writes".into(),

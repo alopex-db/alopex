@@ -145,6 +145,10 @@ impl FileVersion {
 
     /// 現行バージョン定数。
     pub const CURRENT: Self = Self::new(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+    /// LSM overflow fence; default writers retain the v0.1 format.
+    pub const WAL_OVERFLOW: Self = Self::new(0, 2, 0);
+    /// Highest readable container version, independent of default writer format.
+    pub const MAX_SUPPORTED: Self = Self::WAL_OVERFLOW;
 }
 
 /// 統一データファイル形式のエラー型。

@@ -143,6 +143,12 @@ impl MemTable {
         self.memory_usage.load(Ordering::Relaxed)
     }
 
+    /// Stored MVCC versions, used for bounded private recovery accounting.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn version_count(&self) -> usize {
+        self.data.read().expect("memtable lock poisoned").len()
+    }
+
     /// Minimum timestamp inserted so far.
     pub fn min_timestamp(&self) -> Option<u64> {
         let v = self.min_timestamp.load(Ordering::Relaxed);

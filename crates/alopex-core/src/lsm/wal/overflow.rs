@@ -133,7 +133,7 @@ fn directory_usage(directory: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
-fn require_directory_sync() -> Result<()> {
+pub(crate) fn require_directory_sync() -> Result<()> {
     if cfg!(windows) {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -147,7 +147,7 @@ fn require_directory_sync() -> Result<()> {
 
 // Unlike the legacy best-effort container helper, never ignore missing paths or
 // metadata errors: the reference must not outlive an unsynced directory entry.
-fn sync_dir(path: &Path) -> Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     require_directory_sync()?;
     let directory = File::open(path)?;
     if !directory.metadata()?.is_dir() {
@@ -163,6 +163,20 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     sync_dir(parent)
+}
+
+/// Detect v3 explicitly without weakening the legacy v1/v2 reader fence.
+pub(crate) fn detect_version(path: &Path, config: &WalConfig) -> Result<u16> {
+    let mut file = File::open(path)?;
+    let (segment_size, _, _, _) = compute_ring_layout(config)?;
+    let mut bytes = [0; WAL_SEGMENT_HEADER_SIZE];
+    file.seek(SeekFrom::Start(segment_header_offset(segment_size, 0)))?;
+    file.read_exact(&mut bytes)?;
+    if u16::from_le_bytes([bytes[4], bytes[5]]) == FORMAT_VERSION {
+        Ok(WalSegmentHeader::from_bytes_version(&bytes, FORMAT_VERSION)?.version)
+    } else {
+        detect_wal_format_version(path, config)
+    }
 }
 
 impl WalWriter {
@@ -446,7 +460,7 @@ impl WalReader {
 }
 
 #[cfg(test)]
-thread_local! { static FAIL_STAGE: Cell<u8> = const { Cell::new(0) }; }
+thread_local! { pub(crate) static FAIL_STAGE: Cell<u8> = const { Cell::new(0) }; }
 fn fault(_stage: u8) -> Result<()> {
     #[cfg(test)]
     if FAIL_STAGE.get() == _stage {
