@@ -13,6 +13,9 @@ on:
       - "scripts/compatibility/**"
       - "scripts/reference_tests/hnsw_public_inventory.py"
       - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "scripts/reference_tests/polars_common_v0816.py"
+      - "scripts/reference_tests/test_polars_common.py"
+      - "scripts/reference_tests/requirements-polars-common.txt"
       - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
@@ -33,6 +36,9 @@ on:
       - "scripts/compatibility/**"
       - "scripts/reference_tests/hnsw_public_inventory.py"
       - "scripts/reference_tests/test_hnsw_public_inventory.py"
+      - "scripts/reference_tests/polars_common_v0816.py"
+      - "scripts/reference_tests/test_polars_common.py"
+      - "scripts/reference_tests/requirements-polars-common.txt"
       - "docs/parity/hnsw-v0.8.11.json"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
@@ -429,6 +435,23 @@ jobs:
         run: >-
           cargo test -p alopex-dataframe --features lane_ci --test polars_reference
           live_polars_1_43_2_matches_dataframe_contract -- --ignored --exact
+
+      - name: Run ordinary Polars operation contracts
+        if: matrix.polars == '1.43.2'
+        run: |
+          python -B -m unittest discover -s scripts/reference_tests -p test_polars_common.py
+          tested_alopex_version=$(python -c 'import importlib.metadata; print(importlib.metadata.version("alopex"))')
+          python -B scripts/reference_tests/polars_common_v0816.py \
+            --subject-version "$tested_alopex_version" \
+            --output "$RUNNER_TEMP/polars-common" \
+            --data "$RUNNER_TEMP/polars-common-fixtures"
+      - name: Upload ordinary Polars contract evidence
+        if: always() && matrix.polars == '1.43.2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: polars-common-py${{ matrix.python }}
+          path: ${{ runner.temp }}/polars-common
+          if-no-files-found: warn
 
   server-e2e:
     name: server-e2e
