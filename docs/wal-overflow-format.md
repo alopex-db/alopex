@@ -2,8 +2,7 @@
 
 Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
 native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
-WAL v2 and the v0.1 container writer. Windows durable publication, dedicated public
-capacity errors and full public acceptance remain follow-up work. This is not release acceptance for #682.
+WAL v2 and the v0.1 container writer. Windows durable publication and full public acceptance remain follow-up work. This is not release acceptance for #682.
 
 ## Commit boundary
 
@@ -214,7 +213,17 @@ and restore the counters together with the map; rollback clears them. The commit
 stream independently rechecks the final map, including index/journal writes that
 enter through Put/Delete. These logical limits do not include cloned savepoint
 maps, caller buffers or allocator overhead and do not promise a process RSS cap.
-A dedicated public capacity-error code remains outstanding.
+Capacity limits return `alopex_core::Error::WalCapacityExceeded { reason }`.
+Downstream exhaustive matches on the public core `Error` enum need a new arm.
+The variant is the Rust contract; the diagnostic `reason` is human-readable and
+must not be parsed. This covers operation key/value/payload, spool, directory,
+replay, activation/fence and WAL-ring limits. SQL preserves the core source and
+reports `ALOPEX-S004`; Python `AlopexError.code` uses the same code for direct KV,
+open and SQL failures. Actual filesystem failures, including OS disk-full, remain
+`Io`; malformed configuration/data remains `InvalidFormat`. Allocation failure
+remains `Io(OutOfMemory)`. A caller must not assume retrying the same input without
+changing its budget can succeed. Failed puts preserve the retained write set;
+SQL statement failures follow the existing transaction rollback contract.
 
 After complete v3 replay and successful activation/SST discovery, open reconciles
 canonical spool identities with every live post-checkpoint WAL reference. It
@@ -256,10 +265,16 @@ mutation, missing referenced spool, and truncated referenced spool without prefi
 delivery. They construct a v3 fixture through private test helpers; they do not
 enable or qualify a production Windows writer. The test directory contains a
 Unicode component and all fixture writer handles close before reader open.
-The current ordinary CI runs Rust library tests on Linux/macOS; its Windows build
-job only builds release binaries. Windows execution of these fixtures therefore
-remains pending a measured, bounded Windows test host/job. Merely adding a native
-`#[test]` does not establish Windows runtime evidence.
+The Windows build job now runs these three reader tests and two writer-refusal
+tests after its existing release build, reusing the same target directory. It
+requires nonzero expected test counts and saves SHA/tree, raw logs and native
+allocation measurements. The watchdog measures before/during/after Cargo, stops
+at 40 GB host use or 20 GB additional use, and kills the owned process tree on
+failure. Windows inventory uses `FILE_STANDARD_INFO.AllocationSize`; inability
+to measure fails the job. Cache restore is disabled for this Windows job and
+build outputs are removed after CLI artifact upload. This is a native functional
+check on an isolated hosted runner, not a load or power-loss test. Only an actual
+successful run on the exact source qualifies as Windows runtime evidence.
 
 The remaining writer decision must cover both renames and directory creation.
 [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)

@@ -1577,16 +1577,16 @@ impl WalWriter {
         self.ensure_healthy()?;
         let entry_len = encoded.len() as u64;
         if entry_len > self.ring_len {
-            return Err(Error::InvalidFormat(
-                "WAL entry exceeds ring capacity".into(),
-            ));
+            return Err(Error::WalCapacityExceeded {
+                reason: "WAL entry exceeds ring capacity".into(),
+            });
         }
 
         let free_space = self.ring_len - self.used_bytes;
         if entry_len > free_space {
-            return Err(Error::InvalidFormat(
-                "WAL buffer is full; cannot append entry".into(),
-            ));
+            return Err(Error::WalCapacityExceeded {
+                reason: "WAL buffer is full; cannot append entry".into(),
+            });
         }
 
         // If the buffer is empty, always start from the beginning of the data region.

@@ -54,3 +54,46 @@ def test_sql_transaction_larger_than_ring_reopens_atomically(tmp_path):
         db.execute_sql("INSERT INTO items VALUES (3, 'a')")
     assert db.wal_overflow_stats()["gc_failures"] == 0
     db.close()
+
+
+def test_capacity_error_code_is_registered():
+    from alopex import ALOPEX_ERROR_CODES
+    assert "ALOPEX-S004" in ALOPEX_ERROR_CODES
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
+def test_kv_capacity_error_preserves_previous_commit(tmp_path):
+    path = str(tmp_path / "capacity.alopex")
+    db = Database.open(path, wal_overflow=options(value_bytes=2))
+    tx = db.begin(TxnMode.READ_WRITE)
+    tx.put(b"k", b"ok")
+    tx.commit()
+    tx = db.begin(TxnMode.READ_WRITE)
+    with pytest.raises(AlopexError) as failure:
+        tx.put(b"k", b"bad")
+    assert failure.value.code == "ALOPEX-S004"
+    assert tx.get(b"k") == b"ok"
+    tx.rollback()
+    db.close()
+    db = Database.open(path, wal_overflow=options(value_bytes=2))
+    tx = db.begin(TxnMode.READ_ONLY)
+    assert tx.get(b"k") == b"ok"
+    tx.rollback()
+    db.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
+def test_sql_capacity_error_preserves_previous_row(tmp_path):
+    path = str(tmp_path / "sql-capacity.alopex")
+    db = Database.open(path, wal_overflow=options())
+    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, value TEXT)")
+    db.execute_sql("INSERT INTO items VALUES (1, 'ok')")
+    db.close()
+    db = Database.open(path, wal_overflow=options(value_bytes=64))
+    with pytest.raises(AlopexError) as failure:
+        db.execute_sql("INSERT INTO items VALUES (2, '" + "x" * 65 + "')")
+    assert failure.value.code == "ALOPEX-S004"
+    db.close()
+    db = Database.open(path, wal_overflow=options())
+    assert db.execute_sql("SELECT id, value FROM items") == [{"id": 1, "value": "ok"}]
+    db.close()

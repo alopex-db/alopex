@@ -40,14 +40,14 @@ impl OperationLimits {
         let key = usize::try_from(key).map_err(|_| invalid("key length overflow"))?;
         let value = usize::try_from(value).map_err(|_| invalid("value length overflow"))?;
         if key > self.key_bytes || value > self.value_bytes {
-            return Err(invalid("operation exceeds key/value budget"));
+            return Err(capacity("operation exceeds key/value budget"));
         }
         Ok((key, value))
     }
 
     pub(crate) fn check_payload(self, bytes: u64) -> Result<()> {
         if bytes > self.payload_bytes {
-            return Err(invalid("operation stream exceeds payload budget"));
+            return Err(capacity("operation stream exceeds payload budget"));
         }
         Ok(())
     }
@@ -59,9 +59,15 @@ impl OperationLimits {
             .and_then(|n| n.checked_add(value as u64))
             .ok_or_else(|| invalid("operation stream length overflow"))?;
         if payload > self.payload_bytes {
-            return Err(invalid("operation stream exceeds payload budget"));
+            return Err(capacity("operation stream exceeds payload budget"));
         }
         Ok(payload)
+    }
+}
+
+fn capacity(message: &str) -> Error {
+    Error::WalCapacityExceeded {
+        reason: message.into(),
     }
 }
 
@@ -99,7 +105,7 @@ impl<'a> OperationStream<'a> {
                 .ok_or_else(|| invalid("operation stream length overflow"))?;
         }
         if payload_bytes > limits.payload_bytes {
-            return Err(invalid("operation stream exceeds payload budget"));
+            return Err(capacity("operation stream exceeds payload budget"));
         }
         let mut header = [0; OP_HEADER];
         header[..8].copy_from_slice(MAGIC);
@@ -181,7 +187,8 @@ pub struct OperationDecoder {
 impl OperationDecoder {
     /// Bind the expected size from the validated WAL reference before any allocation.
     pub fn new(payload_bytes: u64, limits: OperationLimits) -> Result<Self> {
-        if payload_bytes < STREAM_HEADER as u64 || payload_bytes > limits.payload_bytes {
+        limits.check_payload(payload_bytes)?;
+        if payload_bytes < STREAM_HEADER as u64 {
             return Err(invalid("invalid operation payload length"));
         }
         Ok(Self {

@@ -527,7 +527,10 @@ fn single_operation_payload_limit_is_checked_at_put_boundary() {
     options.operations = OperationLimits::new(40, 8, 64).unwrap();
     let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
     let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
-    assert!(tx.put(vec![0], vec![1; 7]).is_err());
+    assert!(matches!(
+        tx.put(vec![0], vec![1; 7]),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
     assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
     tx.put(vec![0], vec![2; 6]).unwrap();
     tx.commit_self().unwrap();
@@ -541,7 +544,10 @@ fn assert_two_entry_limit(options: LsmOverflowConfig) {
     let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
     tx.put(vec![0], vec![1]).unwrap();
     tx.put(vec![1], vec![2]).unwrap();
-    assert!(tx.put(vec![2], vec![3]).is_err());
+    assert!(matches!(
+        tx.put(vec![2], vec![3]),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
     assert_eq!(tx.get(&vec![2]).unwrap(), None);
     assert_eq!(store.wal_checkpoint_stats().used_bytes, 0);
     tx.rollback_in_place().unwrap();
@@ -555,7 +561,10 @@ fn assert_two_entry_limit(options: LsmOverflowConfig) {
         .unwrap();
     tx.put(vec![0], vec![1]).unwrap();
     tx.put(vec![1], vec![2]).unwrap();
-    assert!(tx.put(vec![2], vec![9]).is_err());
+    assert!(matches!(
+        tx.put(vec![2], vec![9]),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
     assert_eq!(tx.get(&vec![2]).unwrap(), Some(vec![3]));
     tx.commit().unwrap();
 }
@@ -788,9 +797,7 @@ fn recovery_reference_budget_bounds_empty_streams_before_orphan_collection() {
             assert_eq!(recovery.entries_recovered, 1);
             assert!(!orphan.exists());
         } else {
-            assert!(
-                matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull)
-            );
+            assert!(matches!(opened, Err(Error::WalCapacityExceeded { .. })));
             assert!(orphan.exists());
         }
     }

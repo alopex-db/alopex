@@ -55,6 +55,7 @@ EXPECTED_ERROR_CODES = {
     "ALOPEX-PY102",
     "ALOPEX-PY103",
     "ALOPEX-PY104",
+    "ALOPEX-S004",
     # サーバークライアント固有（python/alopex/remote.py）
     "ALOPEX-PY201",
     "ALOPEX-PY202",

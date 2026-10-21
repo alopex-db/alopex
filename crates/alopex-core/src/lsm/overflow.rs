@@ -236,7 +236,9 @@ pub(crate) fn publication_directories(
 }
 
 fn full(message: &str) -> Error {
-    std::io::Error::new(std::io::ErrorKind::StorageFull, message).into()
+    Error::WalCapacityExceeded {
+        reason: message.into(),
+    }
 }
 
 pub(crate) fn check_container_access(path: Option<&Path>, enabled: bool) -> Result<()> {
@@ -375,9 +377,12 @@ pub(crate) fn recover(
                     if references.len() >= options.replay_bytes / 128 {
                         return Err(full("recovery reference index exceeds budget"));
                     }
-                    references
-                        .try_reserve(1)
-                        .map_err(|_| full("cannot reserve recovery reference index"))?;
+                    references.try_reserve(1).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::OutOfMemory,
+                            "cannot reserve recovery reference index",
+                        )
+                    })?;
                     references.push((
                         descriptor.identity().transaction(),
                         descriptor.identity().lsn(),

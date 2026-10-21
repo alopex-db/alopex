@@ -151,6 +151,7 @@ impl From<alopex_core::Error> for SqlError {
             alopex_core::Error::TxnConflict => "ALOPEX-S001",
             alopex_core::Error::TxnClosed => "ALOPEX-S002",
             alopex_core::Error::TxnReadOnly => "ALOPEX-S003",
+            alopex_core::Error::WalCapacityExceeded { .. } => "ALOPEX-S004",
             _ => "ALOPEX-S999",
         };
 
@@ -653,6 +654,31 @@ mod tests {
             unified.message_with_location(),
             "error[ALOPEX-P004]: invalid number literal '12x' at line 3, column 7"
         );
+    }
+
+    #[test]
+    fn wal_capacity_code_survives_core_storage_and_executor_wrappers() {
+        let capacity = || alopex_core::Error::WalCapacityExceeded {
+            reason: "payload budget".into(),
+        };
+        for unified in [
+            SqlError::from(capacity()),
+            SqlError::from(StorageError::from(capacity())),
+            SqlError::from(ExecutorError::Core(capacity())),
+            SqlError::from(ExecutorError::Storage(StorageError::from(capacity()))),
+        ] {
+            assert_eq!(unified.code(), "ALOPEX-S004");
+            assert!(
+                matches!(unified.source().unwrap().downcast_ref::<alopex_core::Error>(),
+                Some(alopex_core::Error::WalCapacityExceeded { reason }) if reason == "payload budget")
+            );
+        }
+        for other in [
+            alopex_core::Error::Io(std::io::ErrorKind::StorageFull.into()),
+            alopex_core::Error::InvalidFormat("payload budget".into()),
+        ] {
+            assert_eq!(SqlError::from(other).code(), "ALOPEX-S999");
+        }
     }
 
     #[test]

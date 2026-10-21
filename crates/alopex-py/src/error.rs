@@ -76,6 +76,7 @@ pub const ERROR_CODES: &[&str] = &[
     "ALOPEX-PY102",
     "ALOPEX-PY103",
     "ALOPEX-PY104",
+    "ALOPEX-S004", // WAL capacity: shared with SQL, including direct KV/open errors.
     // Server client (python/alopex/remote.py) — client-side failures only.
     "ALOPEX-PY201",
     "ALOPEX-PY202",
@@ -252,6 +253,7 @@ fn core_error_code(err: &alopex_core::Error) -> &'static str {
         alopex_core::Error::TxnClosed => "ALOPEX-PY102",
         alopex_core::Error::TxnReadOnly => "ALOPEX-PY103",
         alopex_core::Error::TxnConflict => "ALOPEX-PY104",
+        alopex_core::Error::WalCapacityExceeded { .. } => "ALOPEX-S004",
         _ => GENERIC_ERROR_CODE,
     }
 }

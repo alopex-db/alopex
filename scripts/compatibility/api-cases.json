@@ -65,6 +65,12 @@
       "replacement": "test_api_runtime.py::test_polars_io_with_two_row_chunks",
       "reason": "Five rows preserve NULL/text and CSV/Parquet equality across chunk size two.",
       "classification": "bounded equivalent contract; source archive unchanged"
+    },
+    "crates/alopex-py/tests/test_compatibility_contract.py::test_known_python_error_codes_are_stable": {
+      "replacement": "test_api_runtime.py::test_known_error_codes_preserved_with_explicit_capacity_addition",
+      "implementation_commit": "add4a3ed5db59844a0f2d19051e4eaba35ba76ed",
+      "reason": "The opt-in WAL capacity error adds ALOPEX-S004. Preserve every archived baseline code and allow only this explicitly named addition; no removed code, renamed code, or other addition is waived.",
+      "classification": "explicit additive registry extension; archived source unchanged; existing exception behavior cases retained"
     }
   },
   "supplemental_files": [
@@ -151,7 +157,7 @@
     "crates/alopex-py/tests/test_dataframe_p3.py::test_python_list_namespace_and_explode_implode_parity",
     "crates/alopex-py/tests/test_dataframe_p3.py::test_python_dataframe_p3_errors_are_clear",
     "crates/alopex-py/tests/test_compatibility_contract.py::test_release_wheel_verifier_contract_is_digest_based",
-    "crates/alopex-py/tests/test_compatibility_contract.py::test_known_python_error_codes_are_stable",
+    "tests/compatibility-extensions/test_api_runtime.py::test_known_error_codes_preserved_with_explicit_capacity_addition",
     "crates/alopex-py/tests/test_compatibility_contract.py::test_server_client_codes_are_declared_in_the_rust_registry",
     "crates/alopex-py/tests/test_compatibility_contract.py::test_catalog_not_found_error_contract",
     "crates/alopex-py/tests/test_compatibility_contract.py::test_table_not_found_error_contract",

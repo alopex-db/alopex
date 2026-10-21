@@ -301,6 +301,17 @@ build_host() (
   local build_lock
   local build_root_created=0
   local build_lock_created=0
+  # Cleanup subprocesses must not inherit a HOME/TEMP inside the tree they
+  # remove: Windows tool startup can recreate that directory after rm returns.
+  local cleanup_variable
+  local -a cleanup_environment=()
+  for cleanup_variable in HOME USERPROFILE XDG_CACHE_HOME TEMP TMP TMPDIR; do
+    if declare -p "${cleanup_variable}" >/dev/null 2>&1; then
+      cleanup_environment+=("${cleanup_variable}=${!cleanup_variable}")
+    else
+      cleanup_environment+=("${cleanup_variable}")
+    fi
+  done
   local nimble_dir_owned
   local home_owned
   local xdg_cache_owned
@@ -365,6 +376,15 @@ build_host() (
     trap - EXIT
     set +e
     cleanup_status=0
+    # Restore values (including empty values) or the original unset state
+    # without eval. This is inside build_host's subshell, before any rm/rmdir.
+    for cleanup_variable in "${cleanup_environment[@]}"; do
+      if [[ "${cleanup_variable}" == *=* ]]; then
+        export "${cleanup_variable}"
+      else
+        unset "${cleanup_variable}"
+      fi
+    done
     if [[ "${build_root_created}" == "1" ]]; then
       # Windows runners can retain a just-closed Nim output handle briefly.
       # Retry only this invocation's canonical build root, then fail visibly.

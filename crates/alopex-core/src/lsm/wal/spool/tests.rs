@@ -115,7 +115,7 @@ fn rejects_each_budget_before_output() {
             limited,
         )
         .unwrap_err();
-        assert!(matches!(err, Error::Io(e) if e.kind() == io::ErrorKind::StorageFull));
+        assert!(matches!(err, Error::WalCapacityExceeded { .. }));
         assert!(output.is_empty());
         let mut input = Cursor::new(bytes.clone());
         assert!(verify_spool(&mut input, &descriptor, limited).is_err());

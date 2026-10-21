@@ -78,12 +78,18 @@ fn size_budgets_are_checked_before_stream_construction() {
         OperationLimits::new(n, 0, 2).unwrap(),
         OperationLimits::new(n, 1, 1).unwrap(),
     ] {
-        assert!(OperationStream::new(&map, bound).is_err());
+        assert!(matches!(
+            OperationStream::new(&map, bound),
+            Err(Error::WalCapacityExceeded { .. })
+        ));
     }
     assert!(OperationLimits::new(15, 1, 1).is_err());
     assert!(OperationLimits::new(16, usize::MAX, 1).is_err());
     assert!(OperationDecoder::new(15, limits()).is_err());
-    assert!(OperationDecoder::new(513, limits()).is_err());
+    assert!(matches!(
+        OperationDecoder::new(513, limits()),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
 }
 
 #[test]
