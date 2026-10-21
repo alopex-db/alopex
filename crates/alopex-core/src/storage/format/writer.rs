@@ -4,7 +4,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::fs::{remove_file, rename, OpenOptions};
+use std::fs::{remove_file, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
@@ -315,8 +315,10 @@ impl AlopexFileWriter {
             .sync_all()
             .map_err(|_| FormatError::IncompleteWrite)?;
 
-        // アトミックリネーム
-        rename(&self.temp_path, &self.output_path).map_err(|_| FormatError::IncompleteWrite)?;
+        // Windows publication also requires that the source handle is closed.
+        drop(self.writer);
+        crate::storage::publication::replace_file(&self.temp_path, &self.output_path)
+            .map_err(|_| FormatError::IncompleteWrite)?;
         Ok(())
     }
 

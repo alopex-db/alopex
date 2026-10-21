@@ -24,7 +24,8 @@ identity = {"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=Tr
             "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "platform": sys.platform,
             "writer_supported": False,
-            "lowlevel_wal_writer_supported": True}
+            "lowlevel_wal_writer_supported": True,
+            "lsm_file_publication_supported": True}
 (output / "source.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
 commands = [
     ("release-build", ["cargo", "build", "--release", "--locked", "--all-features"]),
@@ -34,6 +35,8 @@ commands = [
                           "--lib", "lsm::wal::overflow::tests::"]),
     ("windows-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "lsm::wal::overflow::windows_tests::"]),
+    ("lsm-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                         "--lib", "lsm::publication_tests::"]),
 ]
 for name, command in commands:
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
@@ -46,6 +49,6 @@ for name, command in commands:
     if result.returncode:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "27 passed; 0 failed",
-                "windows-publication": "6 passed; 0 failed"}
+                "windows-publication": "6 passed; 0 failed", "lsm-publication": "6 passed; 0 failed"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

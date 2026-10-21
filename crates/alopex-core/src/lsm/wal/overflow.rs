@@ -9,7 +9,7 @@
 //! creation use a durable publication protocol too.
 
 #[cfg(windows)]
-mod windows_publication;
+use crate::storage::publication::windows as windows_publication;
 
 use super::spool::{read_verified_spool, write_spool, SpoolDescriptor, SpoolIdentity, SpoolLimits};
 use super::*;
@@ -191,15 +191,10 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
 // The source must already be synced and closed. A publication error can leave
 // either name installed; callers must not acknowledge a transaction on error.
 fn publish_file(temporary: &Path, path: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        windows_publication::publish(temporary, path, true)
-    }
+    crate::storage::publication::replace_file(temporary, path)?;
     #[cfg(not(windows))]
-    {
-        fs::rename(temporary, path)?;
-        sync_parent_dir(path)
-    }
+    sync_parent_dir(path)?;
+    Ok(())
 }
 
 /// Validate that a configured ring can hold a reference before creating storage.

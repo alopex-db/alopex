@@ -14,6 +14,8 @@ pub mod memtable;
 pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod overflow;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod publication_tests;
 pub mod sstable;
 pub mod wal;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1325,7 +1327,7 @@ impl LsmKV {
             })?;
         }
         writer.finish()?;
-        fs::rename(&temporary, &path)?;
+        crate::storage::publication::replace_file(&temporary, &path)?;
         let size_bytes = fs::metadata(&path)?.len();
 
         let meta = SSTableMeta {
