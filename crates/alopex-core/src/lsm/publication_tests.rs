@@ -21,6 +21,125 @@ fn config() -> LsmKVConfig {
     }
 }
 
+#[test]
+fn nested_ancestors_support_commit_prune_and_rehydrate() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("新規/child/db.alopex.d");
+    let cfg = LsmKVConfig {
+        converge: ConvergePolicy::SidecarOnly,
+        prune_sidecar_on_drop: true,
+        ..config()
+    };
+    let (store, _) = LsmKV::open_with_config(&data, cfg.clone()).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit_self().unwrap();
+    drop(store);
+    assert!(
+        !data.exists(),
+        "successful prune leaves only the container and lock"
+    );
+    let (store, recovery) = LsmKV::open_with_config(&data, cfg).unwrap();
+    assert_eq!(recovery.entries_recovered, 0);
+    let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(tx.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+}
+
+#[test]
+fn dead_sidecar_cleanup_failure_is_reported_without_removing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("dead");
+    fs::write(&data, b"k").unwrap();
+    assert!(container::discard_dead_sidecar(&data).is_err());
+    assert_eq!(fs::read(&data).unwrap(), b"k");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_prune_sharing_failure_retains_live_wal_and_sst() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("sidecar");
+    fs::create_dir_all(data.join("sst")).unwrap();
+    let wal = data.join(container::SIDECAR_WAL_FILE);
+    fs::write(&wal, b"w").unwrap();
+    fs::write(data.join("sst/keep"), b"s").unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&wal)
+        .unwrap();
+    assert!(container::prune_sidecar(&data).is_err());
+    assert!(container::sidecar_is_live(&data));
+    assert_eq!(fs::read(&wal).unwrap(), b"w");
+    assert_eq!(fs::read(data.join("sst/keep")).unwrap(), b"s");
+    assert!(!data.join("lsm.wal.pruned").exists());
+    drop(held);
+    container::prune_sidecar(&data).unwrap();
+    assert!(!data.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_prune_does_not_overwrite_stale_retired_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("sidecar");
+    fs::create_dir(&data).unwrap();
+    fs::write(data.join(container::SIDECAR_WAL_FILE), b"w").unwrap();
+    fs::write(data.join("lsm.wal.pruned"), b"s").unwrap();
+    assert!(container::prune_sidecar(&data).is_err());
+    assert!(container::sidecar_is_live(&data));
+    assert_eq!(fs::read(data.join("lsm.wal.pruned")).unwrap(), b"s");
+    assert_eq!(
+        fs::read(data.join(container::SIDECAR_WAL_FILE)).unwrap(),
+        b"w"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_interrupted_prune_rejects_open_until_debris_can_be_removed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("db.alopex.d");
+    let cfg = LsmKVConfig {
+        converge: ConvergePolicy::SidecarOnly,
+        ..config()
+    };
+    let (store, _) = LsmKV::open_with_config(&data, cfg.clone()).unwrap();
+    let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit_self().unwrap();
+    store.converge().unwrap();
+    drop(store);
+    let sst = fs::read_dir(data.join("sst"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(sst)
+        .unwrap();
+    assert!(container::prune_sidecar(&data).is_err());
+    assert!(!container::sidecar_is_live(&data));
+    assert!(data.join("lsm.wal.pruned").exists());
+    assert!(LsmKV::open_with_config(&data, cfg.clone()).is_err());
+    assert!(
+        !container::sidecar_is_live(&data),
+        "failed cleanup must not publish a WAL"
+    );
+    drop(held);
+    let (store, recovery) = LsmKV::open_with_config(&data, cfg).unwrap();
+    assert_eq!(recovery.entries_recovered, 0);
+    let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(tx.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+}
+
 fn write_container(
     path: &Path,
     bytes: &[u8],

@@ -29,8 +29,10 @@ fn wide_path(path: &Path) -> Result<Vec<u16>> {
     Ok(wide)
 }
 
-/// Publish a synced, closed regular file on the same volume. Both directories
-/// must already exist durably and be exclusively owned. Do not add COPY_ALLOWED:
+/// Publish a synced, closed file or an empty staging directory on the same
+/// volume. Parent directories must already exist durably. Directory publication
+/// always uses `replace = false`; an existing destination must survive a race.
+/// Do not add COPY_ALLOWED:
 /// a cross-volume copy/delete is not an atomic WAL publication.
 pub(crate) fn publish(temporary: &Path, path: &Path, replace: bool) -> Result<()> {
     let source = wide_path(temporary)?;

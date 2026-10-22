@@ -188,7 +188,7 @@ impl LsmOverflowConfig {
         }
         fault(3)?;
         let spool = data.join(SPOOL_DIRECTORY);
-        fs::create_dir_all(&spool)?;
+        crate::storage::publication::create_dir_all(&spool)?;
         disk::sync_dir(&spool)?;
         disk::sync_dir(data)?;
         fault(4)?;

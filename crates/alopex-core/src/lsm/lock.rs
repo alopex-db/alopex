@@ -312,7 +312,7 @@ pub(crate) fn acquire(data_dir: &Path, lock_path: &Path) -> Result<DirectoryLock
 
     if let Some(parent) = lock_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            crate::storage::publication::create_dir_all(parent)?;
         }
     }
 
