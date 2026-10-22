@@ -39,6 +39,10 @@ commands = [
                          "--lib", "lsm::publication_tests::"]),
     ("container-fence", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "lsm::overflow::fence_tests::"]),
+    ("overflow-garbage", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                         "--lib", "lsm::wal::overflow::garbage::tests::"]),
+    ("overflow-lifecycle", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                         "--lib", "lsm::overflow::lifecycle_tests::"]),
     ("directory-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "storage::publication::directories::tests::"]),
 ]
@@ -54,6 +58,7 @@ for name, command in commands:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "27 passed; 0 failed",
                 "windows-publication": "6 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
-                "container-fence": "7 passed; 0 failed", "directory-publication": "8 passed; 0 failed"}
+                "container-fence": "7 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
+                "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "3 passed; 0 failed"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")
