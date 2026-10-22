@@ -617,10 +617,10 @@ impl LsmKV {
         overflow::check_container_access(container_path.as_deref(), overflow.is_some())?;
         Self::restore_from_container(&data_dir, container_path.as_deref(), &config, &metrics)?;
 
-        fs::create_dir_all(&data_dir)?;
+        crate::storage::publication::create_dir_all(&data_dir)?;
         let wal_path = data_dir.join(container::SIDECAR_WAL_FILE);
         let sst_dir = data_dir.join(container::SIDECAR_SST_DIR);
-        fs::create_dir_all(&sst_dir)?;
+        crate::storage::publication::create_dir_all(&sst_dir)?;
         let checkpoint_path = data_dir.join(container::SIDECAR_CHECKPOINT_FILE);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -828,9 +828,9 @@ impl LsmKV {
         if data_dir.exists() {
             // A sidecar without a WAL is the debris of an interrupted prune. The
             // container already supersedes it, so discard it before rebuilding.
-            container::discard_dead_sidecar(data_dir);
+            container::discard_dead_sidecar(data_dir)?;
         }
-        fs::create_dir_all(data_dir)?;
+        crate::storage::publication::create_dir_all(data_dir)?;
         let outcome = container::rehydrate(container_path, data_dir, &config.wal)?;
         metrics.add_rehydrate_bytes_read(outcome.bytes_read);
         info!(

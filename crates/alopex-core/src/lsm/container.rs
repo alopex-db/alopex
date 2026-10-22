@@ -48,8 +48,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(not(target_arch = "wasm32"))]
-use tracing::warn;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::lsm::checkpoint::{save_checkpoint_meta, CheckpointMeta};
@@ -447,7 +445,7 @@ pub(crate) fn rehydrate(
         None if sstable_count == 0 => {
             // No payload at all: a legitimately empty database. This is also the
             // shape the v0.1 compatibility fixtures use.
-            fs::create_dir_all(data_dir.join(SIDECAR_SST_DIR))?;
+            crate::storage::publication::create_dir_all(&data_dir.join(SIDECAR_SST_DIR))?;
             let converged_lsn = reader.footer().wal_sequence_number;
             finish_rehydrate(data_dir, wal_config, converged_lsn, wal_version)?;
             return Ok(RehydrateOutcome {
@@ -471,7 +469,7 @@ pub(crate) fn rehydrate(
         ));
     }
     let sst_dir = data_dir.join(SIDECAR_SST_DIR);
-    fs::create_dir_all(&sst_dir)?;
+    crate::storage::publication::create_dir_all(&sst_dir)?;
 
     let mut bytes_read = 0u64;
     for table in &manifest.tables {
@@ -559,7 +557,9 @@ fn finish_rehydrate(
 
     let wal_path = data_dir.join(SIDECAR_WAL_FILE);
     let writer = if wal_version == super::wal::overflow::FORMAT_VERSION {
-        fs::create_dir_all(data_dir.join(super::overflow::SPOOL_DIRECTORY))?;
+        crate::storage::publication::create_dir_all(
+            &data_dir.join(super::overflow::SPOOL_DIRECTORY),
+        )?;
         WalWriter::create_overflow(
             &wal_path,
             wal_config.clone(),
@@ -581,9 +581,12 @@ fn finish_rehydrate(
 
 /// Delete a sidecar working directory that a container has fully superseded.
 ///
-/// Removal order is fixed (裁定 D8): the WAL goes first, so a crash mid-prune
+/// Removal order is fixed (裁定 D8): the live WAL name goes first, so a crash mid-prune
 /// leaves a directory that [`sidecar_is_live`] classifies as dead and the next
 /// open safely discards and re-hydrates it.
+/// Windows retires the WAL with a non-replacing write-through move before any
+/// deletion. Later removals need not serve as the durability boundary: even if
+/// debris reappears after a crash, the live WAL name has already been retired.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn prune_sidecar(data_dir: &Path) -> Result<()> {
     if !data_dir.exists() {
@@ -591,6 +594,13 @@ pub(crate) fn prune_sidecar(data_dir: &Path) -> Result<()> {
     }
     let wal_path = data_dir.join(SIDECAR_WAL_FILE);
     if wal_path.exists() {
+        #[cfg(windows)]
+        crate::storage::publication::windows::publish(
+            &wal_path,
+            &data_dir.join("lsm.wal.pruned"),
+            false,
+        )?;
+        #[cfg(not(windows))]
         fs::remove_file(&wal_path)?;
         sync_parent_dir(&wal_path)?;
     }
@@ -609,10 +619,12 @@ pub(crate) fn prune_sidecar(data_dir: &Path) -> Result<()> {
 
 /// Discard a dead sidecar left over from an interrupted prune.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn discard_dead_sidecar(data_dir: &Path) {
-    if let Err(err) = fs::remove_dir_all(data_dir) {
-        warn!(error = %err, path = ?data_dir, "failed to discard a dead sidecar directory");
-    }
+pub(crate) fn discard_dead_sidecar(data_dir: &Path) -> Result<()> {
+    // Rehydrating over debris after a sharing/permission failure could publish
+    // a live WAL beside stale SST files. Reject open and leave the container as
+    // the authority until the entire dead sidecar can be removed.
+    fs::remove_dir_all(data_dir)?;
+    Ok(())
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -280,9 +280,30 @@ budget therefore applies to retries as well. It never flushes a read-only file
 handle (Windows requires write access for
 [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)).
 Unix retains the existing file/parent sync shortcut for an already fenced file.
-These existing-directory file operations do not qualify ancestor creation or
-sidecar pruning, and do not remove the public Windows overflow guard.
+These existing-directory file operations do not remove the public Windows
+overflow guard.
 Power-loss guarantees must be justified separately from process-crash tests.
+
+Windows LSM directory creation now stages each missing empty directory beside
+its destination and publishes it with a non-replacing write-through move, parent
+first, before writing children. The first existing ancestor is assumed durable.
+Lock-parent creation, sidecar/SST creation and rehydration use this helper. A
+stale staging directory blocks creation and is not removed; a failed publication
+cleans only the empty staging directory created by that call. If a move became
+visible before an error, the published parent is retained and children are not
+created until retry. This does not flush arbitrary pre-existing directory entries.
+
+Windows sidecar pruning retires `lsm.wal` to `lsm.wal.pruned` with a
+non-replacing write-through move before deleting metadata or SSTs. A sharing
+failure or existing retirement name leaves the live WAL and data intact. Once
+retirement succeeds, remaining debris is classified as dead even if subsequent
+deletion fails. Reopen must remove the entire dead sidecar before rehydrating;
+cleanup failure propagates instead of publishing a new WAL beside stale SSTs.
+The existing sidecar owner lock covers this sequence. This adds no format or
+new live-sidecar marker: the presence of `lsm.wal` remains the deciding artifact.
+Unix keeps its unlink/parent-sync prune boundary. Windows overflow activation
+and GC still have strict directory-sync boundaries to resolve, and public opt-in
+remains Unsupported. Native execution and power-loss qualification are separate.
 
 The portable read-only recovery tests define the same 3-byte/two-fragment fixture
 for all native targets, including Windows: successful replay without file
@@ -302,9 +323,12 @@ and qualified; successful legacy-LSM file tests do not remove that guard.
 Seven separate fence cases exercise an exact copy budget, one byte below the
 required budget, failures before/after publication, stale temporary ownership,
 and Windows retry sharing/budget failures. The native Windows harness requires
-50 passing cases in total. Python additionally verifies that an unsupported
+63 passing cases in total: the previous 50 plus eight directory publication cases
+and five lifecycle cases (nested commit/prune/reopen, cleanup error propagation,
+and three Windows prune failure/retry cases). Python additionally verifies that an unsupported
 overflow open neither creates nested ancestors nor modifies an existing
-3-byte file. These checks do not prove crash or power-loss durability.
+3-byte file, and uses one KV pair and one SQL row in separate Windows tests for
+nested creation, pruning and reopen. These checks do not prove crash or power-loss durability.
 Fixtures contain
 3-byte payloads or a 65-byte payload just beyond a 64-byte ring, not workloads. It
 requires nonzero expected test counts and saves SHA/tree, raw logs and native
