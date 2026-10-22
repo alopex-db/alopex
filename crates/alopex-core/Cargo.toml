@@ -9,6 +9,9 @@ description = "Core storage engine for Alopex DB - LSM-tree, columnar storage, a
 keywords = ["database", "storage", "lsm-tree", "columnar", "vector"]
 categories = ["database-implementations"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(alopex_wal_test_hooks)'] }
+
 [features]
 default = []
 async = []

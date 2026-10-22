@@ -18,6 +18,10 @@ use std::path::PathBuf;
 
 pub(crate) mod garbage;
 
+#[cfg(alopex_wal_test_hooks)]
+#[doc(hidden)]
+pub mod test_hooks;
+
 /// Explicit opt-in format. Default v2 readers/writers continue rejecting it.
 pub const FORMAT_VERSION: u16 = 3;
 /// Fixed physical ring bytes per spool reference, including framing and CRC.
@@ -364,7 +368,7 @@ impl WalWriter {
             self.append_encoded(&reference(descriptor), identity.lsn())?;
             fault(5)?;
             self.force_sync()?;
-            #[cfg(test)]
+            #[cfg(any(test, alopex_wal_test_hooks))]
             fault(8)?; // Durable reference, before returning success to the caller.
             Ok(())
         })();
@@ -599,6 +603,8 @@ thread_local! { pub(crate) static FAIL_STAGE: Cell<u8> = const { Cell::new(0) };
 #[cfg(test)]
 thread_local! { pub(crate) static EXIT_STAGE: Cell<u8> = const { Cell::new(0) }; }
 fn fault(_stage: u8) -> Result<()> {
+    #[cfg(alopex_wal_test_hooks)]
+    test_hooks::hit(_stage)?;
     #[cfg(test)]
     if EXIT_STAGE.get() == _stage {
         // Only the isolated test subprocess arms this; no unwinding/Drop cleanup.
