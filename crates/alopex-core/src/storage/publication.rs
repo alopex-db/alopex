@@ -11,6 +11,9 @@ mod directories;
 #[cfg(windows)]
 pub(crate) mod windows;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod staging;
+
 /// Create missing directories. Windows publishes each empty directory through
 /// a non-replacing write-through move before creating anything inside it.
 /// An existing ancestor is assumed durable; this is not a general dir flush.

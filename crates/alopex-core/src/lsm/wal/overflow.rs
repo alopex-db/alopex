@@ -424,6 +424,56 @@ pub fn activate(path: &Path, config: WalConfig, max_temporary_bytes: u64) -> Res
     result
 }
 
+// LSM-only reconciliation: the owner lock is held and this is the authoritative
+// WAL. Low-level activate/create retain their explicit stale-file refusal.
+pub(crate) fn reconcile_activation_staging(
+    path: &Path,
+    config: &WalConfig,
+    budget: u64,
+) -> Result<()> {
+    let temporary = path.with_extension("overflow-upgrade");
+    match fs::symlink_metadata(&temporary) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let version = detect_version(path, config)?;
+    let reader = WalReader::open_version(path, config.clone(), version)?;
+    drop(reader);
+    let (segment_size, _, segments, _) = compute_ring_layout(config)?;
+    let mut headers = File::open(path)?;
+    crate::storage::publication::staging::recover_prefix(
+        path,
+        &temporary,
+        budget,
+        |offset, bytes| {
+            let end = offset + bytes.len() as u64;
+            let first = offset.saturating_sub(WAL_SECTION_HEADER_SIZE as u64) / segment_size;
+            let last = (end - 1).saturating_sub(WAL_SECTION_HEADER_SIZE as u64) / segment_size;
+            for index in first..=last.min(segments - 1) {
+                let start = segment_header_offset(segment_size, index);
+                let from = offset.max(start);
+                let to = end.min(start + WAL_SEGMENT_HEADER_SIZE as u64);
+                if from < to {
+                    let mut header =
+                        read_segment_header_version(&mut headers, segment_size, index, version)?;
+                    header.version = if version == FORMAT_VERSION {
+                        WAL_VERSION
+                    } else {
+                        FORMAT_VERSION
+                    };
+                    header.crc32 = header.compute_crc();
+                    let alternate = header.to_bytes();
+                    bytes[(from - offset) as usize..(to - offset) as usize].copy_from_slice(
+                        &alternate[(from - start) as usize..(to - start) as usize],
+                    );
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
 impl WalReader {
     /// Open v3 without enabling the legacy replay API to discard new references.
     pub fn open_overflow(path: &Path, config: WalConfig) -> Result<Self> {
@@ -559,3 +609,6 @@ mod windows_tests;
 
 #[cfg(test)]
 mod recovery_portability_tests;
+
+#[cfg(test)]
+mod activation_staging_tests;
