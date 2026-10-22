@@ -1,5 +1,6 @@
 """Small explicit overflow contracts, with no load or performance assertions."""
 import sys
+from pathlib import Path
 
 import pytest
 from alopex import AlopexError, Database, WalOverflowOptions, TxnMode
@@ -115,3 +116,95 @@ def test_sql_capacity_error_preserves_previous_row(tmp_path):
     db = Database.open(path, wal_overflow=options())
     assert db.execute_sql("SELECT id, value FROM items") == [{"id": 1, "value": "ok"}]
     db.close()
+
+
+def seeded_overflow(path):
+    db = Database.open(str(path), wal_overflow=options())
+    tx = db.begin(TxnMode.READ_WRITE)
+    tx.put(b"previous", b"ok")
+    tx.commit()
+    return db
+
+
+def assert_previous_after_reopen(path, db):
+    db.close()
+    db = Database.open(str(path), wal_overflow=options())
+    with db.begin(TxnMode.READ_ONLY) as tx:
+        assert tx.get(b"previous") == b"ok"
+        assert tx.get(b"pending") is None
+    db.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
+@pytest.mark.parametrize("terminal", ["rollback", "drop", "context_exception"])
+def test_uncommitted_transaction_preserves_prior_commit(tmp_path, terminal):
+    path = tmp_path / "cancel.alopex"
+    db = seeded_overflow(path)
+    before = db.wal_overflow_stats()
+    tx = db.begin(TxnMode.READ_WRITE)
+    tx.put(b"pending", b"x" * 65)  # One byte beyond ring payload, not a load fixture.
+    if terminal == "rollback":
+        tx.rollback()
+    elif terminal == "drop":
+        del tx
+    else:
+        with pytest.raises(RuntimeError, match="caller cancelled"):
+            with tx:
+                raise RuntimeError("caller cancelled")
+    assert db.wal_overflow_stats() == before
+    assert_previous_after_reopen(path, db)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
+def test_sql_stream_cancel_rolls_back_rows_and_unique_index(tmp_path):
+    path = tmp_path / "stream.alopex"
+    db = Database.open(str(path), wal_overflow=options())
+    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code TEXT UNIQUE)")
+    db.execute_sql("INSERT INTO items VALUES (1, 'old')")
+    before = db.wal_overflow_stats()
+    tx = db.begin(TxnMode.READ_WRITE)
+    tx.execute_sql("INSERT INTO items VALUES (2, 'pending')")
+    stream = tx.execute_sql_stream("SELECT id, code FROM items")
+    stream.cancel()
+    with pytest.raises(AlopexError) as failure:
+        tx.commit()
+    assert failure.value.code == "stream_abort_required"
+    tx.rollback()
+    assert db.wal_overflow_stats() == before
+    db.close()
+    db = Database.open(str(path), wal_overflow=options())
+    assert db.execute_sql("SELECT id, code FROM items") == [{"id": 1, "code": "old"}]
+    # Both primary and unique keys from the cancelled write can be reused.
+    db.execute_sql("INSERT INTO items VALUES (2, 'pending')")
+    assert db.execute_sql("SELECT id, code FROM items ORDER BY id") == [
+        {"id": 1, "code": "old"}, {"id": 2, "code": "pending"}]
+    db.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
+@pytest.mark.parametrize("foreign_file", [False, True], ids=["missing-directory", "foreign-file"])
+def test_commit_inventory_failure_preserves_prior_commit(tmp_path, foreign_file):
+    path = tmp_path / "io.alopex"
+    db = seeded_overflow(path)
+    before = db.wal_overflow_stats()
+    spool = Path(str(path) + ".d") / "overflow"
+    saved = tmp_path / "saved-overflow"
+    spool.rename(saved)
+    if foreign_file:
+        spool.write_bytes(b"x")
+    try:
+        tx = db.begin(TxnMode.READ_WRITE)
+        tx.put(b"pending", b"x" * 65)
+        with pytest.raises(AlopexError) as failure:
+            tx.commit()
+        assert failure.value.code == "ALOPEX-PY999"  # Neither is configured capacity.
+        if foreign_file:
+            assert spool.read_bytes() == b"x"
+        else:
+            assert not spool.exists()
+    finally:
+        if foreign_file:
+            spool.unlink()
+        saved.rename(spool)
+    assert db.wal_overflow_stats() == before
+    assert_previous_after_reopen(path, db)
