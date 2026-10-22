@@ -1,0 +1,18 @@
+[package]
+name = "alopex-wal-v0816"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+candidate = []
+
+[dependencies]
+alopex-core = "=0.8.16"
+serde_json = "1"
+
+[[bin]]
+name = "alopex-wal-v0816"
+path = "../live_wal.rs"
