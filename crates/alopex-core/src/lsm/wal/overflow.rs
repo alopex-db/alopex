@@ -175,6 +175,7 @@ pub(crate) fn require_directory_sync() -> Result<()> {
 
 // Unlike the legacy best-effort container helper, never ignore missing paths or
 // metadata errors: the reference must not outlive an unsynced directory entry.
+#[cfg(not(windows))]
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     require_directory_sync()?;
     let directory = File::open(path)?;
