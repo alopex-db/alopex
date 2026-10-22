@@ -97,6 +97,43 @@ uploaded on failure as well as success. The workflow's ordinary `ci-success`
 aggregator includes that job. No extra release tag, release run or local runner is
 needed. Tests and workflow changes trigger this lane through its path filters.
 
+## Explicit overflow upgrade from a published container
+
+`wal_overflow.py` is a separate, bounded public-API check for #682. Run each phase
+in its own process, in this order, using an empty evidence directory and a fresh
+`.alopex` database path:
+
+1. Published `alopex==0.8.16` Python: `legacy-write` (one key, `old=ok`, then close).
+2. Checkout-built Python: `upgrade` (verify old file hashes, opt in to a 64-byte
+   ring, read the old value, commit one new 65-byte value, close).
+3. The same published Python: `legacy-reject` (require the explicit incompatible
+   version error and unchanged database/sidecar bytes).
+4. The same checkout-built Python: `reopen` (verify both values).
+
+Each invocation takes `--db <fresh-path.alopex> --evidence <directory>`. Candidate
+phases additionally require `--candidate-native-sha256 <sha256-of-loaded-extension>`;
+record that binary's build command and source commit separately. Old phases check
+the installed distribution version (default `--legacy-version 0.8.16`). Each phase
+writes a JSON receipt with native-module hash, database-file hashes and outcome;
+missing or failed phases do not constitute acceptance. Keep failures separately
+when rerunning with a new fixture. The ordinary historical API matrix remains
+pinned to 0.8.15; this check does not relabel those results as 0.8.16 evidence.
+
+Use the per-host storage inventory above, serialize builds through the shared
+Cargo target, and set a 30-second timeout per phase in the invoking process
+(for example, `subprocess.run(command, check=True, timeout=30)`). Closed files
+recorded by each phase may not exceed 1 MiB. The reference fixture's closed old
+container is only
+468 bytes; its default old WAL is discarded by normal close, not retained as
+a live-WAL recovery fixture. Use existing isolated environments where source
+identity is established; otherwise install binary wheels only for the baseline.
+Delete owned environments, generated DBs and build outputs after saving receipts.
+
+This check is currently a manual acceptance command on supported Unix platforms,
+not a load/performance job or Windows qualification. It certifies closed-container
+upgrade and reader fencing, not every legacy WAL/segment layout, crash recovery,
+or a downgrade path. Development parser overrides do not qualify release assets.
+
 ## Updating the candidate
 
 The old Rust lockfile is a frozen registry baseline. The candidate Rust manifest

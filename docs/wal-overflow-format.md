@@ -424,6 +424,46 @@ contracts. Native Windows CI checks the shared recovery helper, WAL header
 reconciliation, fence retry and internal lifecycle with small independent fixtures;
 it does not run load or performance tests.
 
+## Public API failure and cancellation scope
+
+On supported platforms, the public embedded Rust and Python regression cases
+stage one 65-byte value (one byte beyond the 64-byte ring payload), then explicitly
+roll back or drop the transaction. They compare spool statistics before and after
+the cancellation and reopen the database to check the previous committed value
+and absence of the pending key. Python also checks a caller exception in a
+transaction context. These cancellations occur before synchronous commit begins.
+
+The Python SQL-stream case stages a second row in a two-row table with primary
+and unique keys. Cancelling the transaction's SELECT stream makes commit fail
+with `stream_abort_required`. After rollback and reopen, only the prior row exists,
+and both keys from the cancelled row can be reused. This covers the owned session
+boundary rather than treating a successful standalone SELECT cancel as write
+transaction acceptance.
+
+Missing spool-directory inventory is an I/O error. A foreign regular file at
+that path is a format error and remains untouched. Public commit fails in either
+case, and restoring the original directory permits reopen with the previous
+commit intact. Rust asserts the distinct error variants; Python exposes the
+existing generic `ALOPEX-PY999` for both, rather than the capacity code
+`ALOPEX-S004`. Existing separate capacity cases exercise failed KV and SQL writes.
+This does not inject failures after a spool or WAL reference becomes durable.
+
+`scripts/compatibility/wal_overflow.py` separately exercises a published old
+Python writer, candidate opt-in upgrade, old-reader rejection of the fenced
+container without byte changes, and candidate reopen. It uses one old key and
+one new 65-byte value, records native module and file hashes, and checks the old
+bytes before candidate open. The baseline run uses published 0.8.16, not a
+candidate writer emitting an old-looking header. This closed-container case
+does not establish recovery of an independently produced live legacy WAL.
+
+Public Windows overflow remains unsupported. These results do not make a
+synchronous commit interruptible. Process termination at publication boundaries,
+power loss, and independently produced legacy-WAL recovery remain distinct
+acceptance work.
+The API tests do not certify a cancellation token for synchronous commit or
+replace the format-level short-write, CRC and fsync-failure tests. None of these
+functional cases is a load or performance test.
+
 ## Delivery and acceptance
 
 1. Versioned spool framing, bounded encoder/validator and corruption fixtures. Keep live v2 writer behavior unchanged. Review the exact layout and validation limits before integration.

@@ -98,3 +98,98 @@ fn public_sql_rows_and_unique_index_survive_overflow_commit_and_reopen() {
     assert!(db.execute_sql("INSERT INTO items VALUES (3, 'a')").is_err());
     assert_eq!(db.wal_overflow_stats().unwrap().unwrap().gc_failures, 0);
 }
+
+#[cfg(not(windows))]
+mod failure_acceptance {
+    use super::*;
+    use alopex_embedded::TxnMode;
+    use std::{fs, path::Path};
+
+    fn seed(path: &Path) -> Database {
+        let db = Database::open_with_options(path, options()).unwrap();
+        let mut tx = db.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"previous", b"ok").unwrap();
+        tx.commit().unwrap();
+        db
+    }
+
+    fn assert_reopened(path: &Path, db: Database) {
+        db.close().unwrap();
+        drop(db);
+        let db = Database::open_with_options(path, options()).unwrap();
+        let mut tx = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(tx.get(b"previous").unwrap(), Some(b"ok".to_vec()));
+        assert_eq!(tx.get(b"pending").unwrap(), None);
+        tx.rollback().unwrap();
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn explicit_rollback_preserves_prior_commit_without_creating_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollback.alopex");
+        let db = seed(&path);
+        let before = db.wal_overflow_stats().unwrap();
+        let mut tx = db.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"pending", &[7; 65]).unwrap(); // One byte beyond ring payload.
+        tx.rollback().unwrap();
+        assert_eq!(db.wal_overflow_stats().unwrap(), before);
+        assert_reopened(&path, db);
+    }
+
+    #[test]
+    fn dropped_transaction_preserves_prior_commit_without_creating_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop.alopex");
+        let db = seed(&path);
+        let before = db.wal_overflow_stats().unwrap();
+        let mut tx = db.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"pending", &[7; 65]).unwrap();
+        drop(tx);
+        assert_eq!(db.wal_overflow_stats().unwrap(), before);
+        assert_reopened(&path, db);
+    }
+
+    fn failed_inventory_preserves_prior_commit(foreign_file: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("io.alopex");
+        let db = seed(&path);
+        let before = db.wal_overflow_stats().unwrap();
+        let spool = dir.path().join("io.alopex.d/overflow");
+        let saved = dir.path().join("saved-overflow");
+        fs::rename(&spool, &saved).unwrap();
+        if foreign_file {
+            fs::write(&spool, b"x").unwrap();
+        }
+        let mut tx = db.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"pending", &[7; 65]).unwrap();
+        let error = tx.commit().unwrap_err();
+        if foreign_file {
+            assert!(matches!(
+                error,
+                alopex_embedded::Error::Core(alopex_core::Error::InvalidFormat(_))
+            ));
+            assert_eq!(fs::read(&spool).unwrap(), b"x");
+            fs::remove_file(&spool).unwrap();
+        } else {
+            assert!(
+                matches!(error, alopex_embedded::Error::Core(alopex_core::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound)
+            );
+            assert!(!spool.exists());
+        }
+        fs::rename(&saved, &spool).unwrap();
+        assert_eq!(db.wal_overflow_stats().unwrap(), before);
+        assert_reopened(&path, db);
+    }
+
+    #[test]
+    fn commit_missing_spool_directory_returns_io_and_preserves_prior_commit() {
+        failed_inventory_preserves_prior_commit(false);
+    }
+
+    #[test]
+    fn commit_foreign_spool_path_returns_format_error_without_deleting_it() {
+        failed_inventory_preserves_prior_commit(true);
+    }
+}
