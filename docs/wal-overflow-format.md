@@ -386,8 +386,43 @@ Tiny tests cover each interruption boundary, non-replacing publication failure,
 reservation parsing/accounting, Windows sharing failure, and the internal LSM
 activation/commit/checkpoint/recovery sequence with one key and a 40-byte value.
 Portable state-machine tests do not establish power-loss durability. Native
-Windows execution, complete public API qualification, activation/fence staging
-file reconciliation, and process/power-loss boundaries remain separate work.
+Complete public API qualification and process/power-loss boundaries remain
+separate work. Internal Windows tests do not qualify the public API.
+
+### Interrupted activation and fence copies
+
+Under the exclusive database owner lock, LSM open reconciles an existing
+`.overflow-upgrade` WAL copy or `.overflow-fence` container copy before retrying
+publication. The authoritative file remains the source of truth. Recovery only
+removes a regular staging file whose contents are a prefix of that source, allowing
+bytes from the permitted v2/v3 WAL header (including its CRC) or container-version
+rewrite. This handles interrupted copies and partially rewritten headers, as well
+as an old redundant copy left after publication. Staging data is never promoted.
+
+Comparison uses three fixed 1024-byte buffers. Both file lengths must fit the
+configured activation/fence copy budget; excess returns `WalCapacityExceeded`.
+Staging longer than the source, foreign payload bytes, non-regular paths and
+aliases of the authoritative file are refused and preserved. Opened file identities
+are compared before truncation, including hard links. Filesystem errors propagate;
+an unavailable inventory is not interpreted as an absent file. Low-level WAL
+`activate`/`create` retain their existing refusal of a pre-existing staging path;
+automatic reconciliation belongs to the locked LSM owner.
+
+After the complete comparison succeeds, recovery truncates staging to zero,
+flushes and closes it, then unlinks it. Unix also syncs the parent directory.
+On Windows, a deletion interrupted after the data flush may leave an empty prefix
+for the next open to reclaim. A sharing failure is reported and can be retried
+after the blocking handle closes. Recovery does not allocate another full copy
+or recursively delete paths. Unknown staging requires operator investigation;
+callers must not delete it automatically merely because open failed.
+
+The public Rust `LsmKV::open_with_overflow` path on supported platforms exercises
+this reconciliation on reopen and preserves committed values. The public
+Windows overflow guard remains enabled: internal recovery coverage alone does
+not establish the Database/SQL/Python failure, cancellation and legacy-reader
+contracts. Native Windows CI checks the shared recovery helper, WAL header
+reconciliation, fence retry and internal lifecycle with small independent fixtures;
+it does not run load or performance tests.
 
 ## Delivery and acceptance
 

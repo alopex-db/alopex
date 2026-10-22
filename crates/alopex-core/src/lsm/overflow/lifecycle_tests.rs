@@ -133,3 +133,39 @@ fn failed_checkpoint_preserves_spool_until_successful_retry() {
     store.checkpoint().unwrap();
     assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
 }
+
+#[test]
+fn internal_reopen_reclaims_redundant_activation_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    write(&store, &[(1, Some(vec![7; 40]))]).unwrap();
+    store.checkpoint().unwrap();
+    drop(store);
+    let wal = dir.path().join(container::SIDECAR_WAL_FILE);
+    let temporary = wal.with_extension("overflow-upgrade");
+    fs::write(&temporary, &fs::read(&wal).unwrap()[..3]).unwrap();
+    let reopened = open(dir.path());
+    assert!(!temporary.exists());
+    assert_eq!(value(&reopened, 1), Some(vec![7; 40]));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn public_overflow_open_preserves_unknown_staging_then_recovers_redundant_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    write(&store, &[(1, Some(vec![7; 40]))]).unwrap();
+    store.checkpoint().unwrap();
+    drop(store);
+    let wal = dir.path().join(container::SIDECAR_WAL_FILE);
+    let temporary = wal.with_extension("overflow-upgrade");
+    let original = fs::read(&wal).unwrap();
+    fs::write(&temporary, b"unknown").unwrap();
+    assert!(LsmKV::open_with_overflow(dir.path(), config(), limits()).is_err());
+    assert_eq!(fs::read(&temporary).unwrap(), b"unknown");
+    assert_eq!(fs::read(&wal).unwrap(), original);
+    fs::write(&temporary, &original[..3]).unwrap();
+    let (reopened, _) = LsmKV::open_with_overflow(dir.path(), config(), limits()).unwrap();
+    assert_eq!(value(&reopened, 1), Some(vec![7; 40]));
+    assert!(!temporary.exists());
+}

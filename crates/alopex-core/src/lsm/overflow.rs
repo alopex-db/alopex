@@ -198,6 +198,7 @@ impl LsmOverflowConfig {
             finish_directory_publication(directory)?;
         }
         let path = data.join(container::SIDECAR_WAL_FILE);
+        disk::reconcile_activation_staging(&path, config, self.activation_bytes)?;
         if disk::detect_version(&path, config)? == disk::FORMAT_VERSION {
             WalWriter::open_overflow(&path, config.clone())
         } else {
@@ -315,6 +316,27 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
     let reader = AlopexFileReader::open(FileSource::Path(path.to_path_buf()))?;
     let mut header = *reader.header();
     drop(reader);
+    let temporary = path.with_extension("overflow-fence");
+    let mut alternate = header;
+    alternate.version = if header.version == FileVersion::WAL_OVERFLOW {
+        FileVersion::CURRENT
+    } else {
+        FileVersion::WAL_OVERFLOW
+    };
+    let alternate = alternate.to_bytes();
+    crate::storage::publication::staging::recover_prefix(
+        path,
+        &temporary,
+        budget,
+        |offset, bytes| {
+            if offset < alternate.len() as u64 {
+                let start = offset as usize;
+                let length = bytes.len().min(alternate.len() - start);
+                bytes[..length].copy_from_slice(&alternate[start..start + length]);
+            }
+            Ok(())
+        },
+    )?;
     #[cfg(not(windows))]
     let parent = path
         .parent()
@@ -328,7 +350,6 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
     if fs::metadata(path)?.len() > budget {
         return Err(full("container fence temporary exceeds budget"));
     }
-    let temporary = path.with_extension("overflow-fence");
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)

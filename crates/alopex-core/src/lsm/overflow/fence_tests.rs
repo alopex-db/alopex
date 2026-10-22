@@ -78,6 +78,40 @@ fn stale_fence_temp_is_not_overwritten_or_removed() {
     assert_eq!(fs::read(temporary).unwrap(), b"old");
 }
 
+#[test]
+fn redundant_partial_fence_copy_is_reclaimed_before_retry() {
+    let (dir, path, original) = fixture();
+    let temporary = path.with_extension("overflow-fence");
+    fs::write(&temporary, &original[..3]).unwrap();
+    fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
+    assert_fenced(&path);
+}
+
+#[test]
+fn partly_rewritten_fence_header_is_reclaimed_without_using_staged_data() {
+    let (dir, path, original) = fixture();
+    let mut staged = original.clone();
+    let mut header = FileHeader::from_bytes(original[..HEADER_SIZE].try_into().unwrap()).unwrap();
+    header.version = FileVersion::WAL_OVERFLOW;
+    let new_header = header.to_bytes();
+    let changed = (0..HEADER_SIZE)
+        .find(|&i| staged[i] != new_header[i])
+        .unwrap();
+    staged[changed] = new_header[changed];
+    fs::write(path.with_extension("overflow-fence"), staged).unwrap();
+    fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
+    assert_fenced(&path);
+}
+
+#[test]
+fn leftover_old_header_copy_after_fence_publication_is_reclaimed() {
+    let (dir, path, original) = fixture();
+    fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
+    fs::write(path.with_extension("overflow-fence"), &original).unwrap();
+    fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
+    assert_fenced(&path);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_fenced_retry_requires_publication_and_keeps_bytes_on_sharing_failure() {

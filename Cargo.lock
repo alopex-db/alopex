@@ -263,6 +263,7 @@ dependencies = [
  "proptest",
  "rand 0.8.7",
  "regex",
+ "same-file",
  "serde",
  "serde_json",
  "snap",
