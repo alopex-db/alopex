@@ -473,6 +473,42 @@ The API tests do not certify a cancellation token for synchronous commit or
 replace the format-level short-write, CRC and fsync-failure tests. None of these
 functional cases is a load or performance test.
 
+## Public LSM persistence-boundary acceptance
+
+On supported non-Windows platforms, twelve small independent cases in
+`lsm::overflow::publication_acceptance` call public `LsmKV` open, begin, put,
+commit and scan APIs. Each starts with one committed key and stages two more
+keys, including one 65-byte value, against a 64-byte ring payload. `EveryWrite`
+remains enabled. Each boundary is exercised once with a returned I/O error and
+once with subprocess exit without unwinding or destructors:
+
+| Boundary | Recovery expectation |
+| --- | --- |
+| Spool written, before sync | Previous key only; temporary spool is removed |
+| Spool synced, before publication | Previous key only; temporary spool is removed |
+| Spool published, before reference attempt | Previous key only; unreferenced spool is removed |
+| Reference attempt begins, before append | Previous key only; uncertain writer rejects reuse; reopen removes unreferenced spool |
+| Reference appended and synced by `EveryWrite` | Both pending keys recover together, although the caller has received no success |
+| Additional reference force-sync completed, before returning | Both pending keys recover together, although the caller has received no success |
+
+After a returned error the pending keys have not entered the running store's
+memtable. Once reference publication is uncertain, a second write must fail
+with the explicit reopen-required error. Two fresh opens check exact key/value
+sets, recovery record count, spool cleanup/retention and stable replay accounting.
+An error after durable reference publication does **not** promise rollback.
+
+The boundary hooks and process-exit action exist only in `cfg(test)` builds;
+there is no runtime environment switch or new normal-build public API. The
+ignored child entry is invoked explicitly by each parent case and is not an
+unexecuted acceptance scenario. Each child has a 30-second deadline. There are
+no volume, timing or performance assertions, and no timing-based fault races.
+
+This qualifies the public native LSM layer, not the embedded Database/SQL/Python
+layers or Windows public overflow. An error injected next to a sync call is
+not an actual filesystem short write or fsync failure. Process exit does not
+simulate lost kernel caches or power failure. Those failure modes and lower-level
+codec corruption tests retain separate acceptance evidence.
+
 ## Delivery and acceptance
 
 1. Versioned spool framing, bounded encoder/validator and corruption fixtures. Keep live v2 writer behavior unchanged. Review the exact layout and validation limits before integration.

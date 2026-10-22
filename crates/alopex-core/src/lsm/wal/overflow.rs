@@ -364,6 +364,8 @@ impl WalWriter {
             self.append_encoded(&reference(descriptor), identity.lsn())?;
             fault(5)?;
             self.force_sync()?;
+            #[cfg(test)]
+            fault(8)?; // Durable reference, before returning success to the caller.
             Ok(())
         })();
         if let Err(error) = committed {
@@ -594,7 +596,14 @@ impl WalReader {
 
 #[cfg(test)]
 thread_local! { pub(crate) static FAIL_STAGE: Cell<u8> = const { Cell::new(0) }; }
+#[cfg(test)]
+thread_local! { pub(crate) static EXIT_STAGE: Cell<u8> = const { Cell::new(0) }; }
 fn fault(_stage: u8) -> Result<()> {
+    #[cfg(test)]
+    if EXIT_STAGE.get() == _stage {
+        // Only the isolated test subprocess arms this; no unwinding/Drop cleanup.
+        std::process::exit(80 + i32::from(_stage));
+    }
     #[cfg(test)]
     if FAIL_STAGE.get() == _stage {
         return Err(std::io::Error::other("injected overflow persistence failure").into());
