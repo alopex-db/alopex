@@ -272,6 +272,16 @@ pruning satisfy the complete overflow protocol. Before
 activation, validate each boundary on Windows with tiny fixtures, including nested
 new directories, replaced files, open-handle sharing, injected publication failures
 and process termination. No Windows host validation is claimed by Unix tests.
+
+The container fence and restored SSTables also use this publication helper.
+After an interrupted fence publication, Windows repeats the reserved copy and
+write-through replacement even when the visible header is already v3. The copy
+budget therefore applies to retries as well. It never flushes a read-only file
+handle (Windows requires write access for
+[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)).
+Unix retains the existing file/parent sync shortcut for an already fenced file.
+These existing-directory file operations do not qualify ancestor creation or
+sidecar pruning, and do not remove the public Windows overflow guard.
 Power-loss guarantees must be justified separately from process-crash tests.
 
 The portable read-only recovery tests define the same 3-byte/two-fragment fixture
@@ -282,13 +292,19 @@ enable or qualify a production Windows writer. The test directory contains a
 Unicode component and all fixture writer handles close before reader open.
 The Windows build job runs these three reader tests, 27 shared low-level writer
 and recovery tests, and six Windows publication/LSM-refusal cases after its
-existing release build, reusing the same target directory. Six additional native
+existing release build, reusing the same target directory. Seven additional native
 LSM publication cases cover a 24-byte checkpoint replacement and a failure
 injected after sync, one key/value flushed to an SST and reopened with no WAL replay, a
-3-byte container replacement, Windows sharing failures, and public LSM overflow
+3-byte container replacement, one-key container-to-SST restoration, Windows sharing failures, and public LSM overflow
 refusal without creating ancestors or changing existing files. Windows LSM
 overflow remains Unsupported until all publication boundaries are implemented
 and qualified; successful legacy-LSM file tests do not remove that guard.
+Seven separate fence cases exercise an exact copy budget, one byte below the
+required budget, failures before/after publication, stale temporary ownership,
+and Windows retry sharing/budget failures. The native Windows harness requires
+50 passing cases in total. Python additionally verifies that an unsupported
+overflow open neither creates nested ancestors nor modifies an existing
+3-byte file. These checks do not prove crash or power-loss durability.
 Fixtures contain
 3-byte payloads or a 65-byte payload just beyond a 64-byte ring, not workloads. It
 requires nonzero expected test counts and saves SHA/tree, raw logs and native

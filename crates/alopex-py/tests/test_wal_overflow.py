@@ -34,6 +34,24 @@ def test_platform_capability_matches_open_contract(tmp_path):
         assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows overflow refusal contract")
+def test_windows_overflow_refusal_does_not_create_nested_ancestors(tmp_path):
+    with pytest.raises(AlopexError, match="Windows support is pending"):
+        Database.open(str(tmp_path / "missing" / "child" / "db.alopex"),
+                      wal_overflow=options())
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows overflow refusal contract")
+def test_windows_overflow_refusal_preserves_existing_file(tmp_path):
+    path = tmp_path / "db.alopex"
+    path.write_bytes(b"old")
+    with pytest.raises(AlopexError, match="Windows support is pending"):
+        Database.open(str(path), wal_overflow=options())
+    assert path.read_bytes() == b"old"
+    assert list(tmp_path.iterdir()) == [path]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
 def test_sql_transaction_larger_than_ring_reopens_atomically(tmp_path):
     path = str(tmp_path / "sql.alopex")
