@@ -26,7 +26,7 @@ pub struct LsmOverflowConfig {
     pub(super) spool: SpoolLimits,
     /// Operation payload and individual key/value bounds.
     pub(super) operations: OperationLimits,
-    /// All files in the owned spool directory, including abandoned temps.
+    /// All files and unreleased retirement reservations in the spool directory.
     pub(super) directory_bytes: u64,
     /// Payload bytes per physical fragment.
     pub(super) fragment_bytes: u32,
@@ -48,12 +48,14 @@ pub(super) struct OverflowState {
 }
 
 /// A snapshot of explicit overflow budgets and current usage. Byte counts are
-/// logical file lengths / replay accounting, not allocated disk blocks or RSS.
+/// logical file lengths plus unreleased GC reservations / replay accounting,
+/// not allocated disk blocks or RSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LsmOverflowStats {
-    /// All regular files, including abandoned temporary and unknown files.
+    /// All regular files and unreleased GC reservations, including temporary
+    /// and unknown files.
     pub directory_bytes: u64,
-    /// Configured spool directory limit.
+    /// Configured spool directory limit, including retirement reservations.
     pub directory_limit_bytes: u64,
     /// Charged live replay bytes (key/value plus 128 bytes per version).
     pub replay_bytes: usize,
@@ -189,11 +191,11 @@ impl LsmOverflowConfig {
         fault(3)?;
         let spool = data.join(SPOOL_DIRECTORY);
         crate::storage::publication::create_dir_all(&spool)?;
-        disk::sync_dir(&spool)?;
-        disk::sync_dir(data)?;
+        finish_directory_publication(&spool)?;
+        finish_directory_publication(data)?;
         fault(4)?;
         for directory in publication_directories {
-            disk::sync_dir(directory)?;
+            finish_directory_publication(directory)?;
         }
         let path = data.join(container::SIDECAR_WAL_FILE);
         if disk::detect_version(&path, config)? == disk::FORMAT_VERSION {
@@ -202,6 +204,21 @@ impl LsmOverflowConfig {
             disk::activate(&path, config.clone(), self.activation_bytes)
         }
     }
+}
+
+// Windows creation already published every new directory parent-first through
+// write-through moves. Verify the resulting paths; this is not a generic fsync
+// replacement. The public overflow guard remains until full API qualification.
+fn finish_directory_publication(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if !fs::metadata(path)?.is_dir() {
+        return Err(Error::InvalidFormat(
+            "overflow publication target is not a directory".into(),
+        ));
+    }
+    #[cfg(not(windows))]
+    disk::sync_dir(path)?;
+    Ok(())
 }
 
 // Capture the first existing ancestor before the owner lock/rehydrate creates
@@ -583,3 +600,6 @@ mod tests;
 
 #[cfg(test)]
 mod fence_tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

@@ -3,32 +3,8 @@
 
 use super::*;
 
-pub(super) type Reference = ([u8; 16], u64);
-
-fn identity(name: &str) -> Option<(Reference, &str)> {
-    let (stem, extension) = name.rsplit_once('.')?;
-    if stem.len() != 49 || stem.as_bytes()[32] != b'-' {
-        return None;
-    }
-    let transaction = &stem[..32];
-    let lsn = &stem[33..];
-    if !transaction
-        .bytes()
-        .chain(lsn.bytes())
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return None;
-    }
-    let mut transaction_id = [0; 16];
-    for (index, byte) in transaction_id.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&transaction[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    let lsn = u64::from_str_radix(lsn, 16).ok()?;
-    if transaction_id == [0; 16] || lsn == 0 {
-        return None;
-    }
-    Some(((transaction_id, lsn), extension))
-}
+pub(super) use disk::garbage::Reference;
+use disk::garbage::{identity, retired};
 
 fn collectible(name: &str, checkpoint: u64) -> bool {
     identity(name).is_some_and(|((_, lsn), extension)| {
@@ -57,13 +33,22 @@ fn collect_matching(directory: &Path, predicate: impl Fn(&str) -> bool) -> Resul
     disk::directory_usage(directory)?;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
-        if entry.file_name().to_str().is_some_and(&predicate) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| retired(name).is_some() || predicate(name))
+        {
             fault(5)?;
+            #[cfg(windows)]
+            disk::garbage::remove(&entry.path())?;
+            #[cfg(not(windows))]
             fs::remove_file(entry.path())?;
         }
     }
     fault(6)?;
-    disk::sync_dir(directory)
+    #[cfg(not(windows))]
+    disk::sync_dir(directory)?;
+    Ok(())
 }
 
 #[cfg(test)]

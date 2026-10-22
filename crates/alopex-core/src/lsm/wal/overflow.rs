@@ -16,6 +16,8 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
+pub(crate) mod garbage;
+
 /// Explicit opt-in format. Default v2 readers/writers continue rejecting it.
 pub const FORMAT_VERSION: u16 = 3;
 /// Fixed physical ring bytes per spool reference, including framing and CRC.
@@ -31,7 +33,8 @@ pub struct OverflowLimits {
 }
 
 impl OverflowLimits {
-    /// Include every regular file in the owned spool directory, including temps.
+    /// Include every regular file and unreleased GC reservation in the owned
+    /// spool directory, including temporary files.
     pub fn new(spool: SpoolLimits, directory_bytes: u64, inline_bytes: usize) -> Result<Self> {
         if directory_bytes == 0 || inline_bytes < WAL_ENTRY_FIXED_HEADER + 5 {
             return Err(invalid("invalid overflow directory or inline limit"));
@@ -133,7 +136,10 @@ pub(crate) fn directory_usage(directory: &Path) -> Result<u64> {
             return Err(invalid("non-regular file in spool directory"));
         }
         bytes = bytes
-            .checked_add(entry.metadata()?.len())
+            .checked_add(garbage::charge(
+                entry.file_name().to_str(),
+                entry.metadata()?.len(),
+            ))
             .ok_or_else(|| full("spool accounting overflow"))?;
     }
     Ok(bytes)

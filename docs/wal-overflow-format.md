@@ -301,9 +301,9 @@ deletion fails. Reopen must remove the entire dead sidecar before rehydrating;
 cleanup failure propagates instead of publishing a new WAL beside stale SSTs.
 The existing sidecar owner lock covers this sequence. This adds no format or
 new live-sidecar marker: the presence of `lsm.wal` remains the deciding artifact.
-Unix keeps its unlink/parent-sync prune boundary. Windows overflow activation
-and GC still have strict directory-sync boundaries to resolve, and public opt-in
-remains Unsupported. Native execution and power-loss qualification are separate.
+Unix keeps its unlink/parent-sync prune boundary. Internal Windows activation
+and GC use the protocol below; public opt-in remains Unsupported pending full
+qualification. Native execution and power-loss qualification are separate.
 
 The portable read-only recovery tests define the same 3-byte/two-fragment fixture
 for all native targets, including Windows: successful replay without file
@@ -323,9 +323,10 @@ and qualified; successful legacy-LSM file tests do not remove that guard.
 Seven separate fence cases exercise an exact copy budget, one byte below the
 required budget, failures before/after publication, stale temporary ownership,
 and Windows retry sharing/budget failures. The native Windows harness requires
-63 passing cases in total: the previous 50 plus eight directory publication cases
-and five lifecycle cases (nested commit/prune/reopen, cleanup error propagation,
-and three Windows prune failure/retry cases). Python additionally verifies that an unsupported
+83 passing cases in total: the previous 63 plus seventeen overflow garbage cases
+and three internal overflow lifecycle cases. The earlier 63 include eight directory
+publication cases and five legacy LSM lifecycle cases (nested commit/prune/reopen,
+cleanup error propagation, and three Windows prune failure/retry cases). Python additionally verifies that an unsupported
 overflow open neither creates nested ancestors nor modifies an existing
 3-byte file, and uses one KV pair and one SQL row in separate Windows tests for
 nested creation, pruning and reopen. These checks do not prove crash or power-loss durability.
@@ -346,6 +347,47 @@ requires a writable file handle; [File Caching](https://learn.microsoft.com/en-u
 separately describes cached metadata and explicit flushing. This is insufficient
 evidence to treat the existing no-op directory helper as durable. Do not enable
 Windows LSM by merely replacing the spool rename or removing the platform guard.
+
+### Windows internal activation and spool retirement
+
+Internal activation now uses the parent-first directory publication described
+above; it checks the resulting directory paths rather than treating a skipped
+directory flush as success. This internal path is exercised separately from the
+public API, whose Windows `Unsupported` guard remains enabled.
+
+Only the exclusive owner, after a durable checkpoint/WAL reclamation or complete
+recovery reconciliation, can retire unreferenced canonical spool/temp files:
+
+1. Publish a non-replacing, write-through move to
+   `.gc-<16 lowercase hex reserved bytes>-<original canonical name>`.
+2. Truncate the retired file to zero, sync it, and close the write handle.
+3. Publish a non-replacing, write-through move to the same name with reservation
+   zero, then remove that empty entry. A prior canonical zero-reservation entry
+   may be removed before this move only if it is a regular, zero-length file;
+   this lets GC finish after an uncommitted LSN is reused. Occupied or non-regular
+   destinations still block publication and remain untouched.
+
+Directory accounting charges the greater of actual length and the encoded
+reservation. A failed truncate or flush keeps the prior reservation. A failed
+zero-reservation move may leave either name visible: the old name stays charged,
+while the zero-reservation name refers only to already synced empty data. A retry
+can finish either state. If a crash restores the old reservation name, accounting
+remains conservative. A remaining zero-reservation file is empty and can be
+removed by a later attempt. Recovery recognizes canonical retirement names
+because their original files were proven unreferenced before the retirement
+move; it preserves unknown names and continues to charge their actual bytes.
+Malformed names and retirement files larger than their recorded reservation
+are refused by the Windows remover. No payload copy or whole-directory file list
+is required. These are logical byte reservations, not allocated-block or RSS
+limits. Unix retains its unlink plus strict directory sync and understands the
+retirement accounting when opening files moved from Windows.
+
+Tiny tests cover each interruption boundary, non-replacing publication failure,
+reservation parsing/accounting, Windows sharing failure, and the internal LSM
+activation/commit/checkpoint/recovery sequence with one key and a 40-byte value.
+Portable state-machine tests do not establish power-loss durability. Native
+Windows execution, complete public API qualification, activation/fence staging
+file reconciliation, and process/power-loss boundaries remain separate work.
 
 ## Delivery and acceptance
 
