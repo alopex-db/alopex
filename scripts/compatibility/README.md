@@ -97,6 +97,62 @@ uploaded on failure as well as success. The workflow's ordinary `ci-success`
 aggregator includes that job. No extra release tag, release run or local runner is
 needed. Tests and workflow changes trigger this lane through its path filters.
 
+## Independently produced live WAL (manual #682 acceptance)
+
+`live_wal.rs` is compiled into two core-only clients: `wal-v0816` pins the
+published registry crate at `=0.8.16`; `wal-current` uses this checkout. Each has
+its own committed dependency lock, but both builds use the host's one shared
+Cargo target. They need no SQL parser, Python extension, or performance workload.
+
+After the host inventory and a bounded build plan (the example caps additional
+storage at 2 GB for core-only development builds), build serially:
+
+```bash
+export CARGO_TARGET_DIR="$PWD/target"
+python scripts/compatibility/storage.py --log /tmp/alopex-live-wal-storage.jsonl \
+  --additional-bytes 2000000000 -- \
+  cargo build --locked --manifest-path scripts/compatibility/wal-v0816/Cargo.toml
+python scripts/compatibility/storage.py --log /tmp/alopex-live-wal-storage.jsonl \
+  --additional-bytes 2000000000 -- \
+  cargo build --locked --manifest-path scripts/compatibility/wal-current/Cargo.toml
+python scripts/compatibility/storage.py --log /tmp/alopex-live-wal-storage.jsonl \
+  --additional-bytes 1000000 -- \
+  python scripts/compatibility/live_wal.py \
+    --legacy target/debug/alopex-wal-v0816 \
+    --candidate target/debug/alopex-wal-current \
+    --output /tmp/alopex-live-wal-result
+```
+
+Use a new output directory. The six serial subprocesses, each limited to 30
+seconds, check:
+
+1. Published 0.8.16 commits `old=ok` with `EveryWrite`, a single 64-byte ring
+   payload and automatic checkpoint disabled, then exits without destructors.
+   The parent asserts that the only data file is a 112-byte v2 WAL, with no SST
+   or checkpoint. This is not a closed-container fixture or a rewritten header.
+2. The candidate's default public LSM open recovers exactly one entry with the
+   LSN recorded by the old writer, no checkpoint, warning or premature stop,
+   and the expected value. The file bytes remain unchanged before activation.
+3. The candidate's explicit overflow open independently recovers that same old
+   WAL and commits a new 65-byte value. The old value remains intact.
+4. The actual old reader rejects WAL v3 with the precise unsupported-version
+   reason wrapped in its `CorruptedSegment` error and leaves all data file
+   bytes unchanged.
+5. Two separate candidate reopens each recover the committed reference and read
+   both expected values. The new value depends on overflow recovery.
+
+All fixture files together must stay below 64 KiB. The JSON receipt records
+the registry crate checksum, both binary hashes, manifest/lock/client hashes,
+checkout HEAD, file sizes/hashes and each process result. Keep build logs and
+the exact tested source identity alongside it; the receipt alone does not prove
+how an arbitrary supplied binary was built. Retain compact evidence and remove
+the owned fixture (`output/store`) and regenerable build outputs after the run.
+Do not add this manual acceptance driver to ordinary CI.
+
+This covers native LSM process-exit recovery on supported platforms, not a kill
+during spool/reference publication, power loss, Windows public overflow support,
+or public SQL/Python integration. Those are distinct #682 acceptance items.
+
 ## Explicit overflow upgrade from a published container
 
 `wal_overflow.py` is a separate, bounded public-API check for #682. Run each phase

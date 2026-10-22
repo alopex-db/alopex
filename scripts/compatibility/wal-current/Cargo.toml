@@ -1,0 +1,19 @@
+[package]
+name = "alopex-wal-current"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+default = ["candidate"]
+candidate = []
+
+[dependencies]
+alopex-core = { path = "../../../crates/alopex-core" }
+serde_json = "1"
+
+[[bin]]
+name = "alopex-wal-current"
+path = "../live_wal.rs"

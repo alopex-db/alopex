@@ -456,10 +456,19 @@ bytes before candidate open. The baseline run uses published 0.8.16, not a
 candidate writer emitting an old-looking header. This closed-container case
 does not establish recovery of an independently produced live legacy WAL.
 
+The separate manual `scripts/compatibility/live_wal.py` driver uses a published
+0.8.16 core client to commit one key and exit without destructors. Its fixture is
+only a 112-byte v2 WAL (64-byte ring payload), with no SST or checkpoint. A
+separately built candidate client verifies recovery through both default and
+explicit overflow LSM opens, writes one new 65-byte value, and reads both values
+in two new processes. The actual old reader must reject v3 without changing data
+file bytes. Receipts bind binary, client, lockfile and data-file hashes. This
+native LSM scenario is separate from the Python closed-container check and is
+not a claim about failure in the middle of publication or power-loss recovery.
+
 Public Windows overflow remains unsupported. These results do not make a
 synchronous commit interruptible. Process termination at publication boundaries,
-power loss, and independently produced legacy-WAL recovery remain distinct
-acceptance work.
+power loss and public Windows acceptance remain distinct work.
 The API tests do not certify a cancellation token for synchronous commit or
 replace the format-level short-write, CRC and fsync-failure tests. None of these
 functional cases is a load or performance test.
