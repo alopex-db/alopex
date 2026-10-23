@@ -359,3 +359,31 @@ workflow invokes this manual OS-limit test.
 This verifies real spool write refusal and partial-header recovery. It does not
 prove reference short-write handling, OS fsync-failure behavior, storage power
 loss, the Windows public overflow API, or release-wheel qualification.
+
+### Public API recovery from damaged reference/spool bytes
+
+`publication_corruption.py` adds eight manual KV/SQL cases using the ordinary
+extension. A bounded child commits two pending records and exits without close,
+preserving the live WAL. After that child has exited, the parent modifies only
+owned fixture bytes: reference CRC, a zeroed second half of the reference,
+spool seal CRC, or a one-byte-truncated seal. The fixture checks the WAL's
+20-byte section header, 28-byte segment header, v3 version and reference CRC
+before damage; a format change fails the fixture explicitly.
+
+```bash
+"$PYTHON" scripts/compatibility/publication_corruption.py --output "$NEW_OUTPUT"
+```
+
+Bad reference tails recover only the prior transaction, retain the uncertain
+spool evidence on the first open, and allow a subsequent complete commit.
+Referenced bad spools instead reject open twice, preserving the WAL and damaged
+spool bytes. Restoring the saved exact original spool then recovers the entire
+transaction across two open/close cycles. Exact values and independent primary
+and unique keys guard against partial or duplicate replay.
+
+The same three-record/65-byte-value, 1 MiB fixture and 30-second child bounds
+apply. Use the storage guard, shared target and cleanup policy above. Reports
+record source/native hashes; ordinary CI does not invoke this runner. These
+are **offline damaged-byte recovery** checks. Zeroing a reference tail does not
+simulate an actual short-write syscall; none of these cases qualifies fsync
+failure, power loss, the Windows public API or release assets.
