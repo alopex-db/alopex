@@ -327,3 +327,35 @@ copy in a fresh process and assert
 These checks qualify controlled process exit/error boundaries on non-Windows;
 they do not simulate power loss, partial OS writes or failing hardware fsync,
 and do not qualify a release wheel or the pending Windows overflow public API.
+
+### Real OS spool write refusal and termination
+
+`spool_os_write.py` uses the **ordinary extension without test hooks** on
+Linux/macOS. Run it manually under the same host storage guard after preparing
+an owned package directory with the normal extension:
+
+```bash
+"$PYTHON" scripts/compatibility/spool_os_write.py --output "$NEW_OUTPUT"
+```
+
+Eight separate child processes cover KV/SQL × file-size limit 0/32 bytes ×
+returned EFBIG/SIGXFSZ termination. Each child disables core dumps and applies
+`RLIMIT_FSIZE` only after opening the database and staging two pending records.
+A 33-byte probe confirms the OS's short-write and EFBIG behavior in that same
+child. stdout/stderr use pipes so the limit cannot break receipt output.
+The signal cases leave an actual 0/32-byte temporary spool; the parent verifies
+its size and, for the partial header, the spool magic before recovery. Error
+cases require the public Python I/O error (not the configured capacity error)
+and immediate temporary-file cleanup.
+
+Every case verifies two recovery cycles with the old data only, independent SQL
+primary/unique keys and no leftover spool, then a successful normal commit and
+reopen. Fixtures have three records at most, largest value 65 bytes, a 1 MiB
+physical cap, and a 30-second child timeout. DB fixtures are removed in `finally`;
+logs and source/native hashes remain. Run without Python `-O`; unsupported hosts
+and instrumented extensions fail before creating fixtures. No ordinary CI
+workflow invokes this manual OS-limit test.
+
+This verifies real spool write refusal and partial-header recovery. It does not
+prove reference short-write handling, OS fsync-failure behavior, storage power
+loss, the Windows public overflow API, or release-wheel qualification.
