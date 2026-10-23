@@ -387,3 +387,35 @@ record source/native hashes; ordinary CI does not invoke this runner. These
 are **offline damaged-byte recovery** checks. Zeroing a reference tail does not
 simulate an actual short-write syscall; none of these cases qualifies fsync
 failure, power loss, the Windows public API or release assets.
+
+## Actual reference short writes (manual Linux acceptance)
+
+`reference_os_write.py` uses the explicit debug-only `alopex_wal_test_hooks`
+configuration described above. Its additional private Python hook pauses once
+**after** the complete spool has been synced and published, but **before** the
+WAL reference write. The parent verifies that boundary, uses Linux `prlimit`
+to lower only that child's `RLIMIT_FSIZE`, and acknowledges the pause over a
+pipe. The hook supplies no synthetic I/O error: the kernel rejects the write
+with EFBIG or terminates the child with SIGXFSZ.
+
+```bash
+"$PYTHON" scripts/compatibility/reference_os_write.py --output "$NEW_OUTPUT"
+```
+
+Eight separate cases cover KV/SQL, returned error/OS termination, and zero or
+26 reference bytes written. The WAL is already allocated to 112 bytes; limits
+of 48/74 bytes target the reference inside it. The test compares its exact
+persisted prefix with the sealed spool identity, checks that bytes beyond the
+limit and the sealed spool are unchanged, and verifies the poisoned writer on
+returned errors. Two reopens preserve only the prior transaction and reclaim
+the unreferenced spool; a later normal commit recovers both pending records and
+SQL primary/unique keys. Each child has a total 30-second deadline, prior1 +
+pending2 records, a 65-byte value and a 1 MiB fixture cap. Reports bind results
+to native/source hashes. Retain failed logs and clean generated outputs using
+the per-host storage policy above.
+
+This runner is manual, Linux-only, and requires the instrumented **debug**
+extension. Normal builds (including all features) expose neither private hook;
+release builds reject the custom cfg. No ordinary CI enables it. These cases
+qualify actual reference write failure, not OS fsync failure, power loss,
+Windows support, performance, or release package identity.
