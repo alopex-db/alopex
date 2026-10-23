@@ -8,6 +8,9 @@ description = "Embedded database interface for Alopex DB"
 keywords = ["database", "embedded"]
 categories = ["database-implementations"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(alopex_wal_test_hooks)'] }
+
 [features]
 default = []
 s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]

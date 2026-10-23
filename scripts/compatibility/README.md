@@ -273,3 +273,57 @@ Normal Python CI explicitly ignores `tests/benchmarks` and `test_benchmark_nfr13
 Performance workflows are manual only, require an owning issue, and must have
 separate input/resource/cleanup budgets before dispatch. Their results do not
 qualify ordinary correctness CI.
+
+## Public API WAL publication boundaries (manual development acceptance)
+
+`crates/alopex-embedded/tests/wal_publication.rs` and `publication_python.py`
+each exercise 24 independent cases: Database/KV and SQL, six persistence
+boundaries, error return and immediate process exit. They use one prior and two
+pending keys/rows, a largest value of 65 bytes and a 64-byte WAL ring payload.
+Python also caps each physical fixture at 1 MiB. Child processes have a 30-second
+deadline; there are no retries, throughput assertions or load loops.
+
+These tests require an explicit **debug instrumented build** with
+`RUSTFLAGS='--cfg alopex_wal_test_hooks'`. Hooks are thread-local and consumed on
+first hit. This is deliberately not a Cargo feature: ordinary builds, including
+`--all-features`, contain neither the controls nor the private Python
+`_arm_wal_test_fault` entrypoint. Instrumented compilation without debug
+assertions fails at compile time. Do not ship an instrumented extension.
+These commands are manual; no ordinary CI workflow enables the cfg.
+
+Before building, measure the host, reserve bounded additional space, and use
+the same shared target and `storage.py` guard described above. Serialize these
+commands, retain source/tree and binary hashes with the logs, then delete the
+owned extension copies and generated target outputs. Use the configured parser
+toolchain and the same interpreter for the extension and Python runner:
+
+```bash
+RUSTFLAGS='--cfg alopex_wal_test_hooks' cargo test --locked \
+  -p alopex-embedded --test wal_publication
+RUSTFLAGS='--cfg alopex_wal_test_hooks' PYO3_BUILD_EXTENSION_MODULE=1 \
+  PYO3_PYTHON="$PYTHON" cargo build --locked -p alopex-py
+# Install/copy this debug extension alongside crates/alopex-py/python/alopex
+# in an owned temporary package directory, then point PYTHONPATH there.
+"$PYTHON" scripts/compatibility/publication_python.py --output "$NEW_OUTPUT"
+```
+
+The Rust result is 24 passed plus one ignored child helper; each parent invokes
+that helper explicitly in its own process. Python fails if the instrumented
+entrypoint is absent and writes a per-case report plus native/driver SHA-256.
+Run Python without `-O` so its assertions remain enabled.
+
+The boundaries are after spool write, after spool sync, after spool publication,
+before reference append, after reference append/sync, and after forced reference
+sync. With `EveryWrite`, the last two recover the entire pending transaction
+even when commit returned an error. Earlier boundaries recover only the prior
+transaction. Error-return cases also verify that the live database has no pending
+rows and that uncertain reference outcomes reject further writes until reopen.
+Every case checks two open/close cycles, exact values, and independent SQL primary
+and unique key enforcement. Forced exit avoids destructor-driven convergence.
+
+Afterward rebuild the ordinary extension without `RUSTFLAGS`, import that exact
+copy in a fresh process and assert
+`not hasattr(alopex._alopex, '_arm_wal_test_fault')`. Preserve its separate hash.
+These checks qualify controlled process exit/error boundaries on non-Windows;
+they do not simulate power loss, partial OS writes or failing hardware fsync,
+and do not qualify a release wheel or the pending Windows overflow public API.

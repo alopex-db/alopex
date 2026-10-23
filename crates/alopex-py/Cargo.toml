@@ -36,6 +36,9 @@ ctor = "0.4"
 proptest = "1"
 tempfile = "3"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(alopex_wal_test_hooks)'] }
+
 [features]
 default = []
 lane_ci = []

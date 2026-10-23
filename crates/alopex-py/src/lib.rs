@@ -8,6 +8,13 @@ mod error;
 mod types;
 mod vector;
 
+#[cfg(alopex_wal_test_hooks)]
+#[pyfunction]
+fn _arm_wal_test_fault(stage: u8, exit: bool) -> PyResult<()> {
+    alopex_core::lsm::wal::overflow::test_hooks::arm(stage, exit)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 #[cfg(test)]
 mod test_harness {
     /// Every unit test process needs Python before an error path can create a `PyErr`.
@@ -21,6 +28,8 @@ mod test_harness {
 
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(alopex_wal_test_hooks)]
+    m.add_function(wrap_pyfunction!(_arm_wal_test_fault, m)?)?;
     m.add("AlopexError", py.get_type::<error::PyAlopexError>())?;
     m.add("InvalidCursor", py.get_type::<error::InvalidCursor>())?;
     m.add("ALOPEX_ERROR_CODES", error::ERROR_CODES.to_vec())?;
