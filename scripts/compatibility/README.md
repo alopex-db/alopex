@@ -419,3 +419,38 @@ extension. Normal builds (including all features) expose neither private hook;
 release builds reject the custom cfg. No ordinary CI enables it. These cases
 qualify actual reference write failure, not OS fsync failure, power loss,
 Windows support, performance, or release package identity.
+
+## Sync syscall failures (manual Linux acceptance)
+
+`sync_syscall.py` uses an **ordinary** Python extension and Linux `strace`
+syscall injection. It rejects extensions with either private debug hook.
+The host must permit tracing its own child processes and provide a strace
+version supporting `-yy` and `inject=...:error=EIO:when=...`.
+
+```bash
+"$PYTHON" scripts/compatibility/sync_syscall.py --output "$NEW_OUTPUT"
+# Run just one independent case while investigating a failure:
+"$PYTHON" scripts/compatibility/sync_syscall.py --case kv-spool --output "$ONE_OUTPUT"
+```
+
+Eight cases cover KV/SQL and four sync boundaries: spool `fsync`, publication
+directory `fsync`, reference append `fdatasync`, and forced `fdatasync`.
+Each case first calibrates a successful commit on a separate three-record
+fixture. Its trace identifies the syscall ordinal and decoded file path inside
+the marked commit interval. The fault trace must contain exactly one injected
+EIO at that same boundary; an error during database open is not accepted.
+
+The caller must receive EIO without seeing the pending transaction. Failures
+before reference publication preserve only the prior transaction on reopen;
+failures after writing a complete reference poison the writer and replay the
+whole transaction on reopen. The latter result relies on retained page-cache
+contents and does not claim durability after failed sync. Two reopens check
+values, SQL primary/unique keys and spool reclamation. Pre-reference failures
+also verify a subsequent successful commit. Each child is limited to 30 seconds,
+each case's combined fixtures to 1 MiB, and each trace to 1 MiB.
+
+Reports retain per-case syscall/ordinal, native/source hashes, strace version
+and separate baseline/failure traces. These are **syscall-boundary injected
+errors**, not actual device errors or power-loss simulations. No product Rust
+change, debug hook, ordinary CI job, or performance test is required. Apply the
+same per-host budget and output cleanup policy as the other manual runners.
