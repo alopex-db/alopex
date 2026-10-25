@@ -17,16 +17,22 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--baseline-sha", required=True)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--previous-overflow", type=Path)
+    parser.add_argument("--previous-sha")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if sys.platform != "linux" or sys.flags.optimize:
         parser.error("requires Linux and assertions")
+    if bool(args.previous_overflow) != bool(args.previous_sha):
+        parser.error("--previous-overflow and --previous-sha must be supplied together")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     cpu = min(os.sched_getaffinity(0))
     os.sched_setaffinity(0, {cpu})
     binaries = {name: getattr(args, name.replace("-", "_")).resolve()
                 for name in ("baseline", "candidate-legacy", "candidate-overflow")}
+    if args.previous_overflow:
+        binaries["previous-overflow"] = args.previous_overflow.resolve()
     manifest = dict(binaries={k: hashlib.sha256(v.read_bytes()).hexdigest() for k, v in binaries.items()},
                     baseline_sha=args.baseline_sha, candidate_sha=args.candidate_sha, cpu=cpu,
                     rounds=5, warmup_rounds=1, cache="warm OS cache; fresh DB per case; no cache eviction",
@@ -34,11 +40,14 @@ def main():
                     durability="EveryWrite, one writer, automatic checkpoint disabled",
                     policy="report median ratios; >1.20 is an investigation flag, never automatic acceptance",
                     scope="tiny KV cases only; excludes SQL, throughput and release qualification")
+    if args.previous_overflow:
+        manifest["previous_sha"] = args.previous_sha
     (output / "plan.json").write_text(json.dumps(manifest, indent=2))
     rows = []
     for round_id in range(6):
         names = list(binaries)
-        names = names[round_id % 3:] + names[:round_id % 3]
+        rotation = round_id % len(names)
+        names = names[rotation:] + names[:rotation]
         for size in (16, 2048):
             for name in names:
                 case = f"{round_id}-{size}-{name}"
@@ -54,8 +63,9 @@ def main():
                         assert result.returncode == 0, (case, phase, result.stderr)
                         data = json.loads(result.stdout)
                         if phase == "write":
-                            assert data["source_sha"] == (args.baseline_sha if name == "baseline" else args.candidate_sha)
-                            assert data["overflow"] == (name == "candidate-overflow")
+                            expected_sha = {"baseline": args.baseline_sha, "previous-overflow": args.previous_sha}.get(name, args.candidate_sha)
+                            assert data["source_sha"] == expected_sha
+                            assert data["overflow"] == name.endswith("overflow")
                             record.update(data)
                         else:
                             assert data["verified"]
@@ -83,6 +93,8 @@ def main():
     report = dict(status="measured", plan=manifest, medians=medians, small_commit_ratios=ratios,
                   investigate=[name for name, ratio in ratios.items() if ratio > 1.20],
                   large_case="legacy capacity refusal is a capability gap; failure latency is not compared to success")
+    if args.previous_overflow:
+        report["overflow_after_before_ratio"] = medians["16-candidate-overflow"]["commit_ns"] / medians["16-previous-overflow"]["commit_ns"]
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report), flush=True)
 

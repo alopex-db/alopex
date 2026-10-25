@@ -59,6 +59,100 @@ impl Fixture {
 fn limits() -> OverflowLimits {
     OverflowLimits::new(SpoolLimits::new(256, 512, 32).unwrap(), 1024, 128).unwrap()
 }
+
+#[test]
+fn inline_synced_forces_durability_for_every_sync_mode() {
+    for mode in [
+        SyncMode::EveryWrite,
+        SyncMode::NoSync,
+        SyncMode::BatchSync {
+            max_batch_size: usize::MAX,
+            max_wait_ms: u64::MAX,
+        },
+    ] {
+        let mut f = Fixture::new();
+        f.config.sync_mode = mode;
+        let mut writer = f.writer();
+        reset_sync_calls();
+        let stats = writer
+            .append_inline_synced(&WalEntry::put(1, vec![1], vec![2]))
+            .unwrap();
+        assert_eq!(sync_calls(), 1);
+        assert_eq!(stats.bytes_written, writer.used_bytes());
+        assert_eq!(f.recover(0).unwrap().2, vec![1]);
+    }
+}
+
+#[test]
+fn inline_synced_uncertain_outcome_poisoning_preserves_replay() {
+    for boundary in [9, 10] {
+        let f = Fixture::new();
+        let mut writer = f.writer();
+        let entry = WalEntry::put(1, vec![1], vec![2]);
+        assert!(stage(boundary, || writer.append_inline_synced(&entry)).is_err());
+        assert!(writer.append_inline_synced(&entry).is_err());
+        assert!(append(&mut writer, &f, 2).is_err());
+        assert!(writer.force_sync().is_err());
+        assert_eq!(f.recover(0).unwrap().2, vec![1]);
+    }
+}
+
+#[test]
+fn inline_synced_known_capacity_refusal_keeps_writer_usable() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    assert!(matches!(
+        writer.append_inline_synced(&WalEntry::put(1, vec![1], vec![2; 129])),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
+    writer
+        .append_inline_synced(&WalEntry::put(1, vec![1], vec![2]))
+        .unwrap();
+    assert_eq!(f.recover(0).unwrap().2, vec![1]);
+}
+
+#[test]
+fn inline_synced_exact_ring_fill_then_refusal_keeps_writer_healthy() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    let entry = WalEntry::put(1, vec![1], vec![2; 108]);
+    assert_eq!(entry.encode().unwrap().len() as u64, writer.ring_len());
+    writer.append_inline_synced(&entry).unwrap();
+    assert_eq!(writer.used_bytes(), writer.ring_len());
+    assert!(matches!(
+        writer.append_inline_synced(&WalEntry::put(2, vec![3], vec![4])),
+        Err(Error::WalCapacityExceeded { .. })
+    ));
+    assert!(writer.ensure_healthy().is_ok());
+    assert_eq!(f.recover(0).unwrap().2, vec![1]);
+}
+
+#[test]
+fn inline_synced_real_write_error_poisons_writer() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer
+        .append_inline_synced(&WalEntry::put(1, vec![1], vec![2]))
+        .unwrap();
+    writer.file = File::open(&f.wal).unwrap(); // The OS rejects writes on this read-only handle.
+    assert!(writer
+        .append_inline_synced(&WalEntry::put(2, vec![3], vec![4]))
+        .is_err());
+    assert!(writer.ensure_healthy().is_err());
+    assert_eq!(f.recover(0).unwrap().2, vec![1]);
+}
+
+#[test]
+fn inline_synced_rejects_v2_without_changing_bytes() {
+    let f = Fixture::new();
+    let mut writer = WalWriter::create(&f.wal, f.config.clone(), 1, 1).unwrap();
+    let before = fs::read(&f.wal).unwrap();
+    assert!(writer
+        .append_inline_synced(&WalEntry::put(1, vec![1], vec![2]))
+        .is_err());
+    assert_eq!(fs::read(&f.wal).unwrap(), before);
+    writer.append(&WalEntry::put(1, vec![1], vec![2])).unwrap();
+}
 fn id(lsn: u64) -> SpoolIdentity {
     SpoolIdentity::new([7; 16], lsn).unwrap()
 }

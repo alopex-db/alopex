@@ -293,6 +293,37 @@ impl WalWriter {
         Self::open_version(path, config, FORMAT_VERSION)
     }
 
+    /// Commit a bounded inline batch in v3 with the same durability and uncertain
+    /// outcome contract as a spool reference. The LSM caller bounds allocation.
+    pub(in crate::lsm) fn append_inline_synced(
+        &mut self,
+        entry: &WalEntry,
+    ) -> Result<WalAppendStats> {
+        self.ensure_healthy()?;
+        if self.format_version != FORMAT_VERSION {
+            return Err(invalid("overflow inline commit requires WAL v3"));
+        }
+        let encoded = entry.encode()?;
+        if encoded.len() as u64 > self.ring_len - self.used_bytes {
+            return Err(full("WAL ring lacks room for inline commit"));
+        }
+        let committed = (|| {
+            let mut stats = self.append_encoded(&encoded, entry.lsn)?;
+            #[cfg(test)]
+            fault(9)?;
+            if !matches!(self.config.sync_mode, SyncMode::EveryWrite) {
+                stats.sync_duration_ms += self.force_sync()?;
+            }
+            #[cfg(test)]
+            fault(10)?;
+            Ok(stats)
+        })();
+        if committed.is_err() {
+            self.poisoned = true;
+        }
+        committed
+    }
+
     /// Prepare a synced spool, then append and force-sync its fixed-size reference.
     ///
     /// The directory must already exist durably and be exclusively owned. Known

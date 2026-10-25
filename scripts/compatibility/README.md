@@ -509,3 +509,11 @@ not an automatic acceptance rule or a noise exemption. Five tiny samples do not
 qualify SQL/Python performance, throughput, cold-cache behavior, large datasets,
 or release readiness. Keep #682's overall performance acceptance open until its
 remaining coverage and any observed overhead have an explicit disposition.
+
+For a direct optimization comparison, add `--previous-overflow "$BEFORE_BIN"`
+and `--previous-sha "$BEFORE_SHA"` together. Build that fourth binary with the
+same probe and overflow feature against the pre-change source. The runner uses
+the same six rounds for all four modes (48 tiny cases total), verifies the
+embedded source/feature identities, and reports the candidate/previous overflow
+commit ratio as well as the baseline ratios. This provides a contemporaneous
+control when changed production code requires a new measurement.

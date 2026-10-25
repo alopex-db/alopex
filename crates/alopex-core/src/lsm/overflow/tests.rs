@@ -71,6 +71,190 @@ fn header(path: &Path) -> FileHeader {
     FileHeader::from_bytes(bytes[..HEADER_SIZE].try_into().unwrap()).unwrap()
 }
 
+fn inline_options() -> LsmOverflowConfig {
+    LsmOverflowConfig::new(
+        SpoolLimits::new(16384, 32768, 256).unwrap(),
+        OperationLimits::new(16384, 16, 4096).unwrap(),
+        131072,
+        256,
+        32768,
+    )
+    .with_inline_bytes(1024)
+    .with_activation_bytes(8192)
+}
+
+fn inline_config() -> LsmKVConfig {
+    let mut cfg = config();
+    cfg.wal.segment_size = wal::WAL_SEGMENT_HEADER_SIZE + 4096;
+    cfg
+}
+
+#[test]
+fn small_inline_replays_empty_values_and_deletes_without_spools() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) =
+        LsmKV::open_with_overflow(dir.path(), inline_config(), inline_options()).unwrap();
+    write(
+        &store,
+        &[(0, Some(vec![1; 16])), (1, Some(vec![])), (2, None)],
+    )
+    .unwrap();
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+    assert_eq!(
+        store.overflow_stats().unwrap().unwrap().replay_bytes,
+        3 * 129 + 16
+    );
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    assert!(LsmKV::open_with_config(crash.path(), inline_config()).is_err());
+    let (reopened, recovery) =
+        LsmKV::open_with_overflow(crash.path(), inline_config(), inline_options()).unwrap();
+    assert_eq!(recovery.entries_recovered, 1);
+    assert_eq!(value(&reopened, 0), Some(vec![1; 16]));
+    assert_eq!(value(&reopened, 1), Some(vec![]));
+    assert_eq!(value(&reopened, 2), None);
+    assert_eq!(
+        reopened.overflow_stats().unwrap().unwrap().replay_bytes,
+        3 * 129 + 16
+    );
+}
+
+#[test]
+fn small_inline_mixes_with_large_spools_and_checkpoint_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) =
+        LsmKV::open_with_overflow(dir.path(), inline_config(), inline_options()).unwrap();
+    write(
+        &store,
+        &[(0, Some(vec![3; 2048])), (1, Some(vec![4; 2048]))],
+    )
+    .unwrap();
+    let spool_bytes = store.overflow_stats().unwrap().unwrap().directory_bytes;
+    assert!(spool_bytes > 4096);
+    write(&store, &[(0, None), (2, Some(vec![]))]).unwrap();
+    assert_eq!(
+        store.overflow_stats().unwrap().unwrap().directory_bytes,
+        spool_bytes
+    );
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let (reopened, recovery) =
+        LsmKV::open_with_overflow(crash.path(), inline_config(), inline_options()).unwrap();
+    assert_eq!(recovery.entries_recovered, 2);
+    assert_eq!(value(&reopened, 0), None);
+    assert_eq!(value(&reopened, 1), Some(vec![4; 2048]));
+    assert_eq!(value(&reopened, 2), Some(vec![]));
+    reopened.checkpoint().unwrap();
+    let stats = reopened.overflow_stats().unwrap().unwrap();
+    assert_eq!(stats.directory_bytes, 0);
+    assert_eq!(stats.replay_bytes, 0);
+}
+
+#[test]
+fn small_inline_respects_copy_recovery_and_free_ring_boundaries() {
+    // Stream header16 + op17 + key1 + value. Test each bound at and above it.
+    for (size, inline_bytes, ring, expected_inline) in [
+        (990, 2048, 4096, true),
+        (991, 2048, 4096, false),
+        (16, 50, 4096, true),
+        (16, 49, 4096, false),
+        (16, 1024, 50 + REFERENCE_BYTES, true),
+        (16, 1024, 49 + REFERENCE_BYTES, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = inline_config();
+        cfg.wal.segment_size = wal::WAL_SEGMENT_HEADER_SIZE + ring;
+        let options = inline_options().with_inline_bytes(inline_bytes);
+        let (store, _) = LsmKV::open_with_overflow(dir.path(), cfg.clone(), options).unwrap();
+        write(&store, &[(0, Some(vec![7; size]))]).unwrap();
+        assert_eq!(
+            store.overflow_stats().unwrap().unwrap().directory_bytes == 0,
+            expected_inline
+        );
+        let crash = tempfile::tempdir().unwrap();
+        copy_tree(dir.path(), crash.path());
+        let (reopened, _) = LsmKV::open_with_overflow(crash.path(), cfg, options).unwrap();
+        assert_eq!(value(&reopened, 0), Some(vec![7; size]));
+    }
+}
+
+#[test]
+fn small_inline_charges_live_versions_before_replay_budget_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = inline_options();
+    options.replay_bytes = 260;
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), inline_config(), options).unwrap();
+    for byte in 0..3 {
+        write(&store, &[(0, Some(vec![byte]))]).unwrap();
+        assert_eq!(
+            store.overflow_stats().unwrap().unwrap().replay_bytes,
+            if byte == 1 { 260 } else { 130 }
+        );
+        assert_eq!(
+            store.wal_checkpoint_stats().checkpoint_count,
+            u64::from(byte == 2)
+        );
+    }
+    assert_eq!(value(&store, 0), Some(vec![2]));
+}
+
+#[test]
+fn small_inline_keeps_reference_headroom_after_prior_inline_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = inline_config();
+    // First batch occupies 38 bytes; second stream needs 50 plus a reference.
+    cfg.wal.segment_size = wal::WAL_SEGMENT_HEADER_SIZE + 38 + 49 + REFERENCE_BYTES;
+    let (store, _) = LsmKV::open_with_overflow(dir.path(), cfg, inline_options()).unwrap();
+    write(&store, &[(0, Some(vec![1; 16]))]).unwrap();
+    assert_eq!(store.wal_checkpoint_stats().used_bytes, 38);
+    assert_eq!(store.overflow_stats().unwrap().unwrap().directory_bytes, 0);
+    write(&store, &[(1, Some(vec![2; 16]))]).unwrap();
+    assert_eq!(
+        store.wal_checkpoint_stats().used_bytes,
+        38 + REFERENCE_BYTES as u64
+    );
+    assert!(store.overflow_stats().unwrap().unwrap().directory_bytes > 0);
+    assert_eq!(store.wal_checkpoint_stats().checkpoint_count, 0);
+}
+
+#[test]
+fn small_inline_uncertain_commit_stops_checkpoint_and_recovers_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) =
+        LsmKV::open_with_overflow(dir.path(), inline_config(), inline_options()).unwrap();
+    write(&store, &[(0, Some(vec![1]))]).unwrap();
+    wal::overflow::FAIL_STAGE.set(9);
+    let result = write(&store, &[(1, Some(vec![2])), (2, Some(vec![3]))]);
+    wal::overflow::FAIL_STAGE.set(0);
+    assert!(result.is_err());
+    assert_eq!(value(&store, 1), None);
+    assert!(store.checkpoint().is_err());
+    assert!(write(&store, &[(3, Some(vec![4]))]).is_err());
+    let crash = tempfile::tempdir().unwrap();
+    copy_tree(dir.path(), crash.path());
+    let (reopened, _) =
+        LsmKV::open_with_overflow(crash.path(), inline_config(), inline_options()).unwrap();
+    for key in 0..3 {
+        assert_eq!(value(&reopened, key), Some(vec![key + 1]));
+    }
+    assert_eq!(value(&reopened, 3), None);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    #[test]
+    fn small_inline_stream_length_bounds_the_actual_batch(
+        writes in prop::collection::btree_map(prop::collection::vec(any::<u8>(), 0..16), prop::option::of(prop::collection::vec(any::<u8>(), 0..160)), 1..6)
+    ) {
+        let stream = OperationStream::new(&writes, inline_options().operations).unwrap();
+        prop_assume!(stream.payload_bytes() <= SMALL_INLINE_BYTES);
+        let entry = WalEntry::batch(1, writes.iter().map(|(key,value)| WalBatchOp {
+            op_type: if value.is_some() {WalOpType::Put} else {WalOpType::Delete}, key:key.clone(),value:value.clone(),
+        }).collect());
+        prop_assert!(entry.encode().unwrap().len() as u64 <= stream.payload_bytes());
+    }
+}
+
 #[test]
 fn batch_larger_than_ring_replays_values_empty_put_and_delete() {
     let dir = tempfile::tempdir().unwrap();
