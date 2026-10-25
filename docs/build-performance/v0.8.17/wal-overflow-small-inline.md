@@ -35,7 +35,26 @@ The 13 new focused tests cover Put/Delete/empty values, mixed inline/spool repla
 
 Mutation check selected 17 changed-path capacity, selection, version and sync mutants: 15 caught, two unviable, zero missed/timeouts. Unviable cases are a missing Default implementation and Rust parsing the mutated cast/comparison as generic arguments. Scope is explicit; this is not whole-module mutation coverage. Coupling inspected 32 LSM modules with AST fallback after dependency metadata fetch failed; existing module hotspots and the private LSM→WAL boundary are retained. Dynamic ordering, cfg/macros and implicit algorithm duplication remain analysis blind spots.
 
-The new inline tests cover actual write refusal and injected append/sync boundaries. The earlier reference-path syscall injection evidence does not independently qualify the new inline path against actual sync syscall EIO. That remains a focused follow-up, alongside public Database/SQL/Python path validation, Windows public API support and real-device power-loss acceptance. No unsafe path changed; Miri was not applicable, and Kani was not run.
+The new inline unit tests cover actual write refusal and injected append/sync boundaries. A separate Linux acceptance run now covers the new inline path through the ordinary Python Database KV/SQL APIs; earlier reference-path evidence was not reused for this qualification. Windows public API support and real-device power-loss acceptance remain open. No unsafe path changed; Miri was not applicable, and Kani was not run.
+
+## Inline public API sync/exit acceptance
+
+The ordinary Python extension was built once from runtime source `ee06b5d867c25ed310ee2935dc08c1011e13fb31`, whose product code is unchanged from the measured implementation. Four independent KV/SQL × EIO/SIGKILL cases passed. Each first performs a successful synchronized commit followed by process exit, then calibrates the target syscall on that trace. Every fault hits WAL `fdatasync` ordinal 2 inside the commit interval. Exactly one sync in that interval and zero spool files prove that the inline path was exercised.
+
+| Surface | Fault | Observed sync result | Reopen result | Combined fixture bytes |
+| --- | --- | --- | --- | ---: |
+| Python Database KV | EIO | EIO returned | Complete prior + two pending keys, twice | 5,683 |
+| Python Database KV | SIGKILL | No syscall return observed | Complete prior + two pending keys, twice | 5,683 |
+| Python Database SQL | EIO | EIO returned | Complete prior + two pending rows and PK constraints, twice | 9,835 |
+| Python Database SQL | SIGKILL | No syscall return observed | Complete prior + two pending rows and PK constraints, twice | 9,835 |
+
+On EIO, the live caller retains only prior data and the uncertain writer refuses another commit. Recovery after EIO/SIGKILL exposes the complete written transaction from retained page cache. SIGKILL produces `?` in strace before an observed syscall return; it is not a successful sync or an observed EIO return. These results do not establish durability after device failure or power loss. The scenarios use prior1 + pending2, one-byte KV values or two integer SQL columns with a primary key, a 4096-byte ring and EveryWrite synchronization. Each child is capped at 30 seconds; fixtures and traces are each capped at 1 MiB. This is manual functional acceptance, absent from ordinary CI.
+
+Two initial harness failures are preserved: close correctly removed an empty overflow directory that the first check assumed would remain; SIGKILL prevented the EIO return annotation required by the first shared trace check. The corrected checks accept absent/empty post-close directories and distinguish observed EIO from termination at the exact target path/ordinal. The product binary was not changed or rebuilt. A wrong-ordinal negative control must fail, and Python `-O` must be rejected before output creation.
+
+The first #737 Windows CI also failed in its count gate after **33 native low-level tests passed**, because the gate still expected 27. The gate now expects 33, raising the complete native matrix from 104 to 110; a new CI run is required before integration. The failure remains recorded as [job 121067814630](https://github.com/alopex-db/alopex/actions/runs/40159458285/job/121067814630).
+
+See [case results and source/native/parser digests](wal-overflow-inline-acceptance.json) and [reproduction](../../../scripts/compatibility/README.md#small-inline-sync-failures-and-exit-manual-linux-acceptance). Prior unit/property/mutation and focused lint evidence is reused because no product Rust code changed in this acceptance follow-up.
 
 Overflow budgets and all source/binary/probe/driver/lock hashes are in the JSON. Local parser use was a published 0.8.16 development override, not release qualification. Initial local parser configuration and mutation CLI failures were corrected; their logs are retained. This comparison excludes SQL, Python, indexes, cold cache, throughput, large data and Windows performance.
 

@@ -1,0 +1,106 @@
+{
+  "issue": 682,
+  "pull_request": 737,
+  "status": "four inline sync/exit cases passed; overall issue acceptance open",
+  "runtime_source_commit": "ee06b5d867c25ed310ee2935dc08c1011e13fb31",
+  "runtime_source_tree": "03457a63730f0c221f48ff0d99ec597a1eff61de",
+  "runtime_sources": {
+    "crates/alopex-core/src/lsm/overflow.rs": "0a291e6fa213490a0faf975ce0b84254f0039ff541753a5f796a135cf4d6088d",
+    "crates/alopex-core/src/lsm/wal/overflow.rs": "858b26061947c8dd9c0c193d2f5420c3aa3b50ae66dc467da122bacd39493554"
+  },
+  "native_sha256": "e673adceb498bc41132cc93d575107eb249866af34728c77d12692b20729fda7",
+  "lock_sha256": "1679161e7f92fc40f8813cbbf1e9330dfa8796beefeb2317f815f31bf761b501",
+  "parser_sha256": {
+    "libalopex_sql_parser.a": "0e3942dee13cad656a95c4d769945323a2eb557533ffca089d712ee8c8efdae3",
+    "libalopex_sql_parser.so": "9783ccecfc061c3bb1c7c6919ffce6a3ba2fadebb7726ecde4018c0170e880ae"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "development_parser": "published v0.8.16 Linux override; not release qualification",
+  "cases": [
+    {
+      "case": "kv-eio",
+      "status": "passed",
+      "fixture_bytes": 5683,
+      "syscall": "fdatasync",
+      "ordinal": 2,
+      "target_suffix": "lsm.wal",
+      "replay": "complete",
+      "reopen_cycles": 2,
+      "spool_bytes": 0,
+      "baseline": "synced commit then process exit",
+      "sync_outcome": "EIO returned"
+    },
+    {
+      "case": "kv-kill",
+      "status": "passed",
+      "fixture_bytes": 5683,
+      "syscall": "fdatasync",
+      "ordinal": 2,
+      "target_suffix": "lsm.wal",
+      "replay": "complete",
+      "reopen_cycles": 2,
+      "spool_bytes": 0,
+      "baseline": "synced commit then process exit",
+      "sync_outcome": "SIGKILL before observed syscall return"
+    },
+    {
+      "case": "sql-eio",
+      "status": "passed",
+      "fixture_bytes": 9835,
+      "syscall": "fdatasync",
+      "ordinal": 2,
+      "target_suffix": "lsm.wal",
+      "replay": "complete",
+      "reopen_cycles": 2,
+      "spool_bytes": 0,
+      "baseline": "synced commit then process exit",
+      "sync_outcome": "EIO returned"
+    },
+    {
+      "case": "sql-kill",
+      "status": "passed",
+      "fixture_bytes": 9835,
+      "syscall": "fdatasync",
+      "ordinal": 2,
+      "target_suffix": "lsm.wal",
+      "replay": "complete",
+      "reopen_cycles": 2,
+      "spool_bytes": 0,
+      "baseline": "synced commit then process exit",
+      "sync_outcome": "SIGKILL before observed syscall return"
+    }
+  ],
+  "source_sha256": {
+    "inline_sync.py": "cd4bad69e594b39667bb982323809f75095610e26d3c3d34780c2380671001b5",
+    "publication_python.py": "c340856fdd2e2130b47a488d3413f153df765bfa3fe0e10a1741be9acbf6ab38"
+  },
+  "python": "3.10.12 (main, Mar  3 2026, 11:56:32) [GCC 11.4.0]",
+  "strace": "strace -- version 5.16",
+  "negative_control": {
+    "status": "caught",
+    "mutation": "sync ordinal + 1",
+    "reason": "uncorrupted commit did not return required EIO"
+  },
+  "optimized_python": "rejected with exit2 before creating output",
+  "commands": [
+    "cargo build --locked -p alopex-py",
+    "python3 scripts/compatibility/inline_sync.py --case kv-eio --output NEW_DIR",
+    "python3 scripts/compatibility/inline_sync.py --case kv-kill --output NEW_DIR",
+    "python3 scripts/compatibility/inline_sync.py --case sql-eio --output NEW_DIR",
+    "python3 scripts/compatibility/inline_sync.py --case sql-kill --output NEW_DIR"
+  ],
+  "scope": "Linux x86_64/WSL2; ordinary extension, Python -> Database -> KV or SQL; EveryWrite; prior1+pending2; 4096-byte ring; retained page cache, not power loss",
+  "limits": {
+    "child_seconds": 30,
+    "combined_fixture_bytes_per_case": 1048576,
+    "trace_bytes": 1048576
+  },
+  "ci_failure": {
+    "sha": "ee06b5d867c25ed310ee2935dc08c1011e13fb31",
+    "job": 121067814630,
+    "cause": "Windows lowlevel-writer gate expected27; all33 native tests passed; updated expected count to33, overall native expectation110",
+    "product_test_failures": 0
+  },
+  "initial_failure": "First KV EIO fixture check assumed the overflow directory survives close. Close correctly converged and removed the empty sidecar. Harness now accepts absence or emptiness; initial failed report retained; no product change or rebuild. Initial SIGKILL trace check incorrectly required an EIO return annotation; the process terminates before syscall return, which strace records as ?. The final check requires exact path/ordinal/commit interval and SIGKILL. Both initial failed reports are retained.",
+  "verification_reuse": "Product Rust code unchanged; existing focused13, LSM288+last exact-ring1, mutation15 caught/2 unviable/0 missed and Clippy/fmt remain source-bound evidence. No extra Rust build/mutation/Miri/Kani run locally."
+}
