@@ -60,7 +60,7 @@ for name, command in commands:
     print_log_tail(contents)
     if result.returncode:
         raise SystemExit(result.returncode)
-    required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "27 passed; 0 failed",
+    required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "33 passed; 0 failed",
                 "windows-publication": "6 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
                 "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",

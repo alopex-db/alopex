@@ -16,6 +16,8 @@ use wal::overflow::{self as disk, OverflowLimits, RecoveryEvent, REFERENCE_BYTES
 use wal::spool::{SpoolIdentity, SpoolLimits};
 
 pub(crate) const SPOOL_DIRECTORY: &str = "overflow";
+// Bound the extra copies used by the existing inline batch codec.
+const SMALL_INLINE_BYTES: u64 = 1024;
 
 /// Independent budgets for the opt-in LSM overflow path. These are not process
 /// RSS limits: replay accounting charges key/value bytes plus 128 bytes per op;
@@ -562,7 +564,7 @@ impl LsmKV {
         state: &OverflowState,
     ) -> Result<u64> {
         let options = &state.config;
-        // Every opt-in commit uses one reference; avoid an extra whole-batch Vec.
+        // Large writes stream to a spool without an extra whole-batch Vec.
         let mut stream = OperationStream::new(writes, options.operations)?;
         let payload_bytes = stream.payload_bytes();
         let reserved =
@@ -577,11 +579,50 @@ impl LsmKV {
         if charged > options.replay_bytes {
             return Err(full("commit exceeds replay budget"));
         }
-        let used = disk::directory_usage(&self.data_dir.join(SPOOL_DIRECTORY))?;
+        // Below 1 KiB the operation stream's fixed-width framing is an upper
+        // bound for the inline batch's varint encoding (including its CRC).
+        // Keep room for a subsequent reference; tight rings retain the spool path.
+        let inline = payload_bytes <= SMALL_INLINE_BYTES
+            && payload_bytes <= options.inline_bytes as u64
+            && {
+                let wal = self.wal.read().expect("lsm wal lock poisoned");
+                payload_bytes + REFERENCE_BYTES as u64 <= wal.ring_len() - wal.used_bytes()
+            };
+        let used = if inline {
+            0
+        } else {
+            disk::directory_usage(&self.data_dir.join(SPOOL_DIRECTORY))?
+        };
         if state.charged.load(Ordering::Relaxed) > options.replay_bytes - charged
-            || used > options.directory_bytes - reserved
+            || (!inline && used > options.directory_bytes - reserved)
         {
             self.checkpoint_locked()?;
+        }
+        if inline {
+            let operations = writes
+                .iter()
+                .map(|(key, value)| WalBatchOp {
+                    op_type: if value.is_some() {
+                        WalOpType::Put
+                    } else {
+                        WalOpType::Delete
+                    },
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            let mut entry = WalEntry::batch(0, operations);
+            self.prepare_wal_capacity(entry.encoded_len() as u64)?;
+            entry.lsn = self.ts_oracle.next_timestamp();
+            let mut wal = self.wal.write().expect("lsm wal lock poisoned");
+            let stats = wal.append_inline_synced(&entry)?;
+            self.metrics.add_wal_write_bytes(stats.bytes_written);
+            self.metrics
+                .add_wal_sync_duration_ms(stats.sync_duration_ms);
+            self.wal_used_bytes
+                .store(wal.used_bytes(), Ordering::Relaxed);
+            state.charged.fetch_add(charged, Ordering::Relaxed);
+            return Ok(entry.lsn);
         }
         self.prepare_wal_capacity(REFERENCE_BYTES as u64)?;
         let lsn = self.ts_oracle.next_timestamp();

@@ -455,6 +455,43 @@ errors**, not actual device errors or power-loss simulations. No product Rust
 change, debug hook, ordinary CI job, or performance test is required. Apply the
 same per-host budget and output cleanup policy as the other manual runners.
 
+## Small inline sync failures and exit (manual Linux acceptance)
+
+`inline_sync.py` qualifies the small inline path introduced by #737 through
+the ordinary Python `Database` KV and SQL APIs. It requires Linux `strace`
+with EIO and signal injection and rejects instrumented extensions and Python
+`-O`. Run this separately from ordinary CI:
+
+```bash
+"$PYTHON" scripts/compatibility/inline_sync.py --case kv-eio --output "$ONE_OUTPUT"
+"$PYTHON" scripts/compatibility/inline_sync.py --output "$NEW_OUTPUT"
+```
+
+The four independent cases are KV/SQL × EIO/SIGKILL at the inline WAL sync.
+Each case first runs a normal synchronous commit followed by process exit,
+then calibrates the exact syscall ordinal from its trace. The fault process
+must hit that same WAL path inside the marked commit interval. There must be
+exactly one `fdatasync` and no spool files, so silently exercising the older
+spool path cannot pass. The kill case configures EIO and SIGKILL together;
+SIGKILL prevents an observed syscall return (`?` in strace), so this case
+requires the exact path/ordinal and termination signal rather than an EIO
+return annotation. It does not represent a completed successful sync.
+
+Fixtures contain one prior key/row and two pending keys/rows. KV uses one-byte
+values; SQL uses two integer columns and a primary key. The ring is 4096 bytes,
+inline budget 1024 bytes, and the remaining explicit overflow budgets are
+bounded in `open_db`. EveryWrite synchronization remains enabled. Each child
+has a 30-second timeout, and combined fixtures and each trace are capped at
+1 MiB. No throughput, load, or performance measurement is included.
+
+On EIO, the live caller retains prior data and cannot reuse the uncertain
+writer. After EIO or SIGKILL, two reopens must recover the whole written inline
+transaction, including SQL primary-key constraints and the absence of retry
+data. This observation relies on retained page cache; it does not claim that
+data survives power loss after a failed sync. Reports preserve each outcome,
+native/script hashes, syscall ordinal and separate calibration/fault traces.
+Use the same per-host storage budget, serialized build and cleanup rules.
+
 ## Bounded KV cost comparison (manual Linux measurement)
 
 `kv_cost_probe.rs` and `kv_cost.py` compare the same public `LsmKV` transaction
@@ -509,3 +546,11 @@ not an automatic acceptance rule or a noise exemption. Five tiny samples do not
 qualify SQL/Python performance, throughput, cold-cache behavior, large datasets,
 or release readiness. Keep #682's overall performance acceptance open until its
 remaining coverage and any observed overhead have an explicit disposition.
+
+For a direct optimization comparison, add `--previous-overflow "$BEFORE_BIN"`
+and `--previous-sha "$BEFORE_SHA"` together. Build that fourth binary with the
+same probe and overflow feature against the pre-change source. The runner uses
+the same six rounds for all four modes (48 tiny cases total), verifies the
+embedded source/feature identities, and reports the candidate/previous overflow
+commit ratio as well as the baseline ratios. This provides a contemporaneous
+control when changed production code requires a new measurement.

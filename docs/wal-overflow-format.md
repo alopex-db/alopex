@@ -124,7 +124,7 @@ not permission to publish a partial database.
 | Format activated | New reader requirement durable on WAL and container/sidecar entrypoints | Old software must explicitly reject before decoding new records |
 | Preparing | Temporary spool, no reference | Uncommitted; reclaim under exclusive database ownership |
 | Prepared | Complete synced spool and directory entry, no reference | Still uncommitted; reclaim |
-| Committed | Durable ring reference | Validate complete spool and replay once, in LSN order |
+| Committed | Durable inline batch or ring reference | Replay the inline batch, or validate its complete spool, once in LSN order |
 | Checkpointed | All MVCC versions and checkpoint watermark durable | References at or below watermark need not replay; spool becomes reclaimable |
 | Reclaimed | WAL start and spool directory updates durable | Retain the checkpoint state and account for any failed cleanup |
 
@@ -166,8 +166,18 @@ requires explicit overflow options for a fenced container. Converge preserves
 both the 0.2 header and WAL v3 manifest; container-only rehydrate recreates v3.
 The manifest WAL version may not exceed its container fence. There is no downgrade.
 
-Each nonempty opt-in commit streams its borrowed write set into one spool and
-force-syncs one 53-byte WAL reference before publishing the MemTable changes.
+Small opt-in commits can use the existing v3 inline batch format. The operation
+stream must be at most 1 KiB, fit the configured inline recovery limit, and fit
+the current free ring while leaving room for one 53-byte reference. The stream
+length conservatively bounds the varint batch encoding within this size range.
+This bounds the extra codec copies and avoids spool file/directory I/O for small
+writes. All existing operation/spool/replay budgets still apply. Inline commits
+sync the WAL before publishing MemTable changes, including NoSync/BatchSync
+configurations; uncertain append/sync errors poison the writer until recovery.
+Replay charges inline versions exactly as it charges referenced operations.
+
+Other nonempty opt-in commits stream their borrowed write set into one spool and
+force-sync one 53-byte WAL reference before publishing the MemTable changes.
 Snapshot gate → commit lock → WAL lock ordering is retained. Transaction IDs are
 `ALPXLSM1` plus the little-endian LSN: database ownership and monotonic LSNs provide
 local uniqueness; these IDs are not random or globally unique. Ring pressure can
@@ -182,10 +192,10 @@ the replay budget is rejected before WAL changes; accumulated pending charges
 trigger a checkpoint before the next commit would exceed that budget. The counter
 resumes from recovered MVCC versions and resets only after successful reclamation.
 
-An uncertain reference write poisons the WAL. Checkpoint and converge inspect
+An uncertain inline or reference write poisons the WAL. Checkpoint and converge inspect
 that health before publishing metadata, including converge on Drop. Otherwise a
 checkpoint could incorrectly cover the uncertain commit while its values were
-absent from memory. Reopen resolves that outcome through the durable reference.
+absent from memory. Reopen resolves that outcome through the WAL records.
 
 After durable checkpoint metadata publication and successful WAL reclamation,
 checkpoint/converge collect canonical sealed spool names whose LSN is at or below
