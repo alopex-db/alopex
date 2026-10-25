@@ -1,4 +1,6 @@
-//! Public LSM transactions across deterministic persistence boundaries.
+//! Native LSM transactions across deterministic persistence boundaries.
+//! Unix uses the public opt-in; Windows qualifies only the internal pipeline.
+//! The public Windows Unsupported guard remains unchanged.
 //! Hooks are cfg(test) only. These are process-exit, not power-loss, tests.
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::overflow::LsmOverflowConfig;
@@ -20,32 +22,36 @@ const CASE: &str = "ALOPEX_PUBLIC_LSM_BOUNDARY";
 const DIRECTORY: &str = "ALOPEX_PUBLIC_LSM_DIRECTORY";
 
 fn open(path: &Path) -> (LsmKV, crate::lsm::RecoveryResult) {
-    LsmKV::open_with_overflow(
-        path,
-        LsmKVConfig {
-            wal: WalConfig {
-                segment_size: WAL_SEGMENT_HEADER_SIZE + 64,
-                max_segments: 1,
-                sync_mode: SyncMode::EveryWrite,
-            },
-            checkpoint: CheckpointConfig {
-                auto_checkpoint: false,
-                ..Default::default()
-            },
-            prune_sidecar_on_drop: false,
+    let config = LsmKVConfig {
+        wal: WalConfig {
+            segment_size: WAL_SEGMENT_HEADER_SIZE + 64,
+            max_segments: 1,
+            sync_mode: SyncMode::EveryWrite,
+        },
+        checkpoint: CheckpointConfig {
+            auto_checkpoint: false,
             ..Default::default()
         },
-        LsmOverflowConfig::new(
-            SpoolLimits::new(256, 512, 32).unwrap(),
-            OperationLimits::new(256, 16, 65).unwrap(),
-            4096,
-            32,
-            4096,
-        )
-        .with_inline_bytes(128)
-        .with_activation_bytes(4096),
+        prune_sidecar_on_drop: false,
+        ..Default::default()
+    };
+    let overflow = LsmOverflowConfig::new(
+        SpoolLimits::new(256, 512, 32).unwrap(),
+        OperationLimits::new(256, 16, 65).unwrap(),
+        4096,
+        32,
+        4096,
     )
-    .unwrap()
+    .with_inline_bytes(128)
+    .with_activation_bytes(4096);
+    #[cfg(windows)]
+    {
+        LsmKV::open_inner(path, config, Some(overflow)).unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        LsmKV::open_with_overflow(path, config, overflow).unwrap()
+    }
 }
 
 fn assert_values(store: &LsmKV, pending_committed: bool) {
