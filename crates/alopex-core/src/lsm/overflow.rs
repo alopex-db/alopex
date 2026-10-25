@@ -666,5 +666,8 @@ mod fence_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 
+#[cfg(test)]
+mod inline_lifecycle_tests;
+
 #[cfg(all(test, not(windows)))]
 mod publication_acceptance;
