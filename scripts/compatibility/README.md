@@ -454,3 +454,58 @@ and separate baseline/failure traces. These are **syscall-boundary injected
 errors**, not actual device errors or power-loss simulations. No product Rust
 change, debug hook, ordinary CI job, or performance test is required. Apply the
 same per-host budget and output cleanup policy as the other manual runners.
+
+## Bounded KV cost comparison (manual Linux measurement)
+
+`kv_cost_probe.rs` and `kv_cost.py` compare the same public `LsmKV` transaction
+against a pinned baseline, the candidate's legacy path, and its opt-in overflow
+path. They are never invoked by ordinary CI. Measure the physical host's complete
+Alopex storage before building, serialize builds with one shared Cargo target,
+monitor storage during execution, and remove owned binaries/build outputs after
+retaining compact evidence. Follow the repository's 40 GB stop / 50 GB maximum.
+
+Build the **same probe source** in an isolated temporary Cargo package. Its
+`Cargo.toml` must contain `[workspace]`, `[features] overflow = []`, and an
+`alopex-core` path dependency pointing to a clean, dedicated source worktree.
+Copy the probe to `src/main.rs`. Start its lockfile from the baseline's
+`Cargo.lock`; retain each resolved lockfile and its hash. For each of baseline,
+candidate legacy, and candidate overflow, check out the exact source SHA, set
+`ALOPEX_SOURCE_SHA` to that SHA, and run:
+
+```bash
+# Set CARGO_TARGET_DIR to the host's shared target and TMPDIR to owned storage.
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_BUILD_JOBS=2
+ALOPEX_SOURCE_SHA="$SOURCE_SHA" cargo build --release --manifest-path "$PROBE_MANIFEST"
+# Add --features overflow only for the candidate overflow build.
+# Preserve each executable under a distinct name before building the next one.
+python3 scripts/compatibility/kv_cost.py \
+  --baseline "$BASELINE_BIN" --candidate-legacy "$LEGACY_BIN" \
+  --candidate-overflow "$OVERFLOW_BIN" \
+  --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" \
+  --output "$NEW_OUTPUT"
+```
+
+Use the same release profile/toolchain/environment for all three builds. Record
+source/tree, executable, probe, driver and lockfile hashes with the results. The
+embedded SHA prevents accidentally running a binary built for another source.
+The driver pins one CPU, rotates engine order, and runs one warmup plus five
+measured rounds per cell. Each cell uses a fresh database, warm OS cache, one
+prior key and two pending keys with 16- or 2048-byte values. EveryWrite sync,
+4096-byte WAL ring and disabled automatic checkpointing are identical. Each
+write/reopen subprocess has a 30-second timeout; fixtures are removed after
+verification. The probe exits without destructor checkpointing so that the next
+process actually replays the WAL. This is not a power-loss simulation.
+
+Input preparation, transaction staging, commit and reopen times are distinct.
+`peak_rss_kib` is the **whole write process** VmHWM (including database open and
+the prior commit), not incremental transaction allocation. WAL/spool bytes are
+logical file lengths before close; fixture allocated bytes include filesystem
+blocks. No index is built. Capacity refusals are reported as capability gaps;
+their failure latency must never be compared with successful commit latency.
+
+The predeclared small-case median ratio above 1.20 is an investigation flag,
+not an automatic acceptance rule or a noise exemption. Five tiny samples do not
+qualify SQL/Python performance, throughput, cold-cache behavior, large datasets,
+or release readiness. Keep #682's overall performance acceptance open until its
+remaining coverage and any observed overhead have an explicit disposition.
