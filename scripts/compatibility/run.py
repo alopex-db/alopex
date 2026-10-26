@@ -148,6 +148,44 @@ def assert_complete(output, rust=True):
     return expected
 
 
+def remove_databases(output, removed, *paths):
+    """Retire only owned DBs whose last consumer finished; keep JSON and logs."""
+    for path in paths:
+        relative = str(path.relative_to(output))
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed.append(relative)
+
+
+def run_logical_cases(output, python, rust, removed):
+    """Run one old writer and one reader DB at a time, within the 2 GB budget.
+
+    The old format fixes its ring size. copytree can materialize sparse WALs,
+    so a completed direct-open copy must not survive into the next reader.
+    Callbacks run a separate process and raise on failure before retiring its DB.
+    """
+    for source in ["python15"] + ([] if rust is None else ["rust15"]):
+        if source == "python15":
+            python("logical-old", "old", "export", source)
+        else:
+            rust(source, "old", "export")
+        python(source + "-python-direct", "candidate", "direct", source)
+        remove_databases(output, removed, output / (source + "-python-direct-db"))
+        origin = "python" if source == "python15" else "rust"
+        label = "python-from-" + origin
+        python(label, "candidate", "import", label, source)
+        remove_databases(output, removed, output / (label + "-db"))
+        if rust is not None:
+            label = "rust-from-" + origin
+            direct = output / (source + "-rust-direct-db")
+            shutil.copytree(output / (source + "-source-db"), direct)
+            rust(label + "-direct", "candidate", "direct", source)
+            remove_databases(output, removed, direct)
+            rust(label, "candidate", "import", source)
+            remove_databases(output, removed, output / (label + "-db"))
+        remove_databases(output, removed, output / (source + "-source-db"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--old-python", type=Path, required=True)
@@ -188,6 +226,7 @@ def main():
     env.pop("PYTEST_PLUGINS", None)
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     phases = []
+    removed = []
     report = {
         "status": "failed",
         "phases": phases,
@@ -372,6 +411,9 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
             python(
                 "native-" + case + "-candidate", new_python, "native.py", "new", case
             )
+            remove_databases(
+                output, removed, output / "native" / case / "old-created-db"
+            )
         (output / "native/result.json").write_text(
             json.dumps(aggregate_native(output), indent=2)
         )
@@ -397,29 +439,18 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
         (output / "arrow/report.json").write_text(
             json.dumps(aggregate_arrow(output), indent=2)
         )
-        python("logical-old", old_python, "logical.py", "export", "python15")
-        if not args.python_only:
-            rust("rust15", args.old_rust, "export")
-        for source in ["python15"] + ([] if args.python_only else ["rust15"]):
-            python(
-                source + "-python-direct", new_python, "logical.py", "direct", source
-            )
-            python(
-                "python-from-" + ("python" if source == "python15" else "rust"),
-                new_python,
-                "logical.py",
-                "import",
-                "python-from-" + ("python" if source == "python15" else "rust"),
-                source,
-            )
-            if not args.python_only:
-                label = "rust-from-" + ("python" if source == "python15" else "rust")
-                shutil.copytree(
-                    output / (source + "-source-db"),
-                    output / (source + "-rust-direct-db"),
-                )
-                rust(label + "-direct", args.new_rust, "direct", source)
-                rust(label, args.new_rust, "import", source)
+        run_logical_cases(
+            output,
+            lambda label, owner, *arguments: python(
+                label, {"old": old_python, "candidate": new_python}[owner],
+                "logical.py", *arguments,
+            ),
+            None if args.python_only else lambda label, owner, mode, source=None: rust(
+                label, {"old": args.old_rust, "candidate": args.new_rust}[owner],
+                mode, source,
+            ),
+            removed,
+        )
         report["required_results"] = assert_complete(output, rust=not args.python_only)
         report["status"] = "passed"
     except BaseException as error:
@@ -427,15 +458,12 @@ print(json.dumps({'version':m.version('alopex'),'native_sha256':digest,
         raise
     finally:
         # Output is exclusively owned by this invocation; no user's DB is touched.
-        removed = []
-        for path in [
+        remove_databases(
+            output, removed,
             *output.glob("*-db"),
             *output.glob("native/*/old-created-db"),
             *output.glob("arrow/*/*-db"),
-        ]:
-            if path.is_dir():
-                shutil.rmtree(path)
-                removed.append(str(path.relative_to(output)))
+        )
         report["removed_databases"] = removed
         for path in [
             output / "baseline-source",
