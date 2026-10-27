@@ -226,7 +226,8 @@ class LogicalFixtureLifetimeTests(unittest.TestCase):
                     self.assertEqual(mode, "import")
                     if language == "python":
                         self.assertEqual(arguments[0], label)
-                    path = root / (label + "-db")
+                    # Both real importers create <label>-destination-db.
+                    path = root / (label + "-destination-db")
                     path.mkdir()
                 (path / "wal").write_bytes(b"new-wal")
                 self.assertEqual(

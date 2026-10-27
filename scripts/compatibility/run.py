@@ -174,7 +174,7 @@ def run_logical_cases(output, python, rust, removed):
         origin = "python" if source == "python15" else "rust"
         label = "python-from-" + origin
         python(label, "candidate", "import", label, source)
-        remove_databases(output, removed, output / (label + "-db"))
+        remove_databases(output, removed, output / (label + "-destination-db"))
         if rust is not None:
             label = "rust-from-" + origin
             direct = output / (source + "-rust-direct-db")
@@ -182,7 +182,7 @@ def run_logical_cases(output, python, rust, removed):
             rust(label + "-direct", "candidate", "direct", source)
             remove_databases(output, removed, direct)
             rust(label, "candidate", "import", source)
-            remove_databases(output, removed, output / (label + "-db"))
+            remove_databases(output, removed, output / (label + "-destination-db"))
         remove_databases(output, removed, output / (source + "-source-db"))
 
 
