@@ -1,3 +1,7 @@
+#![allow(
+    deprecated,
+    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
+)]
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -135,9 +139,9 @@ mod tests {
         use parquet::data_type::{ByteArray, ByteArrayType};
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
         use parquet::file::writer::SerializedFileWriter;
-        use parquet::format::PageHeader;
         use parquet::schema::types;
-        use parquet::thrift::TSerializable;
+        use parquet_wire::format::PageHeader;
+        use parquet_wire::thrift::TSerializable;
         use thrift::protocol::TCompactInputProtocol;
 
         for statistics in [EnabledStatistics::None, EnabledStatistics::Page] {
@@ -156,7 +160,7 @@ mod tests {
             let properties = WriterProperties::builder()
                 .set_dictionary_enabled(false)
                 .set_statistics_enabled(statistics)
-                .set_max_statistics_size(64 * 1024)
+                .set_write_page_header_statistics(true)
                 .set_statistics_truncate_length(None)
                 .build();
             let mut bytes = Vec::new();
@@ -171,11 +175,7 @@ mod tests {
             column.close().unwrap();
             group.close().unwrap();
             let footer = writer.close().unwrap();
-            let start = footer.row_groups[0].columns[0]
-                .meta_data
-                .as_ref()
-                .unwrap()
-                .data_page_offset as usize;
+            let start = footer.row_group(0).column(0).data_page_offset() as usize;
             let mut cursor = Cursor::new(&bytes[start..]);
             let expected =
                 PageHeader::read_from_in_protocol(&mut TCompactInputProtocol::new(&mut cursor))

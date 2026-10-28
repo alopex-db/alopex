@@ -100,7 +100,7 @@ fn sql_arrow_hint(encoded: &str) -> Option<Schema> {
     if ipc_schema.endianness() != arrow_ipc::Endianness::Little {
         // Keep the reference converter's endian handling, including Decimal.
         return Some(strip_arrow_application_metadata(
-            arrow_ipc::convert::fb_to_schema(ipc_schema),
+            arrow_ipc::convert::try_fb_to_schema(ipc_schema).ok()?,
         ));
     }
     let fields = ipc_schema
@@ -163,19 +163,19 @@ fn is_reserved_arrow_key(key: &str) -> bool {
 
 fn strip_arrow_application_metadata(schema: Schema) -> Schema {
     let Schema { fields, metadata } = schema;
-    let metadata = metadata
+    let metadata: arrow_schema::Metadata = metadata
         .into_iter()
         .filter(|(key, _)| is_reserved_arrow_key(key))
         .collect();
     // Drop the slice's references before consuming the fields, so stripping
-    // metadata does not first clone the HashMaps we intend to discard.
+    // metadata does not first clone the metadata maps we intend to discard.
     let owned = fields.iter().cloned().collect::<Vec<_>>();
     drop(fields);
     let fields = owned
         .into_iter()
         .map(|field| {
             let field = Arc::unwrap_or_clone(field);
-            let metadata = field
+            let metadata: arrow_schema::Metadata = field
                 .metadata()
                 .iter()
                 .filter(|(key, _)| is_reserved_arrow_key(key))
