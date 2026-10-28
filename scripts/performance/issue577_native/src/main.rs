@@ -299,7 +299,7 @@ fn generate(profile: &Profile, directory: &Path) -> Result<()> {
     for case in &profile.cases {
         let fields = (0..case.columns)
             .map(|column| {
-                let metadata = (0..case.field_metadata_entries)
+                let metadata: arrow_schema::Metadata = (0..case.field_metadata_entries)
                     .map(|index| (format!("k{index:04}"), String::new()))
                     .collect();
                 Field::new(format!("c{column}"), DataType::Int64, false).with_metadata(metadata)
