@@ -45,6 +45,14 @@ impl Default for Counters {
     }
 }
 impl Counters {
+    pub(crate) fn warned_names(&self) -> Vec<String> {
+        self.warned
+            .lock()
+            .expect("HNSW warning lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
     fn reset_warning(&self, name: &str) {
         self.warned
             .lock()
@@ -433,7 +441,13 @@ mod observation_tests {
             reject(&db, "a");
             reject(&db, "b");
             db.commit_with_hnsw_cache_changes(
-                || Ok::<_, ()>(((), Some(HashSet::from(["a".into()])))),
+                || {
+                    let changed = db.hnsw_cache_changes(|visit| {
+                        visit(b"hnsw:meta:a");
+                        true
+                    });
+                    Ok::<_, ()>(((), changed))
+                },
                 || {},
             )
             .unwrap();

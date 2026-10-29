@@ -833,7 +833,8 @@ impl Database {
         visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
     ) -> Option<HashSet<String>> {
         let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
-        if cache.is_empty() {
+        let warned = cache.counters.warned_names();
+        if cache.is_empty() && warned.is_empty() {
             return Some(HashSet::new());
         }
         let mut changed = HashSet::new();
@@ -852,7 +853,7 @@ impl Database {
                         key.strip_prefix(*prefix)
                             .is_some_and(|suffix| suffix.contains(&b':'))
                     });
-            for name in cache.keys() {
+            for name in cache.keys().chain(warned.iter()) {
                 let matches = key
                     .strip_prefix(b"hnsw:meta:")
                     .is_some_and(|suffix| suffix == name.as_bytes())
