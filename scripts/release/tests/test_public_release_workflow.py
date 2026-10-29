@@ -22,17 +22,13 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
     def test_every_run_is_an_immutable_public_report(self) -> None:
         self.assertIn("- name: Finalize verification report", self.text)
         self.assertIn("if: always()", self.text)
-        artifact_name = (
-            "name: release-verification-${{ github.run_id }}-"
-            "${{ github.run_attempt }}"
-        )
-        self.assertEqual(self.text.count(artifact_name), 3)
+        self.assertIn("artifact_name: ${{ steps.report_context.outputs.artifact_name }}", self.text)
+        self.assertIn('artifact_name=release-verification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}', self.text)
+        self.assertEqual(self.text.count("name: ${{ needs.verify.outputs.artifact_name }}"), 2)
+        self.assertEqual(self.text.count("          name: ${{ steps.report_context.outputs.artifact_name }}"), 1)
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.json", self.text)
         self.assertIn("${{ runner.temp }}/release-verification-v*/v*.md", self.text)
-        self.assertIn(
-            'report_path="reports/release-verification/v${version}"',
-            self.text,
-        )
+        self.assertIn('report_path="reports/release-verification/v${VERSION}/${report_id}"', self.text)
         self.assertIn('"${REPORT_PATH}.json"', self.text)
         self.assertIn('"${REPORT_PATH}.md"', self.text)
         self.assertIn("needs.verify.result == 'failure'", self.text)
@@ -105,11 +101,18 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("✅ 全ステップ成功", publish)
         self.assertIn("contents: write", publish)
         self.assertIn('if: ${{ always() && needs.verify.result != \'cancelled\' }}', publish)
-        self.assertIn('report_path="reports/release-verification/v${version}"', publish)
-        self.assertIn('branch="report/verify-release-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"', publish)
-        self.assertIn("event_type=release-verification-ready", publish)
+        self.assertIn('report_id="run-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"', publish)
+        self.assertIn('branch="report/verify-release-v${VERSION}-${REPORT_RUN_ID}-${REPORT_RUN_ATTEMPT}"', publish)
+        self.assertNotIn("DOCS_REPO_TOKEN", publish)
+        self.assertNotIn("dispatches", publish)
+        self.assertIn("Wait for identical bytes on docs main", publish)
         self.assertIn("if: success() && steps.publish.outputs.branch", publish)
-        self.assertIn('"${RUNNER_TEMP}/existing-report.md"', publish)
+        self.assertIn('for extension in json md; do', publish)
+        self.assertIn('"${RUNNER_TEMP}/existing-report.${extension}"', publish)
+        self.assertEqual(publish.count('report_pair.py compare'), 3)
+        self.assertIn('git add "${report_path}.md" "${report_path}.json"', publish)
+        self.assertIn('"${public_url}.json?cachebust=', publish)
+        self.assertIn('"${public_url}.md?cachebust=', publish)
         self.assertNotIn("existing=", publish)
         self.assertNotIn("repository: alopex-db/docs", publish)
         self.assertIn("cmp -s", self.text)
@@ -135,12 +138,13 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("contents: write", publish)
         self.assertIn("actions/download-artifact@v4", publish)
         self.assertIn(
-            "name: release-verification-${{ github.run_id }}-"
-            "${{ github.run_attempt }}",
+            "name: ${{ needs.verify.outputs.artifact_name }}",
             publish,
         )
         self.assertIn("Select downloaded verification report", publish)
-        self.assertIn('echo "REPORT_ROOT=${report_root}"', publish)
+        self.assertIn('report_pair.py select', publish)
+        self.assertIn('REPORT_ARTIFACT: ${{ needs.verify.outputs.artifact_name }}', publish)
+        self.assertNotIn('find "${REPORT_ROOT}"', publish)
 
     def test_report_publication_failure_creates_public_follow_up(self) -> None:
         fallback = self.text.split(
@@ -150,6 +154,9 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("repository: alopex-db/docs", fallback)
         self.assertIn("DOCS_REPO_TOKEN", fallback)
         self.assertIn("Mark report publication failure", fallback)
+        self.assertIn("report_pair.py select", fallback)
+        self.assertIn("name: ${{ needs.verify.outputs.artifact_name }}", fallback)
+        self.assertLess(fallback.index("report_pair.py select"), fallback.index("report.py record"))
         self.assertIn("immutable report publication", fallback)
         self.assertIn(
             'report_path="reports/release-verification/v${version}/run-'
