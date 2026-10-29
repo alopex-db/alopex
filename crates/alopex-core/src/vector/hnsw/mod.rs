@@ -225,8 +225,11 @@ impl HnswIndex {
 
     /// グラフを保存する（フル保存）。
     pub fn save<'a, T: KVTransaction<'a>>(&self, txn: &mut T) -> Result<()> {
-        let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        self.storage.save(txn, &graph)
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        let metadata = self.storage.save(txn, &graph)?;
+        graph.persisted_metadata = Some(metadata);
+        graph.dirty_nodes.clear();
+        Ok(())
     }
 
     #[cfg(feature = "async")]
@@ -361,18 +364,15 @@ impl HnswIndex {
         txn: &mut T,
         state: &mut HnswTransactionState,
     ) -> Result<()> {
-        let (modified, inserted, deleted_keys, requires_full_save) = state.prepare_for_commit();
-        let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        // Insertion and reconnection can mutate neighbor lists outside the
-        // transaction's directly addressed nodes. Persist every live slot in
-        // that case, but do not purge the index before rewriting it.
-        let modified = if requires_full_save || !inserted.is_empty() {
-            (0..graph.nodes.len() as u32).collect()
-        } else {
-            modified
-        };
-        self.storage
-            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        let (modified, inserted, deleted_keys) = state.prepare_for_commit();
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        // Graph mutation tracks reverse-edge changes as well as addressed nodes.
+        // Keep dirty slots on failure so retry never loses a partially saved change.
+        let metadata =
+            self.storage
+                .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        graph.persisted_metadata = Some(metadata);
+        graph.dirty_nodes.clear();
         self.stats_cache = Self::compute_stats(&graph);
         state.clear();
         Ok(())
@@ -531,7 +531,6 @@ pub struct HnswTransactionState {
     inserted_nodes: HashSet<u32>,
     deleted_nodes: HashSet<u32>,
     deleted_key_indices: Vec<Vec<u8>>,
-    requires_full_save: bool,
 }
 
 impl HnswTransactionState {
@@ -546,8 +545,6 @@ impl HnswTransactionState {
             self.inserted_nodes.insert(node_id);
         } else {
             self.modified_nodes.insert(node_id);
-            // Reconnecting an existing node can rewrite every neighbor list.
-            self.requires_full_save = true;
         }
         if let Some(key) = old_key {
             self.deleted_key_indices.push(key);
@@ -559,7 +556,7 @@ impl HnswTransactionState {
         self.modified_nodes.insert(node_id);
     }
 
-    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>, bool) {
+    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>) {
         let modified: Vec<u32> = self
             .modified_nodes
             .difference(&self.inserted_nodes)
@@ -567,7 +564,7 @@ impl HnswTransactionState {
             .collect();
         let inserted: Vec<u32> = self.inserted_nodes.iter().copied().collect();
         let deleted_keys = self.deleted_key_indices.clone();
-        (modified, inserted, deleted_keys, self.requires_full_save)
+        (modified, inserted, deleted_keys)
     }
 
     fn clear(&mut self) {
@@ -576,7 +573,6 @@ impl HnswTransactionState {
         self.inserted_nodes.clear();
         self.deleted_nodes.clear();
         self.deleted_key_indices.clear();
-        self.requires_full_save = false;
     }
 }
 
