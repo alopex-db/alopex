@@ -30,11 +30,30 @@ IDs and 8 MiB, or a smaller execution memory policy. Plain EXPLAIN appends
 `adaptive=true`, the effective `max_candidates` and `max_bytes`, and
 `fallback=Scan` to an eligible `IndexScan`. ANALYZE records the executed path:
 `actual_path=IndexScan fallback=none`, or a `Scan` with `planned=IndexScan`
-and `fallback=CandidateCap` or `fallback=ByteBudget`. Candidate and loop
-counters aggregate repeated probes of the same index and predicate within
-the statement, including a SELECT source inside DML. JSON exposes these
+and `fallback=CandidateCap` or `fallback=ByteBudget`. A planned B-tree node
+that did not run (for example, when `ExactKnnScan` performed the query) is
+named `NotExecuted`, with `planned=IndexScan`, `actual_path=NotExecuted` and
+zero loops. Mixed index/scan loops are named `Adaptive`, also retaining
+`planned=IndexScan`. Plain EXPLAIN continues to show the planned `IndexScan`.
+
+`fallback` summarizes every observed fallback reason (`Mixed` when both
+reasons occurred); `last_fallback` describes only the last loop. Text exposes
+`candidate_cap_fallbacks` and `byte_budget_fallbacks`; JSON exposes the same
+counts in `actual.fallback_counts`. A later successful index loop does not
+erase earlier fallback evidence. When candidate enumeration stops at the
+cap, text uses `candidates>=N` and JSON sets `actual.candidates_complete=false`.
+`N` is the observed lower bound, not the total number of matching rows.
+Byte-budget fallback alone does not imply incomplete candidate enumeration.
+
+Candidate and loop
+counters aggregate repeated execution of the same plan occurrence within
+the statement, including a SELECT source inside DML. Separate occurrences
+of an identical CTE or view have independent counters; cloned execution
+plans retain their original occurrence identity. JSON exposes these
 limits in `adaptive` and observed counters/path in `actual` on the physical
 scan node and the single-scan `access_path`; its logical tree stays unchanged.
+The asynchronous INSERT SELECT source uses the same effective memory policy
+as its EXPLAIN report.
 
 ## Side effects and failure boundaries
 
