@@ -54,6 +54,10 @@ commands = [
                                 "--skip", "lsm::overflow::publication_acceptance::child"]),
     ("directory-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "storage::publication::directories::tests::"]),
+    ("memory-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--test", "memory_snapshot_overwrite"]),
+    ("hnsw-transaction-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                                     "--test", "hnsw_transaction_cache"]),
 ]
 for name, command in commands:
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
@@ -71,6 +75,8 @@ for name, command in commands:
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",
                 "inline-lifecycle": "2 passed; 0 failed",
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
-                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed"}
+                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
+                "memory-snapshots": "20 passed; 0 failed; 0 ignored",
+                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")
