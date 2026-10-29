@@ -280,6 +280,9 @@ jobs:
     # Publish both successful and failed terminal verification reports.
     if: ${{ always() && needs.verify.result != 'cancelled' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      failure_stage: ${{ steps.publication_stage.outputs.stage }}
     permissions:
       contents: write
     env:
@@ -289,12 +292,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download reviewed verification result
+        id: download
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.verify.outputs.artifact_name }}
           path: ${{ env.REPORT_ROOT }}
 
       - name: Select downloaded verification report
+        id: selected
         env:
           REPORT_ARTIFACT: ${{ needs.verify.outputs.artifact_name }}
         shell: bash
@@ -306,6 +311,7 @@ jobs:
             --github-env "${GITHUB_ENV}"
 
       - name: Validate complete publication report
+        id: validated
         shell: bash
         run: |
           set -euo pipefail
@@ -361,6 +367,7 @@ jobs:
       # docs owns the scheduled pull and writes with its own GITHUB_TOKEN.
       # Primary evidence retention/ingestion needs no cross-repository PAT.
       - name: Wait for identical bytes on docs main
+        id: ingestion
         shell: bash
         run: |
           set -euo pipefail
@@ -379,11 +386,33 @@ jobs:
           exit 1
 
       - name: Cleanup publication branch
+        id: cleanup
         if: success() && steps.publish.outputs.branch != ''
         env:
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
         run: git push origin --delete "${BRANCH}"
+
+      - name: Record publication failure stage
+        id: publication_stage
+        if: always()
+        env:
+          DOWNLOAD: ${{ steps.download.outcome }}
+          SELECTED: ${{ steps.selected.outcome }}
+          VALIDATED: ${{ steps.validated.outcome }}
+          RETAINED: ${{ steps.publish.outcome }}
+          INGESTED: ${{ steps.ingestion.outcome }}
+          CLEANED: ${{ steps.cleanup.outcome }}
+        shell: bash
+        run: |
+          stage=orchestration
+          if [[ "$DOWNLOAD" != success ]]; then stage=artifact_download
+          elif [[ "$SELECTED" != success || "$VALIDATED" != success ]]; then stage=report_validation
+          elif [[ "$RETAINED" != success ]]; then stage=source_retention
+          elif [[ "$INGESTED" != success ]]; then stage=docs_ingestion
+          elif [[ "$CLEANED" == failure ]]; then stage=branch_cleanup
+          fi
+          echo "stage=${stage}" >> "$GITHUB_OUTPUT"
 
   publish-vector-benchmark:
     name: Publish reviewed vector benchmark snapshot
@@ -549,114 +578,56 @@ jobs:
           fi
 
   publish-publication-failure-report:
-    name: Publish report-publication failure evidence
+    name: Retain independent report-publication failure evidence
     needs: [verify, publish]
     if: always() && needs.publish.result == 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout public docs repository
-        uses: actions/checkout@v4
-        with:
-          repository: alopex-db/docs
-          token: ${{ secrets.DOCS_REPO_TOKEN }}
-          path: docs-repo
-
-      - name: Download verification result
+      - name: Download original verification evidence when available
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.verify.outputs.artifact_name }}
           path: release-verification-output
 
-      - name: Validate the producing attempt before failure annotation
+      - name: Prepare independent publication failure bundle
         env:
           REPORT_ARTIFACT: ${{ needs.verify.outputs.artifact_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/release/report_pair.py select \
-            --root release-verification-output --artifact "${REPORT_ARTIFACT}" \
-            --run-id "${GITHUB_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
-            --github-env "${GITHUB_ENV}"
-
-      - name: Mark report publication failure
-        env:
           VERSION: ${{ needs.verify.outputs.version || 'unknown' }}
-          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILURE_STAGE: ${{ needs.publish.outputs.failure_stage || 'orchestration' }}
         shell: bash
         run: |
-          set -euo pipefail
-          results="${REPORT_ROOT}/v${VERSION}.json"
-          report_root="${REPORT_ROOT}"
-          version="${VERSION}"
-          failure_log="${RUNNER_TEMP}/report-publication-failure.log"
-          {
-            echo "failed step: Publish immutable verification report"
-            echo "primary publication job result: failure"
-            echo "verification producer: ${REPORT_RUN_ID} attempt ${REPORT_RUN_ATTEMPT}"
-            echo "publication attempt: ${GITHUB_RUN_ATTEMPT}"
-            echo "run: ${RUN_URL}"
-          } > "${failure_log}"
-          python3 scripts/release/verify-release/report.py record \
-            --results "${results}" --name "immutable report publication" --status failure \
-            --description "公開docsへの主レポート保存に失敗したため、この失敗証跡を独立jobで保存する。" \
-            --log "${failure_log}"
-          python3 scripts/release/verify-release/report.py finalize --results "${results}"
-          python3 scripts/release/verify-release/report.py render \
-            --results "${results}" --output-dir "${report_root}"
-          report_path="reports/release-verification/v${version}/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-publication-failure"
-          echo "VERSION=${version}" >> "${GITHUB_ENV}"
-          echo "REPORT_ROOT=${report_root}" >> "${GITHUB_ENV}"
-          echo "REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+          python3 scripts/release/publication_failure.py prepare \
+            --root release-verification-output --artifact "$REPORT_ARTIFACT" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --version "$VERSION" --commit "$GITHUB_SHA" --stage "$FAILURE_STAGE" \
+            --output publication-failure-bundle
 
-      - name: Publish immutable failure report to docs
+      - name: Preserve failure bundle before any publication attempt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication-failure-bundle/reports/
+          if-no-files-found: error
+
+      - name: Retain immutable failure branch in Alopex
         id: publish_failure
-        working-directory: docs-repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          branch="report/verify-release-failure-v${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$(dirname "${REPORT_PATH}")"
-          if [[ -e "${REPORT_PATH}.md" || -e "${REPORT_PATH}.json" ]]; then
-            echo "refusing to overwrite immutable report: ${REPORT_PATH}" >&2
-            exit 1
-          fi
-          cp "../${REPORT_ROOT}/v${VERSION}.md" "${REPORT_PATH}.md"
-          cp "../${REPORT_ROOT}/v${VERSION}.json" "${REPORT_PATH}.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "${branch}"
-          git add "${REPORT_PATH}.md" "${REPORT_PATH}.json"
-          git commit -m "docs(release): retain v${VERSION} publication failure"
-          git push origin "${branch}"
-          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+        run: python3 scripts/release/publication_failure.py retain --root publication-failure-bundle --github-output "$GITHUB_OUTPUT"
 
-      - name: Wait for immutable failure report on docs main
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 60); do
-            if curl -fsSL \
-              "https://raw.githubusercontent.com/alopex-db/docs/main/${REPORT_PATH}.json?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
-              -o "${RUNNER_TEMP}/docs-failure-v${VERSION}.json" && \
-              cmp -s "${REPORT_ROOT}/v${VERSION}.json" "${RUNNER_TEMP}/docs-failure-v${VERSION}.json"; then
-              exit 0
-            fi
-            sleep 30
-          done
-          echo "docs main did not publish the immutable failure report" >&2
-          exit 1
+      - name: Wait for immutable failure bundle on docs main
+        run: python3 scripts/release/publication_failure.py confirm --root publication-failure-bundle
 
-      - name: Cleanup failure-report branch
-        if: always() && steps.publish_failure.outputs.branch != ''
-        working-directory: docs-repo
+      - name: Cleanup confirmed failure-report branch
+        if: success() && steps.publish_failure.outputs.branch != ''
         env:
           BRANCH: ${{ steps.publish_failure.outputs.branch }}
-        shell: bash
-        run: git push origin --delete "${BRANCH}"
+        run: git push origin --delete "$BRANCH"
 
   notify-publication-failure:
     name: Notify immutable report publication failure
@@ -678,7 +649,7 @@ jobs:
           title="release verification: immutable report publication failed"
           existing="$(gh issue list --repo "${REPOSITORY}" --state open \
             --search "${title} in:title" --json number --jq '.[0].number // empty')"
-          body="v${VERSION} の検証結果と公開失敗のdocs記録の両方を保存できませんでした。Actionsの失敗とartifactを確認してください: ${RUN_URL}"
+          body="v${VERSION} の公開失敗証跡をdocsで確認できませんでした。元の検証結果は変更していません。Actions artifactとAlopexの失敗証跡branchを確認してください: ${RUN_URL}"
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
           else
