@@ -624,6 +624,7 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
           files: ${{ runner.temp }}/alopex-candidate-assets/*
           generate_release_notes: true
+          make_latest: "true"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -686,6 +687,24 @@ jobs:
           done
           [[ -n "${run_id}" ]]
           gh run watch "${run_id}" --exit-status
+
+      - name: Verify final Core latest after Python join
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON_TAG: ${{ steps.release.outputs.python_tag }}
+        shell: bash
+        run: |
+          python3 scripts/release/verify_latest_release.py \
+            --repository "${GITHUB_REPOSITORY}" --version "${PYTHON_TAG#alopex-py-v}" \
+            --output "${RUNNER_TEMP}/core-latest-release.json"
+
+      - name: Record final Core release identity
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-release-identities-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core-latest-release.json
+          if-no-files-found: error
 
       - name: Dispatch independent public verification report
         env:
