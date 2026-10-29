@@ -1,4 +1,6 @@
 //! Minimal regression for versions replaced after a transaction begins.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::sync::Arc;
 
 use alopex_core::kv::OwnedKVStore;
