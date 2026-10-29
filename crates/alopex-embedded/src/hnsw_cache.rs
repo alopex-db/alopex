@@ -45,6 +45,26 @@ impl Default for Counters {
     }
 }
 impl Counters {
+    pub(crate) fn warned_names(&self) -> Vec<String> {
+        self.warned
+            .lock()
+            .expect("HNSW warning lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+    fn reset_warning(&self, name: &str) {
+        self.warned
+            .lock()
+            .expect("HNSW warning lock poisoned")
+            .remove(name);
+    }
+    pub(crate) fn reset_warnings(&self) {
+        self.warned
+            .lock()
+            .expect("HNSW warning lock poisoned")
+            .clear();
+    }
     fn touch(&self, entry: &EntryMetrics) {
         entry.hits.fetch_add(1, Ordering::Relaxed);
         entry.last_access.store(
@@ -128,6 +148,7 @@ impl HnswCacheState {
         Some(index)
     }
     pub(crate) fn insert(&mut self, name: String, index: Arc<HnswIndex>) {
+        self.counters.reset_warning(&name);
         self.remove_untracked(&name);
         let bytes = index.stats().memory_bytes;
         let metrics = Arc::new(EntryMetrics::default());
@@ -154,6 +175,7 @@ impl HnswCacheState {
         self.indices.remove(name)
     }
     pub(crate) fn remove(&mut self, name: &str) -> Option<Arc<HnswIndex>> {
+        self.counters.reset_warning(name);
         let removed = self.remove_untracked(name);
         if removed.is_some() {
             self.counters.invalidations.fetch_add(1, Ordering::Relaxed);
@@ -161,6 +183,7 @@ impl HnswCacheState {
         removed
     }
     pub(crate) fn clear(&mut self) {
+        self.counters.reset_warnings();
         self.counters
             .invalidations
             .fetch_add(self.indices.len() as u64, Ordering::Relaxed);
@@ -168,15 +191,12 @@ impl HnswCacheState {
         self.metadata.clear();
         self.used_bytes = 0;
     }
-    pub(crate) fn retain(&mut self, mut retain: impl FnMut(&String, &Arc<HnswIndex>) -> bool) {
-        let removed: Vec<_> = self
-            .indices
-            .iter()
-            .filter(|(name, index)| !retain(name, index))
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in removed {
-            self.remove(&name);
+    pub(crate) fn reject_oversize(&mut self, name: &str, bytes: u64, limit: u64) {
+        self.counters.oversize(name, bytes, limit);
+        // Admission failure may retire an older retained version of this graph.
+        // It is a capacity eviction, not an invalidation by committed data.
+        if self.remove_untracked(name).is_some() {
+            self.counters.evictions.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub(crate) fn trim(&mut self, bytes: u64, preserve: Option<&str>) {
@@ -279,7 +299,7 @@ pub struct HnswCacheStats {
     pub hits: u64,
     /// Actual graph load attempts.
     pub misses: u64,
-    /// Globally retained entries removed by LRU limits.
+    /// Globally retained entries removed by capacity limits or admission failure.
     pub evictions: u64,
     /// Graphs skipped because their byte budget cannot retain them.
     pub oversize_skips: u64,
@@ -301,4 +321,210 @@ pub struct HnswCacheIndexStats {
     pub hits: u64,
     /// Nanoseconds since cache initialization at last shared access.
     pub last_access_ns: u64,
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::Database;
+    use alopex_core::vector::hnsw::HnswConfig;
+
+    struct Warnings(Arc<AtomicU64>);
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    fn capture_warnings(test: impl FnOnce(&AtomicU64)) {
+        let count = Arc::new(AtomicU64::new(0));
+        tracing::subscriber::with_default(Warnings(count.clone()), || test(&count));
+    }
+    fn graph(name: &str) -> Arc<HnswIndex> {
+        let mut index = HnswIndex::create(name, HnswConfig::default().with_dimension(2)).unwrap();
+        index.upsert(b"row", &[1.0, 0.0], b"").unwrap();
+        Arc::new(index)
+    }
+    fn reject(db: &Database, name: &str) {
+        let mut cache = db.hnsw_cache.write().unwrap();
+        Database::hnsw_cache_insert_bounded(&mut cache, name.into(), graph(name), 0);
+    }
+
+    #[test]
+    fn fresh_rejection_counts_each_skip_but_warns_once() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            reject(&db, "a");
+            reject(&db, "a");
+            let stats = db.hnsw_cache_stats();
+            assert_eq!(stats.oversize_skips, 2);
+            assert_eq!(
+                (
+                    stats.invalidations,
+                    stats.evictions,
+                    stats.used_bytes,
+                    stats.entries
+                ),
+                (0, 0, 0, 0)
+            );
+            assert_eq!(warnings.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn rejected_replacement_counts_one_capacity_eviction() {
+        let db = Database::new();
+        db.hnsw_cache
+            .write()
+            .unwrap()
+            .insert("a".into(), graph("a"));
+        assert!(db.hnsw_cache_stats().used_bytes > 0);
+        reject(&db, "a");
+        reject(&db, "a");
+        let stats = db.hnsw_cache_stats();
+        assert_eq!(stats.oversize_skips, 2);
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(
+            (stats.invalidations, stats.used_bytes, stats.entries),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn retained_graph_rearms_only_its_own_warning() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            reject(&db, "a");
+            reject(&db, "b");
+            let mut cache = db.hnsw_cache.write().unwrap();
+            Database::hnsw_cache_insert_bounded(&mut cache, "a".into(), graph("a"), u64::MAX);
+            drop(cache);
+            reject(&db, "a");
+            reject(&db, "b");
+            assert_eq!(warnings.load(Ordering::Relaxed), 3);
+        });
+    }
+
+    #[test]
+    fn changed_limits_rearm_but_identical_or_invalid_limits_do_not() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            db.set_hnsw_cache_limits(1, Some(2)).unwrap();
+            reject(&db, "a");
+            db.set_hnsw_cache_limits(1, Some(2)).unwrap();
+            reject(&db, "a");
+            assert!(db.set_hnsw_cache_limits(2, Some(0)).is_err());
+            reject(&db, "a");
+            assert_eq!(warnings.load(Ordering::Relaxed), 1);
+            db.set_hnsw_cache_limits(2, None).unwrap();
+            reject(&db, "a");
+            assert_eq!(warnings.load(Ordering::Relaxed), 2);
+            db.set_hnsw_cache_limits(2, Some(3)).unwrap();
+            reject(&db, "a");
+            assert_eq!(warnings.load(Ordering::Relaxed), 3);
+        });
+    }
+
+    #[test]
+    fn committed_invalidation_rearms_even_a_nonretained_name() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            reject(&db, "a");
+            reject(&db, "b");
+            db.commit_with_hnsw_cache_changes(
+                || {
+                    let changed = db.hnsw_cache_changes(|visit| {
+                        visit(b"hnsw:meta:a");
+                        true
+                    });
+                    Ok::<_, ()>(((), changed))
+                },
+                || {},
+            )
+            .unwrap();
+            reject(&db, "a");
+            reject(&db, "b");
+            assert_eq!(warnings.load(Ordering::Relaxed), 3);
+            assert_eq!(db.hnsw_cache_stats().invalidations, 0);
+        });
+    }
+
+    #[test]
+    fn failed_commit_keeps_warning_and_retained_graph() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            reject(&db, "a");
+            db.hnsw_cache
+                .write()
+                .unwrap()
+                .insert("b".into(), graph("b"));
+            let result = db.commit_with_hnsw_cache_changes(
+                || Err::<((), Option<HashSet<String>>), _>(()),
+                || {},
+            );
+            assert!(result.is_err());
+            reject(&db, "a");
+            assert_eq!(warnings.load(Ordering::Relaxed), 1);
+            assert_eq!(db.hnsw_cache_stats().entries, 1);
+            assert_eq!(db.hnsw_cache_stats().invalidations, 0);
+        });
+    }
+
+    #[test]
+    fn broad_invalidation_rearms_warnings_and_counts_only_retained_entries() {
+        capture_warnings(|warnings| {
+            let db = Database::new();
+            reject(&db, "a");
+            db.hnsw_cache
+                .write()
+                .unwrap()
+                .insert("b".into(), graph("b"));
+            db.commit_with_hnsw_cache_invalidation(|| Ok::<_, ()>(()))
+                .unwrap();
+            reject(&db, "a");
+            assert_eq!(warnings.load(Ordering::Relaxed), 2);
+            let stats = db.hnsw_cache_stats();
+            assert_eq!(
+                (
+                    stats.invalidations,
+                    stats.evictions,
+                    stats.used_bytes,
+                    stats.entries
+                ),
+                (1, 0, 0, 0)
+            );
+        });
+    }
+
+    #[test]
+    fn selective_invalidation_preserves_other_retained_entries() {
+        let db = Database::new();
+        for name in ["a", "b"] {
+            db.hnsw_cache
+                .write()
+                .unwrap()
+                .insert(name.into(), graph(name));
+        }
+        db.commit_with_hnsw_cache_changes(
+            || Ok::<_, ()>(((), Some(HashSet::from(["a".into()])))),
+            || {},
+        )
+        .unwrap();
+        let stats = db.hnsw_cache_stats();
+        assert_eq!(
+            (stats.invalidations, stats.evictions, stats.entries),
+            (1, 0, 1)
+        );
+        assert_eq!(stats.indexes[0].name, "b");
+        assert_eq!(stats.used_bytes, stats.indexes[0].bytes);
+    }
 }
