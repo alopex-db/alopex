@@ -358,17 +358,8 @@ jobs:
           git push origin "${branch}"
           echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
 
-      - name: Request docs report ingestion
-        if: steps.publish.outputs.branch != ''
-        env:
-          GH_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api --method POST repos/alopex-db/docs/dispatches \
-            -f event_type=release-verification-ready \
-            -f "client_payload[version]=${VERSION}"
-
+      # docs owns the scheduled pull and writes with its own GITHUB_TOKEN.
+      # Primary evidence retention/ingestion needs no cross-repository PAT.
       - name: Wait for identical bytes on docs main
         shell: bash
         run: |

@@ -24,15 +24,22 @@ reports/release-verification/v<version>/run-<run_id>-<producing_attempt>.md
 An existing branch is reusable only when both files are byte-identical. A
 Markdown-only legacy branch or either changed file fails without overwriting or
 repairing the branch. Docs publication is confirmed only after both public files
-match. A dispatch failure or timeout retains the Alopex branch for diagnosis and
+match. A docs ingestion timeout retains the Alopex branch for diagnosis and
 retry; successful confirmation permits deleting that temporary branch.
 
+The docs receiver on main already imports JSON and Markdown from these public
+branches on a configured 15-minute schedule, using its own repository token to
+write docs. Actual scheduled execution may be delayed. The
+primary publisher relies on this pull route and does not request cross-repository
+dispatch. Its bounded wait checks the actual pair, so scheduling delay, receiver
+failure, or a mismatch remains a publication failure rather than an assumed
+success. Read-only/local contract checks are not evidence of live v0.8.17
+publication.
+
 This is the producer-side portion of #431. The remaining acceptance requires a
-matching docs consumer for JSON and Markdown, a common primary/failure evidence
-ingestion path, scoped dispatch credentials or a receiver that needs no
-cross-repository write credential, separate publication-failure evidence and
-failure-stage diagnostics, and authenticated/unauthenticated checks of the real
-public pair. The current fallback still writes directly to the docs repository;
+common primary/failure evidence ingestion path, separate publication-failure
+evidence and failure-stage diagnostics, and authenticated/unauthenticated checks
+of the real public pair. The current fallback still writes directly to the docs repository;
 its credential and retention problems are not resolved by producer validation.
 The full automation must not be accepted until those receiver and failure-path
 requirements are verified. Existing historical Markdown-only reports are not
