@@ -9,6 +9,15 @@ import unittest
 
 GUARD = Path(__file__).with_name("check_parser_wire_contract.py").resolve()
 PARSER = "crates/alopex-sql/nim-sql-parser"
+AST_MODULE = "crates/alopex-sql/src/ast/mod.rs"
+BASE_AST = """#[derive(Serialize, Deserialize)]
+enum StatementKind { Select, Values }
+impl StatementKind {
+    pub fn requires_write(&self) -> bool {
+        match self { Self::Select => false, _ => true }
+    }
+}
+"""
 
 
 class ParserSourceContractTests(unittest.TestCase):
@@ -83,6 +92,24 @@ class ParserSourceContractTests(unittest.TestCase):
         self.write("README.md", "documentation only\n")
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def change_runtime_classifier(self):
+        self.write(AST_MODULE, BASE_AST)
+        self.base = self.commit()
+        self.write(AST_MODULE, BASE_AST.replace("Self::Select => false",
+                                               "Self::Select => visitor(self)"))
+
+    def test_runtime_classifier_change_does_not_require_bump(self):
+        self.change_runtime_classifier()
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_runtime_classifier_exception_does_not_hide_parser_change(self):
+        self.change_runtime_classifier()
+        self.write(f"{PARSER}/src/parser.nim", "# changed parser\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("parser.nim", result.stderr)
 
 
 if __name__ == "__main__":

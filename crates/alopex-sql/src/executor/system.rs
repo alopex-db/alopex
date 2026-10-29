@@ -6,7 +6,7 @@ use crate::executor::{ColumnInfo, ExecutionResult, ExecutorError, QueryResult, R
 use crate::planner::ResolvedType;
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
-use crate::storage::{SqlValue, TxnBridge};
+use crate::storage::{SqlTxn, SqlValue, TxnBridge};
 
 /// PRAGMA cache sizes are expressed in 4096-byte pages.
 const CACHE_PAGE_SIZE: usize = 4096;
@@ -15,21 +15,11 @@ pub(crate) fn try_execute<S: KVStore>(
     bridge: &TxnBridge<S>,
     plan: &LogicalPlan,
 ) -> Result<Option<ExecutionResult>> {
-    if let Some((function, name, alias)) = direct_sequence_call(plan) {
+    if direct_sequence_call(plan).is_some() {
         let mut txn = bridge.begin_write().map_err(ExecutorError::from)?;
-        let value = if function == "nextval" {
-            sequence::next_value(&mut txn, name)?
-        } else {
-            sequence::current_value(&mut txn, name)?
-        };
+        let result = execute_sequence(&mut txn, plan)?;
         txn.commit().map_err(ExecutorError::from)?;
-        return Ok(Some(ExecutionResult::Query(QueryResult::new(
-            vec![ColumnInfo::new(
-                alias.unwrap_or(function),
-                ResolvedType::BigInt,
-            )],
-            vec![vec![SqlValue::BigInt(value)]],
-        ))));
+        return Ok(result.map(ExecutionResult::Query));
     }
     let Some((name, return_type)) = direct_system_call(plan) else {
         return Ok(None);
@@ -44,6 +34,34 @@ pub(crate) fn try_execute<S: KVStore>(
         vec![ColumnInfo::new(name, return_type)],
         vec![vec![value]],
     ))))
+}
+
+/// Evaluate a standalone sequence call using the caller's transaction. Both
+/// materialized and streaming paths must share the value and access checks.
+pub(crate) fn execute_sequence<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    plan: &LogicalPlan,
+) -> Result<Option<QueryResult>> {
+    let Some((function, name, alias)) = direct_sequence_call(plan) else {
+        return Ok(None);
+    };
+    let value = if function.eq_ignore_ascii_case("nextval") {
+        if txn.mode() != alopex_core::types::TxnMode::ReadWrite {
+            return Err(ExecutorError::ReadOnlyTransaction {
+                operation: "nextval".into(),
+            });
+        }
+        sequence::next_value(txn, name)?
+    } else {
+        sequence::current_value(txn, name)?
+    };
+    Ok(Some(QueryResult::new(
+        vec![ColumnInfo::new(
+            alias.unwrap_or(function),
+            ResolvedType::BigInt,
+        )],
+        vec![vec![SqlValue::BigInt(value)]],
+    )))
 }
 
 pub(crate) fn direct_sequence_call(plan: &LogicalPlan) -> Option<(&str, &str, Option<&str>)> {
