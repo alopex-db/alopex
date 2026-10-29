@@ -47,6 +47,11 @@ pub fn execute_delete_with_returning<
     let mut rows_affected = 0u64;
     let mut deleted_rows: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     let mut next_row_id = Some(0u64);
+    let mut primary_key_rows = match filter.as_ref() {
+        Some(predicate) => super::lookup_primary_key_equality(txn, catalog, &table, predicate)?,
+        None => None,
+    };
+    let primary_key_lookup = primary_key_rows.is_some();
     const BATCH: usize = 512;
     let mut staged = (_join_source.is_some() || filter.as_ref().is_some_and(contains_subquery))
         .then(|| super::statement_spool::StatementSpool::new(txn.memory_policy()));
@@ -61,7 +66,16 @@ pub fn execute_delete_with_returning<
     );
 
     while let Some(start_row_id) = next_row_id {
-        let batch = fetch_batch(txn, &table, start_row_id, BATCH)?;
+        let batch = if primary_key_lookup {
+            primary_key_rows
+                .take()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| (row.row_id, row.values))
+                .collect()
+        } else {
+            fetch_batch(txn, &table, start_row_id, BATCH)?
+        };
 
         if batch.is_empty() {
             break;
