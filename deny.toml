@@ -18,8 +18,17 @@ highlight = "simplest-path"
 # Keep one unskipped version per duplicate family. A newly introduced version
 # therefore creates two unskipped versions and fails the blocking bans check.
 # Exact entries also become stale when an old version disappears; CI promotes
-# those diagnostics to errors so the exception list can only shrink deliberately.
+# those diagnostics to errors. New exceptions must name the owning issue and
+# the dependency boundary that prevents convergence; they never suppress advisories.
 skip = [
+    { crate = "alloc-no-stdlib@2.0.4", reason = "Required by the qualified bounded Brotli 4 decoder; Parquet 60 uses Brotli 6/allocator 3. Remove after bounded-decoder memory acceptance (#740/#196)." },
+    { crate = "alloc-stdlib@0.2.2", reason = "Required by the qualified bounded Brotli 4 decoder; Parquet 60 uses allocator 0.3. Remove after bounded-decoder memory acceptance (#740/#196)." },
+    { crate = "brotli-decompressor@4.0.3", reason = "Pinned bounded decoder: upgrading to 6.2.0 failed the aggregate-memory acceptance test. Parquet 60 requires 6.2.0; converge only after preserving that contract (#740/#196)." },
+    { crate = "base64@0.22.1", reason = "Arrow 60 uses 0.23 while SQL/HTTP/tonic and the wire schema require 0.22; #740/#196 track upstream convergence." },
+    { crate = "hashbrown@0.16.1", reason = "The codec-free Parquet 57 wire schema requires 0.16; Arrow/Parquet 60 require 0.17. Remove with the wire bridge (#740/#196)." },
+    { crate = "num-bigint@0.4.6", reason = "The codec-free Parquet 57 wire schema requires 0.4; Arrow/Parquet 60 require 0.5. Remove with the wire bridge (#740/#196)." },
+    { crate = "parquet@57.3.2", reason = "Pinned Thrift wire schema for the bounded reader only, with default features disabled; production decoding/codecs use 60.1. Remove when a standalone wire schema replaces it (#740/#196)." },
+
     { crate = "alopex-core@0.3.4", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "base64@0.21.7", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "bit-set@0.5.3", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
@@ -66,7 +75,6 @@ skip = [
     { crate = "termios@0.2.2", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "thiserror@1.0.69", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "thiserror-impl@1.0.69", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
-    { crate = "twox-hash@1.6.3", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "unicode-width@0.1.14", reason = "TUI test-stack convergence is tracked by #196; remove this exact exception after migration." },
     { crate = "vtparse@0.6.2", reason = "Existing transitive duplicate tracked by #196; remove this exact exception when dependency owners converge." },
     { crate = "windows-sys@0.48.0", reason = "Platform dependency convergence is tracked by #196; remove this exact exception when upstreams align." },
