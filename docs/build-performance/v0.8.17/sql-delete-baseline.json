@@ -1,0 +1,6109 @@
+{
+  "issue": 712,
+  "status": "diagnosis complete; optimization and formal comparison pending",
+  "source": {
+    "source_sha": "a3092d56bb7aae406477d2721a5cc0758a0751a2",
+    "server_sha256": "7254de7433a8777bcac2a9138324e7eada72630bc1f268afbe9fa9d87e6343e0",
+    "supervisor_sha256": "ce8b5f74bc295acd2b4c6ede5d6090eb4f398d1e37a79e9f927d8eb627717265",
+    "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502",
+    "scope": "internal diagnostic; profile sample covers operation/restore/validation, not isolated DELETE"
+  },
+  "build": {
+    "build_source": "34ce28d5c15377837cb78b15a261cfa2c05757a8",
+    "product_source": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2",
+    "build_command": "cargo build --offline --locked --profile test -p alopex-server -p alopex-py",
+    "environment": {
+      "incremental": 0,
+      "dev_debug": 0,
+      "test_debug": 0,
+      "jobs": 2,
+      "RUSTFLAGS": "-D warnings",
+      "parser_override": "/private/tmp/alopex-712-delete-profile/parser/alopex-sql-parser/aarch64-apple-darwin"
+    },
+    "artifacts": {
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server": {
+        "sha256": "7254de7433a8777bcac2a9138324e7eada72630bc1f268afbe9fa9d87e6343e0",
+        "bytes": 42845376
+      },
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+        "sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "bytes": 37042656
+      },
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+        "sha256": "a759f2f266f5a8541fe090f7eaced852e86f8dee543289eb9b2b364d295fdc7a",
+        "bytes": 6886120
+      },
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+        "sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "bytes": 37042656
+      },
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+        "sha256": "a759f2f266f5a8541fe090f7eaced852e86f8dee543289eb9b2b364d295fdc7a",
+        "bytes": 6886120
+      },
+      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d": {
+        "sha256": "7254de7433a8777bcac2a9138324e7eada72630bc1f268afbe9fa9d87e6343e0",
+        "bytes": 42845376
+      }
+    },
+    "copied_extension_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1"
+  },
+  "host": {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "logical_cpus": 18,
+    "cpu_brand": "Apple M5 Pro",
+    "memory_bytes": 51539607552,
+    "affinity": "macOS OS scheduling; no CPU pinning",
+    "threads": "RAYON_NUM_THREADS=2 TOKIO_WORKER_THREADS=2 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1",
+    "other_work": "No local build/test suite ran during timed or profile cells; hosted CI ran separately."
+  },
+  "plan": {
+    "issue": 712,
+    "base": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+    "unanswered": "Does server/public DELETE time reside in begin, execution, or durable commit; is the full-table DELETE scan observed in a live server stack?",
+    "scope": "Manual diagnostic, not a product/reference performance acceptance. Same 32-byte TEXT and seeded primary-key plans, public Python embedded/server. 3/1000/10000 rows,3 warmups+21 samples per cell, separate mixed DELETE/restore stack-sampling cell. Full final state and per-operation checks. No ordinary CI load/performance.",
+    "build_command": "cargo build --locked --profile test -p alopex-server -p alopex-py",
+    "output": "/private/tmp/alopex-712-delete-profile",
+    "shared_target": "/Users/yoshinori/work/alopexDB/alopex/target",
+    "initial_host_bytes": 16385273856,
+    "estimated_peak_additional_bytes": 4000000000,
+    "build_jobs": 2,
+    "incremental": false,
+    "debug_symbols": false,
+    "execution_limits": {
+      "case_seconds": 180,
+      "process_rss_bytes": 2147483648,
+      "fixture_bytes": 2000000000,
+      "host_stop_bytes": 40000000000
+    },
+    "cleanup": "Record source/binary hashes and results; remove owned server/extension binaries, copied package/parser, per-case DBs immediately after diagnosis; retain compact logs and shared active dependencies",
+    "formal_comparison": "Deferred within same issue until dominant cost selected; preserve original 10000/34250 rows,3 warmups21samples3trials,published0.8.16/fixed before/after/reference on same host. No speedup claim from this diagnostic.",
+    "build_source": "34ce28d5c15377837cb78b15a261cfa2c05757a8",
+    "parser_archive_sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d",
+    "matrix": {
+      "surfaces": [
+        "embedded",
+        "server"
+      ],
+      "rows": [
+        3,
+        1000,
+        10000
+      ],
+      "operations": [
+        "noop",
+        "query",
+        "delete"
+      ],
+      "normal_cells": 18,
+      "samples_per_cell": 21,
+      "warmups_per_cell": 3,
+      "profile_cells": 2,
+      "profile_rows": 10000,
+      "profile_seconds": 4
+    },
+    "measurement_boundaries": {
+      "input_sql": "constructed before timer",
+      "phases": [
+        "begin",
+        "execute",
+        "commit",
+        "handle_release"
+      ],
+      "total": "sum of all phases including handle release; restore and validation outside",
+      "query_noop": "explicit READ_WRITE control transactions, not original 100-request random-get benchmark",
+      "profile": "mixed DELETE plus restore and validation, separate run; attribute only visible call stacks, not elapsed timing",
+      "runtime": "macOS, no CPU affinity; Rayon2/Tokio2/OMP2/OpenBLAS1; warm OS cache, test opt1 build; not original Linux reference-product measurement"
+    }
+  },
+  "cells": [
+    {
+      "case": "embedded-3-noop",
+      "surface": "embedded",
+      "rows": 3,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 3,
+        "result_sha256": "4afd774b341a334af4411a0db9dead73aeeadacc77bcdd2eff5870749eec7d62",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.05377,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.2289197091013193,
+      "peak_sampled_rss_bytes": {
+        "client": 2981888
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 3125,
+          "mad": 209
+        },
+        "execute_ns": {
+          "median": 42,
+          "mad": 0
+        },
+        "commit_ns": {
+          "median": 3458,
+          "mad": 84
+        },
+        "release_ns": {
+          "median": 84,
+          "mad": 1
+        },
+        "total_ns": {
+          "median": 6791,
+          "mad": 416
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 40709,
+          "execute_ns": 125,
+          "commit_ns": 19958,
+          "release_ns": 3333,
+          "total_ns": 64125
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 4500,
+          "execute_ns": 167,
+          "commit_ns": 12833,
+          "release_ns": 250,
+          "total_ns": 17750
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 4292,
+          "execute_ns": 83,
+          "commit_ns": 4375,
+          "release_ns": 167,
+          "total_ns": 8917
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3667,
+          "execute_ns": 83,
+          "commit_ns": 3875,
+          "release_ns": 125,
+          "total_ns": 7750
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 4292,
+          "execute_ns": 83,
+          "commit_ns": 3833,
+          "release_ns": 125,
+          "total_ns": 8333
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3458,
+          "execute_ns": 42,
+          "commit_ns": 3750,
+          "release_ns": 125,
+          "total_ns": 7375
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 4125,
+          "execute_ns": 42,
+          "commit_ns": 3667,
+          "release_ns": 125,
+          "total_ns": 7959
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3458,
+          "execute_ns": 0,
+          "commit_ns": 3667,
+          "release_ns": 125,
+          "total_ns": 7250
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3208,
+          "execute_ns": 42,
+          "commit_ns": 3500,
+          "release_ns": 125,
+          "total_ns": 6875
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3208,
+          "execute_ns": 0,
+          "commit_ns": 3500,
+          "release_ns": 83,
+          "total_ns": 6791
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3041,
+          "execute_ns": 42,
+          "commit_ns": 3458,
+          "release_ns": 84,
+          "total_ns": 6625
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3042,
+          "execute_ns": 42,
+          "commit_ns": 3500,
+          "release_ns": 83,
+          "total_ns": 6667
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 2917,
+          "execute_ns": 83,
+          "commit_ns": 3458,
+          "release_ns": 84,
+          "total_ns": 6542
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 4000,
+          "execute_ns": 42,
+          "commit_ns": 3458,
+          "release_ns": 125,
+          "total_ns": 7625
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3125,
+          "execute_ns": 41,
+          "commit_ns": 3750,
+          "release_ns": 84,
+          "total_ns": 7000
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 3334,
+          "execute_ns": 41,
+          "commit_ns": 3542,
+          "release_ns": 83,
+          "total_ns": 7000
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 2958,
+          "execute_ns": 0,
+          "commit_ns": 3375,
+          "release_ns": 42,
+          "total_ns": 6375
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3000,
+          "execute_ns": 42,
+          "commit_ns": 3458,
+          "release_ns": 83,
+          "total_ns": 6583
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3042,
+          "execute_ns": 83,
+          "commit_ns": 3375,
+          "release_ns": 42,
+          "total_ns": 6542
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 2917,
+          "execute_ns": 42,
+          "commit_ns": 3416,
+          "release_ns": 84,
+          "total_ns": 6459
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3875,
+          "execute_ns": 41,
+          "commit_ns": 3334,
+          "release_ns": 83,
+          "total_ns": 7333
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 2833,
+          "execute_ns": 42,
+          "commit_ns": 3250,
+          "release_ns": 83,
+          "total_ns": 6208
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 2833,
+          "execute_ns": 42,
+          "commit_ns": 3208,
+          "release_ns": 84,
+          "total_ns": 6167
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 2667,
+          "execute_ns": 42,
+          "commit_ns": 3250,
+          "release_ns": 83,
+          "total_ns": 6042
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62899,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 3,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-3-query",
+      "surface": "embedded",
+      "rows": 3,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 3,
+        "result_sha256": "4afd774b341a334af4411a0db9dead73aeeadacc77bcdd2eff5870749eec7d62",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.04840099999999999,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.11575979087501764,
+      "peak_sampled_rss_bytes": {
+        "client": 2457600
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 3166,
+          "mad": 124
+        },
+        "execute_ns": {
+          "median": 22584,
+          "mad": 624
+        },
+        "commit_ns": {
+          "median": 3667,
+          "mad": 125
+        },
+        "release_ns": {
+          "median": 84,
+          "mad": 1
+        },
+        "total_ns": {
+          "median": 29583,
+          "mad": 376
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 31458,
+          "execute_ns": 253500,
+          "commit_ns": 14459,
+          "release_ns": 1000,
+          "total_ns": 300417
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 7458,
+          "execute_ns": 39709,
+          "commit_ns": 5833,
+          "release_ns": 208,
+          "total_ns": 53208
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 4084,
+          "execute_ns": 28958,
+          "commit_ns": 6667,
+          "release_ns": 208,
+          "total_ns": 39917
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 4875,
+          "execute_ns": 27833,
+          "commit_ns": 4500,
+          "release_ns": 167,
+          "total_ns": 37375
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 3500,
+          "execute_ns": 25250,
+          "commit_ns": 5375,
+          "release_ns": 125,
+          "total_ns": 34250
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3417,
+          "execute_ns": 24000,
+          "commit_ns": 4083,
+          "release_ns": 125,
+          "total_ns": 31625
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 4250,
+          "execute_ns": 23625,
+          "commit_ns": 4000,
+          "release_ns": 125,
+          "total_ns": 32000
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3416,
+          "execute_ns": 23209,
+          "commit_ns": 3833,
+          "release_ns": 83,
+          "total_ns": 30541
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3083,
+          "execute_ns": 24542,
+          "commit_ns": 3833,
+          "release_ns": 84,
+          "total_ns": 31542
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3250,
+          "execute_ns": 23208,
+          "commit_ns": 3709,
+          "release_ns": 125,
+          "total_ns": 30292
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3208,
+          "execute_ns": 22750,
+          "commit_ns": 3833,
+          "release_ns": 84,
+          "total_ns": 29875
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3250,
+          "execute_ns": 22875,
+          "commit_ns": 3709,
+          "release_ns": 125,
+          "total_ns": 29959
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3125,
+          "execute_ns": 22834,
+          "commit_ns": 3666,
+          "release_ns": 84,
+          "total_ns": 29709
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3042,
+          "execute_ns": 22541,
+          "commit_ns": 3625,
+          "release_ns": 125,
+          "total_ns": 29333
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 3166,
+          "execute_ns": 22500,
+          "commit_ns": 3709,
+          "release_ns": 125,
+          "total_ns": 29500
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 3292,
+          "execute_ns": 22541,
+          "commit_ns": 3667,
+          "release_ns": 83,
+          "total_ns": 29583
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3166,
+          "execute_ns": 22584,
+          "commit_ns": 3625,
+          "release_ns": 83,
+          "total_ns": 29458
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3083,
+          "execute_ns": 22417,
+          "commit_ns": 3625,
+          "release_ns": 125,
+          "total_ns": 29250
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3125,
+          "execute_ns": 22375,
+          "commit_ns": 3666,
+          "release_ns": 84,
+          "total_ns": 29250
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 3125,
+          "execute_ns": 22334,
+          "commit_ns": 3666,
+          "release_ns": 84,
+          "total_ns": 29209
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 4042,
+          "execute_ns": 21792,
+          "commit_ns": 3416,
+          "release_ns": 84,
+          "total_ns": 29334
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 2791,
+          "execute_ns": 21625,
+          "commit_ns": 3459,
+          "release_ns": 83,
+          "total_ns": 27958
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 2833,
+          "execute_ns": 21542,
+          "commit_ns": 3458,
+          "release_ns": 83,
+          "total_ns": 27916
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 2833,
+          "execute_ns": 21417,
+          "commit_ns": 3542,
+          "release_ns": 83,
+          "total_ns": 27875
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62910,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 3,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-3-delete",
+      "surface": "embedded",
+      "rows": 3,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 2,
+        "result_sha256": "ee7ef6d3b601e9f3e1d5e98b6fded94069737d996ad0a457f274b753a8b54663",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.054604999999999994,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.33947645779699087,
+      "peak_sampled_rss_bytes": {
+        "client": 78299136
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 16084,
+          "mad": 4251
+        },
+        "execute_ns": {
+          "median": 31292,
+          "mad": 5542
+        },
+        "commit_ns": {
+          "median": 3889083,
+          "mad": 61833
+        },
+        "release_ns": {
+          "median": 375,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 3959250,
+          "mad": 57375
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 35209,
+          "execute_ns": 165333,
+          "commit_ns": 2875458,
+          "release_ns": 1084,
+          "total_ns": 3077084
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 10125,
+          "execute_ns": 35667,
+          "commit_ns": 3026958,
+          "release_ns": 334,
+          "total_ns": 3073084
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 11250,
+          "execute_ns": 24041,
+          "commit_ns": 3954500,
+          "release_ns": 667,
+          "total_ns": 3990458
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 13459,
+          "execute_ns": 29250,
+          "commit_ns": 3919125,
+          "release_ns": 333,
+          "total_ns": 3962167
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 10209,
+          "execute_ns": 24791,
+          "commit_ns": 2809542,
+          "release_ns": 292,
+          "total_ns": 2844834
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 11083,
+          "execute_ns": 23209,
+          "commit_ns": 3029500,
+          "release_ns": 416,
+          "total_ns": 3064208
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 11833,
+          "execute_ns": 23250,
+          "commit_ns": 2929042,
+          "release_ns": 292,
+          "total_ns": 2964417
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 14208,
+          "execute_ns": 25750,
+          "commit_ns": 2912375,
+          "release_ns": 583,
+          "total_ns": 2952916
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 13584,
+          "execute_ns": 37541,
+          "commit_ns": 3856917,
+          "release_ns": 375,
+          "total_ns": 3908417
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 15208,
+          "execute_ns": 39458,
+          "commit_ns": 3080917,
+          "release_ns": 375,
+          "total_ns": 3135958
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 14875,
+          "execute_ns": 31292,
+          "commit_ns": 2861083,
+          "release_ns": 375,
+          "total_ns": 2907625
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 13667,
+          "execute_ns": 29375,
+          "commit_ns": 3959333,
+          "release_ns": 375,
+          "total_ns": 4002750
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 15875,
+          "execute_ns": 29833,
+          "commit_ns": 3991417,
+          "release_ns": 333,
+          "total_ns": 4037458
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 16084,
+          "execute_ns": 29333,
+          "commit_ns": 3913500,
+          "release_ns": 333,
+          "total_ns": 3959250
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 17083,
+          "execute_ns": 29708,
+          "commit_ns": 3827250,
+          "release_ns": 292,
+          "total_ns": 3874333
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 17417,
+          "execute_ns": 29833,
+          "commit_ns": 4032167,
+          "release_ns": 417,
+          "total_ns": 4079834
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 21042,
+          "execute_ns": 34167,
+          "commit_ns": 3963625,
+          "release_ns": 416,
+          "total_ns": 4019250
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 22917,
+          "execute_ns": 34208,
+          "commit_ns": 3933042,
+          "release_ns": 375,
+          "total_ns": 3990542
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 21667,
+          "execute_ns": 33625,
+          "commit_ns": 3846208,
+          "release_ns": 375,
+          "total_ns": 3901875
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 28208,
+          "execute_ns": 38292,
+          "commit_ns": 3921042,
+          "release_ns": 416,
+          "total_ns": 3987958
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 27708,
+          "execute_ns": 38125,
+          "commit_ns": 3903125,
+          "release_ns": 334,
+          "total_ns": 3969292
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 27125,
+          "execute_ns": 38417,
+          "commit_ns": 3911291,
+          "release_ns": 459,
+          "total_ns": 3977292
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 34917,
+          "execute_ns": 44125,
+          "commit_ns": 3889083,
+          "release_ns": 417,
+          "total_ns": 3968542
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 32042,
+          "execute_ns": 44541,
+          "commit_ns": 3842584,
+          "release_ns": 666,
+          "total_ns": 3919833
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62920,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 3,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "server-3-noop",
+      "surface": "server",
+      "rows": 3,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 3,
+        "result_sha256": "4afd774b341a334af4411a0db9dead73aeeadacc77bcdd2eff5870749eec7d62",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.060611,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.33750304114073515,
+      "peak_sampled_rss_bytes": {
+        "client": 74137600
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 128834,
+          "mad": 2668
+        },
+        "execute_ns": {
+          "median": 125,
+          "mad": 41
+        },
+        "commit_ns": {
+          "median": 128167,
+          "mad": 1875
+        },
+        "release_ns": {
+          "median": 500,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 258500,
+          "mad": 4709
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 251167,
+          "execute_ns": 2333,
+          "commit_ns": 155959,
+          "release_ns": 1791,
+          "total_ns": 411250
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 131667,
+          "execute_ns": 208,
+          "commit_ns": 129708,
+          "release_ns": 750,
+          "total_ns": 262333
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 129833,
+          "execute_ns": 167,
+          "commit_ns": 131125,
+          "release_ns": 583,
+          "total_ns": 261708
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 133917,
+          "execute_ns": 166,
+          "commit_ns": 134584,
+          "release_ns": 666,
+          "total_ns": 269333
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 128708,
+          "execute_ns": 125,
+          "commit_ns": 131959,
+          "release_ns": 541,
+          "total_ns": 261333
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 132916,
+          "execute_ns": 84,
+          "commit_ns": 133625,
+          "release_ns": 708,
+          "total_ns": 267333
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 131583,
+          "execute_ns": 125,
+          "commit_ns": 121542,
+          "release_ns": 541,
+          "total_ns": 253791
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 131834,
+          "execute_ns": 166,
+          "commit_ns": 131000,
+          "release_ns": 667,
+          "total_ns": 263667
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 128875,
+          "execute_ns": 83,
+          "commit_ns": 129042,
+          "release_ns": 500,
+          "total_ns": 258500
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 129292,
+          "execute_ns": 166,
+          "commit_ns": 129000,
+          "release_ns": 584,
+          "total_ns": 259042
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 129917,
+          "execute_ns": 83,
+          "commit_ns": 133584,
+          "release_ns": 625,
+          "total_ns": 264209
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 128834,
+          "execute_ns": 125,
+          "commit_ns": 128000,
+          "release_ns": 541,
+          "total_ns": 257500
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 131333,
+          "execute_ns": 83,
+          "commit_ns": 129375,
+          "release_ns": 500,
+          "total_ns": 261291
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 126166,
+          "execute_ns": 125,
+          "commit_ns": 128167,
+          "release_ns": 458,
+          "total_ns": 254916
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 127042,
+          "execute_ns": 83,
+          "commit_ns": 127875,
+          "release_ns": 500,
+          "total_ns": 255500
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 120875,
+          "execute_ns": 125,
+          "commit_ns": 120917,
+          "release_ns": 750,
+          "total_ns": 242667
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 120166,
+          "execute_ns": 84,
+          "commit_ns": 115708,
+          "release_ns": 500,
+          "total_ns": 236458
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 127583,
+          "execute_ns": 84,
+          "commit_ns": 128250,
+          "release_ns": 458,
+          "total_ns": 256375
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 138500,
+          "execute_ns": 84,
+          "commit_ns": 126916,
+          "release_ns": 459,
+          "total_ns": 265959
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 123833,
+          "execute_ns": 125,
+          "commit_ns": 126292,
+          "release_ns": 417,
+          "total_ns": 250667
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 126500,
+          "execute_ns": 84,
+          "commit_ns": 152375,
+          "release_ns": 458,
+          "total_ns": 279417
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 135708,
+          "execute_ns": 84,
+          "commit_ns": 126500,
+          "release_ns": 500,
+          "total_ns": 262792
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 126292,
+          "execute_ns": 125,
+          "commit_ns": 127542,
+          "release_ns": 625,
+          "total_ns": 254584
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 124834,
+          "execute_ns": 125,
+          "commit_ns": 124875,
+          "release_ns": 500,
+          "total_ns": 250334
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62933,
+        "server_pid": 62935,
+        "surface": "server",
+        "rows": 3,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.020759
+      }
+    },
+    {
+      "case": "server-3-query",
+      "surface": "server",
+      "rows": 3,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 3,
+        "result_sha256": "4afd774b341a334af4411a0db9dead73aeeadacc77bcdd2eff5870749eec7d62",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.063985,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.22994437534362078,
+      "peak_sampled_rss_bytes": {
+        "client": 36732928
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 159041,
+          "mad": 7667
+        },
+        "execute_ns": {
+          "median": 286833,
+          "mad": 15834
+        },
+        "commit_ns": {
+          "median": 157959,
+          "mad": 8584
+        },
+        "release_ns": {
+          "median": 750,
+          "mad": 125
+        },
+        "total_ns": {
+          "median": 611541,
+          "mad": 27751
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 394375,
+          "execute_ns": 808750,
+          "commit_ns": 198959,
+          "release_ns": 2791,
+          "total_ns": 1404875
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 173416,
+          "execute_ns": 351334,
+          "commit_ns": 167666,
+          "release_ns": 959,
+          "total_ns": 693375
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 160083,
+          "execute_ns": 336709,
+          "commit_ns": 168833,
+          "release_ns": 792,
+          "total_ns": 666417
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 173208,
+          "execute_ns": 338334,
+          "commit_ns": 176208,
+          "release_ns": 1208,
+          "total_ns": 688958
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 174542,
+          "execute_ns": 316833,
+          "commit_ns": 169250,
+          "release_ns": 750,
+          "total_ns": 661375
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 178459,
+          "execute_ns": 306708,
+          "commit_ns": 174167,
+          "release_ns": 875,
+          "total_ns": 660209
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 168458,
+          "execute_ns": 302667,
+          "commit_ns": 160791,
+          "release_ns": 750,
+          "total_ns": 632666
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 163750,
+          "execute_ns": 305000,
+          "commit_ns": 169750,
+          "release_ns": 792,
+          "total_ns": 639292
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 166708,
+          "execute_ns": 291917,
+          "commit_ns": 160792,
+          "release_ns": 625,
+          "total_ns": 620042
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 160041,
+          "execute_ns": 304000,
+          "commit_ns": 166959,
+          "release_ns": 750,
+          "total_ns": 631750
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 161666,
+          "execute_ns": 287959,
+          "commit_ns": 166666,
+          "release_ns": 584,
+          "total_ns": 616875
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 162083,
+          "execute_ns": 286833,
+          "commit_ns": 163334,
+          "release_ns": 625,
+          "total_ns": 612875
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 159041,
+          "execute_ns": 287125,
+          "commit_ns": 164750,
+          "release_ns": 625,
+          "total_ns": 611541
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 162334,
+          "execute_ns": 283166,
+          "commit_ns": 157959,
+          "release_ns": 541,
+          "total_ns": 604000
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 149333,
+          "execute_ns": 280250,
+          "commit_ns": 149375,
+          "release_ns": 584,
+          "total_ns": 579542
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 153333,
+          "execute_ns": 278333,
+          "commit_ns": 154042,
+          "release_ns": 750,
+          "total_ns": 586458
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 149667,
+          "execute_ns": 282708,
+          "commit_ns": 150333,
+          "release_ns": 542,
+          "total_ns": 583250
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 151875,
+          "execute_ns": 308084,
+          "commit_ns": 157416,
+          "release_ns": 792,
+          "total_ns": 618167
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 156542,
+          "execute_ns": 262833,
+          "commit_ns": 140417,
+          "release_ns": 750,
+          "total_ns": 560542
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 144083,
+          "execute_ns": 279917,
+          "commit_ns": 154000,
+          "release_ns": 583,
+          "total_ns": 578583
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 155333,
+          "execute_ns": 276084,
+          "commit_ns": 153250,
+          "release_ns": 583,
+          "total_ns": 585250
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 148375,
+          "execute_ns": 251708,
+          "commit_ns": 121917,
+          "release_ns": 750,
+          "total_ns": 522750
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 119542,
+          "execute_ns": 248083,
+          "commit_ns": 122542,
+          "release_ns": 667,
+          "total_ns": 490834
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 122750,
+          "execute_ns": 250291,
+          "commit_ns": 124875,
+          "release_ns": 792,
+          "total_ns": 498708
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62949,
+        "server_pid": 62951,
+        "surface": "server",
+        "rows": 3,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.015577
+      }
+    },
+    {
+      "case": "server-3-delete",
+      "surface": "server",
+      "rows": 3,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 2,
+        "result_sha256": "ee7ef6d3b601e9f3e1d5e98b6fded94069737d996ad0a457f274b753a8b54663",
+        "input_keys_sha256": "6bc066a6cc854d9ecf8e22167934f20984c499e24f70c943f965036cd3319827",
+        "client_cpu_lifetime_seconds": 0.063326,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.3473631669767201,
+      "peak_sampled_rss_bytes": {
+        "client": 74055680,
+        "server": 20365312
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 134375,
+          "mad": 18792
+        },
+        "execute_ns": {
+          "median": 212541,
+          "mad": 23249
+        },
+        "commit_ns": {
+          "median": 3612083,
+          "mad": 56500
+        },
+        "release_ns": {
+          "median": 833,
+          "mad": 83
+        },
+        "total_ns": {
+          "median": 3968333,
+          "mad": 57375
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 2,
+          "begin_ns": 260958,
+          "execute_ns": 757792,
+          "commit_ns": 3324042,
+          "release_ns": 2041,
+          "total_ns": 4344833
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 133750,
+          "execute_ns": 185750,
+          "commit_ns": 3656583,
+          "release_ns": 667,
+          "total_ns": 3976750
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 0,
+          "begin_ns": 124125,
+          "execute_ns": 218584,
+          "commit_ns": 3750333,
+          "release_ns": 875,
+          "total_ns": 4093917
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 92583,
+          "execute_ns": 181625,
+          "commit_ns": 4099125,
+          "release_ns": 1042,
+          "total_ns": 4374375
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 115083,
+          "execute_ns": 176125,
+          "commit_ns": 3637250,
+          "release_ns": 834,
+          "total_ns": 3929292
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 116000,
+          "execute_ns": 191750,
+          "commit_ns": 4732458,
+          "release_ns": 1250,
+          "total_ns": 5041458
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 104000,
+          "execute_ns": 189292,
+          "commit_ns": 3531875,
+          "release_ns": 625,
+          "total_ns": 3825792
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 112459,
+          "execute_ns": 185250,
+          "commit_ns": 3573958,
+          "release_ns": 708,
+          "total_ns": 3872375
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 119125,
+          "execute_ns": 186084,
+          "commit_ns": 3722250,
+          "release_ns": 833,
+          "total_ns": 4028292
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 123291,
+          "execute_ns": 190792,
+          "commit_ns": 3596125,
+          "release_ns": 750,
+          "total_ns": 3910958
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 109791,
+          "execute_ns": 184667,
+          "commit_ns": 3660708,
+          "release_ns": 709,
+          "total_ns": 3955875
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 115583,
+          "execute_ns": 191000,
+          "commit_ns": 3750834,
+          "release_ns": 916,
+          "total_ns": 4058333
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 141917,
+          "execute_ns": 203750,
+          "commit_ns": 3640625,
+          "release_ns": 833,
+          "total_ns": 3987125
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 135458,
+          "execute_ns": 213292,
+          "commit_ns": 3694292,
+          "release_ns": 833,
+          "total_ns": 4043875
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 139000,
+          "execute_ns": 215834,
+          "commit_ns": 3579500,
+          "release_ns": 791,
+          "total_ns": 3935125
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 1,
+          "begin_ns": 137084,
+          "execute_ns": 212541,
+          "commit_ns": 3739584,
+          "release_ns": 750,
+          "total_ns": 4089959
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 131250,
+          "execute_ns": 213625,
+          "commit_ns": 3590584,
+          "release_ns": 750,
+          "total_ns": 3936209
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 137750,
+          "execute_ns": 231250,
+          "commit_ns": 3574917,
+          "release_ns": 833,
+          "total_ns": 3944750
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 134375,
+          "execute_ns": 231500,
+          "commit_ns": 3555583,
+          "release_ns": 833,
+          "total_ns": 3922291
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 162917,
+          "execute_ns": 251083,
+          "commit_ns": 3636542,
+          "release_ns": 1375,
+          "total_ns": 4051917
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 172000,
+          "execute_ns": 270791,
+          "commit_ns": 3534792,
+          "release_ns": 958,
+          "total_ns": 3978541
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 158000,
+          "execute_ns": 267541,
+          "commit_ns": 3541750,
+          "release_ns": 1042,
+          "total_ns": 3968333
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 2,
+          "begin_ns": 159500,
+          "execute_ns": 259833,
+          "commit_ns": 3547250,
+          "release_ns": 875,
+          "total_ns": 3967458
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 0,
+          "begin_ns": 160334,
+          "execute_ns": 259083,
+          "commit_ns": 3612083,
+          "release_ns": 834,
+          "total_ns": 4032334
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62967,
+        "server_pid": 62969,
+        "surface": "server",
+        "rows": 3,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.02641
+      }
+    },
+    {
+      "case": "embedded-1000-noop",
+      "surface": "embedded",
+      "rows": 1000,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 1000,
+        "result_sha256": "c9e5f4606eb1ba2a47250122e4ede9caea356be1db1ae441a912e7c200d8bcc5",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.09432099999999999,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.2291307090781629,
+      "peak_sampled_rss_bytes": {
+        "client": 86196224
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 636583,
+          "mad": 4626
+        },
+        "execute_ns": {
+          "median": 42,
+          "mad": 1
+        },
+        "commit_ns": {
+          "median": 928959,
+          "mad": 10709
+        },
+        "release_ns": {
+          "median": 167,
+          "mad": 41
+        },
+        "total_ns": {
+          "median": 1565458,
+          "mad": 15459
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 723625,
+          "execute_ns": 292,
+          "commit_ns": 1009875,
+          "release_ns": 1041,
+          "total_ns": 1734833
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 690083,
+          "execute_ns": 209,
+          "commit_ns": 974166,
+          "release_ns": 250,
+          "total_ns": 1664708
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 667500,
+          "execute_ns": 125,
+          "commit_ns": 968333,
+          "release_ns": 250,
+          "total_ns": 1636208
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 641209,
+          "execute_ns": 125,
+          "commit_ns": 968416,
+          "release_ns": 584,
+          "total_ns": 1610334
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 644042,
+          "execute_ns": 125,
+          "commit_ns": 919375,
+          "release_ns": 208,
+          "total_ns": 1563750
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 636250,
+          "execute_ns": 42,
+          "commit_ns": 917250,
+          "release_ns": 166,
+          "total_ns": 1553708
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 633792,
+          "execute_ns": 83,
+          "commit_ns": 925042,
+          "release_ns": 166,
+          "total_ns": 1559083
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 634833,
+          "execute_ns": 83,
+          "commit_ns": 917542,
+          "release_ns": 167,
+          "total_ns": 1552625
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 629292,
+          "execute_ns": 42,
+          "commit_ns": 918250,
+          "release_ns": 125,
+          "total_ns": 1547709
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 629166,
+          "execute_ns": 42,
+          "commit_ns": 940958,
+          "release_ns": 709,
+          "total_ns": 1570875
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 651833,
+          "execute_ns": 250,
+          "commit_ns": 938209,
+          "release_ns": 250,
+          "total_ns": 1590542
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 636583,
+          "execute_ns": 42,
+          "commit_ns": 928666,
+          "release_ns": 167,
+          "total_ns": 1565458
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 636792,
+          "execute_ns": 83,
+          "commit_ns": 924958,
+          "release_ns": 167,
+          "total_ns": 1562000
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 637000,
+          "execute_ns": 42,
+          "commit_ns": 943708,
+          "release_ns": 167,
+          "total_ns": 1580917
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 641166,
+          "execute_ns": 42,
+          "commit_ns": 944833,
+          "release_ns": 125,
+          "total_ns": 1586166
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 647625,
+          "execute_ns": 83,
+          "commit_ns": 934167,
+          "release_ns": 125,
+          "total_ns": 1582000
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 665917,
+          "execute_ns": 250,
+          "commit_ns": 918042,
+          "release_ns": 416,
+          "total_ns": 1584625
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 633833,
+          "execute_ns": 83,
+          "commit_ns": 928959,
+          "release_ns": 208,
+          "total_ns": 1563083
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 631250,
+          "execute_ns": 42,
+          "commit_ns": 917667,
+          "release_ns": 166,
+          "total_ns": 1549125
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 629583,
+          "execute_ns": 42,
+          "commit_ns": 920458,
+          "release_ns": 167,
+          "total_ns": 1550250
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 629791,
+          "execute_ns": 42,
+          "commit_ns": 930125,
+          "release_ns": 167,
+          "total_ns": 1560125
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 638125,
+          "execute_ns": 41,
+          "commit_ns": 961667,
+          "release_ns": 167,
+          "total_ns": 1600000
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 635292,
+          "execute_ns": 42,
+          "commit_ns": 951500,
+          "release_ns": 625,
+          "total_ns": 1587459
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 650583,
+          "execute_ns": 167,
+          "commit_ns": 936458,
+          "release_ns": 250,
+          "total_ns": 1587458
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62983,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 1000,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-1000-query",
+      "surface": "embedded",
+      "rows": 1000,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 1000,
+        "result_sha256": "c9e5f4606eb1ba2a47250122e4ede9caea356be1db1ae441a912e7c200d8bcc5",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.095229,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.22444337513297796,
+      "peak_sampled_rss_bytes": {
+        "client": 87457792
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 638291,
+          "mad": 2292
+        },
+        "execute_ns": {
+          "median": 29916,
+          "mad": 3167
+        },
+        "commit_ns": {
+          "median": 925584,
+          "mad": 10418
+        },
+        "release_ns": {
+          "median": 208,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 1604292,
+          "mad": 13167
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 693334,
+          "execute_ns": 176833,
+          "commit_ns": 942000,
+          "release_ns": 875,
+          "total_ns": 1813042
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 633667,
+          "execute_ns": 41167,
+          "commit_ns": 915750,
+          "release_ns": 291,
+          "total_ns": 1590875
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 631417,
+          "execute_ns": 35500,
+          "commit_ns": 923000,
+          "release_ns": 208,
+          "total_ns": 1590125
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 636292,
+          "execute_ns": 29916,
+          "commit_ns": 944500,
+          "release_ns": 584,
+          "total_ns": 1611292
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 646792,
+          "execute_ns": 55583,
+          "commit_ns": 928333,
+          "release_ns": 292,
+          "total_ns": 1631000
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 639666,
+          "execute_ns": 36375,
+          "commit_ns": 928125,
+          "release_ns": 250,
+          "total_ns": 1604416
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 640583,
+          "execute_ns": 31833,
+          "commit_ns": 943750,
+          "release_ns": 167,
+          "total_ns": 1616333
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 639125,
+          "execute_ns": 27583,
+          "commit_ns": 925584,
+          "release_ns": 208,
+          "total_ns": 1592500
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 659750,
+          "execute_ns": 29542,
+          "commit_ns": 928000,
+          "release_ns": 167,
+          "total_ns": 1617459
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 636584,
+          "execute_ns": 25416,
+          "commit_ns": 971917,
+          "release_ns": 542,
+          "total_ns": 1634459
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 637417,
+          "execute_ns": 51500,
+          "commit_ns": 915166,
+          "release_ns": 209,
+          "total_ns": 1604292
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 641708,
+          "execute_ns": 35500,
+          "commit_ns": 904750,
+          "release_ns": 167,
+          "total_ns": 1582125
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 628459,
+          "execute_ns": 29041,
+          "commit_ns": 914000,
+          "release_ns": 209,
+          "total_ns": 1571709
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 634125,
+          "execute_ns": 27042,
+          "commit_ns": 940333,
+          "release_ns": 167,
+          "total_ns": 1601667
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 639791,
+          "execute_ns": 29375,
+          "commit_ns": 940375,
+          "release_ns": 125,
+          "total_ns": 1609666
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 652709,
+          "execute_ns": 25333,
+          "commit_ns": 941542,
+          "release_ns": 125,
+          "total_ns": 1619709
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 675917,
+          "execute_ns": 54083,
+          "commit_ns": 923083,
+          "release_ns": 375,
+          "total_ns": 1653458
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 637708,
+          "execute_ns": 40084,
+          "commit_ns": 920750,
+          "release_ns": 250,
+          "total_ns": 1598792
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 637292,
+          "execute_ns": 30208,
+          "commit_ns": 925334,
+          "release_ns": 166,
+          "total_ns": 1593000
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 638291,
+          "execute_ns": 27750,
+          "commit_ns": 926125,
+          "release_ns": 167,
+          "total_ns": 1592333
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 636584,
+          "execute_ns": 27125,
+          "commit_ns": 923125,
+          "release_ns": 125,
+          "total_ns": 1586959
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 633833,
+          "execute_ns": 25708,
+          "commit_ns": 921459,
+          "release_ns": 166,
+          "total_ns": 1581166
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 667166,
+          "execute_ns": 46167,
+          "commit_ns": 904917,
+          "release_ns": 375,
+          "total_ns": 1618625
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 635792,
+          "execute_ns": 33083,
+          "commit_ns": 913458,
+          "release_ns": 292,
+          "total_ns": 1582625
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 62993,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 1000,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-1000-delete",
+      "surface": "embedded",
+      "rows": 1000,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 999,
+        "result_sha256": "7e9f168b7718d696695636df05a79b3471a8d9481132a776f1614a892448f9d2",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.183649,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.4472511252388358,
+      "peak_sampled_rss_bytes": {
+        "client": 87523328
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 764875,
+          "mad": 35417
+        },
+        "execute_ns": {
+          "median": 741625,
+          "mad": 31083
+        },
+        "commit_ns": {
+          "median": 5272291,
+          "mad": 248376
+        },
+        "release_ns": {
+          "median": 292,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 6879541,
+          "mad": 190500
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 695875,
+          "execute_ns": 725292,
+          "commit_ns": 5056750,
+          "release_ns": 1667,
+          "total_ns": 6479584
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 670250,
+          "execute_ns": 681208,
+          "commit_ns": 4704708,
+          "release_ns": 417,
+          "total_ns": 6056583
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 645834,
+          "execute_ns": 648541,
+          "commit_ns": 4795209,
+          "release_ns": 375,
+          "total_ns": 6089959
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 651459,
+          "execute_ns": 681416,
+          "commit_ns": 4625542,
+          "release_ns": 542,
+          "total_ns": 5958959
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 765125,
+          "execute_ns": 751541,
+          "commit_ns": 4643084,
+          "release_ns": 833,
+          "total_ns": 6160583
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 720875,
+          "execute_ns": 716459,
+          "commit_ns": 4539541,
+          "release_ns": 417,
+          "total_ns": 5977292
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 739083,
+          "execute_ns": 726417,
+          "commit_ns": 4552167,
+          "release_ns": 458,
+          "total_ns": 6018125
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 734875,
+          "execute_ns": 741625,
+          "commit_ns": 5402583,
+          "release_ns": 458,
+          "total_ns": 6879541
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 764875,
+          "execute_ns": 738416,
+          "commit_ns": 5520667,
+          "release_ns": 375,
+          "total_ns": 7024333
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 813333,
+          "execute_ns": 793833,
+          "commit_ns": 5406875,
+          "release_ns": 292,
+          "total_ns": 7014333
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 797166,
+          "execute_ns": 767417,
+          "commit_ns": 5435000,
+          "release_ns": 292,
+          "total_ns": 6999875
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 795708,
+          "execute_ns": 767459,
+          "commit_ns": 5418500,
+          "release_ns": 333,
+          "total_ns": 6982000
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 793792,
+          "execute_ns": 766458,
+          "commit_ns": 5389584,
+          "release_ns": 500,
+          "total_ns": 6950334
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 792166,
+          "execute_ns": 774459,
+          "commit_ns": 5503125,
+          "release_ns": 291,
+          "total_ns": 7070041
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 800292,
+          "execute_ns": 772708,
+          "commit_ns": 5458333,
+          "release_ns": 459,
+          "total_ns": 7031792
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 803625,
+          "execute_ns": 772416,
+          "commit_ns": 5408625,
+          "release_ns": 250,
+          "total_ns": 6984916
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 812625,
+          "execute_ns": 778750,
+          "commit_ns": 5310667,
+          "release_ns": 250,
+          "total_ns": 6902292
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 887416,
+          "execute_ns": 853959,
+          "commit_ns": 5272291,
+          "release_ns": 209,
+          "total_ns": 7013875
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 634500,
+          "execute_ns": 616500,
+          "commit_ns": 4774375,
+          "release_ns": 250,
+          "total_ns": 6025625
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 663125,
+          "execute_ns": 637000,
+          "commit_ns": 4673333,
+          "release_ns": 292,
+          "total_ns": 5973750
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 667166,
+          "execute_ns": 638417,
+          "commit_ns": 4653333,
+          "release_ns": 292,
+          "total_ns": 5959208
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 719833,
+          "execute_ns": 700750,
+          "commit_ns": 4544500,
+          "release_ns": 167,
+          "total_ns": 5965250
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 756500,
+          "execute_ns": 733834,
+          "commit_ns": 4529458,
+          "release_ns": 333,
+          "total_ns": 6020125
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 743708,
+          "execute_ns": 707875,
+          "commit_ns": 4489375,
+          "release_ns": 250,
+          "total_ns": 5941208
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63006,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 1000,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "server-1000-noop",
+      "surface": "server",
+      "rows": 1000,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 1000,
+        "result_sha256": "c9e5f4606eb1ba2a47250122e4ede9caea356be1db1ae441a912e7c200d8bcc5",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.058718,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.3467119592241943,
+      "peak_sampled_rss_bytes": {
+        "client": 74170368,
+        "server": 29900800
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 97708,
+          "mad": 4166
+        },
+        "execute_ns": {
+          "median": 83,
+          "mad": 41
+        },
+        "commit_ns": {
+          "median": 96250,
+          "mad": 3542
+        },
+        "release_ns": {
+          "median": 542,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 193459,
+          "mad": 5917
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 291333,
+          "execute_ns": 3250,
+          "commit_ns": 163458,
+          "release_ns": 1625,
+          "total_ns": 459666
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 143375,
+          "execute_ns": 250,
+          "commit_ns": 136208,
+          "release_ns": 792,
+          "total_ns": 280625
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 135250,
+          "execute_ns": 167,
+          "commit_ns": 131417,
+          "release_ns": 1041,
+          "total_ns": 267875
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 122791,
+          "execute_ns": 125,
+          "commit_ns": 114459,
+          "release_ns": 666,
+          "total_ns": 238041
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 114583,
+          "execute_ns": 84,
+          "commit_ns": 110958,
+          "release_ns": 667,
+          "total_ns": 226292
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 115875,
+          "execute_ns": 167,
+          "commit_ns": 120166,
+          "release_ns": 667,
+          "total_ns": 236875
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 117917,
+          "execute_ns": 125,
+          "commit_ns": 108375,
+          "release_ns": 667,
+          "total_ns": 227084
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 113250,
+          "execute_ns": 125,
+          "commit_ns": 118417,
+          "release_ns": 500,
+          "total_ns": 232292
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 119709,
+          "execute_ns": 83,
+          "commit_ns": 108833,
+          "release_ns": 500,
+          "total_ns": 229125
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 106083,
+          "execute_ns": 42,
+          "commit_ns": 114375,
+          "release_ns": 583,
+          "total_ns": 221083
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 99584,
+          "execute_ns": 83,
+          "commit_ns": 96250,
+          "release_ns": 542,
+          "total_ns": 196459
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 98084,
+          "execute_ns": 83,
+          "commit_ns": 94750,
+          "release_ns": 542,
+          "total_ns": 193459
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 88625,
+          "execute_ns": 84,
+          "commit_ns": 92708,
+          "release_ns": 500,
+          "total_ns": 181917
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 93542,
+          "execute_ns": 83,
+          "commit_ns": 93792,
+          "release_ns": 666,
+          "total_ns": 188083
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 94958,
+          "execute_ns": 83,
+          "commit_ns": 95792,
+          "release_ns": 583,
+          "total_ns": 191416
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 94292,
+          "execute_ns": 41,
+          "commit_ns": 92625,
+          "release_ns": 584,
+          "total_ns": 187542
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 92875,
+          "execute_ns": 42,
+          "commit_ns": 95083,
+          "release_ns": 417,
+          "total_ns": 188417
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 95750,
+          "execute_ns": 42,
+          "commit_ns": 105542,
+          "release_ns": 500,
+          "total_ns": 201834
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 94208,
+          "execute_ns": 84,
+          "commit_ns": 92625,
+          "release_ns": 458,
+          "total_ns": 187375
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 94333,
+          "execute_ns": 84,
+          "commit_ns": 93916,
+          "release_ns": 584,
+          "total_ns": 188917
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 93459,
+          "execute_ns": 83,
+          "commit_ns": 98917,
+          "release_ns": 416,
+          "total_ns": 192875
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 97708,
+          "execute_ns": 42,
+          "commit_ns": 94625,
+          "release_ns": 416,
+          "total_ns": 192791
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 97375,
+          "execute_ns": 42,
+          "commit_ns": 94458,
+          "release_ns": 500,
+          "total_ns": 192375
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 98333,
+          "execute_ns": 42,
+          "commit_ns": 98541,
+          "release_ns": 375,
+          "total_ns": 197291
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63019,
+        "server_pid": 63021,
+        "surface": "server",
+        "rows": 1000,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.043559
+      }
+    },
+    {
+      "case": "server-1000-query",
+      "surface": "server",
+      "rows": 1000,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 1000,
+        "result_sha256": "c9e5f4606eb1ba2a47250122e4ede9caea356be1db1ae441a912e7c200d8bcc5",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.060953,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.3396267918869853,
+      "peak_sampled_rss_bytes": {
+        "client": 74350592
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 122250,
+          "mad": 1750
+        },
+        "execute_ns": {
+          "median": 238792,
+          "mad": 5833
+        },
+        "commit_ns": {
+          "median": 122541,
+          "mad": 1791
+        },
+        "release_ns": {
+          "median": 708,
+          "mad": 84
+        },
+        "total_ns": {
+          "median": 486416,
+          "mad": 10124
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 234417,
+          "execute_ns": 566417,
+          "commit_ns": 149750,
+          "release_ns": 1625,
+          "total_ns": 952209
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 146083,
+          "execute_ns": 286167,
+          "commit_ns": 133958,
+          "release_ns": 750,
+          "total_ns": 566958
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 129542,
+          "execute_ns": 258958,
+          "commit_ns": 130125,
+          "release_ns": 667,
+          "total_ns": 519292
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 131334,
+          "execute_ns": 249791,
+          "commit_ns": 122959,
+          "release_ns": 833,
+          "total_ns": 504917
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 124125,
+          "execute_ns": 244000,
+          "commit_ns": 124083,
+          "release_ns": 750,
+          "total_ns": 492958
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 123667,
+          "execute_ns": 267292,
+          "commit_ns": 123666,
+          "release_ns": 709,
+          "total_ns": 515334
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 125917,
+          "execute_ns": 245041,
+          "commit_ns": 134375,
+          "release_ns": 709,
+          "total_ns": 506042
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 119416,
+          "execute_ns": 239375,
+          "commit_ns": 126292,
+          "release_ns": 667,
+          "total_ns": 485750
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 122541,
+          "execute_ns": 249834,
+          "commit_ns": 122541,
+          "release_ns": 834,
+          "total_ns": 495750
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 120500,
+          "execute_ns": 239458,
+          "commit_ns": 121042,
+          "release_ns": 708,
+          "total_ns": 481708
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 120875,
+          "execute_ns": 241292,
+          "commit_ns": 121250,
+          "release_ns": 708,
+          "total_ns": 484125
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 126083,
+          "execute_ns": 232959,
+          "commit_ns": 132083,
+          "release_ns": 667,
+          "total_ns": 491792
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 123708,
+          "execute_ns": 238792,
+          "commit_ns": 126541,
+          "release_ns": 792,
+          "total_ns": 489833
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 122250,
+          "execute_ns": 234792,
+          "commit_ns": 124291,
+          "release_ns": 709,
+          "total_ns": 482042
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 122500,
+          "execute_ns": 239250,
+          "commit_ns": 124083,
+          "release_ns": 583,
+          "total_ns": 486416
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 120708,
+          "execute_ns": 233750,
+          "commit_ns": 120750,
+          "release_ns": 583,
+          "total_ns": 475791
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 121500,
+          "execute_ns": 300042,
+          "commit_ns": 119750,
+          "release_ns": 542,
+          "total_ns": 541834
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 118792,
+          "execute_ns": 231708,
+          "commit_ns": 117625,
+          "release_ns": 625,
+          "total_ns": 468750
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 120375,
+          "execute_ns": 236333,
+          "commit_ns": 147875,
+          "release_ns": 1125,
+          "total_ns": 505708
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 140083,
+          "execute_ns": 234250,
+          "commit_ns": 120125,
+          "release_ns": 583,
+          "total_ns": 495041
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 123583,
+          "execute_ns": 231084,
+          "commit_ns": 121041,
+          "release_ns": 584,
+          "total_ns": 476292
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 121167,
+          "execute_ns": 229666,
+          "commit_ns": 120792,
+          "release_ns": 792,
+          "total_ns": 472417
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 118666,
+          "execute_ns": 224125,
+          "commit_ns": 112042,
+          "release_ns": 625,
+          "total_ns": 455458
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 108792,
+          "execute_ns": 229833,
+          "commit_ns": 109750,
+          "release_ns": 583,
+          "total_ns": 448958
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63034,
+        "server_pid": 63036,
+        "surface": "server",
+        "rows": 1000,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.040253
+      }
+    },
+    {
+      "case": "server-1000-delete",
+      "surface": "server",
+      "rows": 1000,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 999,
+        "result_sha256": "7e9f168b7718d696695636df05a79b3471a8d9481132a776f1614a892448f9d2",
+        "input_keys_sha256": "64804128c9167eda66b287205f77ff19049a329e06e8577ad902a2f4621b7d4e",
+        "client_cpu_lifetime_seconds": 0.071077,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.4627210828475654,
+      "peak_sampled_rss_bytes": {
+        "client": 74137600,
+        "server": 31670272
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 136458,
+          "mad": 12041
+        },
+        "execute_ns": {
+          "median": 860958,
+          "mad": 109917
+        },
+        "commit_ns": {
+          "median": 4068417,
+          "mad": 167792
+        },
+        "release_ns": {
+          "median": 875,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 5018958,
+          "mad": 49458
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 654,
+          "begin_ns": 257708,
+          "execute_ns": 1292000,
+          "commit_ns": 3630750,
+          "release_ns": 2125,
+          "total_ns": 5182583
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 114,
+          "begin_ns": 122542,
+          "execute_ns": 704375,
+          "commit_ns": 4123166,
+          "release_ns": 1750,
+          "total_ns": 4951833
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 25,
+          "begin_ns": 128625,
+          "execute_ns": 734833,
+          "commit_ns": 4025000,
+          "release_ns": 1000,
+          "total_ns": 4889458
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 759,
+          "begin_ns": 124417,
+          "execute_ns": 694041,
+          "commit_ns": 4268792,
+          "release_ns": 875,
+          "total_ns": 5088125
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 281,
+          "begin_ns": 119333,
+          "execute_ns": 687417,
+          "commit_ns": 4161958,
+          "release_ns": 875,
+          "total_ns": 4969583
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 250,
+          "begin_ns": 129500,
+          "execute_ns": 737000,
+          "commit_ns": 4101958,
+          "release_ns": 1042,
+          "total_ns": 4969500
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 228,
+          "begin_ns": 127042,
+          "execute_ns": 725208,
+          "commit_ns": 4277375,
+          "release_ns": 833,
+          "total_ns": 5130458
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 142,
+          "begin_ns": 126334,
+          "execute_ns": 737416,
+          "commit_ns": 5273292,
+          "release_ns": 792,
+          "total_ns": 6137834
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 754,
+          "begin_ns": 133083,
+          "execute_ns": 786584,
+          "commit_ns": 4090291,
+          "release_ns": 917,
+          "total_ns": 5010875
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 104,
+          "begin_ns": 135041,
+          "execute_ns": 777667,
+          "commit_ns": 4234583,
+          "release_ns": 959,
+          "total_ns": 5148250
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 692,
+          "begin_ns": 134958,
+          "execute_ns": 776625,
+          "commit_ns": 4080542,
+          "release_ns": 792,
+          "total_ns": 4992917
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 758,
+          "begin_ns": 134125,
+          "execute_ns": 867666,
+          "commit_ns": 4066959,
+          "release_ns": 1000,
+          "total_ns": 5069750
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 913,
+          "begin_ns": 138917,
+          "execute_ns": 855625,
+          "commit_ns": 4113041,
+          "release_ns": 875,
+          "total_ns": 5108458
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 558,
+          "begin_ns": 136458,
+          "execute_ns": 860292,
+          "commit_ns": 4092250,
+          "release_ns": 1000,
+          "total_ns": 5090000
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 89,
+          "begin_ns": 176375,
+          "execute_ns": 949125,
+          "commit_ns": 3784125,
+          "release_ns": 1833,
+          "total_ns": 4911458
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 604,
+          "begin_ns": 171792,
+          "execute_ns": 907958,
+          "commit_ns": 3957625,
+          "release_ns": 1042,
+          "total_ns": 5038417
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 432,
+          "begin_ns": 160500,
+          "execute_ns": 894333,
+          "commit_ns": 3900625,
+          "release_ns": 917,
+          "total_ns": 4956375
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 32,
+          "begin_ns": 132583,
+          "execute_ns": 860958,
+          "commit_ns": 4068417,
+          "release_ns": 792,
+          "total_ns": 5062750
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 30,
+          "begin_ns": 165583,
+          "execute_ns": 977500,
+          "commit_ns": 3875042,
+          "release_ns": 833,
+          "total_ns": 5018958
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 95,
+          "begin_ns": 171667,
+          "execute_ns": 970875,
+          "commit_ns": 3848000,
+          "release_ns": 875,
+          "total_ns": 4991417
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 223,
+          "begin_ns": 161375,
+          "execute_ns": 977291,
+          "commit_ns": 3847459,
+          "release_ns": 916,
+          "total_ns": 4987041
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 238,
+          "begin_ns": 178583,
+          "execute_ns": 1091667,
+          "commit_ns": 3750750,
+          "release_ns": 1000,
+          "total_ns": 5022000
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 517,
+          "begin_ns": 171833,
+          "execute_ns": 1089583,
+          "commit_ns": 3642792,
+          "release_ns": 875,
+          "total_ns": 4905083
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 616,
+          "begin_ns": 175584,
+          "execute_ns": 1079916,
+          "commit_ns": 3740625,
+          "release_ns": 834,
+          "total_ns": 4996959
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63048,
+        "server_pid": 63050,
+        "surface": "server",
+        "rows": 1000,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.07824099999999999
+      }
+    },
+    {
+      "case": "embedded-10000-noop",
+      "surface": "embedded",
+      "rows": 10000,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 10000,
+        "result_sha256": "0985bbbaee2928efcadad1ec601a25a7b1903f0067b01b47b86af6768096744d",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 0.548153,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.6808589589782059,
+      "peak_sampled_rss_bytes": {
+        "client": 114917376
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 6734125,
+          "mad": 27125
+        },
+        "execute_ns": {
+          "median": 167,
+          "mad": 42
+        },
+        "commit_ns": {
+          "median": 10119875,
+          "mad": 40417
+        },
+        "release_ns": {
+          "median": 500,
+          "mad": 84
+        },
+        "total_ns": {
+          "median": 16854833,
+          "mad": 61042
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 6936625,
+          "execute_ns": 500,
+          "commit_ns": 10327083,
+          "release_ns": 1625,
+          "total_ns": 17265833
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 6701959,
+          "execute_ns": 291,
+          "commit_ns": 10189292,
+          "release_ns": 833,
+          "total_ns": 16892375
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 6673000,
+          "execute_ns": 208,
+          "commit_ns": 10081084,
+          "release_ns": 541,
+          "total_ns": 16754833
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 6761042,
+          "execute_ns": 167,
+          "commit_ns": 10154000,
+          "release_ns": 666,
+          "total_ns": 16915875
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 6733208,
+          "execute_ns": 209,
+          "commit_ns": 10106208,
+          "release_ns": 542,
+          "total_ns": 16840167
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 6990083,
+          "execute_ns": 417,
+          "commit_ns": 10190916,
+          "release_ns": 917,
+          "total_ns": 17182333
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 6790292,
+          "execute_ns": 166,
+          "commit_ns": 10105709,
+          "release_ns": 375,
+          "total_ns": 16896542
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 6717375,
+          "execute_ns": 209,
+          "commit_ns": 10119875,
+          "release_ns": 583,
+          "total_ns": 16838042
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 6693916,
+          "execute_ns": 167,
+          "commit_ns": 10160292,
+          "release_ns": 458,
+          "total_ns": 16854833
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 6730167,
+          "execute_ns": 167,
+          "commit_ns": 10095375,
+          "release_ns": 583,
+          "total_ns": 16826292
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 6718125,
+          "execute_ns": 83,
+          "commit_ns": 10028333,
+          "release_ns": 500,
+          "total_ns": 16747041
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 6699000,
+          "execute_ns": 83,
+          "commit_ns": 10111459,
+          "release_ns": 625,
+          "total_ns": 16811167
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 7040333,
+          "execute_ns": 250,
+          "commit_ns": 10363792,
+          "release_ns": 1416,
+          "total_ns": 17405791
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 6863666,
+          "execute_ns": 125,
+          "commit_ns": 10110209,
+          "release_ns": 458,
+          "total_ns": 16974458
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 6877500,
+          "execute_ns": 209,
+          "commit_ns": 10163583,
+          "release_ns": 542,
+          "total_ns": 17041834
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 6734125,
+          "execute_ns": 167,
+          "commit_ns": 10201917,
+          "release_ns": 416,
+          "total_ns": 16936625
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 6710250,
+          "execute_ns": 125,
+          "commit_ns": 10117084,
+          "release_ns": 416,
+          "total_ns": 16827875
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 6837791,
+          "execute_ns": 125,
+          "commit_ns": 10011834,
+          "release_ns": 333,
+          "total_ns": 16850083
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 6711250,
+          "execute_ns": 42,
+          "commit_ns": 10463167,
+          "release_ns": 875,
+          "total_ns": 17175334
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 6761250,
+          "execute_ns": 250,
+          "commit_ns": 10251833,
+          "release_ns": 500,
+          "total_ns": 17013833
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 6754750,
+          "execute_ns": 83,
+          "commit_ns": 10069084,
+          "release_ns": 333,
+          "total_ns": 16824250
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 6694041,
+          "execute_ns": 125,
+          "commit_ns": 10129750,
+          "release_ns": 500,
+          "total_ns": 16824416
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 6748167,
+          "execute_ns": 125,
+          "commit_ns": 10198667,
+          "release_ns": 291,
+          "total_ns": 16947250
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 6671375,
+          "execute_ns": 167,
+          "commit_ns": 10101333,
+          "release_ns": 333,
+          "total_ns": 16773208
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63063,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 10000,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-10000-query",
+      "surface": "embedded",
+      "rows": 10000,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 10000,
+        "result_sha256": "0985bbbaee2928efcadad1ec601a25a7b1903f0067b01b47b86af6768096744d",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 0.5489139999999999,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.6836565830744803,
+      "peak_sampled_rss_bytes": {
+        "client": 119570432
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 6674292,
+          "mad": 46083
+        },
+        "execute_ns": {
+          "median": 51458,
+          "mad": 9667
+        },
+        "commit_ns": {
+          "median": 10210083,
+          "mad": 66708
+        },
+        "release_ns": {
+          "median": 542,
+          "mad": 42
+        },
+        "total_ns": {
+          "median": 16950625,
+          "mad": 124958
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 6756083,
+          "execute_ns": 185458,
+          "commit_ns": 10257375,
+          "release_ns": 1334,
+          "total_ns": 17200250
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 6692041,
+          "execute_ns": 87792,
+          "commit_ns": 10278958,
+          "release_ns": 1084,
+          "total_ns": 17059875
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 6539375,
+          "execute_ns": 62291,
+          "commit_ns": 10151459,
+          "release_ns": 500,
+          "total_ns": 16753625
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 6640167,
+          "execute_ns": 62041,
+          "commit_ns": 10122875,
+          "release_ns": 584,
+          "total_ns": 16825667
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 6777333,
+          "execute_ns": 52708,
+          "commit_ns": 10144167,
+          "release_ns": 583,
+          "total_ns": 16974791
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 6852250,
+          "execute_ns": 77334,
+          "commit_ns": 10663000,
+          "release_ns": 1208,
+          "total_ns": 17593792
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 6526750,
+          "execute_ns": 68708,
+          "commit_ns": 10160667,
+          "release_ns": 458,
+          "total_ns": 16756583
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 6647625,
+          "execute_ns": 47167,
+          "commit_ns": 10254875,
+          "release_ns": 958,
+          "total_ns": 16950625
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 6699709,
+          "execute_ns": 73708,
+          "commit_ns": 10385375,
+          "release_ns": 542,
+          "total_ns": 17159334
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 6687333,
+          "execute_ns": 50833,
+          "commit_ns": 10153959,
+          "release_ns": 583,
+          "total_ns": 16892708
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 6601042,
+          "execute_ns": 51458,
+          "commit_ns": 10201542,
+          "release_ns": 375,
+          "total_ns": 16854417
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 6720375,
+          "execute_ns": 44875,
+          "commit_ns": 10157875,
+          "release_ns": 458,
+          "total_ns": 16923583
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 6985916,
+          "execute_ns": 70167,
+          "commit_ns": 10234500,
+          "release_ns": 542,
+          "total_ns": 17291125
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 6635666,
+          "execute_ns": 46417,
+          "commit_ns": 10143375,
+          "release_ns": 375,
+          "total_ns": 16825833
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 6651292,
+          "execute_ns": 41750,
+          "commit_ns": 10314125,
+          "release_ns": 542,
+          "total_ns": 17007709
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 6674292,
+          "execute_ns": 55125,
+          "commit_ns": 10377875,
+          "release_ns": 583,
+          "total_ns": 17107875
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 6620917,
+          "execute_ns": 40208,
+          "commit_ns": 10138333,
+          "release_ns": 542,
+          "total_ns": 16800000
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 6618917,
+          "execute_ns": 41792,
+          "commit_ns": 10099541,
+          "release_ns": 500,
+          "total_ns": 16760750
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 6811417,
+          "execute_ns": 65583,
+          "commit_ns": 10428959,
+          "release_ns": 833,
+          "total_ns": 17306792
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 6695125,
+          "execute_ns": 93500,
+          "commit_ns": 10252208,
+          "release_ns": 667,
+          "total_ns": 17041500
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 6688833,
+          "execute_ns": 47917,
+          "commit_ns": 10254833,
+          "release_ns": 542,
+          "total_ns": 16992125
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 6828667,
+          "execute_ns": 41791,
+          "commit_ns": 10385250,
+          "release_ns": 584,
+          "total_ns": 17256292
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 6585875,
+          "execute_ns": 61000,
+          "commit_ns": 10134416,
+          "release_ns": 417,
+          "total_ns": 16781708
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 6633792,
+          "execute_ns": 34750,
+          "commit_ns": 10210083,
+          "release_ns": 417,
+          "total_ns": 16879042
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63079,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 10000,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "embedded-10000-delete",
+      "surface": "embedded",
+      "rows": 10000,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 9999,
+        "result_sha256": "1f2c752e4afa2dd3efffa3c93501aa79a47c1e2aebf6df245cf5e39a6bd21b28",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 2.028847,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 2.3541547912172973,
+      "peak_sampled_rss_bytes": {
+        "client": 108036096
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 6658250,
+          "mad": 35042
+        },
+        "execute_ns": {
+          "median": 36311709,
+          "mad": 341333
+        },
+        "commit_ns": {
+          "median": 18713833,
+          "mad": 197750
+        },
+        "release_ns": {
+          "median": 1208,
+          "mad": 417
+        },
+        "total_ns": {
+          "median": 61669708,
+          "mad": 340250
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 6778833,
+          "execute_ns": 36269125,
+          "commit_ns": 18443209,
+          "release_ns": 1833,
+          "total_ns": 61493000
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 6983834,
+          "execute_ns": 36757875,
+          "commit_ns": 18372291,
+          "release_ns": 834,
+          "total_ns": 62114834
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 6726959,
+          "execute_ns": 36810041,
+          "commit_ns": 18664584,
+          "release_ns": 1958,
+          "total_ns": 62203542
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 6643042,
+          "execute_ns": 36130791,
+          "commit_ns": 20414084,
+          "release_ns": 1208,
+          "total_ns": 63189125
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 6642417,
+          "execute_ns": 36283250,
+          "commit_ns": 18489083,
+          "release_ns": 1625,
+          "total_ns": 61416375
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 6748500,
+          "execute_ns": 36441417,
+          "commit_ns": 18963291,
+          "release_ns": 1000,
+          "total_ns": 62154208
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 6685791,
+          "execute_ns": 36743167,
+          "commit_ns": 18822458,
+          "release_ns": 1292,
+          "total_ns": 62252708
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 6638875,
+          "execute_ns": 35625750,
+          "commit_ns": 19103833,
+          "release_ns": 2250,
+          "total_ns": 61370708
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 6650750,
+          "execute_ns": 36695584,
+          "commit_ns": 18271375,
+          "release_ns": 625,
+          "total_ns": 61618334
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 6658250,
+          "execute_ns": 35961375,
+          "commit_ns": 18658834,
+          "release_ns": 750,
+          "total_ns": 61279209
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 6986667,
+          "execute_ns": 35925000,
+          "commit_ns": 18608333,
+          "release_ns": 1208,
+          "total_ns": 61521208
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 6612458,
+          "execute_ns": 37461875,
+          "commit_ns": 18785958,
+          "release_ns": 1584,
+          "total_ns": 62861875
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 6724292,
+          "execute_ns": 36807167,
+          "commit_ns": 19455250,
+          "release_ns": 2083,
+          "total_ns": 62988792
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 6674250,
+          "execute_ns": 36419917,
+          "commit_ns": 18594583,
+          "release_ns": 917,
+          "total_ns": 61689667
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 6623208,
+          "execute_ns": 36311709,
+          "commit_ns": 18882333,
+          "release_ns": 875,
+          "total_ns": 61818125
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 6649708,
+          "execute_ns": 36653042,
+          "commit_ns": 20228958,
+          "release_ns": 1292,
+          "total_ns": 63533000
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 6651708,
+          "execute_ns": 36480292,
+          "commit_ns": 18837291,
+          "release_ns": 1334,
+          "total_ns": 61970625
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 6738458,
+          "execute_ns": 35874792,
+          "commit_ns": 18713833,
+          "release_ns": 2375,
+          "total_ns": 61329458
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 6585416,
+          "execute_ns": 36638417,
+          "commit_ns": 17701833,
+          "release_ns": 750,
+          "total_ns": 60926416
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 7024458,
+          "execute_ns": 36128292,
+          "commit_ns": 18516083,
+          "release_ns": 875,
+          "total_ns": 61669708
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 6755875,
+          "execute_ns": 36370375,
+          "commit_ns": 18685042,
+          "release_ns": 1667,
+          "total_ns": 61812959
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 6498333,
+          "execute_ns": 35415917,
+          "commit_ns": 19180666,
+          "release_ns": 1625,
+          "total_ns": 61096541
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 6753333,
+          "execute_ns": 35560750,
+          "commit_ns": 18502625,
+          "release_ns": 500,
+          "total_ns": 60817208
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 6689125,
+          "execute_ns": 36089208,
+          "commit_ns": 18577875,
+          "release_ns": 750,
+          "total_ns": 61356958
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63096,
+        "server_pid": null,
+        "surface": "embedded",
+        "rows": 10000,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": null
+    },
+    {
+      "case": "server-10000-noop",
+      "surface": "server",
+      "rows": 10000,
+      "operation": "noop",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 10000,
+        "result_sha256": "0985bbbaee2928efcadad1ec601a25a7b1903f0067b01b47b86af6768096744d",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 0.073852,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.46200045896694064,
+      "peak_sampled_rss_bytes": {
+        "client": 38780928,
+        "server": 34766848
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 117041,
+          "mad": 1583
+        },
+        "execute_ns": {
+          "median": 83,
+          "mad": 41
+        },
+        "commit_ns": {
+          "median": 116209,
+          "mad": 2709
+        },
+        "release_ns": {
+          "median": 458,
+          "mad": 83
+        },
+        "total_ns": {
+          "median": 232833,
+          "mad": 3625
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 241125,
+          "execute_ns": 2208,
+          "commit_ns": 151792,
+          "release_ns": 1792,
+          "total_ns": 396917
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 125458,
+          "execute_ns": 167,
+          "commit_ns": 130166,
+          "release_ns": 875,
+          "total_ns": 256666
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 126042,
+          "execute_ns": 125,
+          "commit_ns": 119250,
+          "release_ns": 541,
+          "total_ns": 245958
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 124500,
+          "execute_ns": 41,
+          "commit_ns": 120875,
+          "release_ns": 625,
+          "total_ns": 246041
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 123917,
+          "execute_ns": 41,
+          "commit_ns": 119042,
+          "release_ns": 625,
+          "total_ns": 243625
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 119500,
+          "execute_ns": 250,
+          "commit_ns": 118500,
+          "release_ns": 542,
+          "total_ns": 238792
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 113333,
+          "execute_ns": 125,
+          "commit_ns": 118750,
+          "release_ns": 625,
+          "total_ns": 232833
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 115458,
+          "execute_ns": 83,
+          "commit_ns": 117042,
+          "release_ns": 458,
+          "total_ns": 233041
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 117750,
+          "execute_ns": 83,
+          "commit_ns": 107917,
+          "release_ns": 375,
+          "total_ns": 226125
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 117041,
+          "execute_ns": 84,
+          "commit_ns": 114333,
+          "release_ns": 458,
+          "total_ns": 231916
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 116125,
+          "execute_ns": 83,
+          "commit_ns": 113500,
+          "release_ns": 375,
+          "total_ns": 230083
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 115167,
+          "execute_ns": 125,
+          "commit_ns": 114292,
+          "release_ns": 375,
+          "total_ns": 229959
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 115375,
+          "execute_ns": 42,
+          "commit_ns": 112708,
+          "release_ns": 334,
+          "total_ns": 228459
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 116000,
+          "execute_ns": 83,
+          "commit_ns": 113125,
+          "release_ns": 375,
+          "total_ns": 229583
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 113958,
+          "execute_ns": 84,
+          "commit_ns": 113083,
+          "release_ns": 375,
+          "total_ns": 227500
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 117041,
+          "execute_ns": 42,
+          "commit_ns": 133042,
+          "release_ns": 1083,
+          "total_ns": 251208
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 132875,
+          "execute_ns": 209,
+          "commit_ns": 122958,
+          "release_ns": 750,
+          "total_ns": 256792
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 121834,
+          "execute_ns": 166,
+          "commit_ns": 120250,
+          "release_ns": 542,
+          "total_ns": 242792
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 118125,
+          "execute_ns": 83,
+          "commit_ns": 117709,
+          "release_ns": 541,
+          "total_ns": 236458
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 118584,
+          "execute_ns": 41,
+          "commit_ns": 115750,
+          "release_ns": 500,
+          "total_ns": 234875
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 115916,
+          "execute_ns": 125,
+          "commit_ns": 116209,
+          "release_ns": 458,
+          "total_ns": 232708
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 117500,
+          "execute_ns": 84,
+          "commit_ns": 116750,
+          "release_ns": 458,
+          "total_ns": 234792
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 116000,
+          "execute_ns": 83,
+          "commit_ns": 114209,
+          "release_ns": 375,
+          "total_ns": 230667
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 113916,
+          "execute_ns": 84,
+          "commit_ns": 112833,
+          "release_ns": 500,
+          "total_ns": 227333
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63133,
+        "server_pid": 63135,
+        "surface": "server",
+        "rows": 10000,
+        "operation": "noop",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.22247999999999998
+      }
+    },
+    {
+      "case": "server-10000-query",
+      "surface": "server",
+      "rows": 10000,
+      "operation": "query",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 10000,
+        "result_sha256": "0985bbbaee2928efcadad1ec601a25a7b1903f0067b01b47b86af6768096744d",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 0.07368899999999999,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.4486675839871168,
+      "peak_sampled_rss_bytes": {
+        "client": 38699008,
+        "server": 35389440
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 119333,
+          "mad": 1500
+        },
+        "execute_ns": {
+          "median": 221500,
+          "mad": 8416
+        },
+        "commit_ns": {
+          "median": 119667,
+          "mad": 2167
+        },
+        "release_ns": {
+          "median": 334,
+          "mad": 43
+        },
+        "total_ns": {
+          "median": 463167,
+          "mad": 9250
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 229542,
+          "execute_ns": 505375,
+          "commit_ns": 127833,
+          "release_ns": 2125,
+          "total_ns": 864875
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 121375,
+          "execute_ns": 255541,
+          "commit_ns": 125959,
+          "release_ns": 875,
+          "total_ns": 503750
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 115500,
+          "execute_ns": 230083,
+          "commit_ns": 121333,
+          "release_ns": 667,
+          "total_ns": 467583
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 123375,
+          "execute_ns": 232542,
+          "commit_ns": 123958,
+          "release_ns": 708,
+          "total_ns": 480583
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 119042,
+          "execute_ns": 222791,
+          "commit_ns": 116125,
+          "release_ns": 584,
+          "total_ns": 458542
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 118750,
+          "execute_ns": 263084,
+          "commit_ns": 126416,
+          "release_ns": 584,
+          "total_ns": 508834
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 129084,
+          "execute_ns": 248083,
+          "commit_ns": 120292,
+          "release_ns": 500,
+          "total_ns": 497959
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 122208,
+          "execute_ns": 234333,
+          "commit_ns": 125417,
+          "release_ns": 458,
+          "total_ns": 482416
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 122250,
+          "execute_ns": 218167,
+          "commit_ns": 119250,
+          "release_ns": 417,
+          "total_ns": 460084
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 118875,
+          "execute_ns": 218750,
+          "commit_ns": 120458,
+          "release_ns": 334,
+          "total_ns": 458417
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 123125,
+          "execute_ns": 220792,
+          "commit_ns": 119500,
+          "release_ns": 500,
+          "total_ns": 463917
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 118791,
+          "execute_ns": 216125,
+          "commit_ns": 118000,
+          "release_ns": 334,
+          "total_ns": 453250
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 118292,
+          "execute_ns": 219583,
+          "commit_ns": 118167,
+          "release_ns": 292,
+          "total_ns": 456334
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 117834,
+          "execute_ns": 230625,
+          "commit_ns": 117500,
+          "release_ns": 291,
+          "total_ns": 466250
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 122166,
+          "execute_ns": 268375,
+          "commit_ns": 135625,
+          "release_ns": 292,
+          "total_ns": 526458
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 140291,
+          "execute_ns": 255792,
+          "commit_ns": 121542,
+          "release_ns": 291,
+          "total_ns": 517916
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 124417,
+          "execute_ns": 235208,
+          "commit_ns": 119667,
+          "release_ns": 250,
+          "total_ns": 479542
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 120792,
+          "execute_ns": 221500,
+          "commit_ns": 120542,
+          "release_ns": 333,
+          "total_ns": 463167
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 118458,
+          "execute_ns": 218042,
+          "commit_ns": 116250,
+          "release_ns": 333,
+          "total_ns": 453083
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 120833,
+          "execute_ns": 217833,
+          "commit_ns": 117250,
+          "release_ns": 417,
+          "total_ns": 456333
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 119333,
+          "execute_ns": 213084,
+          "commit_ns": 121125,
+          "release_ns": 375,
+          "total_ns": 453917
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 118125,
+          "execute_ns": 217666,
+          "commit_ns": 116209,
+          "release_ns": 291,
+          "total_ns": 452291
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 117125,
+          "execute_ns": 212042,
+          "commit_ns": 127292,
+          "release_ns": 291,
+          "total_ns": 456750
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 117750,
+          "execute_ns": 233167,
+          "commit_ns": 115125,
+          "release_ns": 291,
+          "total_ns": 466333
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63148,
+        "server_pid": 63150,
+        "surface": "server",
+        "rows": 10000,
+        "operation": "query",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.224462
+      }
+    },
+    {
+      "case": "server-10000-delete",
+      "surface": "server",
+      "rows": 10000,
+      "operation": "delete",
+      "profile": false,
+      "result": {
+        "event": "complete",
+        "iterations": 24,
+        "final_rows": 9999,
+        "result_sha256": "1f2c752e4afa2dd3efffa3c93501aa79a47c1e2aebf6df245cf5e39a6bd21b28",
+        "input_keys_sha256": "1d523d29e823e23a7a47bec942abd3955290c53114f40c4c2686a33a946b3213",
+        "client_cpu_lifetime_seconds": 0.079881,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 1.044115582946688,
+      "peak_sampled_rss_bytes": {
+        "client": 75743232,
+        "server": 45842432
+      },
+      "fixture_removed": true,
+      "metrics": {
+        "begin_ns": {
+          "median": 124917,
+          "mad": 2416
+        },
+        "execute_ns": {
+          "median": 20623833,
+          "mad": 143750
+        },
+        "commit_ns": {
+          "median": 5517792,
+          "mad": 208708
+        },
+        "release_ns": {
+          "median": 1000,
+          "mad": 166
+        },
+        "total_ns": {
+          "median": 26175042,
+          "mad": 128042
+        }
+      },
+      "raw": [
+        {
+          "event": "sample",
+          "iteration": 0,
+          "phase": "warmup",
+          "key": 1824,
+          "begin_ns": 263125,
+          "execute_ns": 21502041,
+          "commit_ns": 5995334,
+          "release_ns": 2500,
+          "total_ns": 27763000
+        },
+        {
+          "event": "sample",
+          "iteration": 1,
+          "phase": "warmup",
+          "key": 409,
+          "begin_ns": 134042,
+          "execute_ns": 20662833,
+          "commit_ns": 5411083,
+          "release_ns": 1000,
+          "total_ns": 26208958
+        },
+        {
+          "event": "sample",
+          "iteration": 2,
+          "phase": "warmup",
+          "key": 4506,
+          "begin_ns": 131167,
+          "execute_ns": 21343416,
+          "commit_ns": 5537250,
+          "release_ns": 2084,
+          "total_ns": 27013917
+        },
+        {
+          "event": "sample",
+          "iteration": 3,
+          "phase": "measure",
+          "key": 4012,
+          "begin_ns": 132875,
+          "execute_ns": 20505000,
+          "commit_ns": 5226542,
+          "release_ns": 958,
+          "total_ns": 25865375
+        },
+        {
+          "event": "sample",
+          "iteration": 4,
+          "phase": "measure",
+          "key": 3657,
+          "begin_ns": 124167,
+          "execute_ns": 20550833,
+          "commit_ns": 5528750,
+          "release_ns": 1042,
+          "total_ns": 26204792
+        },
+        {
+          "event": "sample",
+          "iteration": 5,
+          "phase": "measure",
+          "key": 2286,
+          "begin_ns": 124875,
+          "execute_ns": 20535834,
+          "commit_ns": 5470458,
+          "release_ns": 1125,
+          "total_ns": 26132292
+        },
+        {
+          "event": "sample",
+          "iteration": 6,
+          "phase": "measure",
+          "key": 1679,
+          "begin_ns": 115375,
+          "execute_ns": 20927083,
+          "commit_ns": 5926542,
+          "release_ns": 1375,
+          "total_ns": 26970375
+        },
+        {
+          "event": "sample",
+          "iteration": 7,
+          "phase": "measure",
+          "key": 8935,
+          "begin_ns": 126084,
+          "execute_ns": 20623833,
+          "commit_ns": 5325792,
+          "release_ns": 916,
+          "total_ns": 26076625
+        },
+        {
+          "event": "sample",
+          "iteration": 8,
+          "phase": "measure",
+          "key": 1424,
+          "begin_ns": 129917,
+          "execute_ns": 20738416,
+          "commit_ns": 5309084,
+          "release_ns": 1125,
+          "total_ns": 26178542
+        },
+        {
+          "event": "sample",
+          "iteration": 9,
+          "phase": "measure",
+          "key": 9674,
+          "begin_ns": 124917,
+          "execute_ns": 20662542,
+          "commit_ns": 5197916,
+          "release_ns": 834,
+          "total_ns": 25986209
+        },
+        {
+          "event": "sample",
+          "iteration": 10,
+          "phase": "measure",
+          "key": 6912,
+          "begin_ns": 126541,
+          "execute_ns": 21301292,
+          "commit_ns": 5746208,
+          "release_ns": 1792,
+          "total_ns": 27175833
+        },
+        {
+          "event": "sample",
+          "iteration": 11,
+          "phase": "measure",
+          "key": 520,
+          "begin_ns": 127333,
+          "execute_ns": 20392667,
+          "commit_ns": 5653917,
+          "release_ns": 1125,
+          "total_ns": 26175042
+        },
+        {
+          "event": "sample",
+          "iteration": 12,
+          "phase": "measure",
+          "key": 488,
+          "begin_ns": 131209,
+          "execute_ns": 20534041,
+          "commit_ns": 5486125,
+          "release_ns": 1000,
+          "total_ns": 26152375
+        },
+        {
+          "event": "sample",
+          "iteration": 13,
+          "phase": "measure",
+          "key": 1535,
+          "begin_ns": 128333,
+          "execute_ns": 20527833,
+          "commit_ns": 5605792,
+          "release_ns": 958,
+          "total_ns": 26262916
+        },
+        {
+          "event": "sample",
+          "iteration": 14,
+          "phase": "measure",
+          "key": 3582,
+          "begin_ns": 146209,
+          "execute_ns": 21062458,
+          "commit_ns": 5927333,
+          "release_ns": 1542,
+          "total_ns": 27137542
+        },
+        {
+          "event": "sample",
+          "iteration": 15,
+          "phase": "measure",
+          "key": 3811,
+          "begin_ns": 117708,
+          "execute_ns": 20558625,
+          "commit_ns": 5542958,
+          "release_ns": 1459,
+          "total_ns": 26220750
+        },
+        {
+          "event": "sample",
+          "iteration": 16,
+          "phase": "measure",
+          "key": 8279,
+          "begin_ns": 127709,
+          "execute_ns": 20798541,
+          "commit_ns": 5080917,
+          "release_ns": 708,
+          "total_ns": 26007875
+        },
+        {
+          "event": "sample",
+          "iteration": 17,
+          "phase": "measure",
+          "key": 9863,
+          "begin_ns": 117709,
+          "execute_ns": 20739291,
+          "commit_ns": 6204834,
+          "release_ns": 1166,
+          "total_ns": 27063000
+        },
+        {
+          "event": "sample",
+          "iteration": 18,
+          "phase": "measure",
+          "key": 434,
+          "begin_ns": 124459,
+          "execute_ns": 20480083,
+          "commit_ns": 5460125,
+          "release_ns": 625,
+          "total_ns": 26065292
+        },
+        {
+          "event": "sample",
+          "iteration": 19,
+          "phase": "measure",
+          "key": 9195,
+          "begin_ns": 123875,
+          "execute_ns": 20457833,
+          "commit_ns": 5517792,
+          "release_ns": 708,
+          "total_ns": 26100208
+        },
+        {
+          "event": "sample",
+          "iteration": 20,
+          "phase": "measure",
+          "key": 3257,
+          "begin_ns": 124916,
+          "execute_ns": 20826625,
+          "commit_ns": 6130292,
+          "release_ns": 875,
+          "total_ns": 27082708
+        },
+        {
+          "event": "sample",
+          "iteration": 21,
+          "phase": "measure",
+          "key": 8928,
+          "begin_ns": 124458,
+          "execute_ns": 20929625,
+          "commit_ns": 6046417,
+          "release_ns": 1625,
+          "total_ns": 27102125
+        },
+        {
+          "event": "sample",
+          "iteration": 22,
+          "phase": "measure",
+          "key": 6873,
+          "begin_ns": 130250,
+          "execute_ns": 20455459,
+          "commit_ns": 5444458,
+          "release_ns": 958,
+          "total_ns": 26031125
+        },
+        {
+          "event": "sample",
+          "iteration": 23,
+          "phase": "measure",
+          "key": 3611,
+          "begin_ns": 123291,
+          "execute_ns": 20862000,
+          "commit_ns": 5061000,
+          "release_ns": 709,
+          "total_ns": 26047000
+        }
+      ],
+      "ready": {
+        "event": "ready",
+        "pid": 63165,
+        "server_pid": 63167,
+        "surface": "server",
+        "rows": 10000,
+        "operation": "delete",
+        "profile": false,
+        "native_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
+        "driver_sha256": "66c5f070d894585f2e0caabc04dde42da132c67664777be2139d5643eced5502"
+      },
+      "server_stopped": {
+        "event": "server_stopped",
+        "returncode": 0,
+        "server_cpu_lifetime_seconds": 0.758956
+      }
+    }
+  ],
+  "stack": {
+    "embedded": {
+      "sha256": "f4f4e1d8e98ce9733410d2a54cfbd9e77e5c1a1005d24df5fa7e99c97864070f",
+      "delete_inclusive_samples": 637,
+      "fetch_batch_inclusive_samples": 617,
+      "selected_call_tree_lines": [
+        "                              +   !           :   587 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 1096  [0x109181074]",
+        "                              +   !           :   | 558 alopex_sql::executor::dml::delete::fetch_batch::h8e1aaf1efc4a364b  (in _alopex.abi3.so) + 160  [0x10917ec08]",
+        "                              +   !           :   | 21 alopex_sql::executor::dml::delete::fetch_batch::h8e1aaf1efc4a364b  (in _alopex.abi3.so) + 608  [0x10917edc8]",
+        "                              +   !           :   | 8 alopex_sql::executor::dml::delete::fetch_batch::h8e1aaf1efc4a364b  (in _alopex.abi3.so) + 448  [0x10917ed28]",
+        "                              +   !           :   8 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 1812  [0x109181340]",
+        "                              +   !           :   5 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 1684  [0x1091812c0]",
+        "                              +   !           :   3 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 2068  [0x109181440]",
+        "                              +   !           :   3 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 2076  [0x109181448]",
+        "                              +   !           :   1 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 2028  [0x109181418]",
+        "                              +   !           224 alopex_sql::storage::bridge::LocalRangeChangeJournal::capture::h7f1d08136748c76f  (in _alopex.abi3.so) + 112  [0x1090d67ec]",
+        "                              +   !           12 alopex_sql::storage::bridge::LocalRangeChangeJournal::capture::h7f1d08136748c76f  (in _alopex.abi3.so) + 260  [0x1090d6880]",
+        "                              + ! :               30 alopex_sql::executor::dml::delete::execute_delete_with_returning::h5d971fa3a8e66258  (in _alopex.abi3.so) + 1096  [0x109181074]",
+        "                              + ! :                 29 alopex_sql::executor::dml::delete::fetch_batch::h8e1aaf1efc4a364b  (in _alopex.abi3.so) + 160  [0x10917ec08]",
+        "                              + ! :                 1 alopex_sql::executor::dml::delete::fetch_batch::h8e1aaf1efc4a364b  (in _alopex.abi3.so) + 608  [0x10917edc8]",
+        "                              + !             8 alopex_sql::storage::bridge::LocalRangeChangeJournal::capture::h7f1d08136748c76f  (in _alopex.abi3.so) + 112  [0x1090d67ec]"
+      ],
+      "scope": "3-second mixed DELETE/restore/validation sample; counts within DELETE, not process-wide CPU proportions"
+    },
+    "server": {
+      "sha256": "13d33eabb689f239ccccef8d04916760c5d07eef17f291477f1e6e17a8715391",
+      "delete_inclusive_samples": 966,
+      "fetch_batch_inclusive_samples": 923,
+      "selected_call_tree_lines": [
+        "      !       :           |         923 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 1112  [0x1023bc420]",
+        "      !       :           |         + 842 alopex_sql::executor::dml::delete::fetch_batch::h90562325a3b9ee88  (in alopex-server) + 160  [0x1023bae1c]",
+        "      !       :           |         + 48 alopex_sql::executor::dml::delete::fetch_batch::h90562325a3b9ee88  (in alopex-server) + 608  [0x1023bafdc]",
+        "      !       :           |         + 33 alopex_sql::executor::dml::delete::fetch_batch::h90562325a3b9ee88  (in alopex-server) + 448  [0x1023baf3c]",
+        "      !       :           |         27 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 1852  [0x1023bc704]",
+        "      !       :           |         9 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 1724  [0x1023bc684]",
+        "      !       :           |         3 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 2068  [0x1023bc7dc]",
+        "      !       :           |         2 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 2108  [0x1023bc804]",
+        "      !       :           |         1 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 2060  [0x1023bc7d4]",
+        "      !       :           |         1 alopex_sql::executor::dml::delete::execute_delete_with_returning::h1dbc1a8954a8ae38  (in alopex-server) + 2308  [0x1023bc8cc]"
+      ],
+      "scope": "3-second mixed DELETE/restore/validation sample; counts within DELETE, not process-wide CPU proportions"
+    }
+  },
+  "profiles": [
+    {
+      "case": "embedded-10000-delete",
+      "surface": "embedded",
+      "rows": 10000,
+      "operation": "delete",
+      "profile": true,
+      "result": {
+        "event": "complete",
+        "iterations": 43,
+        "final_rows": 9999,
+        "result_sha256": "70a08961b159a1c30e5baacb6dbb2f1090a2bd71857aa636f2302c4706c12b44",
+        "input_keys_sha256": "04fd9b9af8f08667f6e2c83d3d8bba39976966f30569ccaa5949b8c84805f9e7",
+        "client_cpu_lifetime_seconds": 3.576412,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 5.254841874819249,
+      "peak_sampled_rss_bytes": {
+        "client": 109920256
+      },
+      "fixture_removed": true
+    },
+    {
+      "case": "server-10000-delete",
+      "surface": "server",
+      "rows": 10000,
+      "operation": "delete",
+      "profile": true,
+      "result": {
+        "event": "complete",
+        "iterations": 121,
+        "final_rows": 9999,
+        "result_sha256": "5e38a5c1c225fa801af3d66e1813b89cb1e691486e4762c2ed7ad250ec659d19",
+        "input_keys_sha256": "335511810226cf149cde9178b005ce470f264ef20a738a08f71f74ae42d88074",
+        "client_cpu_lifetime_seconds": 0.12498999999999999,
+        "validation": "per-operation result and full state after reconnect/reopen",
+        "scope": "manual internal diagnosis; not reference-product or published-version comparison"
+      },
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 5.538973208051175,
+      "peak_sampled_rss_bytes": {
+        "client": 75612160,
+        "server": 45826048
+      },
+      "fixture_removed": true
+    }
+  ],
+  "verification": {
+    "normal_cells": 18,
+    "warmup_samples": 54,
+    "measured_samples": 378,
+    "full_state_pairs": 9,
+    "phase_sums": "all exact",
+    "fixture_cleanup": "20/20 timed/profile cells removed plus2/2 smoke",
+    "native_build": "3m44s; test opt1; no product-source changes",
+    "harness_tests": 4,
+    "CI_refusal": "exit2 before output/binary access"
+  },
+  "followup": {
+    "adopt": "Apply existing single-column primary-key equality lookup to DELETE while retaining predicate evaluation, FK/index updates, RETURNING and rollback; use minimal scan-count and semantic regressions.",
+    "owner": "Codex / #712",
+    "do_not_duplicate": "Embedded full-table journal cost belongs to #684/#770.",
+    "remaining": "All six SQL write/random cases and four independent reads against fixed published/before/after/reference, server/client resources including IO,3trials, plus remaining SQL streaming/KV/DataFrame/HNSW/CSV scope."
+  },
+  "server_sync": "Unmodified public server default LsmKVConfig BatchSync(max_batch_size1024,max_wait_ms10); no fsync/commit weakening. Embedded retains its public defaults. Not a normalized durability-overhead comparison."
+}
