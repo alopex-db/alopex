@@ -16,6 +16,8 @@ pub mod metrics;
 pub mod overflow;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod publication_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scan_tests;
 pub mod sstable;
 pub mod wal;
 #[cfg(all(test, not(target_arch = "wasm32")))]
