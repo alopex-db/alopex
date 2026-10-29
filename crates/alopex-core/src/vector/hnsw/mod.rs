@@ -292,9 +292,9 @@ impl HnswIndex {
         let existed = graph.find_node_id(key).is_some();
         let node_id = graph.upsert(key, vector, metadata)?;
         if existed {
-            state.record_upsert(node_id, false, None);
+            state.record_upsert(node_id, false);
         } else {
-            state.record_upsert(node_id, true, None);
+            state.record_upsert(node_id, true);
         }
         Ok(())
     }
@@ -331,7 +331,7 @@ impl HnswIndex {
             } else {
                 graph.upsert(key, vector, metadata)?
             };
-            state.record_upsert(node_id, !existed, None);
+            state.record_upsert(node_id, !existed);
             if all_new && (position + 1) % BULK_PRUNE_INTERVAL == 0 {
                 graph.prune_overfull_neighbors();
             }
@@ -364,13 +364,17 @@ impl HnswIndex {
         txn: &mut T,
         state: &mut HnswTransactionState,
     ) -> Result<()> {
-        let (modified, inserted, deleted_keys) = state.prepare_for_commit();
+        let (modified, inserted) = state.prepare_for_commit();
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
         // Graph mutation tracks reverse-edge changes as well as addressed nodes.
         // Keep dirty slots on failure so retry never loses a partially saved change.
-        let metadata =
-            self.storage
-                .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        let metadata = self.storage.save_incremental(
+            txn,
+            &graph,
+            state.snapshot.as_ref(),
+            &modified,
+            &inserted,
+        )?;
         graph.persisted_metadata = Some(metadata);
         graph.dirty_nodes.clear();
         self.stats_cache = Self::compute_stats(&graph);
@@ -530,7 +534,6 @@ pub struct HnswTransactionState {
     modified_nodes: HashSet<u32>,
     inserted_nodes: HashSet<u32>,
     deleted_nodes: HashSet<u32>,
-    deleted_key_indices: Vec<Vec<u8>>,
 }
 
 impl HnswTransactionState {
@@ -540,14 +543,11 @@ impl HnswTransactionState {
         }
     }
 
-    fn record_upsert(&mut self, node_id: u32, is_new: bool, old_key: Option<Vec<u8>>) {
+    fn record_upsert(&mut self, node_id: u32, is_new: bool) {
         if is_new {
             self.inserted_nodes.insert(node_id);
         } else {
             self.modified_nodes.insert(node_id);
-        }
-        if let Some(key) = old_key {
-            self.deleted_key_indices.push(key);
         }
     }
 
@@ -556,15 +556,14 @@ impl HnswTransactionState {
         self.modified_nodes.insert(node_id);
     }
 
-    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>) {
+    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>) {
         let modified: Vec<u32> = self
             .modified_nodes
             .difference(&self.inserted_nodes)
             .copied()
             .collect();
         let inserted: Vec<u32> = self.inserted_nodes.iter().copied().collect();
-        let deleted_keys = self.deleted_key_indices.clone();
-        (modified, inserted, deleted_keys)
+        (modified, inserted)
     }
 
     fn clear(&mut self) {
@@ -572,7 +571,6 @@ impl HnswTransactionState {
         self.modified_nodes.clear();
         self.inserted_nodes.clear();
         self.deleted_nodes.clear();
-        self.deleted_key_indices.clear();
     }
 }
 
