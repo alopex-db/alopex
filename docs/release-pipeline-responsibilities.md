@@ -73,6 +73,7 @@ job's owner.
 | `compatibility.yml:historical-parser` | Extended Verification | historical parser matrix result |
 | `compatibility.yml:historical-contract` | Extended Verification | historical API matrix result |
 | `compatibility.yml:current-windows-full` | Extended Verification | Windows full-workspace result |
+| `compatibility.yml:windows-overflow-public` | Extended Verification | manually selected Windows public overflow, fault/exit recovery and published old-reader receipts; source identity and cleanup |
 | `compatibility.yml:native` | Development CI | exact-SHA native compatibility result |
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |

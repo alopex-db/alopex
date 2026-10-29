@@ -1,18 +1,11 @@
 //! Small inline/reference integration contracts on both native platforms.
 //!
-//! Unix uses the public opt-in. Windows qualifies the internal LSM pipeline;
-//! this does not bypass the public guard outside tests or prove power-loss safety.
+//! Both native platforms use the public opt-in. These cases do not prove
+//! device power-loss safety.
 use super::*;
 
 fn open(path: &Path) -> Result<(LsmKV, RecoveryResult)> {
-    #[cfg(windows)]
-    {
-        LsmKV::open_inner(path, inline_config(), Some(inline_options()))
-    }
-    #[cfg(not(windows))]
-    {
-        LsmKV::open_with_overflow(path, inline_config(), inline_options())
-    }
+    LsmKV::open_with_overflow(path, inline_config(), inline_options())
 }
 
 fn write(store: &LsmKV, values: &[(u8, Option<Vec<u8>>)]) -> Result<()> {

@@ -1,5 +1,5 @@
 //! Manual instrumented-build acceptance. See scripts/compatibility/README.md.
-#![cfg(all(alopex_wal_test_hooks, not(windows)))]
+#![cfg(alopex_wal_test_hooks)]
 use alopex_core::lsm::wal::overflow::test_hooks;
 use alopex_embedded::wal_overflow::{
     LsmOverflowConfig, OperationLimits, SpoolLimits, SyncMode, WalConfig,
