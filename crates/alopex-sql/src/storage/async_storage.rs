@@ -1043,6 +1043,9 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
             )?
         }
         query_plan => {
+            if let Some(result) = crate::executor::execute_sequence(txn, &query_plan)? {
+                return Ok(ExecutionResult::Query(result));
+            }
             let guard = catalog.read().expect("catalog lock poisoned");
             let policy = txn.memory_policy().cloned();
             query::execute_query_with_policy_and_copy_security(
@@ -1141,6 +1144,25 @@ fn stream_query_blocking<'ctx, S: KVStore + 'ctx>(
             reason: "query API requires SELECT".into(),
         }));
         return;
+    }
+
+    match crate::executor::execute_sequence(txn, &plan) {
+        Ok(Some(result)) => {
+            for (index, values) in result.rows.into_iter().enumerate() {
+                if sender
+                    .blocking_send(Ok(Row::new(index as u64 + 1, values)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            return;
+        }
+        Err(err) => {
+            let _ = sender.blocking_send(Err(err));
+            return;
+        }
+        Ok(None) => {}
     }
 
     let guard = catalog.read().expect("catalog lock poisoned");

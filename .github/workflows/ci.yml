@@ -39,7 +39,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Verify change scope classifier
-        run: bash scripts/ci/test_classify_change_scope.sh
+        run: |
+          bash scripts/ci/test_classify_change_scope.sh
+          python3 -m unittest scripts.ci.test_check_parser_wire_contract
       - name: Classify production and release-process changes
         id: classify
         shell: bash

@@ -1331,3 +1331,136 @@ async fn http_streaming_select_and_error_propagation() {
     }
     assert!(saw_error);
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn sequence_stream_commits_allocation_and_preserves_bigint() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+    let (status, _) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({"sql": "CREATE SEQUENCE counter START WITH 7"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({"sql": "SELECT nextval('counter') AS value", "streaming": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items: Vec<Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(items.iter().all(|item| item["error"].is_null()), "{body}");
+    assert_eq!(
+        items
+            .iter()
+            .filter_map(|item| item["row"].as_array())
+            .collect::<Vec<_>>(),
+        vec![&vec![serde_json::json!({"BigInt": 7})]]
+    );
+    assert_eq!(items.last().unwrap()["done"], true);
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({"sql": "SELECT nextval('counter') AS value"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["rows"], serde_json::json!([[{"BigInt": 8}]]));
+    assert_eq!(result["columns"][0]["name"], "value");
+    assert_eq!(result["columns"][0]["data_type"], "BIGINT");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn sequence_nextval_obeys_server_write_restrictions_in_both_apis() {
+    use alopex_server::ops::state::Mode;
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state.clone());
+    for sql in [
+        "CREATE SEQUENCE counter START WITH 7",
+        "SELECT nextval('counter')",
+    ] {
+        assert_eq!(
+            send_json(&app, "/sql", serde_json::json!({"sql": sql}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    for mode in [Mode::ReadOnly, Mode::Maintenance] {
+        state.lifecycle_state.set_mode(mode);
+        for streaming in [false, true] {
+            let (status, body) = send_json(
+                &app,
+                "/sql",
+                serde_json::json!({"sql": "SELECT NEXTVAL('counter')", "streaming": streaming}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(body.contains("writes are blocked"), "{body}");
+            let (status, body) = send_json(&app, "/sql", serde_json::json!({"sql": "SELECT currval('counter') AS value", "streaming": streaming})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains("\"BigInt\":7"), "{body}");
+        }
+    }
+    state.lifecycle_state.set_mode(Mode::Normal);
+    let (_, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({"sql": "SELECT nextval('counter') AS value"}),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["rows"],
+        serde_json::json!([[{"BigInt": 8}]])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn sequence_stream_response_failure_rolls_back_allocation() {
+    use alopex_sql::storage::AsyncSqlTransaction;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = ServerConfig {
+        data_dir: temp_dir.path().join("data"),
+        audit_log_enabled: false,
+        tracing_enabled: false,
+        metrics_enabled: false,
+        max_response_size: 1,
+        ..ServerConfig::default()
+    };
+    let state = Server::new(config).unwrap().state.clone();
+    let mut txn = state.begin_sql_txn().await.unwrap();
+    txn.async_execute("CREATE SEQUENCE counter START WITH 7")
+        .await
+        .unwrap();
+    txn.async_commit().await.unwrap();
+    let app = http::router(state.clone());
+    let (_, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({"sql": "SELECT nextval('counter')", "streaming": true}),
+    )
+    .await;
+    assert!(body.contains("response size exceeds limit"), "{body}");
+    let mut txn = state.begin_sql_txn().await.unwrap();
+    let alopex_sql::executor::ExecutionResult::Query(result) = txn
+        .async_execute("SELECT nextval('counter')")
+        .await
+        .unwrap()
+    else {
+        panic!("expected query")
+    };
+    assert_eq!(
+        result.rows,
+        vec![vec![alopex_sql::storage::SqlValue::BigInt(7)]]
+    );
+    txn.async_rollback().await.unwrap();
+}
