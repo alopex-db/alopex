@@ -93,6 +93,14 @@ fixtures were removed. Shared Cargo dependencies remain for active release work.
 Compact source hashes, logs, mutation/coupling records and cleanup identities are
 in `/private/tmp/alopex-682-windows-public`.
 
+Manual execution is available in the existing Compatibility workflow through
+`acceptance_suite=windows-overflow`, dispatched on this PR branch. Its dedicated
+hosted Windows job checks normal Python15, instrumented Rust24/Python24,
+published 0.8.16 container refusal, and six independent live-WAL processes.
+The receipts bind the exact checkout, normal/instrumented DLL hashes and old
+registry/wheel identities. This prepares the acceptance; it is not evidence that
+the Windows run has passed. Ordinary CI does not run the instrumented suite.
+
 Next: verify the exact PR source on native Windows, including both normal and
 manual public-API gates, before candidate integration. The broader #682
 performance comparison and device-failure/power-loss qualification remain
