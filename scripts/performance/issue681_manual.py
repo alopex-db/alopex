@@ -125,8 +125,8 @@ def main():
             process.stdout.close()
     peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     report = {"outcome":outcome,"failure":failure,"phase_sampled_peak_rss_bytes":phases,
-              "process_lifetime_peak_rss_bytes":peak if sys.platform=="darwin" else peak*1024,
-              "peak_scope":"lifetime includes seed/build; per-phase values are sampled lower bounds",
+              "children_lifetime_peak_rss_bytes":peak if sys.platform=="darwin" else peak*1024,
+              "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; workload phase values are sampled lower bounds, not exact phase maxima",
               "final_inventory":storage.inventory([args.output])}
     (args.output / "summary.json").write_text(json.dumps(report,indent=2))
     print(json.dumps({**{k:v for k,v in report.items() if k != "final_inventory"},
