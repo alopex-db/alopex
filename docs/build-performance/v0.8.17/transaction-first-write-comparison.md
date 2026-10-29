@@ -165,3 +165,12 @@ This closes the bounded public Python first-scalar-write comparison. Native
 borrowed/owned index/resource evidence, required OS CI and candidate composition
 remain before #684 acceptance. #770 remains stacked on #769 and is not a
 release-ready or merged candidate claim.
+
+## Native evidence reconciliation
+
+The [native index/resource report](transaction-begin-native-resources.md) now
+completes the local borrowed/owned index0/1/2 time/RSS comparison and maps all
+five #684 conditions to source-bound development evidence. It also preserves
+the native autocommit timing flag and its fixed balanced replication. Required
+CI and candidate composition remain; earlier native-pending notes above describe
+the preceding handoff. No issue or release completion is claimed.

@@ -136,3 +136,12 @@ integration remain. These bounded measurements do not establish large-transactio
 or HNSW vector-mutation throughput. The public Python 0.8.16 baseline must not be
 compared directly with these native candidate results. #684 and the v0.8.17
 release remain open.
+
+## Native evidence reconciliation
+
+The [native index/resource report](transaction-begin-native-resources.md) now
+completes the local borrowed/owned index0/1/2 time/RSS comparison and maps all
+five #684 conditions to source-bound development evidence. It also preserves
+the native autocommit timing flag and its fixed balanced replication. Required
+CI and candidate composition remain; earlier native-pending notes above describe
+the preceding handoff. No issue or release completion is claimed.
