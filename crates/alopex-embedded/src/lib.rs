@@ -17,6 +17,9 @@ mod sql_api;
 mod sql_session;
 mod txn_manager;
 
+#[cfg(test)]
+mod hnsw_begin_tests;
+
 pub use crate::catalog::{CachedTableInfo, Catalog};
 pub use crate::catalog_api::{
     CatalogInfo, CatalogManifestCatalog, CatalogManifestColumn, CatalogManifestCompression,
@@ -78,6 +81,9 @@ use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+// Internal cache snapshot paired with a backend transaction's read point.
+type HnswCacheSnapshot = (u64, Vec<(String, HnswIndex)>);
 
 const DEFAULT_HNSW_CACHE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 const HNSW_CACHE_MAX_ENTRIES: usize = 128;
@@ -675,7 +681,28 @@ impl Database {
         result
     }
 
-    pub(crate) fn hnsw_cache_snapshot(&self) -> (u64, Vec<(String, HnswIndex)>) {
+    // Pair a backend snapshot with a cache snapshot only while commits are excluded.
+    // Under contention, the backend snapshot alone is sufficient for correctness.
+    // Capture the epoch BEFORE begin: a commit during begin must prevent later
+    // publication of graphs loaded from that older transaction.
+    fn begin_with_hnsw_cache<T>(
+        &self,
+        begin: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, HnswCacheSnapshot)> {
+        match self.hnsw_cache_gate.try_read() {
+            Ok(_gate) => {
+                let transaction = begin()?;
+                Ok((transaction, self.hnsw_cache_snapshot()))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let epoch = self.hnsw_cache_epoch.load(Ordering::Acquire);
+                Ok((begin()?, (epoch, Vec::new())))
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("hnsw cache gate lock poisoned"),
+        }
+    }
+
+    pub(crate) fn hnsw_cache_snapshot(&self) -> HnswCacheSnapshot {
         let epoch = self.hnsw_cache_epoch.load(Ordering::Acquire);
         let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
         let entries = cache
@@ -1315,15 +1342,9 @@ impl Database {
 
     /// Begins a new transaction.
     pub fn begin(&self, mode: TxnMode) -> Result<Transaction<'_>> {
-        let (mut txn, epoch, cached, observer) = {
-            let _gate = self
-                .hnsw_cache_gate
-                .read()
-                .expect("hnsw cache gate lock poisoned");
-            let txn = self.store.begin(mode).map_err(Error::Core)?;
-            let (epoch, cached) = self.hnsw_cache_snapshot();
-            (txn, epoch, cached, self.hnsw_cache_observer())
-        };
+        let (mut txn, (epoch, cached)) =
+            self.begin_with_hnsw_cache(|| self.store.begin(mode).map_err(Error::Core))?;
+        let observer = self.hnsw_cache_observer();
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == RangeChangeJournalCapability::Supported

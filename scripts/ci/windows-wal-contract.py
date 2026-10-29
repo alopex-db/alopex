@@ -66,6 +66,8 @@ commands = [
                                      "--test", "hnsw_transaction_cache"]),
     ("hnsw-cold-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                                "--test", "hnsw_cold_publication"]),
+    ("hnsw-begin-cache", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                          "--lib", "hnsw_begin_tests"]),
     ("hnsw-copy-on-write", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                             "--lib", "vector::hnsw::cow::tests"]),
     ("hnsw-dirty-writes", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
@@ -94,6 +96,7 @@ for name, command in commands:
                 "memory-snapshots": "20 passed; 0 failed; 0 ignored",
                 "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored",
                 "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored",
+                "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
                 "hnsw-copy-on-write": "7 passed; 0 failed; 0 ignored",
                 "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
