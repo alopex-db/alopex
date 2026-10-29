@@ -503,7 +503,7 @@ fn incremental_save_persists_changes() {
 
     let mut inc_txn = kv.begin(TxnMode::ReadWrite).unwrap();
     storage()
-        .save_incremental(&mut inc_txn, &graph, &[], &[inserted], &[])
+        .save_incremental(&mut inc_txn, &graph, None, &[], &[inserted])
         .unwrap();
     kv.txn_manager().commit(inc_txn).unwrap();
 

@@ -201,6 +201,7 @@ fn rolled_back_flush_and_different_store_require_full_save() {
 struct FailAfterPuts<T> {
     inner: T,
     remaining: Option<usize>,
+    deny_scans: bool,
 }
 
 impl<'a, T: KVTransaction<'a>> KVTransaction<'a> for FailAfterPuts<T> {
@@ -229,6 +230,10 @@ impl<'a, T: KVTransaction<'a>> KVTransaction<'a> for FailAfterPuts<T> {
         &mut self,
         prefix: &[u8],
     ) -> crate::Result<Box<dyn Iterator<Item = (crate::Key, crate::Value)> + '_>> {
+        assert!(
+            !self.deny_scans,
+            "incremental flush scanned stored nodes or keys"
+        );
         self.inner.scan_prefix(prefix)
     }
     fn scan_range(
@@ -236,6 +241,10 @@ impl<'a, T: KVTransaction<'a>> KVTransaction<'a> for FailAfterPuts<T> {
         start: &[u8],
         end: &[u8],
     ) -> crate::Result<Box<dyn Iterator<Item = (crate::Key, crate::Value)> + '_>> {
+        assert!(
+            !self.deny_scans,
+            "incremental flush scanned stored nodes or keys"
+        );
         self.inner.scan_range(start, end)
     }
     fn commit_self(self) -> crate::Result<()> {
@@ -262,6 +271,7 @@ fn partial_node_write_failure_can_retry_in_same_transaction() {
     let mut tx = FailAfterPuts {
         inner: kv.begin(TxnMode::ReadWrite).unwrap(),
         remaining: Some(2),
+        deny_scans: false,
     };
     assert!(index.commit_staged(&mut tx, &mut state).is_err());
     assert_eq!(index.graph.read().unwrap().dirty_nodes, dirty);
@@ -289,4 +299,140 @@ fn staged_batch_preserves_pruned_neighbors_after_reopen() {
         .collect();
     index.upsert_staged_batch(&entries, &mut state).unwrap();
     commit(&mut index, &mut state, &kv);
+}
+
+#[test]
+fn delta_flush_work_is_bounded_by_touched_nodes_and_keys() {
+    use super::super::storage::take_serialized_node_count;
+    let kv = MemoryKV::new();
+    let mut index = index();
+    for id in 0..32u8 {
+        index.upsert(&[id], &[id as f32, 1.0], &[]).unwrap();
+    }
+    save(&index, &kv);
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged(&[99], &[8.5, 1.0], &[], &mut state)
+        .unwrap();
+    let touched = index.graph.read().unwrap().dirty_nodes.len();
+    assert!(touched < 33);
+    let mut tx = FailAfterPuts {
+        inner: kv.begin(TxnMode::ReadWrite).unwrap(),
+        remaining: None,
+        deny_scans: true,
+    };
+    take_serialized_node_count();
+    index.commit_staged(&mut tx, &mut state).unwrap();
+    let serialized = take_serialized_node_count();
+    assert!(
+        serialized <= 2 * touched,
+        "serialized {serialized} records for {touched} touched nodes"
+    );
+    let mut key_writes = 0;
+    assert!(tx.inner.visit_pending_write_keys(&mut |key| {
+        if key.starts_with(b"hnsw:key:") {
+            key_writes += 1;
+        }
+    }));
+    assert_eq!(key_writes, touched);
+    tx.commit_self().unwrap();
+    assert_stored(&index, &kv);
+}
+
+#[test]
+fn no_op_flush_does_not_scan_or_serialize_graph_nodes() {
+    use super::super::storage::take_serialized_node_count;
+    let kv = MemoryKV::new();
+    let mut index = index();
+    index.upsert(b"a", &[1.0, 0.0], &[]).unwrap();
+    save(&index, &kv);
+    let mut state = HnswTransactionState::default();
+    let mut tx = FailAfterPuts {
+        inner: kv.begin(TxnMode::ReadWrite).unwrap(),
+        remaining: None,
+        deny_scans: true,
+    };
+    take_serialized_node_count();
+    index.commit_staged(&mut tx, &mut state).unwrap();
+    assert_eq!(take_serialized_node_count(), 0);
+    tx.commit_self().unwrap();
+    assert_stored(&index, &kv);
+}
+
+#[test]
+fn unsaved_before_image_falls_back_to_full_save() {
+    let kv = MemoryKV::new();
+    let mut index = index();
+    index.upsert(b"a", &[1.0, 0.0], &[]).unwrap();
+    save(&index, &kv);
+    // This direct mutation precedes the staged snapshot and is not a persisted before-image.
+    index.upsert(b"a", &[5.0, 0.0], b"changed").unwrap();
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged(b"b", &[2.0, 0.0], &[], &mut state)
+        .unwrap();
+    commit(&mut index, &mut state, &kv);
+}
+
+#[test]
+fn staged_compaction_and_reinsertion_preserve_moved_key_mapping() {
+    let kv = MemoryKV::new();
+    let mut index = index();
+    for id in 0..6u8 {
+        index.upsert(&[id], &[id as f32, 0.0], &[]).unwrap();
+    }
+    save(&index, &kv);
+    let mut state = HnswTransactionState::default();
+    index.delete_staged(&[0], &mut state).unwrap();
+    index.delete_staged(&[1], &mut state).unwrap();
+    index.compact().unwrap();
+    index
+        .upsert_staged(&[0], &[2.5, 0.0], &[], &mut state)
+        .unwrap();
+    index
+        .upsert_staged(&[9], &[1.5, 0.0], &[], &mut state)
+        .unwrap();
+    // key 0 now occupies the former key 1 slot, while key 9 uses its old slot.
+    assert_eq!(index.graph.read().unwrap().find_node_id(&[0]), Some(1));
+    commit(&mut index, &mut state, &kv);
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+    #[test]
+    fn bounded_multi_operation_flushes_match_full_save(operations in proptest::collection::vec((0u8..4, 0u8..8, 0u8..16), 1..17)) {
+        let kv = MemoryKV::new();
+        let mut index = index();
+        save(&index, &kv);
+        let mut state = HnswTransactionState::default();
+        for (position, (operation, id, coordinate)) in operations.into_iter().enumerate() {
+            match operation {
+                0 | 1 => index.upsert_staged(&[id], &[coordinate as f32, 1.0], &[coordinate], &mut state).unwrap(),
+                2 => { index.delete_staged(&[id], &mut state).unwrap(); },
+                _ => { index.compact().unwrap(); },
+            }
+            if position % 4 == 3 { commit(&mut index, &mut state, &kv); }
+        }
+        commit(&mut index, &mut state, &kv);
+    }
+}
+
+#[test]
+fn full_save_during_staging_invalidates_before_image_for_deltas() {
+    let kv = MemoryKV::new();
+    let mut index = index();
+    index.upsert(b"a", &[1.0, 0.0], &[]).unwrap();
+    save(&index, &kv);
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged(b"a", &[3.0, 0.0], &[], &mut state)
+        .unwrap();
+    let mut tx = kv.begin(TxnMode::ReadWrite).unwrap();
+    index.save(&mut tx).unwrap();
+    index
+        .upsert_staged(b"b", &[2.0, 0.0], &[], &mut state)
+        .unwrap();
+    index.commit_staged(&mut tx, &mut state).unwrap();
+    tx.commit_self().unwrap();
+    assert_stored(&index, &kv);
 }

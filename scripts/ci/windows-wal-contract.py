@@ -92,6 +92,6 @@ for name, command in commands:
                 "memory-snapshots": "20 passed; 0 failed; 0 ignored",
                 "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored",
                 "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored",
-                "hnsw-dirty-writes": "9 passed; 0 failed; 0 ignored"}
+                "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

@@ -30,7 +30,7 @@ writing, failure after two buffered writes, compaction, slot reuse, batched
 insertion and a rolled-back flush. The same nine cases run on Windows.
 
 This is one stage of #681. Full graph cloning for forks and rollback snapshots,
-full checksum calculation, key-index synchronization and statistics calculation
-remain. This change does not claim to remove all O(N) work or establish a new
+statistics calculation remain. The checksum and key-index follow-up is documented
+in [HNSW delta checksums](hnsw-delta-checksums.md). This change does not claim to remove all O(N) work or establish a new
 100k-row timing result. The dedicated post-fix measurement follows the remaining
 write-path work; normal CI receives no load or performance test.
