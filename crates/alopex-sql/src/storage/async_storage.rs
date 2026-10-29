@@ -810,6 +810,53 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
                 if_not_exists,
             )?
         }
+        LogicalPlan::CreateView {
+            table,
+            if_not_exists,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *guard,
+                table,
+                Vec::new(),
+                if_not_exists,
+            )?
+        }
+        LogicalPlan::DropView { name, if_exists } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            if let Some(view) =
+                ddl::schema_evolution::prepare_drop_view(txn, &*guard, &name, if_exists)?
+            {
+                guard.drop_table(&view.name)?;
+            }
+            ExecutionResult::Success
+        }
+        LogicalPlan::AlterTable {
+            name,
+            if_exists,
+            action,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            if !guard.table_exists(&name) && if_exists {
+                return Ok(ExecutionResult::Success);
+            }
+            let outcome = ddl::schema_evolution::prepare_alter(txn, &*guard, &name, action)?;
+            guard.drop_table(&outcome.old_table.name)?;
+            guard.create_table(outcome.new_table)?;
+            for (_, index) in outcome.updated_indexes {
+                guard.create_index(index)?;
+            }
+            ExecutionResult::Success
+        }
+        LogicalPlan::Truncate { name } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            ddl::schema_evolution::execute_truncate(txn, &*guard, &name)?
+        }
         LogicalPlan::CreateTableAs {
             table,
             if_not_exists,
