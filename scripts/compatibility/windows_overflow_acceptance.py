@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -42,6 +43,30 @@ def require_runner(platform, env):
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def native_git_bash(git_executable):
+    # PowerShell's PATH can resolve plain `bash` to System32's WSL launcher.
+    # Anchor this native parser build to the Git for Windows installation.
+    require(git_executable is not None, "Git for Windows executable is required")
+    git = Path(git_executable).resolve()
+    require(git.name.lower() == "git.exe", "expected native Git for Windows")
+    for bash in (git.parent / "bash.exe", git.parent.parent / "bin/bash.exe"):
+        if bash.is_file():
+            return bash
+    raise RuntimeError("Git for Windows bash.exe not found; do not fall back to WSL")
+
+
+def retry_readonly(function, path, error_info):
+    # Git pack files in the job-owned Nimble cache can carry FILE_ATTRIBUTE_READONLY.
+    # Retry only that known case; keep sharing/ACL/other IO failures visible.
+    error = error_info[1]
+    entry = Path(path)
+    if (not isinstance(error, PermissionError) or function not in (os.unlink, os.remove, os.rmdir)
+            or entry.is_symlink() or entry.stat().st_mode & stat.S_IWRITE):
+        raise error
+    entry.chmod(entry.stat().st_mode | stat.S_IWRITE)
+    function(path)
 
 
 def write(path, value):
@@ -152,7 +177,9 @@ class Acceptance:
             "excluded": "load/performance, hardware power loss, release-wheel qualification"})
 
     def build_parser(self):
-        self.run("parser-build", ["bash", "scripts/build-nim-parser.sh", "--backend", "host"],
+        bash = native_git_bash(shutil.which("git"))
+        self.run("parser-build", [str(bash), "--noprofile", "--norc",
+                                 "scripts/build-nim-parser.sh", "--backend", "host"],
                  additional=2_000_000_000)
         write(self.output / "parser-identity.json", {
             "sha256": digest(self.parser / "alopex_sql_parser.dll"),
@@ -249,7 +276,7 @@ class Acceptance:
         for path in (self.target, self.work, self.output / "live-wal/store",
                      Path(os.environ["RUNNER_TEMP"]) / "alopex-nim-parser-toolchain"):
             if path.exists():
-                shutil.rmtree(path)
+                shutil.rmtree(path, onerror=retry_readonly)
         # Remove generated parser binaries, preserving tracked contract/source files.
         tracked = set(subprocess.check_output(["git", "ls-files", "--", str(self.parser)],
                                               cwd=REPO, text=True).splitlines())

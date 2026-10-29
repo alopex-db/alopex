@@ -1,15 +1,61 @@
 """Small receipt/selection negatives; never builds or loads Alopex."""
 import copy
+import os
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 import unittest
 
 from windows_overflow_acceptance import (
     STAGES, require_runner, validate_python_report, validate_pytest, validate_rust_log,
+    native_git_bash, retry_readonly,
 )
 
 
 class AcceptanceGuardTests(unittest.TestCase):
+    def test_git_bash_is_selected_without_path_fallback_to_wsl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Git/cmd").mkdir(parents=True)
+            (root / "Git/bin").mkdir()
+            git = root / "Git/cmd/git.exe"
+            git.touch()
+            bash = root / "Git/bin/bash.exe"
+            bash.touch()
+            self.assertEqual(native_git_bash(str(git)), bash.resolve())
+            # A missing Git Bash must fail even if an unrelated bash is on PATH.
+            bash.unlink()
+            with self.assertRaisesRegex(RuntimeError, "not fall back to WSL"):
+                native_git_bash(str(git))
+
+    def test_readonly_pack_cleanup_and_unrelated_error_propagation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.idx"
+            pack.write_bytes(b"tiny pack")
+            pack.chmod(stat.S_IREAD)
+            denied = PermissionError("readonly pack")
+            retry_readonly(os.unlink, str(pack), (PermissionError, denied, None))
+            self.assertFalse(pack.exists())
+            pack.write_bytes(b"writable")
+            with self.assertRaises(PermissionError):
+                retry_readonly(os.unlink, str(pack), (PermissionError, denied, None))
+            self.assertTrue(pack.exists())
+            io_error = OSError("other I/O error")
+            with self.assertRaisesRegex(OSError, "other I/O"):
+                retry_readonly(os.unlink, str(pack), (OSError, io_error, None))
+
+    def test_owned_tree_with_readonly_git_pack_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "owned"
+            pack = root / ".git/objects/pack/small.idx"
+            pack.parent.mkdir(parents=True)
+            pack.write_bytes(b"pack")
+            pack.chmod(stat.S_IREAD)
+            shutil.rmtree(root, onerror=retry_readonly)
+            self.assertFalse(root.exists())
+
     def test_manual_host_is_required(self):
         env = {"RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_EVENT_NAME": "workflow_dispatch",
                "ALOPEX_ACCEPTANCE_SUITE": "windows-overflow"}

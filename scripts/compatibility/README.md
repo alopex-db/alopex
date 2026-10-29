@@ -341,11 +341,13 @@ host usage stops work. The always-run cleanup removes target, owned packages,
 venvs, fixtures and parser binaries after saving compact receipts. The workflow
 uploads only JSON/JSONL/log/XML, never the built DLLs or test databases.
 
-The four local guard tests need only the standard library:
+The seven local guard tests need only the standard library:
 `python -m unittest discover -s scripts/compatibility -p test_windows_overflow_acceptance.py`.
 They reject nonmanual/self-hosted execution, missing/duplicate cases, hash
 mismatches, failure/skip receipts and a Rust summary without actual case names.
-They do not execute a native build or establish Windows acceptance.
+They also select Git for Windows Bash explicitly (never the WSL launcher) and
+exercise removal of owned read-only Git pack files while preserving other I/O
+errors. They do not execute a native build or establish Windows acceptance.
 
 The harnesses support native Unix and Windows. Existing non-Windows results
 do not qualify Windows: run the same Rust24/Python24 cases against the exact
