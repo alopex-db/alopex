@@ -381,6 +381,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "prometheus",
+ "proptest",
  "prost",
  "prost-types",
  "protoc-bin-vendored",

@@ -37,7 +37,9 @@ use crate::ops::distributed_read::{
 };
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::{CatalogTxnOperation, ServerState};
-use crate::session::{CatalogRollbackEffect, SessionCatalogTxnGuardKind, SessionId, TxnHandle};
+use crate::session::{
+    CatalogRollbackEffect, CatalogTableState, SessionCatalogTxnGuardKind, SessionId, TxnHandle,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -152,6 +154,7 @@ struct TableLifecycleState {
 }
 
 enum TableLifecycleCandidate {
+    SchemaTables(Vec<CatalogTableState>),
     Created {
         table_name: String,
         before: Option<TableLifecycleState>,
@@ -1303,6 +1306,63 @@ fn table_lifecycle_candidates(
     state: &ServerState,
     planned: &[PlannedStatement],
 ) -> Result<Vec<TableLifecycleCandidate>> {
+    fn executing_plan(statement: &PlannedStatement) -> &LogicalPlan {
+        let mut plan = &statement.plan;
+        while let LogicalPlan::Explain {
+            analyze: true,
+            input,
+            ..
+        } = plan
+        {
+            plan = input;
+        }
+        plan
+    }
+    // An ALTER can change metadata without changing the table ID, or rename a
+    // table used by another statement in the batch. Snapshot the affected names
+    // together so mixed CREATE/DROP/ALTER batches can be undone atomically.
+    if planned
+        .iter()
+        .any(|statement| matches!(executing_plan(statement), LogicalPlan::AlterTable { .. }))
+    {
+        let guard = state
+            .catalog
+            .read()
+            .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+        let mut names = std::collections::BTreeSet::new();
+        for statement in planned {
+            match executing_plan(statement) {
+                LogicalPlan::CreateTable { table, .. }
+                | LogicalPlan::CreateTableAs { table, .. }
+                | LogicalPlan::CreateView { table, .. } => {
+                    names.insert(table.name.clone());
+                }
+                LogicalPlan::AlterTable { name, action, .. } => {
+                    names.insert(name.clone());
+                    if let alopex_sql::ast::AlterTableAction::RenameTable { new_name } = action {
+                        names.insert(new_name.clone());
+                    }
+                }
+                LogicalPlan::DropTable { name, .. }
+                | LogicalPlan::DropView { name, .. }
+                | LogicalPlan::Truncate { name } => {
+                    names.insert(name.clone());
+                }
+                LogicalPlan::CreateIndex { index, .. } => {
+                    names.insert(index.table.clone());
+                }
+                LogicalPlan::DropIndex { name, .. } => {
+                    if let Some(index) = guard.get_index(name) {
+                        names.insert(index.table.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(vec![TableLifecycleCandidate::SchemaTables(
+            crate::catalog_rollback::capture(&*guard, &names.into_iter().collect::<Vec<_>>()),
+        )]);
+    }
     let mut candidates = Vec::new();
     for statement in planned {
         let mut plan = &statement.plan;
@@ -1315,13 +1375,15 @@ fn table_lifecycle_candidates(
             plan = input;
         }
         match plan {
-            LogicalPlan::CreateTable { table, .. } | LogicalPlan::CreateTableAs { table, .. } => {
+            LogicalPlan::CreateTable { table, .. }
+            | LogicalPlan::CreateTableAs { table, .. }
+            | LogicalPlan::CreateView { table, .. } => {
                 candidates.push(TableLifecycleCandidate::Created {
                     table_name: table.name.clone(),
                     before: table_lifecycle_state(state, &table.name)?,
                 });
             }
-            LogicalPlan::DropTable { name, .. } => {
+            LogicalPlan::DropTable { name, .. } | LogicalPlan::DropView { name, .. } => {
                 // Capture the table and its dependent indexes under one read guard.
                 // Other statements do not need an all-index snapshot.
                 let guard = state
@@ -1370,6 +1432,63 @@ fn statement_effects_after_execution(
     let mut catalog_rollback_effects = Vec::new();
     for candidate in candidates {
         match candidate {
+            TableLifecycleCandidate::SchemaTables(before) => {
+                let after = {
+                    let guard = state
+                        .catalog
+                        .read()
+                        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+                    crate::catalog_rollback::capture(
+                        &*guard,
+                        &before
+                            .iter()
+                            .map(|state| state.name.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let mut changed = false;
+                for (old, new) in before.iter().zip(&after) {
+                    if crate::catalog_rollback::same(old, new)? {
+                        continue;
+                    }
+                    changed = true;
+                    match (&old.table, &new.table) {
+                        (Some(old), Some(new)) if old.table_id == new.table_id => {
+                            push_lifecycle_effect(
+                                &mut lifecycle_effects,
+                                TableLifecycleEffect::SchemaChanged {
+                                    table_ref: TableRef::new(table_fqn_string(new)),
+                                    table_id: new.table_id,
+                                },
+                            );
+                        }
+                        (old, new) => {
+                            if let Some(old) = old {
+                                push_lifecycle_effect(
+                                    &mut lifecycle_effects,
+                                    TableLifecycleEffect::Dropped {
+                                        table_ref: TableRef::new(table_fqn_string(old)),
+                                        table_id: old.table_id,
+                                    },
+                                );
+                            }
+                            if let Some(new) = new {
+                                push_lifecycle_effect(
+                                    &mut lifecycle_effects,
+                                    TableLifecycleEffect::Created {
+                                        table_ref: TableRef::new(table_fqn_string(new)),
+                                        table_id: new.table_id,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    catalog_rollback_effects
+                        .push(CatalogRollbackEffect::RestoreTables { before, after });
+                }
+            }
             TableLifecycleCandidate::Created { table_name, before } => {
                 let after = table_lifecycle_state(state, &table_name)?;
                 if let Some(after) = after {
@@ -1633,7 +1752,8 @@ fn table_key(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<
 }
 
 fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestContext) -> Response {
-    if is_write_sql(&request.sql) {
+    let requires_write = is_write_sql(&request.sql);
+    if requires_write {
         if let Err(err) = state.lifecycle_state.check_write_allowed() {
             return error_response(err, ctx);
         }
@@ -2030,7 +2150,23 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
             let _ = handle.wait_for_idle_with_operation(operation).await;
         }
         if let StreamSource::Txn { txn, .. } = source {
-            let _ = txn.async_rollback().await;
+            // A SELECT can allocate a sequence value. Finalize that write only
+            // after successful streaming; errors or cancellation roll it back.
+            let result = if success && !sender.is_closed() && requires_write {
+                txn.async_commit().await
+            } else {
+                txn.async_rollback().await
+            };
+            if let Err(err) = result {
+                success = false;
+                send_stream_error_until(
+                    &sender,
+                    ServerError::Sql(err.into()),
+                    &correlation_id,
+                    deadline,
+                )
+                .await;
+            }
         }
         if let Some(logger) = audit {
             logger.log_ddl(&sql, None, &correlation_id);
@@ -2176,6 +2312,10 @@ fn classify_statement_schema(
         alopex_sql::ast::StatementKind::Explain { .. } => StatementSchemaClass::NonSchema,
         alopex_sql::ast::StatementKind::CreateTable(_)
         | alopex_sql::ast::StatementKind::DropTable(_)
+        | alopex_sql::ast::StatementKind::CreateView(_)
+        | alopex_sql::ast::StatementKind::DropView(_)
+        | alopex_sql::ast::StatementKind::AlterTable(_)
+        | alopex_sql::ast::StatementKind::Truncate(_)
         | alopex_sql::ast::StatementKind::CreateIndex(_)
         | alopex_sql::ast::StatementKind::DropIndex(_) => StatementSchemaClass::SchemaMutation,
         alopex_sql::ast::StatementKind::Select(_)
@@ -3505,5 +3645,77 @@ mod tests {
         assert!(is_write_sql("EXPLAIN ANALYZE INSERT INTO items VALUES (1)"));
         assert!(!is_ddl("EXPLAIN CREATE TABLE items (id INT)"));
         assert!(is_ddl("EXPLAIN ANALYZE CREATE TABLE items (id INT)"));
+    }
+    #[tokio::test]
+    async fn schema_evolution_retains_catalog_writer_until_rollback() {
+        let (_temp_dir, state) = catalog_guard_test_server();
+        for sql in [
+            "CREATE TABLE items (id INTEGER)",
+            "CREATE VIEW visible AS SELECT id FROM items",
+        ] {
+            execute_non_session_statements_with_routing(
+                state.clone(),
+                sql,
+                "schema-setup",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        }
+        for sql in [
+            "ALTER TABLE items ADD COLUMN value TEXT",
+            "TRUNCATE TABLE items",
+            "CREATE VIEW another AS SELECT id FROM items",
+            "DROP VIEW visible",
+        ] {
+            // The existing view prevents ALTER; remove it for that case only.
+            if sql.starts_with("ALTER") {
+                execute_non_session_statements_with_routing(
+                    state.clone(),
+                    "DROP VIEW visible",
+                    "schema-drop",
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            }
+            let session = state.session_manager.create_session().await.unwrap();
+            state
+                .session_manager
+                .begin_transaction(&session)
+                .await
+                .unwrap();
+            execute_session_statements_with_routing(
+                state.clone(),
+                &session,
+                sql,
+                "schema-change",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            assert!(
+                state.catalog_txn_gate.clone().try_read_owned().is_err(),
+                "{sql}"
+            );
+            state
+                .finalize_session(&session, crate::server::SessionFinalizationAction::Rollback)
+                .await
+                .unwrap();
+            assert!(
+                state.catalog_txn_gate.clone().try_write_owned().is_ok(),
+                "{sql}"
+            );
+            if sql.starts_with("ALTER") {
+                execute_non_session_statements_with_routing(
+                    state.clone(),
+                    "CREATE VIEW visible AS SELECT id FROM items",
+                    "schema-view",
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            }
+        }
     }
 }

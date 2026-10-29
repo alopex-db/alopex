@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod auth;
+mod catalog_rollback;
 pub mod config;
 pub mod error;
 pub mod grpc;

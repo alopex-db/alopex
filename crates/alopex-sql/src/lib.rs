@@ -41,6 +41,7 @@ pub mod parser;
 mod parser_contract;
 pub mod planner;
 pub mod scalar;
+mod statement_effects;
 pub mod storage;
 #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
 pub mod tokio_adapter;

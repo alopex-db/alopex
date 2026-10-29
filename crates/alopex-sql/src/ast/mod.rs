@@ -148,6 +148,8 @@ impl StatementKind {
             Self::Explain {
                 analyze, statement, ..
             } => *analyze && statement.kind.requires_write(),
+            Self::Select(select) => crate::statement_effects::select_requires_write(select),
+            Self::Values(values) => crate::statement_effects::values_requires_write(values),
             kind => !kind.is_query(),
         }
     }
