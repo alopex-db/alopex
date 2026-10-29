@@ -2,15 +2,21 @@
 
 Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
 storage is bounded to 20 GB per command, 40 GB host stop, using one target.
+Build and contract phases share one target but have separate workflow deadlines.
 Artifacts contain source identity and raw results; the workflow removes target
-only after artifact upload. No durability/power-loss claim for the writer.
+after retaining those results. No durability/power-loss claim for the writer.
 """
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from windows_wal_console import print_log_tail
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--phase", required=True, choices=("build", "contracts"))
+args = parser.parse_args()
 
 repo = Path(__file__).resolve().parents[2]
 output = repo / "artifacts/windows-wal"
@@ -64,6 +70,9 @@ commands = [
                            "--lib", "vector::hnsw::tests::dirty_write_tests"]),
 ]
 for name, command in commands:
+    if (name == "release-build") != (args.phase == "build"):
+        continue
+    print(f"Starting {name}", flush=True)
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
         result = subprocess.run([sys.executable, str(repo / "scripts/compatibility/storage.py"),
                                  "--log", str(output / "storage.jsonl"),
