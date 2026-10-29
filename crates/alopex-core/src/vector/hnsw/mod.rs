@@ -2,6 +2,7 @@
 
 mod cow;
 mod graph;
+mod stats;
 mod storage;
 mod types;
 
@@ -127,7 +128,7 @@ impl HnswIndex {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
         let node_id = graph.upsert(key, vector, metadata)?;
-        self.stats_cache = Self::compute_stats(&graph);
+        self.stats_cache = graph.refresh_statistics();
 
         if let Some(callback) = &self.on_insert {
             let insert_stats = self.build_insert_stats(&graph, node_id);
@@ -168,7 +169,7 @@ impl HnswIndex {
         if all_new {
             graph.prune_overfull_neighbors();
         }
-        self.stats_cache = Self::compute_stats(&graph);
+        self.stats_cache = graph.refresh_statistics();
         Ok(())
     }
 
@@ -219,7 +220,7 @@ impl HnswIndex {
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
         let deleted = graph.delete(key)?;
         if deleted {
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         Ok(deleted)
     }
@@ -270,7 +271,7 @@ impl HnswIndex {
         {
             let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
             *graph = working_graph;
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         self.compacting.store(false, Ordering::Release);
         self.compact_condvar.notify_all();
@@ -354,7 +355,7 @@ impl HnswIndex {
         let deleted = graph.delete(key)?;
         if deleted {
             state.record_delete(node_id);
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         Ok(deleted)
     }
@@ -378,7 +379,7 @@ impl HnswIndex {
         )?;
         graph.persisted_metadata = Some(metadata);
         graph.dirty_nodes.clear();
-        self.stats_cache = Self::compute_stats(&graph);
+        self.stats_cache = graph.refresh_statistics();
         state.clear();
         Ok(())
     }
@@ -388,7 +389,7 @@ impl HnswIndex {
         if let Some(snapshot) = state.snapshot.take() {
             let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
             *graph = snapshot;
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         state.clear();
         Ok(())
@@ -415,8 +416,8 @@ impl HnswIndex {
         Self::from_parts(name, storage, graph)
     }
 
-    pub(crate) fn from_parts(name: &str, storage: HnswStorage, graph: HnswGraph) -> Self {
-        let stats_cache = Self::compute_stats(&graph);
+    pub(crate) fn from_parts(name: &str, storage: HnswStorage, mut graph: HnswGraph) -> Self {
+        let stats_cache = graph.refresh_statistics();
         Self {
             name: name.to_string(),
             graph: Arc::new(RwLock::new(graph)),
@@ -450,7 +451,8 @@ impl HnswIndex {
         Ok(())
     }
 
-    fn compute_stats(graph: &HnswGraph) -> HnswStats {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn compute_stats_full(graph: &HnswGraph) -> HnswStats {
         let mut level_distribution = vec![0u64; graph.max_level + 1];
         let mut total_edges = 0u64;
         let mut active_nodes = 0u64;
@@ -483,6 +485,7 @@ impl HnswIndex {
         }
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn estimate_memory_bytes(graph: &HnswGraph) -> u64 {
         let mut total_bytes: u64 = 0;
 

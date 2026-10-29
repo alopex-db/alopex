@@ -333,6 +333,7 @@ impl HnswStorage {
         Ok(HnswGraph {
             nodes,
             dirty_nodes: HashSet::new(),
+            statistics: super::stats::GraphStatistics::default(),
             persisted_metadata,
             key_to_node,
             entry_point: metadata.entry_point,

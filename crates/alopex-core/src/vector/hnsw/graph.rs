@@ -15,6 +15,7 @@ pub struct HnswGraph {
     pub(crate) nodes: PagedVec<Option<SharedNode>>,
     /// Slots changed since the last successful synchronous save, including reverse edges.
     pub(crate) dirty_nodes: HashSet<u32>,
+    pub(crate) statistics: super::stats::GraphStatistics,
     /// Header of the last successful save/load; a different target requires a full save.
     pub(crate) persisted_metadata: Option<Vec<u8>>,
     pub(crate) key_to_node: KeyMap,
@@ -32,6 +33,7 @@ impl Clone for HnswGraph {
         Self {
             nodes: self.nodes.clone(),
             dirty_nodes: self.dirty_nodes.clone(),
+            statistics: self.statistics.clone(),
             persisted_metadata: self.persisted_metadata.clone(),
             key_to_node: self.key_to_node.clone(),
             entry_point: self.entry_point,
@@ -53,6 +55,7 @@ impl HnswGraph {
         Ok(Self {
             nodes: PagedVec::default(),
             dirty_nodes: HashSet::new(),
+            statistics: super::stats::GraphStatistics::default(),
             persisted_metadata: None,
             key_to_node: KeyMap::default(),
             entry_point: None,
@@ -116,7 +119,7 @@ impl HnswGraph {
             deleted: false,
         };
 
-        self.dirty_nodes.insert(node_id);
+        self.mark_node_changed(node_id);
         if let Some(slot) = self.nodes.get_mut(node_id as usize) {
             *slot = Some(node.into());
         } else {
@@ -236,13 +239,13 @@ impl HnswGraph {
                 })
                 .collect();
             for id in affected {
+                self.mark_node_changed(id as u32);
                 let other = self.nodes[id].as_mut().expect("affected node exists");
                 for neighbors in &mut other.neighbors {
                     neighbors.retain(|&neighbor| neighbor != node_id);
                 }
-                self.dirty_nodes.insert(id as u32);
             }
-            self.dirty_nodes.insert(node_id);
+            self.mark_node_changed(node_id);
             let Some(node) = self
                 .nodes
                 .get_mut(node_id as usize)
@@ -455,18 +458,13 @@ impl HnswGraph {
         let Some(&node_id) = self.key_to_node.get(key) else {
             return Ok(false);
         };
-        let Some(node) = self
-            .nodes
-            .get_mut(node_id as usize)
-            .and_then(|n| n.as_mut())
-        else {
-            return Ok(false);
-        };
-        if node.deleted {
+        if self.node(node_id).is_none_or(|node| node.deleted) {
             return Ok(false);
         }
-
-        self.dirty_nodes.insert(node_id);
+        self.mark_node_changed(node_id);
+        let node = self.nodes[node_id as usize]
+            .as_mut()
+            .expect("live node checked above");
         node.deleted = true;
         self.active_count = self.active_count.saturating_sub(1);
         self.deleted_count += 1;
@@ -500,7 +498,7 @@ impl HnswGraph {
             }
         }
         for &id in &removed_ids {
-            self.dirty_nodes.insert(id);
+            self.mark_node_changed(id);
             self.nodes[id as usize] = None;
         }
 
@@ -805,7 +803,7 @@ impl HnswGraph {
     }
 
     fn connect_new_node(&mut self, node_id: u32, neighbors: &[u32], level: usize) {
-        self.dirty_nodes.insert(node_id);
+        self.mark_node_changed(node_id);
         if let Some(node) = self
             .nodes
             .get_mut(node_id as usize)
@@ -821,14 +819,15 @@ impl HnswGraph {
         }
 
         for &n in neighbors {
-            if let Some(node) = self.nodes.get_mut(n as usize).and_then(|n| n.as_mut()) {
-                if level < node.neighbors.len() {
-                    let neigh = &mut node.neighbors[level];
-                    if !neigh.contains(&node_id) {
-                        neigh.push(node_id);
-                        self.dirty_nodes.insert(n);
-                    }
-                }
+            if self.node(n).is_some_and(|node| {
+                level < node.neighbors.len() && !node.neighbors[level].contains(&node_id)
+            }) {
+                self.mark_node_changed(n);
+                self.nodes[n as usize]
+                    .as_mut()
+                    .expect("neighbor checked above")
+                    .neighbors[level]
+                    .push(node_id);
             }
         }
     }
@@ -856,6 +855,7 @@ impl HnswGraph {
 
         let selected = self.select_neighbors_heuristic(&selected, max_degree);
 
+        self.mark_node_changed(node_id);
         if let Some(node) = self
             .nodes
             .get_mut(node_id as usize)
@@ -863,7 +863,6 @@ impl HnswGraph {
         {
             if level < node.neighbors.len() {
                 node.neighbors[level] = selected;
-                self.dirty_nodes.insert(node_id);
             }
         }
     }
@@ -907,11 +906,11 @@ impl HnswGraph {
             })
             .collect();
         for id in affected {
+            self.mark_node_changed(id as u32);
             let node = self.nodes[id].as_mut().expect("affected node exists");
             for neighbors in &mut node.neighbors {
                 neighbors.retain(|neighbor| !removed.contains(neighbor));
             }
-            self.dirty_nodes.insert(id as u32);
         }
     }
 
@@ -973,6 +972,14 @@ impl HnswGraph {
         } else {
             total_edges as f64 / nodes as f64
         }
+    }
+
+    fn mark_node_changed(&mut self, id: u32) {
+        self.dirty_nodes.insert(id);
+        self.statistics.record_before(
+            id,
+            self.nodes.get(id as usize).and_then(|node| node.as_deref()),
+        );
     }
 
     fn node(&self, id: u32) -> Option<&HnswNode> {
