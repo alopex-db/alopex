@@ -1,6 +1,8 @@
 //! HNSW インデックスの永続化レイヤー。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use super::cow::{KeyMap, PagedVec};
 
 use crc32fast::hash;
 
@@ -281,9 +283,9 @@ impl HnswStorage {
         }
 
         let mut all_node_checksums: u32 = 0;
-        let mut nodes = Vec::with_capacity(metadata.next_node_id as usize);
-        let mut key_to_node = HashMap::new();
-        let mut free_list = Vec::new();
+        let mut nodes = PagedVec::default();
+        let mut key_to_node = KeyMap::default();
+        let mut free_list = PagedVec::default();
 
         for (node_id, bytes) in node_bytes.into_iter().enumerate() {
             if let Some(node_bytes) = bytes {
@@ -293,14 +295,17 @@ impl HnswStorage {
 
                 key_to_node.insert(node_data.key.clone(), node_id as u32);
                 let norm = super::vector_norm(&node_data.vector);
-                nodes.push(Some(HnswNode {
-                    key: node_data.key,
-                    vector: node_data.vector,
-                    norm,
-                    metadata: node_data.metadata,
-                    neighbors: node_data.neighbors,
-                    deleted: node_data.deleted,
-                }));
+                nodes.push(Some(
+                    HnswNode {
+                        key: node_data.key,
+                        vector: node_data.vector,
+                        norm,
+                        metadata: node_data.metadata,
+                        neighbors: node_data.neighbors,
+                        deleted: node_data.deleted,
+                    }
+                    .into(),
+                ));
             } else {
                 nodes.push(None);
                 free_list.push(node_id as u32);
