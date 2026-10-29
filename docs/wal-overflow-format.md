@@ -62,10 +62,11 @@ retains the spool and prevents further writer mutation until recovery/reopen.
 
 The writer/activation primitives require durable file publication. Windows uses
 synced closed files and same-volume `MoveFileExW(MOVEFILE_WRITE_THROUGH)` in
-already durable, exclusively owned parent directories. The existing
-container directory-sync helper is a no-op there. Explicit v3 read/recovery is
-available. Implement and verify Windows durable publication before enabling
-database overflow on that platform; the no-op is not durability evidence.
+already durable, exclusively owned parent directories. Missing ancestors are
+published parent-first through the shared directory publication helper. The
+legacy container directory-sync no-op is not used as durability evidence.
+Explicit v3 read/recovery uses the same public opt-in on both native platforms;
+Windows public-API qualification remains a separate integration requirement.
 Directory budgets count logical file lengths (including framing and temporary
 files); filesystem block/metadata overhead needs separate host headroom. The
 inline limit bounds encoded record bytes; decoded key/value and operation-vector
@@ -162,7 +163,8 @@ opt-in. Existing `LsmKVConfig` fields are unchanged; overflow options have priva
 fields and budget builders. The owner lock precedes all restore/activation mutation. Before directory
 creation, open records the first existing ancestors; new sidecar/container parent
 entries are synced child-first up to those ancestors before v3 activation.
-Windows returns Unsupported before opening or changing database files.
+On Windows, the shared publication helper creates those ancestors parent-first
+using write-through moves. Invalid budgets still fail before filesystem effects.
 
 For a sidecar, activation first atomically stream-copies its valid container and
 patches only the header version to **0.2.0**, syncs the file, renames and syncs the
@@ -266,6 +268,11 @@ directory budget checks still precede replay: cleanup does not bypass an
 already-exceeded recovery budget.
 
 ### Windows publication prerequisites
+
+The following implementation notes record staged qualification through #739.
+References below to a gated public API describe those earlier source revisions.
+The current public-path change and its outstanding qualification are stated at
+the start of this document; earlier internal results are not substituted for it.
 
 Windows LSM writes are still rejected before I/O, including the public Database
 and Python opt-in. `WalOverflowOptions.writes_supported()` reports this explicitly.

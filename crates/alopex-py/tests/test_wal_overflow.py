@@ -30,8 +30,9 @@ def test_platform_capability_matches_open_contract(tmp_path):
     assert WalOverflowOptions.writes_supported()
     db = Database.open(str(tmp_path / "missing" / "child" / "記録.alopex"),
                        wal_overflow=options())
-    with db.begin(TxnMode.READ_WRITE) as tx:
-        tx.put(b"key", b"x" * 65)
+    tx = db.begin(TxnMode.READ_WRITE)
+    tx.put(b"key", b"x" * 65)
+    tx.commit()
     assert db.wal_overflow_stats()["directory_bytes"] > 64
     db.close()
     db = Database.open(str(tmp_path / "missing" / "child" / "記録.alopex"),

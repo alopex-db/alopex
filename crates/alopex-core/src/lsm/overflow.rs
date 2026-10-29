@@ -211,7 +211,7 @@ impl LsmOverflowConfig {
 
 // Windows creation already published every new directory parent-first through
 // write-through moves. Verify the resulting paths; this is not a generic fsync
-// replacement. The public overflow guard remains until full API qualification.
+// replacement; the durable entry was published by the creation path itself.
 fn finish_directory_publication(path: &Path) -> Result<()> {
     #[cfg(windows)]
     if !fs::metadata(path)?.is_dir() {

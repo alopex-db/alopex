@@ -1,5 +1,4 @@
 //! Native LSM transactions across deterministic persistence boundaries.
-//! Unix uses the public opt-in; Windows qualifies only the internal pipeline.
 //! Both native platforms enter through the public LSM overflow API.
 //! Hooks are cfg(test) only. These are process-exit, not power-loss, tests.
 use crate::kv::{KVStore, KVTransaction};
