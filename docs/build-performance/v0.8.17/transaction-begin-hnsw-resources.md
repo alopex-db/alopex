@@ -167,3 +167,11 @@ cleanup records). Worker SHA-256:
 `6a661662beac7c4fda6b138cda752fe92bcd0b14b81545228f73ceae957122ea`.
 Final runner SHA-256:
 `06f06f7c39b908905fb54610ac8456e612b459a6cffb892249ed2f6ee48497b2`.
+
+## First-write follow-up
+
+The [bounded scalar first-write comparison](transaction-first-write-comparison.md)
+now records time, phase RSS, initial regression flags and their fixed balanced
+replication. Both retained wheels and the follow-up venv have been reclaimed;
+prior wheel retention notes above describe the earlier handoff. Native
+index/resource coverage, OS CI and candidate integration remain.

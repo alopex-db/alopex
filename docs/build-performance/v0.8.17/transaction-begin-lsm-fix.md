@@ -127,8 +127,12 @@ after recording; shared dependencies remain for active release work.
 ## Remaining acceptance
 
 The [source-matched public Python comparison](transaction-begin-python-comparison.md)
-now confirms the begin improvement and public transaction regressions. HNSW
-index counts 0/1/2, autocommit, mutation-heavy memory/disk scaling, OS CI and
-candidate integration remain. The public Python 0.8.16 baseline must not be
+now confirms the begin improvement and public transaction regressions. The
+[HNSW/resource comparison](transaction-begin-hnsw-resources.md) and
+[first-scalar-write comparison](transaction-first-write-comparison.md) add
+public Python evidence, including bounded replication of two initial timing
+flags. Native borrowed/owned index/resource coverage, OS CI and candidate
+integration remain. These bounded measurements do not establish large-transaction
+or HNSW vector-mutation throughput. The public Python 0.8.16 baseline must not be
 compared directly with these native candidate results. #684 and the v0.8.17
 release remain open.

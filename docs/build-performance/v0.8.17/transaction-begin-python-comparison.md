@@ -113,3 +113,11 @@ those immediate comparisons; they are development artifacts, not release assets.
 The temporary venv, parser downloads and owned intermediate binaries are
 reclaimed after recording, while compact logs and the two needed wheels remain.
 Do not rebuild these products merely to refresh their dates.
+
+## First-write follow-up
+
+The [bounded scalar first-write comparison](transaction-first-write-comparison.md)
+now records time, phase RSS, initial regression flags and their fixed balanced
+replication. Both retained wheels and the follow-up venv have been reclaimed;
+prior wheel retention notes above describe the earlier handoff. Native
+index/resource coverage, OS CI and candidate integration remain.
