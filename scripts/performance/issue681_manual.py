@@ -44,6 +44,8 @@ def main():
     binary = args.binary.resolve(strict=True)
     identity = {"source":subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),
                 "binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "example_source_sha256":hashlib.sha256((ROOT / "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs").read_bytes()).hexdigest(),
+                "runner_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "rows":args.rows,"dimensions":args.dimensions,"rss_limit":args.rss_limit,
                 "timeout_seconds":args.timeout,"initial_inventory":inventory}
     (args.output / "identity.json").write_text(json.dumps(identity,indent=2))
@@ -127,7 +129,8 @@ def main():
               "peak_scope":"lifetime includes seed/build; per-phase values are sampled lower bounds",
               "final_inventory":storage.inventory([args.output])}
     (args.output / "summary.json").write_text(json.dumps(report,indent=2))
-    print(json.dumps(report),flush=True)
+    print(json.dumps({**{k:v for k,v in report.items() if k != "final_inventory"},
+                      "final_host_bytes":report["final_inventory"]["allocated_bytes"]}),flush=True)
     return 0 if outcome == "passed" else 1
 
 
