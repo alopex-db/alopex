@@ -22,7 +22,7 @@ alopex-cluster.workspace = true
 alopex-core.workspace = true
 alopex-sql.workspace = true
 alopex-dataframe.workspace = true
-arrow = "53"
+arrow = "60.1"
 thiserror = "1.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

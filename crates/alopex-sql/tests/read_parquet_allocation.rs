@@ -1,3 +1,7 @@
+#![allow(
+    deprecated,
+    reason = "Malformed-file fixtures use the pinned codec-free Thrift schema"
+)]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::fs::File;
@@ -17,7 +21,7 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
-use parquet::thrift::{TCompactOutputProtocol, TSerializable};
+use parquet_wire::thrift::{TCompactOutputProtocol, TSerializable};
 
 const LIMIT: usize = 64 * 1024;
 const DECLARED_PAGE_BYTES: i32 = 1024 * 1024;
@@ -157,7 +161,8 @@ fn fixture_with_dictionary(sizes: Option<(i32, i32)>, dictionary: bool) -> tempf
         .unwrap();
     column.close().unwrap();
     group.close().unwrap();
-    let mut footer = writer.close().unwrap();
+    writer.close().unwrap();
+    let mut footer = wire_footer(&std::fs::read(file.path()).unwrap());
 
     if let Some((uncompressed, compressed)) = sizes {
         let mut bytes = std::fs::read(file.path()).unwrap();
@@ -282,7 +287,7 @@ fn execute_observed_sql(
 
 fn metadata_footer(
     file: &tempfile::NamedTempFile,
-    values: Vec<parquet::format::KeyValue>,
+    values: Vec<parquet_wire::format::KeyValue>,
     column_metadata: bool,
 ) -> Vec<u8> {
     rewritten_metadata_footer(file, |footer| {
@@ -299,7 +304,7 @@ fn metadata_footer(
 
 fn rewritten_metadata_footer(
     file: &tempfile::NamedTempFile,
-    change: impl FnOnce(&mut parquet::format::FileMetaData),
+    change: impl FnOnce(&mut parquet_wire::format::FileMetaData),
 ) -> Vec<u8> {
     use std::io::Cursor;
     use thrift::protocol::TCompactInputProtocol;
@@ -307,7 +312,7 @@ fn rewritten_metadata_footer(
     let bytes = std::fs::read(file.path()).unwrap();
     let size =
         u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+    let mut footer = parquet_wire::format::FileMetaData::read_from_in_protocol(
         &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - size..])),
     )
     .unwrap();
@@ -462,7 +467,7 @@ fn issue577_schema_names_tree_walk_preserves_controlled_errors() {
         let file = row_count_fixture(1);
         let encoded = rewritten_metadata_footer(&file, |footer| {
             footer.schema =
-                parquet::schema::types::to_thrift(&parse_message_type(&schema).unwrap()).unwrap();
+                wire_schema(&schema);
             if let Some(children) = children {
                 footer.schema[0].num_children = Some(children);
             }
@@ -514,7 +519,7 @@ fn issue577_metadata_workspace_sum_checked_before_allocation() {
             &file,
             ["budget_a", "budget_b"]
                 .into_iter()
-                .map(|key| parquet::format::KeyValue {
+                .map(|key| parquet_wire::format::KeyValue {
                     key: key.into(),
                     value: Some("x".repeat(width)),
                 })
@@ -599,7 +604,7 @@ fn issue577_metadata_map_capacity_checked_before_allocation() {
         let encoded = metadata_footer(
             &file,
             (0..count)
-                .map(|index| parquet::format::KeyValue {
+                .map(|index| parquet_wire::format::KeyValue {
                     key: format!("kv_{index:04}"),
                     value: Some("x".into()),
                 })
@@ -687,7 +692,7 @@ fn issue577_embedded_arrow_schema_preserves_results_and_errors() {
         let file = row_count_fixture(1);
         let encoded = metadata_footer(
             &file,
-            vec![parquet::format::KeyValue {
+            vec![parquet_wire::format::KeyValue {
                 key: "ARROW:schema".into(),
                 value: value.map(str::to_owned),
             }],
@@ -871,7 +876,7 @@ fn issue577_row_count_checked_before_decode() {
             let footer_size =
                 u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
                     as usize;
-            let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+            let mut footer = parquet_wire::format::FileMetaData::read_from_in_protocol(
                 &mut TCompactInputProtocol::new(Cursor::new(
                     &bytes[bytes.len() - 8 - footer_size..],
                 )),
@@ -950,9 +955,13 @@ fn row_group_metadata_shared_budget_before_allocation(sorted: bool) {
                 .set_compression(Compression::SNAPPY)
                 .set_dictionary_enabled(false)
                 .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
-                .set_sorting_columns(
-                    sorted.then(|| vec![parquet::format::SortingColumn::new(0, false, false)]),
-                )
+                .set_sorting_columns(sorted.then(|| {
+                    vec![parquet::file::metadata::SortingColumn {
+                        column_idx: 0,
+                        descending: false,
+                        nulls_first: false,
+                    }]
+                }))
                 .build(),
         );
         let mut writer =
@@ -1098,7 +1107,7 @@ fn embedded_arrow_metadata_fixture(root: bool, entries: usize) -> tempfile::Name
     use parquet::arrow::ArrowWriter;
 
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
-    let metadata = (0..entries)
+    let metadata: arrow_schema::Metadata = (0..entries)
         .map(|index| (format!("k{index:04}"), String::new()))
         .collect();
     let field = Field::new("id", DataType::Int64, false);
@@ -1379,7 +1388,7 @@ fn routing_schema_avoids_row_group_materialization(limit: Option<u64>) {
         .collect();
     let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(1)
+        .set_max_row_group_row_count(Some(1))
         .build();
     let mut writer =
         ArrowWriter::try_new(File::create(file.path()).unwrap(), schema, Some(properties)).unwrap();
@@ -1610,15 +1619,15 @@ fn issue577_embedded_arrow_union_id_range_returns_error() {
         (-1, true),
     ] {
         let file = fixture(false);
-        let fields = UnionFields::new([0], [Field::new("value", DataType::Int64, false)]);
+        let fields =
+            UnionFields::try_new([0], [Field::new("value", DataType::Int64, false)]).unwrap();
         let schema = Schema::new(vec![Field::new(
             "id",
             DataType::Union(fields, UnionMode::Sparse),
             false,
         )]);
         let options = IpcWriteOptions::default();
-        let mut tracker =
-            DictionaryTracker::new_with_preserve_dict_id(true, options.preserve_dict_id());
+        let mut tracker = DictionaryTracker::new(true);
         let mut bytes = IpcDataGenerator::default()
             .schema_to_bytes_with_dictionary_tracker(&schema, &mut tracker, &options)
             .ipc_message;
@@ -1632,7 +1641,7 @@ fn issue577_embedded_arrow_union_id_range_returns_error() {
         assert!(arrow_ipc::root_as_message(&bytes).is_ok());
         let encoded = metadata_footer(
             &file,
-            vec![parquet::format::KeyValue {
+            vec![parquet_wire::format::KeyValue {
                 key: parquet::arrow::ARROW_SCHEMA_META_KEY.into(),
                 value: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
             }],
@@ -1668,7 +1677,7 @@ fn issue577_embedded_arrow_nested_metadata_shared_budget_before_allocation() {
         (Some(LIMIT * 4), 400, false),
     ] {
         let file = fixture(false);
-        let metadata = (0..entries)
+        let metadata: arrow_schema::Metadata = (0..entries)
             .map(|index| (format!("k{index:04}"), String::new()))
             .collect();
         let child = Field::new("value", DataType::Int64, false).with_metadata(metadata);
@@ -1678,15 +1687,14 @@ fn issue577_embedded_arrow_nested_metadata_shared_budget_before_allocation() {
             false,
         )]);
         let options = IpcWriteOptions::default();
-        let mut tracker =
-            DictionaryTracker::new_with_preserve_dict_id(true, options.preserve_dict_id());
+        let mut tracker = DictionaryTracker::new(true);
         let bytes = IpcDataGenerator::default()
             .schema_to_bytes_with_dictionary_tracker(&schema, &mut tracker, &options)
             .ipc_message;
         // A valid legacy raw IPC hint is decoded before its incompatible type is discarded.
         let encoded = metadata_footer(
             &file,
-            vec![parquet::format::KeyValue {
+            vec![parquet_wire::format::KeyValue {
                 key: parquet::arrow::ARROW_SCHEMA_META_KEY.into(),
                 value: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
             }],
@@ -1761,7 +1769,7 @@ fn issue577_statistics_shared_budget_before_allocation() {
                 .meta_data
                 .as_mut()
                 .unwrap()
-                .statistics = Some(parquet::format::Statistics {
+                .statistics = Some(parquet_wire::format::Statistics {
                 max: None,
                 min: None,
                 null_count: Some(0),
@@ -1831,7 +1839,8 @@ fn page_statistics_fixture(width: usize) -> tempfile::NamedTempFile {
         .unwrap();
     column.close().unwrap();
     group.close().unwrap();
-    let mut footer = writer.close().unwrap();
+    writer.close().unwrap();
+    let mut footer = wire_footer(&std::fs::read(file.path()).unwrap());
     let bytes = std::fs::read(file.path()).unwrap();
     let footer_size =
         u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
@@ -1844,7 +1853,7 @@ fn page_statistics_fixture(width: usize) -> tempfile::NamedTempFile {
     let mut pages = 0;
     while position < end {
         let mut input = Cursor::new(&bytes[position..end]);
-        let mut header = parquet::format::PageHeader::read_from_in_protocol(
+        let mut header = parquet_wire::format::PageHeader::read_from_in_protocol(
             &mut TCompactInputProtocol::new(&mut input),
         )
         .unwrap();
@@ -1852,7 +1861,7 @@ fn page_statistics_fixture(width: usize) -> tempfile::NamedTempFile {
         let payload_end = payload_start + header.compressed_page_size as usize;
         if pages == 1 {
             header.data_page_header.as_mut().unwrap().statistics =
-                Some(parquet::format::Statistics {
+                Some(parquet_wire::format::Statistics {
                     max: None,
                     min: None,
                     null_count: Some(0),
@@ -2212,7 +2221,8 @@ fn delta_header_checked_before_allocation(encoding: parquet::basic::Encoding, co
             .unwrap();
         column.close().unwrap();
         group.close().unwrap();
-        let mut footer = writer.close().unwrap();
+        writer.close().unwrap();
+        let mut footer = wire_footer(&std::fs::read(file.path()).unwrap());
         let (result, maximum) = execute_observed_after_planning(&file, || {
             let Some(input) = replacement else {
                 return;
@@ -2220,7 +2230,7 @@ fn delta_header_checked_before_allocation(encoding: parquet::basic::Encoding, co
             let mut bytes = std::fs::read(file.path()).unwrap();
             let metadata = footer.row_groups[0].columns[0].meta_data.as_mut().unwrap();
             let offset = metadata.data_page_offset as usize;
-            let mut header = parquet::format::PageHeader::read_from_in_protocol(
+            let mut header = parquet_wire::format::PageHeader::read_from_in_protocol(
                 &mut TCompactInputProtocol::new(Cursor::new(&bytes[offset..])),
             )
             .unwrap();
@@ -2547,14 +2557,14 @@ fn replace_with_brotli_huffman_fixture(file: &tempfile::NamedTempFile) {
     let bytes = std::fs::read(file.path()).unwrap();
     let footer_size =
         u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let mut footer = parquet::format::FileMetaData::read_from_in_protocol(
+    let mut footer = parquet_wire::format::FileMetaData::read_from_in_protocol(
         &mut TCompactInputProtocol::new(Cursor::new(&bytes[bytes.len() - 8 - footer_size..])),
     )
     .unwrap();
     let chunk = &mut footer.row_groups[0].columns[0];
     let metadata = chunk.meta_data.as_mut().unwrap();
     let offset = metadata.data_page_offset as usize;
-    let mut header = parquet::format::PageHeader::read_from_in_protocol(
+    let mut header = parquet_wire::format::PageHeader::read_from_in_protocol(
         &mut TCompactInputProtocol::new(Cursor::new(&bytes[offset..])),
     )
     .unwrap();
@@ -2566,7 +2576,7 @@ fn replace_with_brotli_huffman_fixture(file: &tempfile::NamedTempFile) {
     header
         .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_header))
         .unwrap();
-    metadata.codec = parquet::format::CompressionCodec::BROTLI;
+    metadata.codec = parquet_wire::format::CompressionCodec::BROTLI;
     metadata.total_compressed_size = (encoded_header.len() + input.len()) as i64;
     metadata.total_uncompressed_size = metadata.total_compressed_size;
     let total_size = metadata.total_compressed_size;
@@ -2730,7 +2740,8 @@ fn codec_output_checked_before_capacity_growth(compression: Compression) {
             .unwrap();
         column.close().unwrap();
         group.close().unwrap();
-        let mut footer = writer.close().unwrap();
+        writer.close().unwrap();
+        let mut footer = wire_footer(&std::fs::read(file.path()).unwrap());
         let (result, maximum) = execute_observed_with_alias(&file, "", Some(limit), || {
             if !large {
                 return;
@@ -2956,7 +2967,7 @@ fn issue577_schema_change_precedes_page_and_row_budget_checks() {
 
 #[test]
 fn issue577_footer_metadata_allocations_rejected_before_decode() {
-    use parquet::format;
+    use parquet_wire::format;
     use std::mem::size_of;
 
     // Each path uses explicit compact field IDs; intermediate lists have one struct.
@@ -3149,7 +3160,7 @@ fn issue577_page_reader_adapter_preserves_normal_pages() {
                     .set_writer_version(version)
                     .set_dictionary_enabled(dictionary)
                     .set_compression(compression)
-                    .set_max_row_group_size(3)
+                    .set_max_row_group_row_count(Some(3))
                     .set_data_page_row_count_limit(1)
                     .set_write_batch_size(1)
                     .build();
@@ -3247,4 +3258,27 @@ fn issue577_page_reader_adapter_preserves_empty_file() {
     assert!(result.rows.is_empty());
     assert_eq!(result.columns[0].name, "id");
     assert!(maximum <= LIMIT);
+}
+
+fn wire_footer(bytes: &[u8]) -> parquet_wire::format::FileMetaData {
+    let size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    parquet_wire::format::FileMetaData::read_from_in_protocol(
+        &mut thrift::protocol::TCompactInputProtocol::new(std::io::Cursor::new(
+            &bytes[bytes.len() - 8 - size..],
+        )),
+    )
+    .unwrap()
+}
+
+fn wire_schema(schema: &str) -> Vec<parquet_wire::format::SchemaElement> {
+    let mut bytes = Vec::new();
+    let writer = SerializedFileWriter::new(
+        &mut bytes,
+        Arc::new(parse_message_type(schema).unwrap()),
+        Arc::new(WriterProperties::builder().build()),
+    )
+    .unwrap();
+    writer.close().unwrap();
+    wire_footer(&bytes).schema
 }

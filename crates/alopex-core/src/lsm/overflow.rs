@@ -669,5 +669,5 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod inline_lifecycle_tests;
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod publication_acceptance;

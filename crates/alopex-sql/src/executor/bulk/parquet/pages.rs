@@ -18,6 +18,7 @@ use parquet::file::serialized_reader::SerializedPageReader;
 use super::input::InputFile;
 
 mod bounded;
+mod wire;
 
 pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
     let semantic =
@@ -40,7 +41,7 @@ pub(super) fn reader_schema_hint(schema: Arc<Schema>) -> Arc<Schema> {
                 return field;
             }
             let mut field = Arc::unwrap_or_clone(field);
-            let metadata = field
+            let metadata: arrow_schema::Metadata = field
                 .metadata()
                 .iter()
                 .filter(|(key, _)| semantic(key))
@@ -101,6 +102,14 @@ struct FileRowGroups {
 }
 
 impl RowGroups for FileRowGroups {
+    fn row_groups(
+        &self,
+    ) -> Box<dyn Iterator<Item = &parquet::file::metadata::RowGroupMetaData> + '_> {
+        Box::new(self.metadata.row_groups().iter())
+    }
+    fn metadata(&self) -> &ParquetMetaData {
+        &self.metadata
+    }
     fn num_rows(&self) -> usize {
         self.num_rows
     }
@@ -142,26 +151,11 @@ impl Iterator for ColumnChunks {
                 .columns()
                 .get(self.column)
                 .ok_or_else(|| ParquetError::IndexOutOfBound(self.column, group.num_columns()))?;
-            let locations = if let Some(index) = self.metadata.offset_index() {
-                let columns = index
-                    .get(group_index)
-                    .ok_or_else(|| ParquetError::IndexOutOfBound(group_index, index.len()))?;
-                if columns.is_empty() {
-                    None
-                } else {
-                    Some(
-                        columns
-                            .get(self.column)
-                            .ok_or_else(|| {
-                                ParquetError::IndexOutOfBound(self.column, columns.len())
-                            })?
-                            .page_locations
-                            .clone(),
-                    )
-                }
-            } else {
-                None
-            };
+            let locations = self
+                .metadata
+                .page_index_for_row_group(group_index)
+                .offset_index(self.column)
+                .map(|index| index.page_locations.clone());
             let inner: Box<dyn PageReader> = if matches!(
                 column.compression(),
                 parquet::basic::Compression::GZIP(_)
@@ -542,7 +536,7 @@ mod tests {
         .unwrap();
         let props = WriterProperties::builder()
             .set_compression(compression)
-            .set_max_row_group_size(2)
+            .set_max_row_group_row_count(Some(2))
             .set_data_page_row_count_limit(1)
             .set_write_batch_size(1)
             .build();
@@ -554,11 +548,12 @@ mod tests {
         let input = File::open(file.path()).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
             input.try_clone().unwrap(),
-            ArrowReaderOptions::new().with_page_index(true),
+            ArrowReaderOptions::new()
+                .with_page_index_policy(parquet::file::metadata::PageIndexPolicy::Optional),
         )
         .unwrap();
         let metadata = Arc::clone(builder.metadata());
-        assert!(metadata.offset_index().is_some());
+        assert!(metadata.page_index().is_some());
         let groups = FileRowGroups {
             file: Arc::new(InputFile::from(input.try_clone().unwrap())),
             metadata: Arc::clone(&metadata),
@@ -599,6 +594,10 @@ mod schema_hint_tests {
     use std::sync::Arc;
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "Verify preservation of dictionary IDs while Arrow still supports them"
+    )]
     fn hint_preserves_semantics_without_copying_ordinary_field_metadata() {
         let metadata = HashMap::from([
             ("description".into(), "x".repeat(4096)),

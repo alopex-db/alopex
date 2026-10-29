@@ -1,3 +1,7 @@
+#![allow(
+    deprecated,
+    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
+)]
 #[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -81,7 +85,7 @@ fn validate_arrow_field(field: arrow_ipc::Field<'_>) -> Result<()> {
         return Err(invalid_page());
     }
     let children = field.children().map_or(0, |children| children.len());
-    // FlatBuffers validates structure; Arrow 53's owned converter assumes these semantics.
+    // FlatBuffers validates structure; Arrow's owned converter assumes these semantics.
     let valid = match field.type_type() {
         Type::Null
         | Type::Bool
@@ -447,7 +451,9 @@ pub(super) fn check_pages(
                         bytes.checked_add((2 * std::mem::size_of::<bytes::Bytes>()) as u64)
                     })
                     .and_then(|bytes| {
-                        bytes.checked_add(std::mem::size_of::<parquet::format::PageHeader>() as u64)
+                        bytes.checked_add(
+                            std::mem::size_of::<parquet_wire::format::PageHeader>() as u64
+                        )
                     })
                     .ok_or_else(invalid_page)?;
                 reserved_bytes = reserved_bytes
@@ -703,7 +709,42 @@ impl<R: Read> CompactHeader<R> {
         if count == 0 {
             return Ok(());
         }
-        // std HashMap uses four buckets for up to three entries, then 7/8 occupancy.
+        // Arrow 60 Metadata owns an Arc<BTreeMap>. Nodes have 11 key/value
+        // slots and a padded four-word header. Only internal nodes have 12
+        // child pointers. Non-root nodes contain at least 5 entries; an
+        // internal root has at least 2 children, all other internal nodes 6.
+        // Thus N total nodes permit at most (N + 3) / 6 internal nodes.
+        let nodes = 1 + (count - 1) / 5;
+        let internal = (nodes + 3) / 6;
+        let leaf_bytes =
+            11 * std::mem::size_of::<(String, String)>() + 4 * std::mem::size_of::<usize>();
+        let edges = internal
+            .checked_mul((12 * std::mem::size_of::<usize>()) as u64)
+            .ok_or_else(invalid_page)?;
+        let table = nodes
+            .checked_mul(leaf_bytes as u64)
+            .and_then(|v| v.checked_add(edges))
+            .and_then(|v| {
+                v.checked_add(arc_bytes::<std::collections::BTreeMap<String, String>>() as u64)
+            })
+            .ok_or_else(invalid_page)?;
+        // Original IPC metadata and the converted reader field can coexist.
+        self.charge_metadata(
+            table.checked_mul(2).ok_or_else(invalid_page)?,
+            MetadataContext::RetainedMetadata,
+        )?;
+        // Reserve an additional map for construction and copy-on-write transitions.
+        self.charge_metadata(table, MetadataContext::Unknown)
+    }
+
+    fn reserve_arrow_root_merge_map(&mut self, count: u64) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        // Parquet 60 still merges file and IPC root metadata in a HashMap
+        // before converting it into Arrow Metadata. The IPC reservation above
+        // covers the B-tree owners; only one merge HashMap is live, not a
+        // third B-tree. Keep its growth scratch in the pre-allocation budget.
         let buckets = if count < 4 {
             4
         } else if count < 8 {
@@ -719,12 +760,7 @@ impl<R: Read> CompactHeader<R> {
             .checked_mul((std::mem::size_of::<(String, String)>() + 1) as u64)
             .and_then(|v| v.checked_add(16))
             .ok_or_else(invalid_page)?;
-        // Original IPC metadata and the converted reader field can coexist.
-        self.charge_metadata(
-            table.checked_mul(2).ok_or_else(invalid_page)?,
-            MetadataContext::RetainedMetadata,
-        )?;
-        // Rehashing can retain the preceding smaller table until relocation finishes.
+        self.charge_metadata(table, MetadataContext::RetainedMetadata)?;
         self.charge_metadata(table, MetadataContext::Unknown)
     }
 
@@ -841,8 +877,11 @@ impl<R: Read> CompactHeader<R> {
         let count = self.reserve_arrow_key_values(
             schema.custom_metadata().into_iter().flat_map(|v| v.iter()),
         )?;
-        // File key-values are cloned into the map that receives IPC root metadata.
-        self.reserve_arrow_map(
+        // File key-values contribute additional entries to the final B-tree.
+        // Reserving the two disjoint input counts separately also bounds their union.
+        self.reserve_arrow_map(self.file_key_values)?;
+        // Parquet combines these inputs in one HashMap before conversion.
+        self.reserve_arrow_root_merge_map(
             self.file_key_values
                 .checked_add(count)
                 .ok_or_else(invalid_page)?,
@@ -1165,7 +1204,7 @@ impl<R: Read> CompactHeader<R> {
                         std::mem::size_of::<parquet::basic::Encoding>()
                     }
                     MetadataContext::PageEncodingStats => {
-                        std::mem::size_of::<parquet::file::page_encoding_stats::PageEncodingStats>()
+                        std::mem::size_of::<parquet::file::metadata::PageEncodingStats>()
                     }
                     _ => 0,
                 };
@@ -1373,7 +1412,7 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::ColumnMetaData, 2) => (
             9,
             MetadataContext::ColumnEncoding,
-            std::mem::size_of::<parquet::format::Encoding>(),
+            std::mem::size_of::<parquet_wire::format::Encoding>(),
             5,
         ),
         (MetadataContext::ColumnMetaData, 3) => (
@@ -1392,14 +1431,14 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::ColumnMetaData, 8) => (
             9,
             MetadataContext::KeyValue,
-            std::mem::size_of::<parquet::format::KeyValue>(),
+            std::mem::size_of::<parquet_wire::format::KeyValue>(),
             12,
         ),
         (MetadataContext::ColumnMetaData, 12) => (12, MetadataContext::RetainedStatistics, 0, 0),
         (MetadataContext::ColumnMetaData, 13) => (
             9,
             MetadataContext::PageEncodingStats,
-            std::mem::size_of::<parquet::format::PageEncodingStats>(),
+            std::mem::size_of::<parquet_wire::format::PageEncodingStats>(),
             12,
         ),
         (MetadataContext::ColumnMetaData, 16) => (12, MetadataContext::SizeStatistics, 0, 0),
@@ -1420,20 +1459,20 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::FileMetaData, 2) => (
             9,
             MetadataContext::SchemaElement,
-            std::mem::size_of::<parquet::format::SchemaElement>(),
+            std::mem::size_of::<parquet_wire::format::SchemaElement>(),
             12,
         ),
         (MetadataContext::FileMetaData, 3) => (6, MetadataContext::Unknown, 0, 0),
         (MetadataContext::FileMetaData, 4) => (
             9,
             MetadataContext::RowGroup,
-            std::mem::size_of::<parquet::format::RowGroup>(),
+            std::mem::size_of::<parquet_wire::format::RowGroup>(),
             12,
         ),
         (MetadataContext::FileMetaData, 5) => (
             9,
             MetadataContext::FileKeyValue,
-            std::mem::size_of::<parquet::format::KeyValue>(),
+            std::mem::size_of::<parquet_wire::format::KeyValue>(),
             12,
         ),
         (MetadataContext::FileMetaData, 6) => (8, MetadataContext::RetainedMetadata, 0, 0),
@@ -1441,7 +1480,7 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::FileMetaData, 7) => (
             9,
             MetadataContext::ColumnOrder,
-            std::mem::size_of::<parquet::format::ColumnOrder>(),
+            std::mem::size_of::<parquet_wire::format::ColumnOrder>(),
             12,
         ),
         (MetadataContext::FileMetaData, 8) => (12, MetadataContext::EncryptionAlgorithm, 0, 0),
@@ -1471,7 +1510,7 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::RowGroup, 1) => (
             9,
             MetadataContext::ColumnChunk,
-            std::mem::size_of::<parquet::format::ColumnChunk>(),
+            std::mem::size_of::<parquet_wire::format::ColumnChunk>(),
             12,
         ),
         (MetadataContext::RowGroup, 2)
@@ -1481,7 +1520,7 @@ fn metadata_field(context: MetadataContext, id: i16) -> Option<(u8, MetadataCont
         (MetadataContext::RowGroup, 4) => (
             9,
             MetadataContext::SortingColumn,
-            std::mem::size_of::<parquet::format::SortingColumn>(),
+            std::mem::size_of::<parquet_wire::format::SortingColumn>(),
             12,
         ),
         (MetadataContext::RowGroup, 7) => (4, MetadataContext::Unknown, 0, 0),
@@ -1545,7 +1584,7 @@ mod tests {
 
     #[test]
     fn issue577_arrow_key_values_preserve_shared_budget_boundaries() {
-        for count in [0_u64, 1, 3, 4, 7, 8] {
+        for count in [0_u64, 1, 3, 4, 7, 8, 10, 11, 12, 31, 64] {
             let empty = arrow_schema::Schema::empty();
             let mut builder = arrow_ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&empty);
             builder.reset();
@@ -1580,17 +1619,15 @@ mod tests {
             builder.finish(schema, None);
             let schema = arrow_ipc::root_as_schema(builder.finished_data()).unwrap();
             let metadata = schema.custom_metadata().unwrap();
-            let buckets = match count {
-                0 => 0,
-                1..=3 => 4,
-                4..=7 => 8,
-                8 => 16,
-                _ => unreachable!(),
-            };
-            let table = if buckets == 0 {
+            let table = if count == 0 {
                 0
             } else {
-                buckets * (std::mem::size_of::<(String, String)>() as u64 + 1) + 16
+                let nodes = 1 + (count - 1) / 5;
+                nodes
+                    * (11 * std::mem::size_of::<(String, String)>()
+                        + 4 * std::mem::size_of::<usize>()) as u64
+                    + (nodes + 3) / 6 * (12 * std::mem::size_of::<usize>()) as u64
+                    + arc_bytes::<std::collections::BTreeMap<String, String>>() as u64
             };
             let strings = count * 2 * ("key".len() + "value".len()) as u64;
             let total = 37 + strings + 3 * table;
@@ -1742,7 +1779,7 @@ mod tests {
             let owned_lower_bound = [metadata, reader_metadata]
                 .into_iter()
                 .map(|map| {
-                    map.capacity() * std::mem::size_of::<(String, String)>()
+                    map.len() * std::mem::size_of::<(String, String)>()
                         + map
                             .iter()
                             .map(|(key, value)| key.capacity() + value.capacity())

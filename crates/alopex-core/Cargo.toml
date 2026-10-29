@@ -42,7 +42,7 @@ thiserror = { workspace = true }
 snap = "1.1"
 tracing = { workspace = true }
 futures-core = { workspace = true }
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14.3", optional = true }
 lz4 = { version = "1.24", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
 dhat = { version = "0.3", optional = true }
@@ -76,7 +76,7 @@ tokio = { workspace = true }
 libc = "0.2"
 alopex-sql = { path = "../alopex-sql" }
 alopex-dataframe = { path = "../alopex-dataframe" }
-arrow = "53"
+arrow = "60.1"
 
 # jemalloc doesn't support Windows
 [target.'cfg(not(target_os = "windows"))'.dependencies]

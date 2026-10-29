@@ -191,3 +191,119 @@ class SplitCaseAcceptanceTests(unittest.TestCase):
             self.assertEqual(
                 sum(node.endswith(spec["replacement"]) for node in selected), 1
             )
+
+
+class LogicalFixtureLifetimeTests(unittest.TestCase):
+    """Exercise the real scheduler with byte-sized stand-ins for old WAL DBs."""
+
+    def exercise(self, root, python_only=False, fail_at=None):
+        import shutil
+        from scripts.compatibility.run import run_logical_cases
+
+        calls, removed = [], []
+
+        def callback(language, label, owner, mode, *arguments):
+            calls.append(label)
+            if mode == "export":
+                self.assertEqual(owner, "old")
+                source = arguments[0] if language == "python" else label
+                self.assertFalse(list(root.glob("*-db")), "previous source still live")
+                path = root / (source + "-source-db")
+                path.mkdir()
+                (path / "wal").write_bytes(b"old-wal")
+                (root / (source + "-bundle.json")).write_text("{}")
+            else:
+                self.assertEqual(owner, "candidate")
+                source = arguments[-1]
+                source_db = root / (source + "-source-db")
+                self.assertEqual((source_db / "wal").read_bytes(), b"old-wal")
+                if mode == "direct":
+                    path = root / (source + "-" + language + "-direct-db")
+                    if language == "python":
+                        shutil.copytree(source_db, path)
+                    self.assertEqual((path / "wal").read_bytes(), b"old-wal")
+                else:
+                    self.assertEqual(mode, "import")
+                    if language == "python":
+                        self.assertEqual(arguments[0], label)
+                    # Both real importers create <label>-destination-db.
+                    path = root / (label + "-destination-db")
+                    path.mkdir()
+                (path / "wal").write_bytes(b"new-wal")
+                self.assertEqual(
+                    {p.name for p in root.glob("*-db")},
+                    {source_db.name, path.name},
+                    "completed reader DB overlaps the next reader",
+                )
+                self.assertEqual((source_db / "wal").read_bytes(), b"old-wal")
+            (root / (label + "-result.json")).write_text('{"pass": true}')
+            (root / (label + ".log")).write_text("case evidence")
+            if label == fail_at:
+                raise RuntimeError("injected reader failure")
+
+        run_logical_cases(
+            root,
+            lambda *args: callback("python", *args),
+            None if python_only else lambda *args: callback("rust", *args),
+            removed,
+        )
+        return calls, removed
+
+    def test_full_matrix_bounds_live_databases_and_keeps_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls, removed = self.exercise(root)
+            self.assertEqual(calls, [
+                "logical-old", "python15-python-direct", "python-from-python",
+                "rust-from-python-direct", "rust-from-python", "rust15",
+                "rust15-python-direct", "python-from-rust",
+                "rust-from-rust-direct", "rust-from-rust",
+            ])
+            self.assertEqual(len(removed), 10)
+            self.assertEqual(len(set(removed)), 10)
+            self.assertFalse(list(root.glob("*-db")))
+            self.assertEqual(len(list(root.glob("*-result.json"))), 10)
+            self.assertEqual(len(list(root.glob("*.log"))), 10)
+            self.assertEqual(len(list(root.glob("*-bundle.json"))), 2)
+
+    def test_python_only_keeps_both_python_consumers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls, removed = self.exercise(root, python_only=True)
+            self.assertEqual(calls, [
+                "logical-old", "python15-python-direct", "python-from-python",
+            ])
+            self.assertEqual(len(removed), 3)
+            self.assertFalse(list(root.glob("*-db")))
+
+    def test_failure_stops_schedule_and_final_cleanup_keeps_failure_evidence(self):
+        from scripts.compatibility.run import remove_databases
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "injected reader failure"):
+                self.exercise(root, fail_at="rust-from-python-direct")
+            self.assertEqual({p.name for p in root.glob("*-db")}, {
+                "python15-source-db", "python15-rust-direct-db",
+            })
+            self.assertFalse((root / "rust15-bundle.json").exists())
+            removed = []
+            remove_databases(root, removed, *root.glob("*-db"))
+            self.assertEqual(len(removed), 2)
+            self.assertTrue((root / "rust-from-python-direct.log").exists())
+            self.assertTrue((root / "rust-from-python-direct-result.json").exists())
+
+    def test_cleanup_failure_is_not_silently_discounted(self):
+        from unittest.mock import patch
+        from scripts.compatibility.run import remove_databases
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "owned-db"
+            path.mkdir()
+            removed = []
+            with patch("scripts.compatibility.run.shutil.rmtree", side_effect=OSError("busy")):
+                with self.assertRaisesRegex(OSError, "busy"):
+                    remove_databases(root, removed, path)
+            self.assertEqual(removed, [])
+            self.assertTrue(path.exists())

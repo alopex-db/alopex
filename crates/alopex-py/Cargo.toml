@@ -25,7 +25,7 @@ alopex-cluster.workspace = true
 alopex-dataframe.workspace = true
 alopex-embedded.workspace = true
 alopex-sql.workspace = true
-arrow = "53"
+arrow = "60.1"
 
 [build-dependencies]
 pyo3-build-config = "0.29.0"

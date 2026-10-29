@@ -47,16 +47,18 @@ sha2 = "0.10"
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
-parquet = { version = "53", features = ["arrow", "experimental"] }
+parquet = { workspace = true, features = ["experimental"] }
+# Stable Thrift wire types only; no Arrow, compression, or old zstd dependencies.
+parquet-wire = { package = "parquet", version = "=57.3.2", default-features = false }
 bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
 flate2 = { version = "=1.1.8", default-features = false, features = ["rust_backend"] }
-zstd = { version = "=0.13.3", default-features = false, features = ["experimental"] }
+zstd = { version = "=0.14.3", default-features = false, features = ["experimental"] }
 brotli-decompressor = "=4.0.3"
 thrift = { version = "=0.17.0", default-features = false }
 crc32fast = "=1.5.0"
-arrow-array = "53"
-arrow-schema = "53"
-arrow-ipc = "53"
+arrow-array = "60.1"
+arrow-schema = "60.1"
+arrow-ipc = "60.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
 rmp-serde = "1.3"
