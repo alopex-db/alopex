@@ -105,8 +105,10 @@ qualified wheels were then built with the same dev/opt-level-1 configuration,
 imported successfully and passed the public tests. Logs and identities of the
 failed attempts remain separate from accepted results.
 
-HNSW index counts 0/1/2, autocommit, start-phase memory/disk scaling, OS CI and
-candidate integration remain. Reuse the two recorded source-bound wheels for
+The [HNSW/resource follow-up](transaction-begin-hnsw-resources.md) now records
+public Python index counts 0/1/2, autocommit and start-phase memory/disk scaling.
+Native index/resource coverage, first-write overhead, OS CI and candidate
+integration remain. Reuse the two recorded source-bound wheels for
 those immediate comparisons; they are development artifacts, not release assets.
 The temporary venv, parser downloads and owned intermediate binaries are
 reclaimed after recording, while compact logs and the two needed wheels remain.
