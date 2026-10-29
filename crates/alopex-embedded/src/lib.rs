@@ -562,8 +562,7 @@ impl Database {
     ) {
         let bytes = index.stats().memory_bytes;
         if bytes > limit_bytes || limit_bytes == 0 {
-            cache.counters.oversize(&name, bytes, limit_bytes);
-            cache.remove(&name);
+            cache.reject_oversize(&name, bytes, limit_bytes);
             return;
         }
         cache.insert(name.clone(), index);
@@ -602,8 +601,11 @@ impl Database {
             .hnsw_cache_gate
             .write()
             .expect("hnsw cache gate lock poisoned");
-        self.hnsw_cache_limit_bytes.store(bytes, Ordering::Release);
+        let previous_bytes = self.hnsw_cache_limit_bytes.swap(bytes, Ordering::AcqRel);
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        if previous_bytes != bytes || entries.is_some_and(|count| count != cache.max_entries) {
+            cache.counters.reset_warnings();
+        }
         if let Some(entries) = entries {
             cache.max_entries = entries;
         }
@@ -813,7 +815,11 @@ impl Database {
         {
             let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
             match changed {
-                Some(names) => cache.retain(|name, _| !names.contains(name)),
+                Some(names) => {
+                    for name in names {
+                        cache.remove(&name);
+                    }
+                }
                 None => cache.clear(),
             }
         }
