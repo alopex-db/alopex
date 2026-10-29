@@ -58,6 +58,8 @@ commands = [
                            "--test", "memory_snapshot_overwrite"]),
     ("hnsw-transaction-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                                      "--test", "hnsw_transaction_cache"]),
+    ("hnsw-cold-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                               "--test", "hnsw_cold_publication"]),
 ]
 for name, command in commands:
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
@@ -77,6 +79,7 @@ for name, command in commands:
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
                 "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
                 "memory-snapshots": "20 passed; 0 failed; 0 ignored",
-                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored"}
+                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored",
+                "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

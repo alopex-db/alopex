@@ -536,9 +536,17 @@ pub struct HnswTxnEntry {
     pub dirty: bool,
     pub(crate) cached_read: bool,
     last_access: Instant,
+    mutable_accessed: bool,
 }
 
 impl HnswTxnEntry {
+    /// Clone a graph loaded only for reading in this transaction.
+    /// A flushed mutation remains ineligible even after `dirty` is cleared.
+    pub fn clone_unmodified_load(&self) -> Option<HnswIndex> {
+        (!self.cached_read && !self.mutable_accessed && !self.dirty)
+            .then(|| self.index.clone_for_read())
+    }
+
     pub(crate) fn loaded(index: HnswIndex) -> Self {
         Self {
             index,
@@ -546,6 +554,7 @@ impl HnswTxnEntry {
             dirty: false,
             cached_read: false,
             last_access: Instant::now(),
+            mutable_accessed: false,
         }
     }
 
@@ -557,6 +566,7 @@ impl HnswTxnEntry {
             dirty: false,
             cached_read: true,
             last_access: Instant::now(),
+            mutable_accessed: false,
         }
     }
 }
@@ -617,7 +627,9 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
             self.hnsw_indices
                 .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
-        Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
+        let entry = self.hnsw_indices.get_mut(name).expect("inserted above");
+        entry.mutable_accessed = true;
+        Ok(entry)
     }
 
     pub(crate) fn ensure_write_txn(&self) -> CoreResult<()> {
@@ -891,6 +903,7 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
     fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
         self.hnsw_entry(name)?;
         let entry = self.hnsw_indices.get_mut(name).expect("loaded above");
+        entry.mutable_accessed = true;
         if entry.cached_read {
             entry.index = entry.index.fork_owned();
             entry.cached_read = false;
