@@ -1,3 +1,7 @@
+#![allow(
+    deprecated,
+    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
+)]
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -5,18 +9,19 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::wire::{encoding, page_metadata, statistics};
 use brotli_decompressor::{
     Allocator, BrotliDecompressStream, BrotliResult, BrotliState, HuffmanCode, SliceWrapper,
     StandardAlloc,
 };
 use bytes::Bytes;
-use parquet::basic::{Compression, Encoding, Type};
+use parquet::basic::{Compression, Type};
 use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ColumnChunkMetaData;
-use parquet::file::statistics;
-use parquet::format::{PageHeader, PageLocation, PageType};
-use parquet::thrift::TSerializable;
+use parquet::file::page_index::offset_index::PageLocation;
+use parquet_wire::format::{PageHeader, PageType};
+use parquet_wire::thrift::TSerializable;
 use thrift::protocol::TCompactInputProtocol;
 
 use super::super::preflight;
@@ -264,11 +269,11 @@ impl BoundedPages {
                     .data_page_offset()
                     .checked_sub(offset)
                     .ok_or_else(invalid)?;
-                pages.push_front(PageLocation::new(
+                pages.push_front(PageLocation {
                     offset,
-                    i32::try_from(size).map_err(|_| invalid())?,
-                    -1,
-                ));
+                    compressed_page_size: i32::try_from(size).map_err(|_| invalid())?,
+                    first_row_index: -1,
+                });
             }
             Position::Indexed { pages, total_rows }
         } else {
@@ -350,7 +355,8 @@ impl BoundedPages {
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             let data = start.checked_add(bytes.len() as u64).ok_or_else(invalid)?;
             let mut protocol = TCompactInputProtocol::new(Cursor::new(bytes));
-            let header = PageHeader::read_from_in_protocol(&mut protocol)?;
+            let header = PageHeader::read_from_in_protocol(&mut protocol)
+                .map_err(|error| ParquetError::External(Box::new(error)))?;
             let size = nonnegative(header.compressed_page_size)?;
             let next = data
                 .checked_add(size as u64)
@@ -401,7 +407,7 @@ impl BoundedPages {
             {
                 return Err(invalid());
             }
-            PageMetadata::try_from(&header)?;
+            page_metadata(&header)?;
             self.pending = Some(Pending {
                 header,
                 data,
@@ -502,7 +508,7 @@ impl BoundedPages {
                 Ok(Page::DictionaryPage {
                     buf,
                     num_values: u32::try_from(count).map_err(|_| invalid())?,
-                    encoding: Encoding::try_from(header.encoding)?,
+                    encoding: encoding(header.encoding)?,
                     is_sorted: header.is_sorted.unwrap_or(false),
                 })
             }
@@ -511,10 +517,10 @@ impl BoundedPages {
                 Ok(Page::DataPage {
                     buf,
                     num_values: u32::try_from(header.num_values).map_err(|_| invalid())?,
-                    encoding: Encoding::try_from(header.encoding)?,
-                    def_level_encoding: Encoding::try_from(header.definition_level_encoding)?,
-                    rep_level_encoding: Encoding::try_from(header.repetition_level_encoding)?,
-                    statistics: statistics::from_thrift(self.physical_type, header.statistics)?,
+                    encoding: encoding(header.encoding)?,
+                    def_level_encoding: encoding(header.definition_level_encoding)?,
+                    rep_level_encoding: encoding(header.repetition_level_encoding)?,
+                    statistics: statistics(self.physical_type, header.statistics)?,
                 })
             }
             PageType::DATA_PAGE_V2 => {
@@ -522,7 +528,7 @@ impl BoundedPages {
                 Ok(Page::DataPageV2 {
                     buf,
                     num_values: u32::try_from(header.num_values).map_err(|_| invalid())?,
-                    encoding: Encoding::try_from(header.encoding)?,
+                    encoding: encoding(header.encoding)?,
                     num_nulls: u32::try_from(header.num_nulls).map_err(|_| invalid())?,
                     num_rows: u32::try_from(header.num_rows).map_err(|_| invalid())?,
                     def_levels_byte_len: u32::try_from(header.definition_levels_byte_length)
@@ -530,7 +536,7 @@ impl BoundedPages {
                     rep_levels_byte_len: u32::try_from(header.repetition_levels_byte_length)
                         .map_err(|_| invalid())?,
                     is_compressed: header.is_compressed.unwrap_or(true),
-                    statistics: statistics::from_thrift(self.physical_type, header.statistics)?,
+                    statistics: statistics(self.physical_type, header.statistics)?,
                 })
             }
             _ => Err(invalid()),
@@ -567,7 +573,7 @@ impl PageReader for BoundedPages {
                 is_dict: pending.header.type_ == PageType::DICTIONARY_PAGE,
             }))
         } else {
-            Ok(Some(PageMetadata::try_from(&pending.header)?))
+            Ok(Some(page_metadata(&pending.header)?))
         }
     }
     fn skip_next_page(&mut self) -> Result<()> {

@@ -299,7 +299,7 @@ fn generate(profile: &Profile, directory: &Path) -> Result<()> {
     for case in &profile.cases {
         let fields = (0..case.columns)
             .map(|column| {
-                let metadata = (0..case.field_metadata_entries)
+                let metadata: arrow_schema::Metadata = (0..case.field_metadata_entries)
                     .map(|index| (format!("k{index:04}"), String::new()))
                     .collect();
                 Field::new(format!("c{column}"), DataType::Int64, false).with_metadata(metadata)
@@ -321,7 +321,7 @@ fn generate(profile: &Profile, directory: &Path) -> Result<()> {
             .create_new(true)
             .open(directory.join(format!("{}.parquet", case.id)))?;
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(case.row_group_rows)
+            .set_max_row_group_row_count(Some(case.row_group_rows))
             .build();
         let mut writer = ArrowWriter::try_new(file, schema, Some(properties))?;
         writer.write(&batch)?;

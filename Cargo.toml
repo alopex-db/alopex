@@ -20,6 +20,8 @@ repository = "https://github.com/alopex-db/alopex"
 edition = "2021"
 
 [workspace.dependencies]
+# Preserve the existing codecs and pure-Rust gzip backend during the Arrow 60 migration.
+parquet = { version = "60.1", default-features = false, features = ["arrow", "snap", "brotli", "flate2-rust_backend", "lz4", "zstd", "base64"] }
 # Internal crates
 alopex-core = { version = "=0.8.17", path = "crates/alopex-core", features = ["compression-zstd"] }
 alopex-sql = { version = "=0.8.17", path = "crates/alopex-sql" }
