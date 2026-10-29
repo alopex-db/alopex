@@ -867,12 +867,13 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
         } => {
             ensure_write(mode, op_name)?;
             let guard = catalog.read().expect("catalog lock poisoned");
+            let policy = txn.memory_policy().cloned();
             let ExecutionResult::Query(result) =
                 query::execute_query_with_policy_and_copy_security(
                     txn,
                     &*guard,
                     *source,
-                    None,
+                    policy.as_ref(),
                     read_security,
                 )?
             else {
