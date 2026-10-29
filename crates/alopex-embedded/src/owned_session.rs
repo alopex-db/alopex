@@ -79,14 +79,14 @@ impl Database {
         self: Arc<Self>,
         mode: TxnMode,
     ) -> Result<OwnedEmbeddedTransaction> {
-        let (session, cached, observer) = {
+        let (session, epoch, cached, observer) = {
             let _gate = self
                 .hnsw_cache_gate
                 .read()
                 .expect("hnsw cache gate lock poisoned");
             let session = self.begin_owned_transaction(mode)?;
-            let (_, cached) = self.hnsw_cache_snapshot();
-            (session, cached, self.hnsw_cache_observer())
+            let (epoch, cached) = self.hnsw_cache_snapshot();
+            (session, epoch, cached, self.hnsw_cache_observer())
         };
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
@@ -119,6 +119,7 @@ impl Database {
                 .map(|(name, index)| (name, alopex_sql::storage::HnswTxnEntry::cached_read(index)))
                 .collect(),
             sql_hnsw_observer: observer,
+            sql_hnsw_epoch: epoch,
             vector_cache_invalidated: false,
             vector_index: None,
             vector_index_dirty: false,
@@ -142,6 +143,7 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
     pub(crate) sql_hnsw_observer: Arc<dyn alopex_sql::storage::HnswCacheObserver>,
+    sql_hnsw_epoch: u64,
     pub(crate) vector_cache_invalidated: bool,
     pub(crate) vector_index: Option<VectorKeyIndex>,
     pub(crate) vector_index_dirty: bool,
@@ -544,17 +546,26 @@ impl OwnedEmbeddedTransaction {
         let overlay = std::mem::take(&mut self.overlay);
         let catalog_deleted = overlay.has_deletions();
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-        self.db.commit_with_hnsw_cache_changes(
+        let (epoch, reusable) = self.db.commit_with_hnsw_cache_changes(
             || {
                 self.session
                     .commit_with_observer(|transaction| {
-                        if catalog_deleted {
-                            return None;
-                        }
-                        self.db.hnsw_cache_changes(|visitor| {
+                        let changed = if catalog_deleted {
+                            None
+                        } else {
+                            self.db.hnsw_cache_changes(|visitor| {
+                                transaction.visit_pending_write_keys(visitor)
+                            })
+                        };
+                        let reusable = Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
                             transaction.visit_pending_write_keys(visitor)
-                        })
+                        });
+                        let epoch = self
+                            .db
+                            .hnsw_publication_epoch_after_commit(self.sql_hnsw_epoch);
+                        ((epoch, reusable), changed)
                     })
+                    .map(|(_, observation)| observation)
                     .map_err(Error::Core)
             },
             || {
@@ -580,6 +591,9 @@ impl OwnedEmbeddedTransaction {
                 }
             },
         )?;
+        if let Some(epoch) = epoch {
+            self.db.hnsw_cache_insert_if_current(epoch, reusable);
+        }
         if self.catalog_modified {
             self.db.invalidate_table_info_cache();
         }
@@ -596,7 +610,16 @@ impl OwnedEmbeddedTransaction {
 
     /// Roll back the owned transaction once.
     pub fn rollback(&mut self) -> Result<()> {
-        self.session.rollback().map_err(Error::Core)?;
+        let (_, reusable) = self
+            .session
+            .rollback_with_observer(|transaction| {
+                Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
+                    transaction.visit_pending_write_keys(visitor)
+                })
+            })
+            .map_err(Error::Core)?;
+        self.db
+            .hnsw_cache_insert_if_current(self.sql_hnsw_epoch, reusable);
         for (index, state) in self.hnsw_indices.values_mut() {
             let _ = index.rollback(state);
         }
