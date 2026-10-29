@@ -74,8 +74,22 @@ pub struct TxnHandle {
     inner: Arc<TxnHandleInner>,
 }
 
+/// A table and its attached indexes at one transaction lifecycle boundary.
+#[derive(Clone)]
+pub struct CatalogTableState {
+    pub(crate) name: String,
+    pub(crate) table: Option<TableMetadata>,
+    pub(crate) indexes: Vec<IndexMetadata>,
+}
+
 #[derive(Clone)]
 pub enum CatalogRollbackEffect {
+    /// Restore only the table names affected by a schema evolution request.
+    /// Keep each request in order; repeated ALTERs must unwind in reverse order.
+    RestoreTables {
+        before: Vec<CatalogTableState>,
+        after: Vec<CatalogTableState>,
+    },
     DropTable {
         table_name: String,
         table_id: u32,

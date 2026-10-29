@@ -54,6 +54,7 @@ futures-core = { workspace = true }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+proptest = "1.4"
 rcgen = "0.12"
 tempfile = "3.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
