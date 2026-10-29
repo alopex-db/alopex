@@ -400,6 +400,18 @@ impl ServerState {
         let mut result = Ok(());
         for effect in effects.into_iter().rev() {
             let (mut tables, indexes): (Vec<String>, Vec<String>) = match &effect {
+                CatalogRollbackEffect::RestoreTables { before, after } => (
+                    before
+                        .iter()
+                        .chain(after)
+                        .map(|state| state.name.clone())
+                        .collect(),
+                    before
+                        .iter()
+                        .chain(after)
+                        .flat_map(|state| state.indexes.iter().map(|index| index.name.clone()))
+                        .collect(),
+                ),
                 CatalogRollbackEffect::DropTable { table_name, .. } => (
                     vec![table_name.clone()],
                     catalog
@@ -435,6 +447,9 @@ impl ServerState {
             }
             let effect_result = (|| {
                 match effect {
+                    CatalogRollbackEffect::RestoreTables { before, after } => {
+                        crate::catalog_rollback::restore(&mut *catalog, &before, &after)?;
+                    }
                     CatalogRollbackEffect::DropTable {
                         table_name,
                         table_id,

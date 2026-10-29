@@ -810,6 +810,53 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
                 if_not_exists,
             )?
         }
+        LogicalPlan::CreateView {
+            table,
+            if_not_exists,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *guard,
+                table,
+                Vec::new(),
+                if_not_exists,
+            )?
+        }
+        LogicalPlan::DropView { name, if_exists } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            if let Some(view) =
+                ddl::schema_evolution::prepare_drop_view(txn, &*guard, &name, if_exists)?
+            {
+                guard.drop_table(&view.name)?;
+            }
+            ExecutionResult::Success
+        }
+        LogicalPlan::AlterTable {
+            name,
+            if_exists,
+            action,
+        } => {
+            ensure_write(mode, op_name)?;
+            let mut guard = catalog.write().expect("catalog lock poisoned");
+            if !guard.table_exists(&name) && if_exists {
+                return Ok(ExecutionResult::Success);
+            }
+            let outcome = ddl::schema_evolution::prepare_alter(txn, &*guard, &name, action)?;
+            guard.drop_table(&outcome.old_table.name)?;
+            guard.create_table(outcome.new_table)?;
+            for (_, index) in outcome.updated_indexes {
+                guard.create_index(index)?;
+            }
+            ExecutionResult::Success
+        }
+        LogicalPlan::Truncate { name } => {
+            ensure_write(mode, op_name)?;
+            let guard = catalog.read().expect("catalog lock poisoned");
+            ddl::schema_evolution::execute_truncate(txn, &*guard, &name)?
+        }
         LogicalPlan::CreateTableAs {
             table,
             if_not_exists,
@@ -845,6 +892,18 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
             let mut guard = catalog.write().expect("catalog lock poisoned");
             ddl::drop_index::execute_drop_index(txn, &mut *guard, &name, if_exists)?
         }
+        LogicalPlan::CreateSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::create(txn, statement)?
+        }
+        LogicalPlan::AlterSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::alter(txn, statement)?
+        }
+        LogicalPlan::DropSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::drop(txn, statement)?
+        }
         LogicalPlan::Insert {
             table,
             columns,
@@ -867,12 +926,13 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
         } => {
             ensure_write(mode, op_name)?;
             let guard = catalog.read().expect("catalog lock poisoned");
+            let policy = txn.memory_policy().cloned();
             let ExecutionResult::Query(result) =
                 query::execute_query_with_policy_and_copy_security(
                     txn,
                     &*guard,
                     *source,
-                    None,
+                    policy.as_ref(),
                     read_security,
                 )?
             else {
@@ -1031,6 +1091,9 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
             )?
         }
         query_plan => {
+            if let Some(result) = crate::executor::execute_sequence(txn, &query_plan)? {
+                return Ok(ExecutionResult::Query(result));
+            }
             let guard = catalog.read().expect("catalog lock poisoned");
             let policy = txn.memory_policy().cloned();
             query::execute_query_with_policy_and_copy_security(
@@ -1129,6 +1192,25 @@ fn stream_query_blocking<'ctx, S: KVStore + 'ctx>(
             reason: "query API requires SELECT".into(),
         }));
         return;
+    }
+
+    match crate::executor::execute_sequence(txn, &plan) {
+        Ok(Some(result)) => {
+            for (index, values) in result.rows.into_iter().enumerate() {
+                if sender
+                    .blocking_send(Ok(Row::new(index as u64 + 1, values)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            return;
+        }
+        Err(err) => {
+            let _ = sender.blocking_send(Err(err));
+            return;
+        }
+        Ok(None) => {}
     }
 
     let guard = catalog.read().expect("catalog lock poisoned");
