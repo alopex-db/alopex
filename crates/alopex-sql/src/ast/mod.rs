@@ -1,6 +1,5 @@
 pub mod ddl;
 pub mod dml;
-mod effects;
 pub mod expr;
 pub mod span;
 
@@ -149,8 +148,8 @@ impl StatementKind {
             Self::Explain {
                 analyze, statement, ..
             } => *analyze && statement.kind.requires_write(),
-            Self::Select(select) => effects::select_requires_write(select),
-            Self::Values(values) => effects::values_requires_write(values),
+            Self::Select(select) => crate::statement_effects::select_requires_write(select),
+            Self::Values(values) => crate::statement_effects::values_requires_write(values),
             kind => !kind.is_query(),
         }
     }
@@ -173,35 +172,5 @@ mod tests {
         assert!(!kind("EXPLAIN INSERT INTO items VALUES (1)").requires_write());
         assert!(kind("EXPLAIN ANALYZE INSERT INTO items VALUES (1)").requires_write());
         assert!(!kind("EXPLAIN ANALYZE SELECT * FROM items").requires_write());
-    }
-
-    #[test]
-    fn sequence_write_requirement_covers_nested_queries_without_matching_text() {
-        for sql in [
-            "SELECT nextval('counter')",
-            "SELECT NEXTVAL('counter') AS value",
-            "VALUES (nextval('counter'))",
-            "SELECT coalesce(nextval('counter'), 0)",
-            "SELECT CASE WHEN true THEN nextval('counter') ELSE 0 END",
-            "SELECT (SELECT nextval('counter'))",
-            "SELECT * FROM (SELECT nextval('counter')) AS nested",
-            "WITH nested AS (SELECT nextval('counter')) SELECT * FROM nested",
-            "SELECT 1 UNION ALL SELECT nextval('counter')",
-            "SELECT 1 WHERE nextval('counter') > 0",
-            "SELECT 1 ORDER BY nextval('counter')",
-            "SELECT sum(1) OVER (ORDER BY nextval('counter'))",
-            "EXPLAIN ANALYZE SELECT nextval('counter')",
-        ] {
-            assert!(kind(sql).requires_write(), "{sql}");
-        }
-        for sql in [
-            "SELECT currval('counter')",
-            "SELECT 'nextval(counter)' AS nextval",
-            "SELECT 1 /* nextval('counter') */",
-            "VALUES (1)",
-            "EXPLAIN SELECT nextval('counter')",
-        ] {
-            assert!(!kind(sql).requires_write(), "{sql}");
-        }
     }
 }

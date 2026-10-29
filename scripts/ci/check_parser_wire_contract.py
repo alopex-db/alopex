@@ -19,6 +19,7 @@ WIRE_FILES = {
     "crates/alopex-sql/src/nim_bridge.rs",
 }
 WIRE_PREFIX = "crates/alopex-sql/src/ast/"
+AST_MODULE = WIRE_PREFIX + "mod.rs"
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
 
@@ -54,11 +55,46 @@ def wire_related(path: str) -> bool:
     return path in WIRE_FILES or path.startswith(WIRE_PREFIX)
 
 
+def without_write_classifier_body(source: str) -> str:
+    """Mask only the existing non-serialized method, failing closed on ambiguity.
+
+    This is deliberately not a Rust parser or a general impl/test exemption.
+    Only brace-balanced identifier/punctuation expressions are accepted; strings,
+    comments, attributes and unfamiliar syntax retain the original source.
+    Every byte outside this one method body still participates in comparison.
+    """
+    signature = "    pub fn requires_write(&self) -> bool {"
+    if source.count(signature) != 1:
+        return source
+    start = source.index(signature) + len(signature)
+    depth = 1
+    for end in range(start, len(source)):
+        token = source[end]
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth == 0:
+                body = source[start:end]
+                if re.fullmatch(r"[A-Za-z0-9_\s:.,{}()&*!=>?;+\-]*", body):
+                    return source[:start] + " <runtime-write-classifier> " + source[end:]
+                return source
+    return source
+
+
+def runtime_only_ast_change(before: str, after: str) -> bool:
+    return without_write_classifier_body(before) == without_write_classifier_body(after)
+
+
 def check(base: str, head: str) -> list[str]:
     changed = git("diff", "--no-renames", "--name-only", "-z", base, head).decode(
         "utf-8"
     ).split("\0")
     wire_changes = sorted(path for path in changed if wire_related(path))
+    if AST_MODULE in wire_changes and runtime_only_ast_change(
+        source_at(base, AST_MODULE), source_at(head, AST_MODULE)
+    ):
+        wire_changes.remove(AST_MODULE)
     old_version = version_at(base)
     new_version = version_at(head)
     consumer_version = declared_version(

@@ -50,6 +50,7 @@ pub mod memory;
 pub mod query;
 mod result;
 mod system;
+#[cfg(feature = "tokio")]
 pub(crate) use system::execute_sequence;
 
 #[cfg(feature = "tokio")]

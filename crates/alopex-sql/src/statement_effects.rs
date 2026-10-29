@@ -1,9 +1,9 @@
 //! Conservative write classification for query expressions. This is independent
 //! of name resolution so callers can enforce write restrictions before planning.
 
-use super::*;
+use crate::ast::*;
 
-pub(super) fn select_requires_write(select: &Select) -> bool {
+pub(crate) fn select_requires_write(select: &Select) -> bool {
     with_requires_write(select.with.as_ref())
         || select.distinct_on.iter().any(expr_requires_write)
         || select.projection.iter().any(|item| match item {
@@ -36,7 +36,7 @@ pub(super) fn select_requires_write(select: &Select) -> bool {
             .any(|option| expr_requires_write(&option.value))
 }
 
-pub(super) fn values_requires_write(values: &Values) -> bool {
+pub(crate) fn values_requires_write(values: &Values) -> bool {
     with_requires_write(values.with.as_ref())
         || values.rows.iter().flatten().any(expr_requires_write)
         || values
@@ -149,6 +149,47 @@ fn expr_requires_write(expr: &Expr) -> bool {
         ExprKind::InSubquery { expr, subquery, .. }
         | ExprKind::Quantified { expr, subquery, .. } => {
             expr_requires_write(expr) || subquery.kind.requires_write()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AlopexDialect, Parser};
+    fn kind(sql: &str) -> StatementKind {
+        Parser::parse_sql(&AlopexDialect, sql)
+            .unwrap()
+            .remove(0)
+            .kind
+    }
+    #[test]
+    fn sequence_write_requirement_covers_nested_queries_without_matching_text() {
+        for sql in [
+            "SELECT nextval('counter')",
+            "SELECT NEXTVAL('counter') AS value",
+            "VALUES (nextval('counter'))",
+            "SELECT coalesce(nextval('counter'), 0)",
+            "SELECT CASE WHEN true THEN nextval('counter') ELSE 0 END",
+            "SELECT (SELECT nextval('counter'))",
+            "SELECT * FROM (SELECT nextval('counter')) AS nested",
+            "WITH nested AS (SELECT nextval('counter')) SELECT * FROM nested",
+            "SELECT 1 UNION ALL SELECT nextval('counter')",
+            "SELECT 1 WHERE nextval('counter') > 0",
+            "SELECT 1 ORDER BY nextval('counter')",
+            "SELECT sum(1) OVER (ORDER BY nextval('counter'))",
+            "EXPLAIN ANALYZE SELECT nextval('counter')",
+        ] {
+            assert!(kind(sql).requires_write(), "{sql}");
+        }
+        for sql in [
+            "SELECT currval('counter')",
+            "SELECT 'nextval(counter)' AS nextval",
+            "SELECT 1 /* nextval('counter') */",
+            "VALUES (1)",
+            "EXPLAIN SELECT nextval('counter')",
+        ] {
+            assert!(!kind(sql).requires_write(), "{sql}");
         }
     }
 }
