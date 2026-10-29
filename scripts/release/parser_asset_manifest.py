@@ -58,6 +58,13 @@ TARGET_STATIC_LIBRARIES = {
     "x86_64-pc-windows-msvc": "alopex_sql_parser.lib",
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.a",
 }
+# Supported targets and mandatory release targets are distinct in v0.8.17.
+# Intel remains verifiable when present, but cannot block the primary manifest.
+REQUIRED_TARGETS = frozenset({
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+})
 REQUIRED_PACKAGES = {
     "msgpack4nim": {
         "file_count": 5,
@@ -1337,9 +1344,9 @@ def validate_manifest_shape(manifest: dict[str, Any]) -> None:
         archive_names.append(record["archive"]["filename"])
     if targets != sorted(targets) or len(targets) != len(set(targets)):
         raise ParserAssetError("vendor manifest targets are duplicate or unsorted")
-    if set(targets) != set(TARGET_LIBRARIES):
+    if not REQUIRED_TARGETS.issubset(targets):
         raise ParserAssetError(
-            "vendor manifest target matrix must contain every supported target"
+            "vendor manifest target matrix must contain every required target"
         )
     if len(archive_names) != len(set(archive_names)):
         raise ParserAssetError("vendor manifest has duplicate archive filenames")

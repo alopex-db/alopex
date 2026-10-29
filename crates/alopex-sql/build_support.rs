@@ -16,9 +16,8 @@ const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
 const VENDOR_MANIFEST_RELATIVE_PATH: &str = "nim-sql-parser/vendor/parser-vendor-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
-const REQUIRED_TARGETS: [&str; 4] = [
+const REQUIRED_TARGETS: [&str; 3] = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
@@ -284,7 +283,11 @@ fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
         .iter()
         .map(|asset| asset.target.as_str())
         .collect();
-    if targets != REQUIRED_TARGETS {
+    if targets.windows(2).any(|pair| pair[0] >= pair[1])
+        || REQUIRED_TARGETS
+            .iter()
+            .any(|required| !targets.contains(required))
+    {
         return Err(error(
             "parser vendor manifest target matrix is incomplete, duplicated, or unsorted",
         ));
@@ -494,6 +497,12 @@ mod tests {
 
     const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
     const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+    // Independent release contract, not derived from the production constant.
+    const PRIMARY_TARGETS: [&str; 3] = [
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ];
 
     struct Fixture {
         _temporary: TempDir,
@@ -617,6 +626,116 @@ mod tests {
         let destination = destination_vendor.join(target);
         fs::create_dir_all(&destination).expect("target directory");
         copy_target_contents(&source_vendor.join(target), &destination);
+    }
+
+    fn rewrite_fixture_targets(
+        fixture: &Fixture,
+        change: impl FnOnce(&mut Vec<serde_json::Value>),
+    ) {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.manifest()).unwrap()).unwrap();
+        change(manifest["assets"].as_array_mut().unwrap());
+        fs::write(fixture.manifest(), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn primary_manifest_resolves_each_required_explicit_target_without_intel() {
+        for target in PRIMARY_TARGETS {
+            let fixture = Fixture::new(false);
+            rewrite_fixture_targets(&fixture, |assets| {
+                assets.retain(|asset| asset["target"] != "x86_64-apple-darwin");
+            });
+            let explicit = fixture.explicit_dir(target);
+            let resolved = resolve_native_library_with_options(
+                &fixture.crate_root,
+                target,
+                Some(explicit.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .unwrap();
+            assert_eq!(resolved.directory, explicit);
+        }
+    }
+
+    #[test]
+    fn primary_manifest_rejects_each_missing_required_target() {
+        for missing in PRIMARY_TARGETS {
+            let fixture = Fixture::new(true);
+            rewrite_fixture_targets(&fixture, |assets| {
+                assets.retain(|asset| asset["target"] != missing);
+            });
+            let failure = resolve_native_library_with_options(
+                &fixture.crate_root,
+                LINUX_TARGET,
+                None,
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(failure.contains("target matrix"), "{missing}: {failure}");
+        }
+    }
+
+    #[test]
+    fn primary_manifest_rejects_duplicate_unsorted_and_unsupported_targets() {
+        for mode in ["duplicate", "unsorted", "unsupported"] {
+            let fixture = Fixture::new(true);
+            rewrite_fixture_targets(&fixture, |assets| match mode {
+                "duplicate" => assets.insert(0, assets[0].clone()),
+                "unsorted" => assets.reverse(),
+                _ => {
+                    let mut extra = assets[0].clone();
+                    extra["target"] = serde_json::json!("zz-unsupported-target");
+                    assets.push(extra);
+                }
+            });
+            assert!(
+                resolve_native_library_with_options(
+                    &fixture.crate_root,
+                    LINUX_TARGET,
+                    None,
+                    false,
+                    &fixture.manifest_sha256(),
+                )
+                .is_err(),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_intel_requires_a_manifest_bound_asset_even_with_explicit_directory() {
+        let fixture = Fixture::new(false);
+        let target = "x86_64-apple-darwin";
+        let explicit = fixture.explicit_dir(target);
+        assert!(
+            resolve_native_library_with_options(
+                &fixture.crate_root,
+                target,
+                Some(explicit.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .is_ok()
+        );
+        rewrite_fixture_targets(&fixture, |assets| {
+            assets.retain(|asset| asset["target"] != target);
+        });
+        let failure = resolve_native_library_with_options(
+            &fixture.crate_root,
+            target,
+            Some(explicit.as_os_str()),
+            false,
+            &fixture.manifest_sha256(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            failure.contains("no asset for target x86_64-apple-darwin"),
+            "{failure}"
+        );
     }
 
     fn copy_target_contents(source: &Path, destination: &Path) {
