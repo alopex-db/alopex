@@ -126,7 +126,9 @@ after recording; shared dependencies remain for active release work.
 
 ## Remaining acceptance
 
-Same-source public Python before/after, HNSW index counts 0/1/2, autocommit,
-mutation-heavy memory/disk scaling, OS CI and candidate integration remain.
-The public Python 0.8.16 baseline must not be compared directly with these native
-candidate results. #684 and the v0.8.17 release remain open.
+The [source-matched public Python comparison](transaction-begin-python-comparison.md)
+now confirms the begin improvement and public transaction regressions. HNSW
+index counts 0/1/2, autocommit, mutation-heavy memory/disk scaling, OS CI and
+candidate integration remain. The public Python 0.8.16 baseline must not be
+compared directly with these native candidate results. #684 and the v0.8.17
+release remain open.
