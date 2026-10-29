@@ -1,5 +1,4 @@
 """Small explicit overflow contracts, with no load or performance assertions."""
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,32 +27,36 @@ def test_default_memory_database_has_no_overflow_statistics():
 
 
 def test_platform_capability_matches_open_contract(tmp_path):
-    assert WalOverflowOptions.writes_supported() == (sys.platform != "win32")
-    if sys.platform == "win32":
-        with pytest.raises(AlopexError, match="Windows support is pending"):
-            Database.open(str(tmp_path / "absent.alopex"), wal_overflow=options())
-        assert list(tmp_path.iterdir()) == []
+    assert WalOverflowOptions.writes_supported()
+    db = Database.open(str(tmp_path / "missing" / "child" / "記録.alopex"),
+                       wal_overflow=options())
+    with db.begin(TxnMode.READ_WRITE) as tx:
+        tx.put(b"key", b"x" * 65)
+    assert db.wal_overflow_stats()["directory_bytes"] > 64
+    db.close()
+    db = Database.open(str(tmp_path / "missing" / "child" / "記録.alopex"),
+                       wal_overflow=options())
+    with db.begin(TxnMode.READ_ONLY) as tx:
+        assert tx.get(b"key") == b"x" * 65
+    db.close()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows overflow refusal contract")
-def test_windows_overflow_refusal_does_not_create_nested_ancestors(tmp_path):
-    with pytest.raises(AlopexError, match="Windows support is pending"):
+def test_invalid_overflow_budget_does_not_create_nested_ancestors(tmp_path):
+    with pytest.raises(AlopexError):
         Database.open(str(tmp_path / "missing" / "child" / "db.alopex"),
-                      wal_overflow=options())
+                      wal_overflow=options(fragment_bytes=0))
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows overflow refusal contract")
-def test_windows_overflow_refusal_preserves_existing_file(tmp_path):
+def test_invalid_overflow_budget_preserves_existing_file(tmp_path):
     path = tmp_path / "db.alopex"
     path.write_bytes(b"old")
-    with pytest.raises(AlopexError, match="Windows support is pending"):
-        Database.open(str(path), wal_overflow=options())
+    with pytest.raises(AlopexError):
+        Database.open(str(path), wal_overflow=options(fragment_bytes=0))
     assert path.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [path]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
 def test_sql_transaction_larger_than_ring_reopens_atomically(tmp_path):
     path = str(tmp_path / "sql.alopex")
     db = Database.open(path, wal_overflow=options())
@@ -80,7 +83,6 @@ def test_capacity_error_code_is_registered():
     assert "ALOPEX-S004" in ALOPEX_ERROR_CODES
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
 def test_kv_capacity_error_preserves_previous_commit(tmp_path):
     path = str(tmp_path / "capacity.alopex")
     db = Database.open(path, wal_overflow=options(value_bytes=2))
@@ -101,7 +103,6 @@ def test_kv_capacity_error_preserves_previous_commit(tmp_path):
     db.close()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="durable Windows overflow publication pending")
 def test_sql_capacity_error_preserves_previous_row(tmp_path):
     path = str(tmp_path / "sql-capacity.alopex")
     db = Database.open(path, wal_overflow=options())
@@ -135,7 +136,6 @@ def assert_previous_after_reopen(path, db):
     db.close()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
 @pytest.mark.parametrize("terminal", ["rollback", "drop", "context_exception"])
 def test_uncommitted_transaction_preserves_prior_commit(tmp_path, terminal):
     path = tmp_path / "cancel.alopex"
@@ -155,7 +155,6 @@ def test_uncommitted_transaction_preserves_prior_commit(tmp_path, terminal):
     assert_previous_after_reopen(path, db)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
 def test_sql_stream_cancel_rolls_back_rows_and_unique_index(tmp_path):
     path = tmp_path / "stream.alopex"
     db = Database.open(str(path), wal_overflow=options())
@@ -181,7 +180,6 @@ def test_sql_stream_cancel_rolls_back_rows_and_unique_index(tmp_path):
     db.close()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="public Windows overflow qualification pending")
 @pytest.mark.parametrize("foreign_file", [False, True], ids=["missing-directory", "foreign-file"])
 def test_commit_inventory_failure_preserves_prior_commit(tmp_path, foreign_file):
     path = tmp_path / "io.alopex"

@@ -2,7 +2,20 @@
 
 Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
 native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
-WAL v2 and the v0.1 container writer. Windows LSM publication and full public acceptance remain follow-up work. This is not release acceptance for #682.
+WAL v2 and the v0.1 container writer. The explicit public Windows path now uses
+the existing write-through file/directory publication and recovery pipeline.
+Native Windows public-API qualification is still pending; the historical
+internal-only results below do not establish that qualification. This is not
+release acceptance for #682.
+
+The public-path change also selects the small Database/SQL/Python overflow,
+budget and cancellation cases on Windows. LSM lifecycle, inline recovery and
+publication-boundary tests enter through `open_with_overflow` on both platforms.
+Invalid budgets must still fail before creating ancestors or touching an
+existing file. Ordinary builds contain no failure-injection controls; the
+manual instrumented Database/SQL/Python harnesses are now Windows-capable,
+but their Windows results and independent legacy-reader checks remain required
+before this change is accepted. No load/performance test is added to ordinary CI.
 
 ## Commit boundary
 

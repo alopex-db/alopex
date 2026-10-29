@@ -574,7 +574,8 @@ impl LsmKV {
 
     /// Open with explicitly bounded WAL overflow. Reopening requires the same
     /// opt-in; the durable container/WAL fence intentionally excludes old readers.
-    /// Windows activation remains unsupported until durable publication is available.
+    /// Windows uses synced, closed files and write-through publication, including
+    /// newly created ancestors. Publication failures are returned to the caller.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_overflow(
         path: impl AsRef<Path>,

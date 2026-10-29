@@ -1,6 +1,6 @@
 //! Native LSM transactions across deterministic persistence boundaries.
 //! Unix uses the public opt-in; Windows qualifies only the internal pipeline.
-//! The public Windows Unsupported guard remains unchanged.
+//! Both native platforms enter through the public LSM overflow API.
 //! Hooks are cfg(test) only. These are process-exit, not power-loss, tests.
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::overflow::LsmOverflowConfig;
@@ -44,14 +44,7 @@ fn open(path: &Path) -> (LsmKV, crate::lsm::RecoveryResult) {
     )
     .with_inline_bytes(128)
     .with_activation_bytes(4096);
-    #[cfg(windows)]
-    {
-        LsmKV::open_inner(path, config, Some(overflow)).unwrap()
-    }
-    #[cfg(not(windows))]
-    {
-        LsmKV::open_with_overflow(path, config, overflow).unwrap()
-    }
+    LsmKV::open_with_overflow(path, config, overflow).unwrap()
 }
 
 fn assert_values(store: &LsmKV, pending_committed: bool) {

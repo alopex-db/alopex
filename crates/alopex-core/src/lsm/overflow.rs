@@ -161,9 +161,9 @@ impl LsmOverflowConfig {
         self
     }
 
-    /// Validate budgets and platform support without filesystem side effects.
+    /// Validate budgets without filesystem side effects. File publication uses
+    /// the platform's durable publication path when the database is opened.
     pub fn validate(&self) -> Result<()> {
-        disk::require_directory_sync()?;
         self.limits()?;
         if self.fragment_bytes == 0
             || self.fragment_bytes > wal::spool::MAX_FRAGMENT_BYTES

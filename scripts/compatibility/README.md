@@ -324,9 +324,12 @@ and unique key enforcement. Forced exit avoids destructor-driven convergence.
 Afterward rebuild the ordinary extension without `RUSTFLAGS`, import that exact
 copy in a fresh process and assert
 `not hasattr(alopex._alopex, '_arm_wal_test_fault')`. Preserve its separate hash.
-These checks qualify controlled process exit/error boundaries on non-Windows;
-they do not simulate power loss, partial OS writes or failing hardware fsync,
-and do not qualify a release wheel or the pending Windows overflow public API.
+The harnesses support native Unix and Windows. Existing non-Windows results
+do not qualify Windows: run the same Rust24/Python24 cases against the exact
+Windows source/build and retain their identities separately. These controlled
+process exit/error checks do not simulate power loss, partial OS writes or
+failing hardware fsync, and do not qualify a release wheel. Windows package
+setup must also retain the package-local `native` DLL directory.
 
 ### Real OS spool write refusal and termination
 

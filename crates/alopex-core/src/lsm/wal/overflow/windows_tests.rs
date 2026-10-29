@@ -9,12 +9,6 @@ fn config() -> WalConfig {
 }
 
 #[test]
-fn windows_lsm_directory_durability_remains_gated() {
-    assert!(matches!(require_directory_sync(), Err(Error::Io(e))
-        if e.kind() == std::io::ErrorKind::Unsupported));
-}
-
-#[test]
 fn windows_stale_create_temp_is_preserved_and_blocks_creation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("wal");
