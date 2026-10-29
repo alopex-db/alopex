@@ -1,5 +1,6 @@
 //! Hierarchical Navigable Small World (HNSW) vector index module.
 
+mod cow;
 mod graph;
 mod storage;
 mod types;
