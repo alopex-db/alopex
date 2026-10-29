@@ -92,6 +92,18 @@ impl QueryExecutionContext {
     /// the child scope, and the shared result cache contains integer IDs only.
     pub(super) fn for_plan_clone(&self, original: &LogicalPlan, cloned: &LogicalPlan) -> Self {
         let mut next = self.clone();
+        next.btree_probe_ids.clear();
+        if !self.btree_probe_ids.is_empty() {
+            let original_scans = super::btree::scan_addresses(original);
+            let cloned_scans = super::btree::scan_addresses(cloned);
+            if original_scans.len() == cloned_scans.len() {
+                for (original, cloned) in original_scans.into_iter().zip(cloned_scans) {
+                    if let Some(id) = self.btree_probe_ids.get(&original) {
+                        next.btree_probe_ids.insert(cloned, *id);
+                    }
+                }
+            }
+        }
         next.subquery_ids = HashMap::new();
         if self.statement_subqueries.is_none() {
             return next;

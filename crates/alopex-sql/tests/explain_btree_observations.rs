@@ -26,6 +26,48 @@ const SETUP: [&str; 3] = [
 ];
 const QUERY: &str =
     "SELECT id FROM k WHERE g = 2 ORDER BY vector_distance(e, [1,0,0,1], 'l2') LIMIT 1";
+fn access_nodes<'a>(node: &'a serde_json::Value, out: &mut Vec<&'a serde_json::Value>) {
+    if node.get("actual").is_some() {
+        out.push(node);
+    }
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            access_nodes(child, out);
+        }
+    }
+}
+
+#[test]
+fn explain_btree_identical_cte_and_view_probes_have_independent_loops() {
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let mut run = |sql: &str| {
+        let statement = Parser::parse_sql(&AlopexDialect, sql).unwrap().remove(0);
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statement)
+            .unwrap();
+        executor.execute(plan).unwrap()
+    };
+    for sql in SETUP {
+        run(sql);
+    }
+    run("CREATE VIEW visible AS SELECT id FROM k WHERE g = 2");
+    for sql in [
+        "WITH visible AS (SELECT id FROM k WHERE g = 2) SELECT id FROM visible UNION ALL SELECT id FROM visible",
+        "SELECT id FROM visible UNION ALL SELECT id FROM visible",
+    ] {
+        let output = text(run(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}")));
+        let document: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let mut nodes = Vec::new();
+        access_nodes(&document["physical_plan"]["root"], &mut nodes);
+        assert_eq!(nodes.len(), 2, "{output}");
+        for node in nodes {
+            assert_eq!(node["actual"]["loops"], 1, "{output}");
+            assert_eq!(node["actual"]["candidates_examined"], 1, "{output}");
+        }
+    }
+}
+
 fn assert_not_executed(text: &str, json: &str) {
     assert!(text.contains("ExactKnnScan"), "{text}");
     assert!(
@@ -72,6 +114,23 @@ async fn bridge() -> AsyncTxnBridge<'static, AsyncKVTransactionAdapter> {
         TxnMode::ReadWrite,
         catalog,
     )
+}
+
+#[tokio::test]
+async fn explain_btree_async_cte_probes_have_independent_loops() {
+    let mut bridge = bridge().await;
+    for sql in SETUP {
+        bridge.async_execute(sql).await.unwrap();
+    }
+    let output = text(bridge.async_execute("EXPLAIN (ANALYZE, FORMAT JSON) WITH visible AS (SELECT id FROM k WHERE g = 2) SELECT id FROM visible UNION ALL SELECT id FROM visible").await.unwrap());
+    let document: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let mut nodes = Vec::new();
+    access_nodes(&document["physical_plan"]["root"], &mut nodes);
+    assert_eq!(nodes.len(), 2, "{output}");
+    for node in nodes {
+        assert_eq!(node["actual"]["loops"], 1, "{output}");
+        assert_eq!(node["actual"]["candidates_examined"], 1, "{output}");
+    }
 }
 
 #[tokio::test]

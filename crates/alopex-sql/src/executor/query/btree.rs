@@ -1,6 +1,7 @@
 //! Planned limits and observed outcomes for adaptive B-tree access.
 use super::{MAX_BTREE_INDEX_BYTES, MAX_BTREE_INDEX_CANDIDATES, Row};
 use crate::executor::MemoryPolicy;
+use crate::planner::LogicalPlan;
 use crate::planner::typed_expr::TypedExpr;
 use std::{cell::RefCell, rc::Rc};
 
@@ -75,16 +76,50 @@ impl Drop for BtreeTrace {
     }
 }
 
-pub(super) fn record(table: &str, index: &str, predicate: &TypedExpr, outcome: &IndexScanOutcome) {
+pub(super) fn tracing() -> bool {
+    ACTIVE_TRACE.with(|active| active.borrow().is_some())
+}
+
+/// Addresses are lookup keys for this owned execution tree only, never
+/// dereferenced or exposed. Boxed scan children retain their address as their
+/// parents move into the executor. Clone sites explicitly rebind these keys.
+pub(super) fn scan_addresses(plan: &LogicalPlan) -> Vec<usize> {
+    fn collect(plan: &LogicalPlan, addresses: &mut Vec<usize>) {
+        if matches!(plan, LogicalPlan::Scan { .. }) {
+            addresses.push(plan as *const LogicalPlan as usize);
+        }
+        for child in plan.explain_children() {
+            collect(child, addresses);
+        }
+    }
+    let mut addresses = Vec::new();
+    collect(plan, &mut addresses);
+    addresses
+}
+
+pub(super) fn record(
+    table: &str,
+    index: &str,
+    predicate: &TypedExpr,
+    outcome: &IndexScanOutcome,
+    probe_id: Option<usize>,
+) {
     ACTIVE_TRACE.with(|active| {
         if let Some(stats) = active.borrow().as_ref() {
-            record_into(&mut stats.borrow_mut(), table, index, predicate, outcome);
+            record_into_node(
+                &mut stats.borrow_mut(),
+                table,
+                index,
+                predicate,
+                outcome,
+                probe_id,
+            );
         }
     });
 }
 
-// Include the predicate so self-joins using one index with different bounds
-// do not borrow each other's outcome. Identical probes aggregate their loops.
+// Retain the predicate as a guard in addition to the statement-local node ID.
+// Only repeated execution of the same plan occurrence aggregates loops.
 fn probe_key(table: &str, index: &str, predicate: &TypedExpr) -> String {
     format!("{table}/{index}/{predicate:?}")
 }
@@ -94,10 +129,12 @@ pub(crate) struct BtreeChoice {
     pub index: String,
     key: String,
     limits: BtreeLimits,
+    probe_id: Option<usize>,
 }
 
 pub(crate) struct BtreeAccessStats {
     key: String,
+    probe_id: Option<usize>,
     candidates: u64,
     loops: u64,
     fallbacks: u64,
@@ -106,20 +143,22 @@ pub(crate) struct BtreeAccessStats {
     last_fallback: Option<BtreeFallback>,
 }
 
-fn record_into(
+fn record_into_node(
     stats: &mut Vec<BtreeAccessStats>,
     table: &str,
     index: &str,
     predicate: &TypedExpr,
     outcome: &IndexScanOutcome,
+    probe_id: Option<usize>,
 ) {
     let key = probe_key(table, index, predicate);
     let position = stats
         .iter()
-        .position(|stats| stats.key == key)
+        .position(|stats| stats.key == key && stats.probe_id == probe_id)
         .unwrap_or_else(|| {
             stats.push(BtreeAccessStats {
                 key,
+                probe_id,
                 candidates: 0,
                 loops: 0,
                 fallbacks: 0,
@@ -162,11 +201,19 @@ impl BtreeChoice {
             index: index.to_owned(),
             key: probe_key(table, index, predicate),
             limits: BtreeLimits::new(memory),
+            probe_id: None,
         }
     }
 
+    pub(super) fn for_node(mut self, probe_id: usize) -> Self {
+        self.probe_id = Some(probe_id);
+        self
+    }
+
     fn actual<'a>(&self, stats: &'a [BtreeAccessStats]) -> Option<&'a BtreeAccessStats> {
-        stats.iter().find(|stats| stats.key == self.key)
+        stats
+            .iter()
+            .find(|stats| stats.key == self.key && stats.probe_id == self.probe_id)
     }
 
     pub(crate) fn annotate_json(
@@ -283,6 +330,16 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use std::sync::{Arc, RwLock};
 
+    fn record_into(
+        stats: &mut Vec<BtreeAccessStats>,
+        table: &str,
+        index: &str,
+        predicate: &TypedExpr,
+        outcome: &IndexScanOutcome,
+    ) {
+        record_into_node(stats, table, index, predicate, outcome, None);
+    }
+
     fn probe(index: &str) {
         let predicate = TypedExpr::literal(
             crate::ast::expr::Literal::Number("1".into()),
@@ -297,7 +354,61 @@ mod tests {
                 rows: Vec::new(),
                 candidates: 1,
             },
+            None,
         );
+    }
+
+    #[test]
+    fn btree_observation_does_not_borrow_an_identical_siblings_execution() {
+        let predicate = TypedExpr::literal(
+            crate::ast::expr::Literal::Number("1".into()),
+            crate::planner::types::ResolvedType::Integer,
+            crate::Span::default(),
+        );
+        let mut stats = Vec::new();
+        record_into_node(
+            &mut stats,
+            "t",
+            "idx",
+            &predicate,
+            &IndexScanOutcome::Rows {
+                rows: Vec::new(),
+                candidates: 1,
+            },
+            Some(1),
+        );
+        for (id, path, loops) in [(0, "NotExecuted", 0), (1, "IndexScan", 1)] {
+            let choice = BtreeChoice::new("t", "idx", &predicate, None).for_node(id);
+            let mut node = serde_json::json!({});
+            choice.annotate_json(&mut node, Some(&stats));
+            assert_eq!(node["actual"]["path"], path);
+            assert_eq!(node["actual"]["loops"], loops);
+        }
+    }
+
+    #[test]
+    fn btree_observation_clone_rebinds_only_cloned_scan_addresses() {
+        let plan = LogicalPlan::Scan {
+            table: "t".into(),
+            projection: crate::planner::Projection::All(vec![]),
+        };
+        let cloned = plan.clone();
+        let trace = BtreeTrace::start();
+        let mut context = super::super::QueryExecutionContext::default().with_btree_plan(&plan);
+        context.btree_probe_ids.insert(usize::MAX, 42);
+        let next = context.for_plan_clone(&plan, &cloned);
+        assert_eq!(next.btree_probe_ids.len(), 1);
+        assert_eq!(
+            next.btree_probe_ids
+                .get(&(std::ptr::from_ref(&cloned) as usize)),
+            Some(&0)
+        );
+        assert!(
+            !next
+                .btree_probe_ids
+                .contains_key(&(std::ptr::from_ref(&plan) as usize))
+        );
+        drop(trace);
     }
 
     #[test]

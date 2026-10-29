@@ -46,14 +46,14 @@ cap, text uses `candidates>=N` and JSON sets `actual.candidates_complete=false`.
 Byte-budget fallback alone does not imply incomplete candidate enumeration.
 
 Candidate and loop
-counters aggregate repeated probes of the same index and predicate within
-the statement, including a SELECT source inside DML. JSON exposes these
+counters aggregate repeated execution of the same plan occurrence within
+the statement, including a SELECT source inside DML. Separate occurrences
+of an identical CTE or view have independent counters; cloned execution
+plans retain their original occurrence identity. JSON exposes these
 limits in `adaptive` and observed counters/path in `actual` on the physical
 scan node and the single-scan `access_path`; its logical tree stays unchanged.
 The asynchronous INSERT SELECT source uses the same effective memory policy
-as its EXPLAIN report. Attribution of identical probes from separate CTE/view
-occurrences remains tracked in #679; aggregate counters must not be read as
-independent per-occurrence measurements.
+as its EXPLAIN report.
 
 ## Side effects and failure boundaries
 
