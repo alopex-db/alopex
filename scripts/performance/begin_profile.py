@@ -42,6 +42,9 @@ def main():
                 except BaseException:
                     tx.rollback()
                     raise
+                finally:
+                    # Seed-handle destruction must precede reopen and the first timed begin.
+                    del tx
             seed_ns = perf_counter_ns() - seed_started
             reopened = perf_counter_ns()
             if args.backend == 'disk':

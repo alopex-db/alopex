@@ -23,7 +23,7 @@ includes checking the single-row result; Python checks it immediately after the
 query timer. Comparisons between API implementations are diagnostic, not speedup
 claims. First-after-open does not mean a cold operating-system page cache.
 
-The accepted dataset contains 72 successful timing processes and 432 samples (72 first-after-open,
+The accepted dataset contains 72 successful timing processes and 416 samples (56 first-after-open,
 360 warm), across memory/disk, RO/RW, noop/query, and native borrowed/owned plus
 public Python. All 72 fixtures were reclaimed. Separate four-second native sampling loops obtained two stack profiles without
 mixing those iterations into the timing results. Their fixtures were reclaimed too.
@@ -33,6 +33,14 @@ The worker now explicitly destroys that handle outside timing, and only those 24
 cases were rerun. A fake-handle regression test and a negative probe reproduce the
 old lifetime error and verify the correction. All 99 executed fixture processes
 (including excluded runs) were reclaimed.
+
+Follow-up review also found that the seed transaction handle survived until the
+first measured begin in nonempty Python cases. The 16 affected first-after-open
+samples are retained but excluded from the accepted count above; the 120 warm
+Python samples and the table below remain valid. The worker now deletes the seed
+handle before reopen/first begin, including on seed failure. Fake-handle tests
+cover memory/disk and the failure path. The source-matched Python comparison
+uses that corrected worker on both sides; no native timing rerun is needed.
 
 Warm noop begin medians in milliseconds:
 
