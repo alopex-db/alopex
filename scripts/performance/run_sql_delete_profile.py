@@ -46,20 +46,23 @@ def stop_group(child):
     child.wait(timeout=10)
 
 
-def main():
+def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
+         default_rows=(3, 1000, 10000), operations=("noop", "query", "delete"),
+         profile_operations=("delete",), row_count=lambda operation, rows: rows,
+         scope="internal diagnostic; profile sample covers operation/restore/validation, not isolated DELETE"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--rows", type=int, nargs="+", choices=[3, 1000, 10000], default=[3, 1000, 10000])
-    parser.add_argument("--operations", nargs="+", choices=["noop", "query", "delete"], default=["noop", "query", "delete"])
+    parser.add_argument("--rows", type=int, nargs="+", choices=row_choices, default=default_rows)
+    parser.add_argument("--operations", nargs="+", choices=operations, default=operations)
     parser.add_argument("--surfaces", nargs="+", choices=["embedded", "server"], default=["embedded", "server"])
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     if sys.platform != "darwin" or os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         parser.error("manual macOS diagnosis only; never run as CI")
-    if args.profile and args.operations != ["delete"]:
-        parser.error("profile requires --operations delete")
+    if args.profile and not set(args.operations).issubset(profile_operations):
+        parser.error("profile operations must be selected from "+", ".join(profile_operations))
     args.output.mkdir(parents=True, exist_ok=False)
     initial = check(args.output / "storage.jsonl")["allocated_bytes"]
     if initial+2_000_000_000 >= 40_000_000_000:
@@ -68,20 +71,25 @@ def main():
     identity = dict(source_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     server_sha256=hashlib.sha256(args.server.read_bytes()).hexdigest(),
                     supervisor_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                    driver_sha256=hashlib.sha256((ROOT / "scripts/performance/sql_delete_profile.py").read_bytes()).hexdigest(),
-                    scope="internal diagnostic; profile sample covers operation/restore/validation, not isolated DELETE")
+                    driver_sha256=hashlib.sha256((ROOT / "scripts/performance" / driver_name).read_bytes()).hexdigest(),
+                    entrypoint_sha256=hashlib.sha256(Path(sys.argv[0]).read_bytes()).hexdigest(), scope=scope)
     (args.output / "identity.json").write_text(json.dumps(identity, indent=2)+"\n")
     records = []
+    seen = set()
     for rows in args.rows:
         for surface in args.surfaces:
             for operation in args.operations:
-                name = f"{surface}-{rows}-{operation}"
+                fixture_rows = row_count(operation, rows)
+                name = f"{surface}-{fixture_rows}-{operation}"
+                if name in seen:
+                    continue
+                seen.add(name)
                 path = args.output / (name+".jsonl")
-                record = dict(case=name, surface=surface, rows=rows, operation=operation, profile=args.profile)
+                record = dict(case=name, surface=surface, rows=fixture_rows, operation=operation, profile=args.profile)
                 with tempfile.TemporaryDirectory(prefix="alopex-712-case-") as tmp:
                     work = Path(tmp) / "work"
-                    command = [str(args.python), "-B", str(ROOT / "scripts/performance/sql_delete_profile.py"), "--manual",
-                               "--surface", surface, "--rows", str(rows), "--operation", operation,
+                    command = [str(args.python), "-B", str(ROOT / "scripts/performance" / driver_name), "--manual",
+                               "--surface", surface, "--rows", str(fixture_rows), "--operation", operation,
                                "--work", str(work), "--server-bin", str(args.server)]
                     if args.profile:
                         command.append("--profile")
@@ -147,7 +155,7 @@ def main():
                                 sampler.kill()
                                 sampler.wait(timeout=10)
                     # Keep compact server logs before removing all data and config.
-                    for log in ("server.stdout", "server.stderr"):
+                    for log in ("server.stdout", "server.stderr", "client.profile.txt"):
                         if (work / log).exists():
                             shutil.copyfile(work / log, args.output / (name+"."+log))
                     record.update(exit_code=child.returncode, elapsed_seconds=time.monotonic()-start,
