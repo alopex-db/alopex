@@ -15,6 +15,8 @@ MANIFEST_TOOL_PATH = "scripts/release/parser_asset_manifest.py"
 WIRE_FILES = {
     "crates/alopex-sql/nim-sql-parser/src/alopex_sql_parser.nim",
     "crates/alopex-sql/nim-sql-parser/src/ast.nim",
+    "crates/alopex-sql/nim-sql-parser/src/parser.nim",
+    "crates/alopex-sql/nim-sql-parser/src/lexer.nim",
     "crates/alopex-sql/nim-sql-parser/src/promql_ast.nim",
     "crates/alopex-sql/src/nim_bridge.rs",
 }
