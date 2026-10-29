@@ -22,11 +22,20 @@ class HandleLifetimeTests(unittest.TestCase):
                 self.db = db
                 db.live += 1
             def rollback(self):
-                pass
+                if not self.db.active:
+                    raise RuntimeError('transaction is closed')
+                self.db.active = False
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                if self.db.active:
+                    self.rollback()
+                return False
             def execute_sql(self, sql):
                 pass
             @staticmethod
             def commit():
+                db.active = False
                 if fail_seed:
                     raise ValueError('seed commit failed')
             def __del__(self):
@@ -42,6 +51,7 @@ class HandleLifetimeTests(unittest.TestCase):
                 if self.live:
                     raise RuntimeError('previous handle still alive at next begin')
                 self.calls += 1
+                self.active = True
                 return Transaction(self)
             def close(self):
                 if self.live:

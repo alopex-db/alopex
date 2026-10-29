@@ -36,12 +36,10 @@ def main():
             if args.rows:
                 tx = db.begin(TxnMode.READ_WRITE)
                 try:
-                    for row in range(args.rows):
-                        tx.execute_sql(f'INSERT INTO items VALUES ({row}, {row * 3})')
-                    tx.commit()
-                except BaseException:
-                    tx.rollback()
-                    raise
+                    with tx:
+                        for row in range(args.rows):
+                            tx.execute_sql(f'INSERT INTO items VALUES ({row}, {row * 3})')
+                        tx.commit()
                 finally:
                     # Seed-handle destruction must precede reopen and the first timed begin.
                     del tx
