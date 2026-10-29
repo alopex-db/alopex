@@ -79,15 +79,9 @@ impl Database {
         self: Arc<Self>,
         mode: TxnMode,
     ) -> Result<OwnedEmbeddedTransaction> {
-        let (session, epoch, cached, observer) = {
-            let _gate = self
-                .hnsw_cache_gate
-                .read()
-                .expect("hnsw cache gate lock poisoned");
-            let session = self.begin_owned_transaction(mode)?;
-            let (epoch, cached) = self.hnsw_cache_snapshot();
-            (session, epoch, cached, self.hnsw_cache_observer())
-        };
+        let (session, (epoch, cached)) =
+            self.begin_with_hnsw_cache(|| self.begin_owned_transaction(mode))?;
+        let observer = self.hnsw_cache_observer();
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == alopex_core::kv::RangeChangeJournalCapability::Supported
