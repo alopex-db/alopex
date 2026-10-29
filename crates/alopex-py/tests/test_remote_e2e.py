@@ -58,6 +58,55 @@ def _table_name() -> str:
     return f"remote_{uuid.uuid4().hex[:12]}"
 
 
+@pytest.mark.parametrize("case", ["existing", "missing_if_exists", "missing"])
+def test_sequence_drop_matches_embedded_contract(alopex_server, case):
+    name = _table_name()
+    embedded = Database.new()
+    remote = RemoteDatabase(alopex_server.http_base)
+    try:
+        if case == "existing":
+            for surface in (embedded, remote):
+                assert surface.execute_sql(f"CREATE SEQUENCE {name}") is None
+        sql = f"DROP SEQUENCE {'IF EXISTS ' if case == 'missing_if_exists' else ''}{name}"
+        if case == "missing":
+            with pytest.raises(AlopexError, match="sequence not found") as local_error:
+                embedded.execute_sql(sql)
+            with pytest.raises(AlopexError, match="sequence not found") as remote_error:
+                remote.execute_sql(sql)
+            assert type(remote_error.value) is type(local_error.value)
+            assert remote_error.value.code == local_error.value.code
+        else:
+            assert embedded.execute_sql(sql) is None
+            assert remote.execute_sql(sql) is None
+            if case == "existing":
+                for surface in (embedded, remote):
+                    with pytest.raises(AlopexError, match="sequence not found"):
+                        surface.execute_sql(f"DROP SEQUENCE {name}")
+    finally:
+        remote.close()
+        embedded.close()
+
+
+def test_sequence_drop_rollback_matches_embedded_state(alopex_server):
+    name = _table_name()
+    embedded = Database.new()
+    remote = RemoteDatabase(alopex_server.http_base)
+    try:
+        for surface in (embedded, remote):
+            surface.execute_sql(f"CREATE SEQUENCE {name} START WITH 7")
+            transaction = surface.begin(TxnMode.READ_WRITE)
+            try:
+                assert transaction.execute_sql(f"DROP SEQUENCE {name}") is None
+            finally:
+                transaction.rollback()
+            assert surface.execute_sql(f"DROP SEQUENCE {name}") is None
+            with pytest.raises(AlopexError, match="sequence not found"):
+                surface.execute_sql(f"DROP SEQUENCE {name}")
+    finally:
+        remote.close()
+        embedded.close()
+
+
 def test_same_sql_script_returns_identical_values_on_both_surfaces(alopex_server):
     table = _table_name()
     embedded = Database.new()

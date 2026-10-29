@@ -845,6 +845,18 @@ fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
             let mut guard = catalog.write().expect("catalog lock poisoned");
             ddl::drop_index::execute_drop_index(txn, &mut *guard, &name, if_exists)?
         }
+        LogicalPlan::CreateSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::create(txn, statement)?
+        }
+        LogicalPlan::AlterSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::alter(txn, statement)?
+        }
+        LogicalPlan::DropSequence(statement) => {
+            ensure_write(mode, op_name)?;
+            ddl::sequence::drop(txn, statement)?
+        }
         LogicalPlan::Insert {
             table,
             columns,
