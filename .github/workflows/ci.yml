@@ -483,7 +483,12 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo build --release --all-features
 
-      - name: Bounded Windows build and native WAL contracts
+      - name: Bounded Windows release build
+        timeout-minutes: 45
+        if: runner.os == 'Windows'
+        run: python scripts/ci/windows-wal-contract.py --phase build
+
+      - name: Bounded Windows native WAL contracts
         timeout-minutes: 45
         if: runner.os == 'Windows'
         # Reuse this job's release target. Tiny WAL/LSM publication fixtures
@@ -491,7 +496,7 @@ jobs:
         run: |
           python scripts/ci/test_windows_wal_console.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/ci/windows-wal-contract.py
+          python scripts/ci/windows-wal-contract.py --phase contracts
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -2,15 +2,21 @@
 
 Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
 storage is bounded to 20 GB per command, 40 GB host stop, using one target.
+Build and contract phases share one target but have separate workflow deadlines.
 Artifacts contain source identity and raw results; the workflow removes target
-only after artifact upload. No durability/power-loss claim for the writer.
+after retaining those results. No durability/power-loss claim for the writer.
 """
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from windows_wal_console import print_log_tail
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--phase", required=True, choices=("build", "contracts"))
+args = parser.parse_args()
 
 repo = Path(__file__).resolve().parents[2]
 output = repo / "artifacts/windows-wal"
@@ -54,8 +60,15 @@ commands = [
                                 "--skip", "lsm::overflow::publication_acceptance::child"]),
     ("directory-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "storage::publication::directories::tests::"]),
+    ("memory-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--test", "memory_snapshot_overwrite"]),
+    ("hnsw-transaction-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                                     "--test", "hnsw_transaction_cache"]),
 ]
 for name, command in commands:
+    if (name == "release-build") != (args.phase == "build"):
+        continue
+    print(f"Starting {name}", flush=True)
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
         result = subprocess.run([sys.executable, str(repo / "scripts/compatibility/storage.py"),
                                  "--log", str(output / "storage.jsonl"),
@@ -71,6 +84,8 @@ for name, command in commands:
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",
                 "inline-lifecycle": "2 passed; 0 failed",
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
-                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed"}
+                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
+                "memory-snapshots": "20 passed; 0 failed; 0 ignored",
+                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")
