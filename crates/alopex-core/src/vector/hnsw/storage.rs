@@ -91,7 +91,7 @@ impl HnswStorage {
         &self,
         txn: &mut T,
         graph: &HnswGraph,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         // 既存データを全削除してからフル書き込みする。
         self.purge_nodes(txn)?;
         self.purge_key_indices(txn)?;
@@ -131,9 +131,9 @@ impl HnswStorage {
 
         let final_meta_bytes =
             bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        txn.put(self.meta_key(), final_meta_bytes)?;
+        txn.put(self.meta_key(), final_meta_bytes.clone())?;
 
-        Ok(())
+        Ok(final_meta_bytes)
     }
 
     /// 変更分のみ保存しつつ、チェックサムは全ノードで再計算する。
@@ -144,9 +144,21 @@ impl HnswStorage {
         modified_nodes: &[u32],
         inserted_nodes: &[u32],
         deleted_key_indices: &[Vec<u8>],
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
+        // A flushed write may have been rolled back, or this index may be saved
+        // into another store. Only use deltas against the exact known header.
+        let stored_metadata = txn.get(&self.meta_key())?;
+        if graph.persisted_metadata.is_none() || stored_metadata != graph.persisted_metadata {
+            return self.save(txn, graph);
+        }
         // 更新/追加ノードのみ書き込み。
-        for &node_id in modified_nodes.iter().chain(inserted_nodes.iter()) {
+        let changed: HashSet<u32> = modified_nodes
+            .iter()
+            .chain(inserted_nodes.iter())
+            .chain(graph.dirty_nodes.iter())
+            .copied()
+            .collect();
+        for &node_id in &changed {
             if let Some(node) = graph.nodes.get(node_id as usize).and_then(|n| n.as_ref()) {
                 let node_data = Self::node_to_data(node);
                 let node_bytes = bincode::serialize(&node_data)
@@ -165,9 +177,13 @@ impl HnswStorage {
         }
 
         // 存在しないノードIDのデータは削除して、空きリストと整合させる。
-        for (node_id, node_opt) in graph.nodes.iter().enumerate() {
-            if node_opt.is_none() {
-                txn.delete(self.node_key(node_id as u32))?;
+        for &node_id in &changed {
+            if graph
+                .nodes
+                .get(node_id as usize)
+                .is_none_or(Option::is_none)
+            {
+                txn.delete(self.node_key(node_id))?;
             }
         }
 
@@ -200,9 +216,9 @@ impl HnswStorage {
 
         let final_meta_bytes =
             bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        txn.put(self.meta_key(), final_meta_bytes)?;
+        txn.put(self.meta_key(), final_meta_bytes.clone())?;
 
-        Ok(())
+        Ok(final_meta_bytes)
     }
 
     /// Read only the header; graph checksum validation remains with full loading.
@@ -293,8 +309,12 @@ impl HnswStorage {
             });
         }
 
+        let persisted_metadata =
+            Some(bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?);
         Ok(HnswGraph {
             nodes,
+            dirty_nodes: HashSet::new(),
+            persisted_metadata,
             key_to_node,
             entry_point: metadata.entry_point,
             max_level: metadata.max_level,

@@ -60,6 +60,8 @@ commands = [
                                      "--test", "hnsw_transaction_cache"]),
     ("hnsw-cold-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                                "--test", "hnsw_cold_publication"]),
+    ("hnsw-dirty-writes", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--lib", "vector::hnsw::tests::dirty_write_tests"]),
 ]
 for name, command in commands:
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
@@ -80,6 +82,7 @@ for name, command in commands:
                 "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
                 "memory-snapshots": "20 passed; 0 failed; 0 ignored",
                 "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored",
-                "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored"}
+                "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored",
+                "hnsw-dirty-writes": "9 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

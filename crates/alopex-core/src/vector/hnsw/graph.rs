@@ -12,6 +12,10 @@ use crate::{Error, Result};
 #[allow(dead_code)]
 pub struct HnswGraph {
     pub(crate) nodes: Vec<Option<HnswNode>>,
+    /// Slots changed since the last successful synchronous save, including reverse edges.
+    pub(crate) dirty_nodes: HashSet<u32>,
+    /// Header of the last successful save/load; a different target requires a full save.
+    pub(crate) persisted_metadata: Option<Vec<u8>>,
     pub(crate) key_to_node: HashMap<Vec<u8>, u32>,
     pub(crate) entry_point: Option<u32>,
     pub(crate) max_level: usize,
@@ -26,6 +30,8 @@ impl Clone for HnswGraph {
     fn clone(&self) -> Self {
         Self {
             nodes: self.nodes.clone(),
+            dirty_nodes: self.dirty_nodes.clone(),
+            persisted_metadata: self.persisted_metadata.clone(),
             key_to_node: self.key_to_node.clone(),
             entry_point: self.entry_point,
             max_level: self.max_level,
@@ -45,6 +51,8 @@ impl HnswGraph {
         config.validate()?;
         Ok(Self {
             nodes: Vec::new(),
+            dirty_nodes: HashSet::new(),
+            persisted_metadata: None,
             key_to_node: HashMap::new(),
             entry_point: None,
             max_level: 0,
@@ -107,6 +115,7 @@ impl HnswGraph {
             deleted: false,
         };
 
+        self.dirty_nodes.insert(node_id);
         if let Some(slot) = self.nodes.get_mut(node_id as usize) {
             *slot = Some(node);
         } else {
@@ -210,11 +219,18 @@ impl HnswGraph {
         self.validate_vector(vector)?;
         if let Some(node_id) = self.find_node_id(key) {
             let was_deleted = self.node(node_id).is_some_and(|node| node.deleted);
-            for other in self.nodes.iter_mut().flatten() {
-                for neighbors in &mut other.neighbors {
-                    neighbors.retain(|&neighbor| neighbor != node_id);
+            for (id, other) in self.nodes.iter_mut().enumerate() {
+                if let Some(other) = other {
+                    for neighbors in &mut other.neighbors {
+                        let before = neighbors.len();
+                        neighbors.retain(|&neighbor| neighbor != node_id);
+                        if neighbors.len() != before {
+                            self.dirty_nodes.insert(id as u32);
+                        }
+                    }
                 }
             }
+            self.dirty_nodes.insert(node_id);
             let Some(node) = self
                 .nodes
                 .get_mut(node_id as usize)
@@ -438,6 +454,7 @@ impl HnswGraph {
             return Ok(false);
         }
 
+        self.dirty_nodes.insert(node_id);
         node.deleted = true;
         self.active_count = self.active_count.saturating_sub(1);
         self.deleted_count += 1;
@@ -467,6 +484,7 @@ impl HnswGraph {
                 if n.deleted {
                     removed_keys.push(n.key.clone());
                     removed_ids.push(idx as u32);
+                    self.dirty_nodes.insert(idx as u32);
                     *node = None;
                 }
             }
@@ -773,6 +791,7 @@ impl HnswGraph {
     }
 
     fn connect_new_node(&mut self, node_id: u32, neighbors: &[u32], level: usize) {
+        self.dirty_nodes.insert(node_id);
         if let Some(node) = self
             .nodes
             .get_mut(node_id as usize)
@@ -793,6 +812,7 @@ impl HnswGraph {
                     let neigh = &mut node.neighbors[level];
                     if !neigh.contains(&node_id) {
                         neigh.push(node_id);
+                        self.dirty_nodes.insert(n);
                     }
                 }
             }
@@ -829,6 +849,7 @@ impl HnswGraph {
         {
             if level < node.neighbors.len() {
                 node.neighbors[level] = selected;
+                self.dirty_nodes.insert(node_id);
             }
         }
     }
@@ -856,9 +877,15 @@ impl HnswGraph {
             return;
         }
         let removed: HashSet<u32> = removed_ids.iter().copied().collect();
-        for node in self.nodes.iter_mut().flatten() {
-            for neigh in node.neighbors.iter_mut() {
-                neigh.retain(|id| !removed.contains(id));
+        for (id, node) in self.nodes.iter_mut().enumerate() {
+            if let Some(node) = node {
+                for neigh in node.neighbors.iter_mut() {
+                    let before = neigh.len();
+                    neigh.retain(|id| !removed.contains(id));
+                    if neigh.len() != before {
+                        self.dirty_nodes.insert(id as u32);
+                    }
+                }
             }
         }
     }
