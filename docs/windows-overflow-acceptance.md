@@ -1,9 +1,10 @@
 # Windows public overflow: implementation and acceptance
 
-#682, candidate base `5fe5cbc19dd8fa1bbebe3e7add3a708dda3c2a0f`.
+#682, candidate base `e4d5f59e67b93d8e3f4a491dc725cb96a47639f8`.
 
-**Status: implementation and macOS development checks complete; Windows public
-acceptance and candidate integration pending.** This does not close #682.
+**Status: implementation, macOS development checks and the Windows manual public
+acceptance suite passed; ordinary CI and candidate integration remain pending.**
+This does not close #682.
 
 The public LSM, Database, SQL and Python opt-in now reaches the existing Windows
 publication pipeline. Budget validation still precedes filesystem effects.
@@ -32,9 +33,9 @@ comments/documentation; no Rust executable behavior changed after these builds.
 | Public Python KV/SQL/cancellation/budgets/reopen | macOS 15 passed, 0 failed/skipped |
 | Normal extension isolation | private fault hook absent in a fresh process |
 | Windows ordinary native contracts | 134 selected; execution pending |
-| Windows ordinary Python overflow cases | 15 selected; execution pending |
-| Windows instrumented Database/SQL boundaries | manual Rust24 and Python24 execution pending |
-| Independent published old reader | Windows activation/refusal/bytes-preserved/reopen acceptance pending |
+| Windows ordinary Python overflow cases | 15 passed, 0 failed/skipped in the manual suite's normal extension |
+| Windows instrumented Database/SQL boundaries | Rust24 and Python24 passed; Python cases each verified two reopen cycles |
+| Independent published old reader | Published 0.8.16 container and live-WAL activation/refusal/bytes-preserved/reopen passed |
 
 The Windows runner total is the previous 124, minus one obsolete platform-refusal
 assertion, plus nine public overflow and two journal cases. Lifecycle, inline and
@@ -71,8 +72,8 @@ Target: `LsmOverflowConfig::validate` and its public preflight boundary.
 Mutation check: one scoped cargo-mutants replacement of validation with
 `Ok(())` was caught by the new existing-file regression. No survivor, timeout or
 unviable mutant; restored source verified. Other unchanged validation predicates
-were not included in this bounded mutation run. Windows-only execution is still
-pending. No new unsafe code was added; Miri is unavailable for the installed
+were not included in this bounded mutation run. Windows manual execution is
+recorded below. No new unsafe code was added; Miri is unavailable for the installed
 toolchain, and Kani was not run.
 
 Scoped coupling analysis covered LSM (33 modules, critical0/high2/medium12) and
@@ -98,11 +99,53 @@ Manual execution is available in the existing Compatibility workflow through
 hosted Windows job checks normal Python15, instrumented Rust24/Python24,
 published 0.8.16 container refusal, and six independent live-WAL processes.
 The receipts bind the exact checkout, normal/instrumented DLL hashes and old
-registry/wheel identities. This prepares the acceptance; it is not evidence that
-the Windows run has passed. Ordinary CI does not run the instrumented suite.
+registry/wheel identities. Ordinary CI does not run the instrumented suite.
 
-Next: verify the exact PR source on native Windows, including both normal and
-manual public-API gates, before candidate integration. The broader #682
+## Native Windows manual result
+
+[Run 40960742467, attempt 1](https://github.com/alopex-db/alopex/actions/runs/40960742467)
+completed successfully on source `4194599371452e10d7be712006f2fa76fb83ee17`, tree
+`e9832f3de5f4ef940a2eebf2713a5462f9a9c936`. It includes candidate `e4d5f59e`.
+The normal extension has no private fault hook. The 15 ordinary Python cases,
+24 Rust boundary cases and 24 Python boundary cases passed without skips.
+Python's maximum fixture was 5,790 bytes, with two successful reopen cycles per
+case. The six injection points cover spool write/sync/publication, before
+reference, reference append/sync and force-sync, for errors and process exits
+through both KV and SQL.
+
+The published PyPI 0.8.16 wheel passed four independent container processes.
+The independent crates.io core 0.8.16 and current clients passed six live-WAL
+processes: legacy write, current read, upgrade, old-reader refusal and two
+current reopens. Both old readers rejected the new format without modifying
+files. Live-WAL reopens recovered the committed entry without warnings and
+preserved the files. This is controlled process-exit and I/O-injection evidence,
+not hardware power-loss or released-wheel qualification.
+
+Artifact `12935754854` contains 89 compact evidence files. Its downloaded ZIP
+SHA-256 is `cf94882269f344a734262eaf9f27ef144c9aee7d562e3d076f45123397d3ed48`,
+matching GitHub's artifact digest. Independent reconciliation checked exact
+case names, XML counts, normal/instrumented native hashes, old-reader identities,
+source/driver hashes, file snapshots, and all phase receipts. Windows checkout
+uses CRLF; driver/config hashes match the fixed Git blobs after that explicit
+checkout conversion. The retained [compact evidence](build-performance/v0.8.17/windows-overflow-public.json)
+includes the receipts and source identities. Full local logs remain under
+`/private/tmp/alopex-771-windows-manual/attempt2`.
+
+The 110 storage samples peaked at 3,546,337,640 allocated bytes. Cleanup removed
+the owned shared target and work directory and ended at 597,685,320 bytes.
+No raw database, native DLL or executable was uploaded.
+
+The earlier run `40957708284` failed before product tests: plain `bash` selected
+the WSL launcher, and cleanup hit a read-only Nimble Git pack. Those failures
+remain recorded. The successful source explicitly selects native Git Bash and
+handles read-only owned files. Ordinary CI subsequently found the new manual
+job missing from the workflow responsibility inventory; the documentation-only
+follow-up registers it as Extended Verification. That follow-up does not change
+product, tests, runners or workflow bytes, so it does not require repeating this
+manual execution. Its ordinary CI and final candidate composition still need
+separate confirmation.
+
+Next: verify ordinary CI and the composed candidate before integration. The broader #682
 performance comparison and device-failure/power-loss qualification remain
 separate from these controlled process-exit tests. Release-package qualification,
 publication, post-release checks and main integration remain tracked by #690.
