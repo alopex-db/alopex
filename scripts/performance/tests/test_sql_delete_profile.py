@@ -45,13 +45,13 @@ class Client:
 class DiagnosticTests(unittest.TestCase):
     def test_phases_exclude_handle_destruction_and_restore(self):
         client = Client()
-        ticks = iter([0, 3, 11, 20])
+        ticks = iter([0, 3, 11, 20, 25])
         def clock():
             client.events.append("clock")
             return next(ticks)
         result, intervals = diagnostic.timed_operation(client, None, 1, "delete", clock)
-        self.assertEqual(intervals, dict(begin_ns=3, execute_ns=8, commit_ns=9, total_ns=20))
-        self.assertEqual(client.events, ["clock", "begin", "clock", "execute", "clock", "commit", "clock", "destroy"])
+        self.assertEqual(intervals, dict(begin_ns=3, execute_ns=8, commit_ns=9, release_ns=5, total_ns=25))
+        self.assertEqual(client.events, ["clock", "begin", "clock", "execute", "clock", "commit", "clock", "destroy", "clock"])
         diagnostic.write(client, None, ["restore"])
         self.assertEqual(client.live, 0)
 

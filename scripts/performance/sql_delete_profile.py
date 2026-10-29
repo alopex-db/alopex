@@ -29,12 +29,12 @@ def emit(value):
 
 def timed_operation(client, mode, key, operation, clock=time.perf_counter_ns):
     # A previous transaction must already be destroyed before entering here.
+    sql = (f"DELETE FROM bench_write WHERE id = {key}" if operation == "delete" else
+           f"SELECT id, value FROM bench_write WHERE id = {key}")
     started = clock()
     transaction = client.begin(mode)
     begun = clock()
     try:
-        sql = (f"DELETE FROM bench_write WHERE id = {key}" if operation == "delete" else
-               f"SELECT id, value FROM bench_write WHERE id = {key}")
         result = transaction.execute_sql(sql) if operation != "noop" else None
         executed = clock()
         transaction.commit()
@@ -46,10 +46,13 @@ def timed_operation(client, mode, key, operation, clock=time.perf_counter_ns):
             pass
         raise
     finally:
-        # Keep native/session destruction outside every measured interval.
+        # Isolate native/session release from begin/execute/commit and the
+        # next iteration, while retaining it in the overall operation time.
         del transaction
+    finished = clock()
     return result, dict(begin_ns=begun-started, execute_ns=executed-begun,
-                        commit_ns=committed-executed, total_ns=committed-started)
+                        commit_ns=committed-executed, release_ns=finished-committed,
+                        total_ns=finished-started)
 
 
 def write(client, mode, sqls):

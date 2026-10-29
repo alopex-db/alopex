@@ -23,6 +23,29 @@ def events(path):
     return [json.loads(line) for line in lines if line.endswith("\n")]
 
 
+def stop_group(child):
+    """Stop owned descendants even if the direct child already exited."""
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        child.wait(timeout=10)
+        return
+    deadline = time.monotonic()+10
+    while time.monotonic() < deadline:
+        child.poll()  # Reap the direct child before probing the process group.
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(.1)
+    else:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    child.wait(timeout=10)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, required=True)
@@ -119,18 +142,7 @@ def main():
                             failure = str(exc)
                             record.update(status="failed", error=failure)
                         finally:
-                            # Include grandchildren even when the Python child has
-                            # already failed or crashed without running its finally.
-                            try:
-                                os.killpg(child.pid, signal.SIGTERM)
-                            except ProcessLookupError:
-                                pass
-                            if child.poll() is None:
-                                try:
-                                    child.wait(timeout=10)
-                                except subprocess.TimeoutExpired:
-                                    os.killpg(child.pid, signal.SIGKILL)
-                                    child.wait(timeout=10)
+                            stop_group(child)
                             if sampler and sampler.poll() is None:
                                 sampler.kill()
                                 sampler.wait(timeout=10)
