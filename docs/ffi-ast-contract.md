@@ -63,6 +63,12 @@ CI compares public Nim AST declarations and MessagePack writers, the Rust AST,
 and the Rust wire decoder with the pull request base (or the preceding push).
 Changing those files requires a higher `PARSER_CONTRACT_VERSION`; the Rust
 consumer pin and parser asset manifest tool must declare that same version.
+The one runtime-only exception is the body of `StatementKind::requires_write`,
+which does not declare or serialize the AST. CI accepts a change to that body
+only when every byte outside the unchanged method signature and balanced body
+is identical. Ambiguous syntax fails closed. Fields, variants, serde attributes,
+types, other methods and wire decoding retain the version-increase requirement.
+The recursive write-effect visitor lives outside the wire-schema directory.
 Grammar-only changes can retain the version when the wire shape is unchanged;
 the versioned producer/consumer MessagePack fixtures still check their covered
 SQL forms. Run `scripts/ci/check_parser_wire_contract.py BASE HEAD` locally to
