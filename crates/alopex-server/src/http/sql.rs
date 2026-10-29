@@ -1633,7 +1633,8 @@ fn table_key(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<
 }
 
 fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestContext) -> Response {
-    if is_write_sql(&request.sql) {
+    let requires_write = is_write_sql(&request.sql);
+    if requires_write {
         if let Err(err) = state.lifecycle_state.check_write_allowed() {
             return error_response(err, ctx);
         }
@@ -2030,7 +2031,23 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
             let _ = handle.wait_for_idle_with_operation(operation).await;
         }
         if let StreamSource::Txn { txn, .. } = source {
-            let _ = txn.async_rollback().await;
+            // A SELECT can allocate a sequence value. Finalize that write only
+            // after successful streaming; errors or cancellation roll it back.
+            let result = if success && !sender.is_closed() && requires_write {
+                txn.async_commit().await
+            } else {
+                txn.async_rollback().await
+            };
+            if let Err(err) = result {
+                success = false;
+                send_stream_error_until(
+                    &sender,
+                    ServerError::Sql(err.into()),
+                    &correlation_id,
+                    deadline,
+                )
+                .await;
+            }
         }
         if let Some(logger) = audit {
             logger.log_ddl(&sql, None, &correlation_id);

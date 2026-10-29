@@ -50,6 +50,7 @@ pub mod memory;
 pub mod query;
 mod result;
 mod system;
+pub(crate) use system::execute_sequence;
 
 #[cfg(feature = "tokio")]
 pub use async_executor::AsyncExecutor;
@@ -1346,19 +1347,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                if let Some((function, name, alias)) = system::direct_sequence_call(&plan) {
-                    let value = if function.eq_ignore_ascii_case("nextval") {
-                        ddl::sequence::next_value(&mut sql_txn, name)?
-                    } else {
-                        ddl::sequence::current_value(&mut sql_txn, name)?
-                    };
-                    Ok(ExecutionResult::Query(QueryResult::new(
-                        vec![ColumnInfo::new(
-                            alias.unwrap_or(function),
-                            ResolvedType::BigInt,
-                        )],
-                        vec![vec![SqlValue::BigInt(value)]],
-                    )))
+                if let Some(result) = system::execute_sequence(&mut sql_txn, &plan)? {
+                    Ok(ExecutionResult::Query(result))
                 } else {
                     query::execute_query(&mut sql_txn, &view, plan)
                 }
