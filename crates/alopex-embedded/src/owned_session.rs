@@ -154,6 +154,7 @@ struct OwnedEmbeddedSavepoint {
     vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
     hnsw_index_names: HashSet<String>,
+    sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -355,6 +356,8 @@ impl OwnedEmbeddedTransaction {
             self.failed = true;
             return Err(error);
         }
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -365,6 +368,11 @@ impl OwnedEmbeddedTransaction {
             vector_index: self.vector_index.clone(),
             vector_index_dirty: self.vector_index_dirty,
             hnsw_index_names: self.hnsw_indices.keys().cloned().collect(),
+            sql_hnsw: self
+                .sql_hnsw
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry.fork_for_savepoint()))
+                .collect(),
         });
         Ok(())
     }
@@ -387,6 +395,15 @@ impl OwnedEmbeddedTransaction {
         // Core already discarded descendants, even if restoring the graph fails.
         self.savepoints.truncate(position + 1);
         self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
+        // Restore only after core/direct graph recovery succeeded. Fork again:
+        // the target savepoint remains available for repeated rollback.
+        self.sql_hnsw = self.savepoints[position]
+            .sql_hnsw
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.fork_for_savepoint()))
+            .collect();
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         self.failed = false;
         Ok(())
     }
@@ -588,6 +605,7 @@ impl OwnedEmbeddedTransaction {
         if let Some(epoch) = epoch {
             self.db.hnsw_cache_insert_if_current(epoch, reusable);
         }
+        self.savepoints.clear();
         if self.catalog_modified {
             self.db.invalidate_table_info_cache();
         }
@@ -619,6 +637,7 @@ impl OwnedEmbeddedTransaction {
         }
         self.hnsw_indices.clear();
         self.sql_hnsw.clear();
+        self.savepoints.clear();
         self.overlay = CatalogOverlay::default();
         Ok(())
     }
@@ -632,6 +651,35 @@ mod tests {
     use alopex_core::TxnMode;
     use alopex_core::{HnswConfig, Metric};
     use std::sync::Arc;
+
+    fn terminal_releases_saved_graphs(commit: bool) {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index("saved", HnswConfig::default().with_dimension(2))
+            .unwrap();
+        let mut transaction = database
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction.create_savepoint("s").unwrap();
+        assert!(transaction.savepoints[0].sql_hnsw.contains_key("saved"));
+        if commit {
+            transaction.commit().unwrap();
+        } else {
+            transaction.rollback().unwrap();
+        }
+        assert!(transaction.savepoints.is_empty());
+        assert!(transaction.rollback_to_savepoint("s").is_err());
+    }
+
+    #[test]
+    fn savepoint_terminal_commit_releases_graphs() {
+        terminal_releases_saved_graphs(true);
+    }
+
+    #[test]
+    fn savepoint_terminal_rollback_releases_graphs() {
+        terminal_releases_saved_graphs(false);
+    }
 
     #[test]
     fn savepoint_restores_hnsw_graph_after_nested_staging() {

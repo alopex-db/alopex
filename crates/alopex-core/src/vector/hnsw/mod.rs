@@ -529,7 +529,7 @@ impl HnswIndex {
 }
 
 /// トランザクション内の HNSW 変更を追跡する。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HnswTransactionState {
     snapshot: Option<HnswGraph>,
     modified_nodes: HashSet<u32>,
