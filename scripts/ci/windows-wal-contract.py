@@ -68,6 +68,20 @@ commands = [
                            "--test", "memory_snapshot_overwrite"]),
     ("hnsw-transaction-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                                      "--test", "hnsw_transaction_cache"]),
+    ("hnsw-cold-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                               "--test", "hnsw_cold_publication"]),
+    ("hnsw-statistics", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                         "--lib", "vector::hnsw::stats::tests"]),
+    ("hnsw-two-index-eviction", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                                "--test", "hnsw_two_index_eviction"]),
+    ("hnsw-savepoint-cache", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                              "--test", "hnsw_savepoint_cache"]),
+    ("hnsw-begin-cache", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                          "--lib", "hnsw_begin_tests"]),
+    ("hnsw-copy-on-write", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                            "--lib", "vector::hnsw::cow::tests"]),
+    ("hnsw-dirty-writes", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--lib", "vector::hnsw::tests::dirty_write_tests"]),
 ]
 for name, command in commands:
     if (name == "release-build") != (args.phase == "build"):
@@ -92,6 +106,13 @@ for name, command in commands:
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
                 "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
                 "memory-snapshots": "20 passed; 0 failed; 0 ignored",
-                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored"}
+                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored",
+                "hnsw-cold-publication": "21 passed; 0 failed; 0 ignored",
+                "hnsw-statistics": "4 passed; 0 failed; 0 ignored",
+                "hnsw-two-index-eviction": "6 passed; 0 failed; 0 ignored",
+                "hnsw-savepoint-cache": "13 passed; 0 failed; 0 ignored",
+                "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
+                "hnsw-copy-on-write": "7 passed; 0 failed; 0 ignored",
+                "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

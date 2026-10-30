@@ -1,0 +1,723 @@
+{
+  "issue": 681,
+  "tracker": 690,
+  "status": "Development measurement completed; candidate integration and release qualification pending",
+  "date": "2026-10-29",
+  "before": {
+    "identity": {
+      "source": "5e05f0149e93e92455e59fe8c3a4cdfbec19e578",
+      "binary_sha256": "a14ab01f10cf37b27f0fdd7e422bc79128507499d63519b02023b67cc47b95dd",
+      "example_source_sha256": "aa06599e8f162cd1ca9a19490fd83b887aec690f7c328791500e8db55d90437a",
+      "runner_sha256": "00157be9c59ff5724494320ae54f5d25c026a2dd291750d740d099a2a932b558",
+      "rows": 100000,
+      "dimensions": 384,
+      "rss_limit": 8000000000,
+      "timeout_seconds": 900
+    },
+    "binary_build_commit": "6f850bd6",
+    "binary_to_measurement_diff": "runner only; product and example unchanged",
+    "events": [
+      {
+        "phase": "seed",
+        "data": {
+          "event": "start",
+          "rows": 100000,
+          "dimensions": 384
+        }
+      },
+      {
+        "phase": "seed",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 1848117875
+        }
+      },
+      {
+        "phase": "index_build",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "index_build",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 174249296709
+        }
+      },
+      {
+        "phase": "cold_transaction_1",
+        "data": {
+          "event": "start",
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 0,
+            "entries": 0,
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 0,
+            "indexes": []
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_1",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 238852417,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 0,
+            "entries": 0,
+            "hits": 0,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 226587167,
+            "indexes": []
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_2",
+        "data": {
+          "event": "start",
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 0,
+            "entries": 0,
+            "hits": 0,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 226587167,
+            "indexes": []
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_2",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 221146417,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 0,
+            "entries": 0,
+            "hits": 0,
+            "misses": 2,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 435351792,
+            "indexes": []
+          }
+        }
+      },
+      {
+        "phase": "warm",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "warm",
+        "data": {
+          "event": "end",
+          "graph_bytes": 180643400,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180643400,
+            "entries": 1,
+            "hits": 0,
+            "misses": 3,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 644268584,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180643400,
+                "hits": 0,
+                "last_access_ns": 176790243792
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "writer_begin",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "writer_begin",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 22417
+        }
+      },
+      {
+        "phase": "first_insert",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "first_insert",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 712189167,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180643400,
+            "entries": 1,
+            "hits": 1,
+            "misses": 3,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 644268584,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180643400,
+                "hits": 1,
+                "last_access_ns": 176800849750
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "second_insert",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "second_insert",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 555080584,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180643400,
+            "entries": 1,
+            "hits": 2,
+            "misses": 3,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 644268584,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180643400,
+                "hits": 1,
+                "last_access_ns": 176800849750
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "rollback",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "rollback",
+        "data": {
+          "event": "end"
+        }
+      },
+      {
+        "phase": "complete",
+        "data": {
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180643400,
+            "entries": 1,
+            "hits": 2,
+            "misses": 3,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 644268584,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180643400,
+                "hits": 1,
+                "last_access_ns": 176800849750
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "phase_sampled_peak_rss_bytes": {
+      "seed": 942669824,
+      "index_build": 1509670912,
+      "cold_transaction_1": 1524957184,
+      "cold_transaction_2": 1525071872,
+      "warm": 1525071872,
+      "writer_begin": 1525104640,
+      "first_insert": 1975140352,
+      "second_insert": 1979957248,
+      "rollback": 1979957248,
+      "complete": 1945632768
+    },
+    "children_lifetime_peak_rss_bytes": 1979957248
+  },
+  "after": {
+    "identity": {
+      "source": "2085048699010852da9ccd1abbd9a80fef6d05fd",
+      "binary_sha256": "2a830d1f0b61be4e40ad5ce9815ba79630d071a9a8bb3ca4ead1d741ad602a02",
+      "example_source_sha256": "aa06599e8f162cd1ca9a19490fd83b887aec690f7c328791500e8db55d90437a",
+      "runner_sha256": "786fcf22edf857d24d698f3a992d6f4d27ed1dae23d6d116e37014c338bb6dcf",
+      "rows": 100000,
+      "dimensions": 384,
+      "rss_limit": 8000000000,
+      "timeout_seconds": 900
+    },
+    "product_tree": "674f99e41dc72a3f5e4f455e76cd6d1b0817b0f5",
+    "temporary_harness_source": "85ed5cfc703b3da1332433cdffe5efb3d66bc505",
+    "harness_hashes": {
+      "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs": "aa06599e8f162cd1ca9a19490fd83b887aec690f7c328791500e8db55d90437a",
+      "scripts/performance/issue681_manual.py": "786fcf22edf857d24d698f3a992d6f4d27ed1dae23d6d116e37014c338bb6dcf"
+    },
+    "events": [
+      {
+        "phase": "seed",
+        "data": {
+          "event": "start",
+          "rows": 100000,
+          "dimensions": 384
+        }
+      },
+      {
+        "phase": "seed",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 1910694042
+        }
+      },
+      {
+        "phase": "index_build",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "index_build",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 191442375333
+        }
+      },
+      {
+        "phase": "cold_transaction_1",
+        "data": {
+          "event": "start",
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 0,
+            "entries": 0,
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 0,
+            "indexes": []
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_1",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 241162625,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 0,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 0,
+                "last_access_ns": 193605968917
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_2",
+        "data": {
+          "event": "start",
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 0,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 0,
+                "last_access_ns": 193605968917
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "cold_transaction_2",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 625875,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 1,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 1,
+                "last_access_ns": 193611742667
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "warm",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "warm",
+        "data": {
+          "event": "end",
+          "graph_bytes": 180644168,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 2,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 2,
+                "last_access_ns": 193617933792
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "writer_begin",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "writer_begin",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 27125
+        }
+      },
+      {
+        "phase": "first_insert",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "first_insert",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 5130000,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 3,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 3,
+                "last_access_ns": 193628533083
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "second_insert",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "second_insert",
+        "data": {
+          "event": "end",
+          "elapsed_ns": 4953250,
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 4,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 3,
+                "last_access_ns": 193628533083
+              }
+            ]
+          }
+        }
+      },
+      {
+        "phase": "rollback",
+        "data": {
+          "event": "start"
+        }
+      },
+      {
+        "phase": "rollback",
+        "data": {
+          "event": "end"
+        }
+      },
+      {
+        "phase": "complete",
+        "data": {
+          "stats": {
+            "limit_bytes": 268435456,
+            "limit_entries": 128,
+            "used_bytes": 180644168,
+            "entries": 1,
+            "hits": 4,
+            "misses": 1,
+            "evictions": 0,
+            "oversize_skips": 0,
+            "invalidations": 0,
+            "load_ns_total": 239794792,
+            "indexes": [
+              {
+                "name": "ih",
+                "bytes": 180644168,
+                "hits": 3,
+                "last_access_ns": 193628533083
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "phase_sampled_peak_rss_bytes": {
+      "seed": 968278016,
+      "index_build": 1564065792,
+      "cold_transaction_1": 1587609600,
+      "cold_transaction_2": 1587691520,
+      "warm": 1587691520,
+      "writer_begin": 1587707904,
+      "first_insert": 1587871744,
+      "second_insert": 1588019200,
+      "rollback": 1588019200,
+      "complete": 1588019200
+    },
+    "children_lifetime_peak_rss_bytes": 1588133888
+  },
+  "comparison": [
+    {
+      "phase": "seed",
+      "before_elapsed_ns": 1848117875,
+      "after_elapsed_ns": 1910694042,
+      "after_over_before": 1.0338594025015855,
+      "before_sampled_rss_bytes": 942669824,
+      "after_sampled_rss_bytes": 968278016
+    },
+    {
+      "phase": "index_build",
+      "before_elapsed_ns": 174249296709,
+      "after_elapsed_ns": 191442375333,
+      "after_over_before": 1.0986694290807544,
+      "before_sampled_rss_bytes": 1509670912,
+      "after_sampled_rss_bytes": 1564065792
+    },
+    {
+      "phase": "cold_transaction_1",
+      "before_elapsed_ns": 238852417,
+      "after_elapsed_ns": 241162625,
+      "after_over_before": 1.0096721148105443,
+      "before_sampled_rss_bytes": 1524957184,
+      "after_sampled_rss_bytes": 1587609600
+    },
+    {
+      "phase": "cold_transaction_2",
+      "before_elapsed_ns": 221146417,
+      "after_elapsed_ns": 625875,
+      "after_over_before": 0.002830138550243841,
+      "before_sampled_rss_bytes": 1525071872,
+      "after_sampled_rss_bytes": 1587691520
+    },
+    {
+      "phase": "writer_begin",
+      "before_elapsed_ns": 22417,
+      "after_elapsed_ns": 27125,
+      "after_over_before": 1.2100191818709016,
+      "before_sampled_rss_bytes": 1525104640,
+      "after_sampled_rss_bytes": 1587707904
+    },
+    {
+      "phase": "first_insert",
+      "before_elapsed_ns": 712189167,
+      "after_elapsed_ns": 5130000,
+      "after_over_before": 0.007203142420165455,
+      "before_sampled_rss_bytes": 1975140352,
+      "after_sampled_rss_bytes": 1587871744
+    },
+    {
+      "phase": "second_insert",
+      "before_elapsed_ns": 555080584,
+      "after_elapsed_ns": 4953250,
+      "after_over_before": 0.008923479117763557,
+      "before_sampled_rss_bytes": 1979957248,
+      "after_sampled_rss_bytes": 1588019200
+    }
+  ],
+  "first_insert_sampled_rss_increase_bytes": {
+    "before": 450035712,
+    "after": 163840
+  },
+  "conditions": {
+    "host": "same local macOS arm64 host, 18 logical CPUs, 51,539,607,552 bytes RAM",
+    "profile": "Cargo test profile opt-level=1; incremental=0, debug=0, build jobs=2",
+    "runtime_threads": 2,
+    "rows": 100000,
+    "dimensions": 384,
+    "database": "in-memory; streamed vector preparation",
+    "cache_limit_bytes": 268435456,
+    "rss_limit_bytes": 8000000000,
+    "timeout_seconds": 900,
+    "host_stop_bytes": 40000000000,
+    "sample_count": 1,
+    "parser": "published 0.8.16 development override; not release-qualified"
+  },
+  "measurement_limits": [
+    "Single before/after run; not statistical latency qualification",
+    "ps samples and phase boundaries are lower bounds on true RSS maxima",
+    "RUSAGE_CHILDREN includes monitor utilities as well as workload",
+    "Seed/index construction separated from INSERT; INSERT includes its SQL/HNSW work before transaction rollback, not durable transaction commit",
+    "No whole-first-write O(1) claim; COW directories/shards and graph traversal remain",
+    "Index build elapsed increased by about 9.87%; isolated source effect versus noise not established",
+    "Begin-phase sampled RSS increased; do not describe all phases as lower memory",
+    "No repeated scale run merely to replace existing evidence"
+  ],
+  "failure_history": [
+    {
+      "run": "initial sandbox attempt",
+      "outcome": "failed before measurement",
+      "reason": "ps denied with Operation not permitted",
+      "samples": 0,
+      "cleanup": "owned process terminated and waited; shell exit 1 confirmed before host-access retry"
+    }
+  ],
+  "raw_digests": {
+    "before/identity.json": "8cdb8a433f32b3b3baaa0e2fea954ef1068f061df9c1b00b5ff74380e26cc164",
+    "before/events.jsonl": "284bf9f10882f866e6bda587aa64b30b458f7a19e1eb76e1f9ff557b13576c73",
+    "before/rss.jsonl": "5d6604a4478e897576cbb7a92474d45e197b8e5dc5d1e6d84e105de3babaab85",
+    "before/summary.json": "a9dfe487a027262bf2bfe46fdab75fbe092270d2b765c3cf227a7e1046757192",
+    "before/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "after/identity.json": "92d05da8bf6d66f8f5e0d754c80187acbfa5ea8c1f35ff438e2c5fda4ab51c79",
+    "after/events.jsonl": "69c5f5dc10d3210e48c9ca490b13937d1664f54f8aab0324a6bc112f1d95e35a",
+    "after/rss.jsonl": "ca1b04c25720f25b4e0cd4a7351b8ab4f4dfed3ed2685af3b51e50b1955a5ade",
+    "after/summary.json": "aad42bea90dce4c022e0bbe7fe48e10b4214cfdf1342c29237fb1ef820115686",
+    "after/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "storage": {
+    "build_peak_bytes": 13911298048,
+    "run_final_bytes": 13911818240,
+    "host_peak_bytes": 13911904256,
+    "after_cleanup_bytes": 13849800704
+  },
+  "remaining": [
+    "Check and integrate dependency PRs, then candidate CI",
+    "Reconcile #681 acceptance with candidate ancestry",
+    "Investigate index-build timing increase in dedicated performance qualification; no broad no-regression claim",
+    "Other #690 scope, RC artifacts, publication/post-release verification and main merge remain outstanding"
+  ],
+  "cleanup": {
+    "removed_example_artifacts": 4,
+    "temporary_harness_sources_removed": true,
+    "retained": "Compact logs and shared dependencies for active release work"
+  }
+}

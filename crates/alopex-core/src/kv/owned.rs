@@ -566,6 +566,15 @@ impl OwnedTransactionSession {
         self.finish_transaction(false)
     }
 
+    /// Observe the final transaction after closing session access, then roll back once.
+    /// Return the observation only when rollback succeeds.
+    pub fn rollback_with_observer<T>(
+        &self,
+        observe: impl FnOnce(&dyn OwnedKVTransaction) -> T,
+    ) -> Result<(OwnedTransactionSessionStatus, T)> {
+        self.finish_transaction_observed(false, observe)
+    }
+
     /// Snapshot the transaction's staged writes.
     pub fn create_savepoint(&self) -> Result<u64> {
         self.with_transaction(|transaction| transaction.create_savepoint())
@@ -938,6 +947,43 @@ mod tests {
             .is_err());
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         assert_eq!(calls.commits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rollback_observer_closes_access_and_discards_writes_once() {
+        let store = Arc::new(MemoryKV::new());
+        let session = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        session
+            .with_transaction(|tx| tx.put(b"discard".to_vec(), b"value".to_vec()))
+            .unwrap();
+        let observed = AtomicUsize::new(0);
+        let (status, keys) = session
+            .rollback_with_observer(|tx| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(session.status(), OwnedTransactionSessionStatus::Closed);
+                assert!(session.with_transaction(|_| Ok(())).is_err());
+                let mut keys = Vec::new();
+                assert!(tx.visit_pending_write_keys(&mut |key| keys.push(key.to_vec())));
+                keys
+            })
+            .unwrap();
+        assert_eq!(status, OwnedTransactionSessionStatus::RolledBack);
+        assert_eq!(keys, vec![b"discard".to_vec()]);
+        assert!(session
+            .rollback_with_observer(|_| observed.fetch_add(1, Ordering::SeqCst))
+            .is_err());
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        let reader = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
+        assert_eq!(
+            reader
+                .with_transaction(|tx| tx.get(&b"discard".to_vec()))
+                .unwrap(),
+            None
+        );
+        reader.rollback().unwrap();
     }
 
     #[test]

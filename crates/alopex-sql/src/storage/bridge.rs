@@ -536,9 +536,33 @@ pub struct HnswTxnEntry {
     pub dirty: bool,
     pub(crate) cached_read: bool,
     last_access: Instant,
+    mutable_accessed: bool,
 }
 
 impl HnswTxnEntry {
+    /// Capture an independent graph and transaction state for a savepoint.
+    ///
+    /// The graph fork uses copy-on-write storage. Preserve cache origin and
+    /// mutation history: restoring a savepoint must not make an uncommitted
+    /// graph eligible for publication as an unmodified cold load.
+    pub fn fork_for_savepoint(&self) -> Self {
+        Self {
+            index: self.index.fork_owned(),
+            state: self.state.clone(),
+            dirty: self.dirty,
+            cached_read: self.cached_read,
+            last_access: self.last_access,
+            mutable_accessed: self.mutable_accessed,
+        }
+    }
+
+    /// Clone a graph loaded only for reading in this transaction.
+    /// A flushed mutation remains ineligible even after `dirty` is cleared.
+    pub fn clone_unmodified_load(&self) -> Option<HnswIndex> {
+        (!self.cached_read && !self.mutable_accessed && !self.dirty)
+            .then(|| self.index.clone_for_read())
+    }
+
     pub(crate) fn loaded(index: HnswIndex) -> Self {
         Self {
             index,
@@ -546,6 +570,7 @@ impl HnswTxnEntry {
             dirty: false,
             cached_read: false,
             last_access: Instant::now(),
+            mutable_accessed: false,
         }
     }
 
@@ -557,6 +582,7 @@ impl HnswTxnEntry {
             dirty: false,
             cached_read: true,
             last_access: Instant::now(),
+            mutable_accessed: false,
         }
     }
 }
@@ -617,7 +643,9 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
             self.hnsw_indices
                 .insert(name.to_string(), HnswTxnEntry::loaded(index));
         }
-        Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
+        let entry = self.hnsw_indices.get_mut(name).expect("inserted above");
+        entry.mutable_accessed = true;
+        Ok(entry)
     }
 
     pub(crate) fn ensure_write_txn(&self) -> CoreResult<()> {
@@ -891,6 +919,7 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
     fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
         self.hnsw_entry(name)?;
         let entry = self.hnsw_indices.get_mut(name).expect("loaded above");
+        entry.mutable_accessed = true;
         if entry.cached_read {
             entry.index = entry.index.fork_owned();
             entry.cached_read = false;
@@ -1007,6 +1036,125 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn savepoint_fork_publication_matches_model() {
+        use proptest::prelude::*;
+        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+            cases: 8,
+            failure_persistence: None,
+            ..Default::default()
+        });
+        runner
+            .run(
+                &proptest::collection::vec(any::<bool>(), 0..5),
+                |operations| {
+                    let store = MemoryKV::new();
+                    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+                    let mut index =
+                        HnswIndex::create("model", HnswConfig::default().with_dimension(2))
+                            .unwrap();
+                    index.upsert(b"base", &[1.0, 0.0], b"").unwrap();
+                    let mut entry = HnswTxnEntry::loaded(index);
+                    let mut changed = false;
+                    prop_assert!(entry.fork_for_savepoint().clone_unmodified_load().is_some());
+                    for write in operations {
+                        if write {
+                            entry
+                                .index
+                                .upsert_staged(b"change", &[2.0, 1.0], b"", &mut entry.state)
+                                .unwrap();
+                            entry.mutable_accessed = true;
+                            entry
+                                .index
+                                .commit_staged(&mut txn, &mut entry.state)
+                                .unwrap();
+                            changed = true;
+                        } else {
+                            entry.index.search(&[1.0, 0.0], 2, Some(2)).unwrap();
+                        }
+                        let saved = entry.fork_for_savepoint();
+                        prop_assert_eq!(saved.clone_unmodified_load().is_some(), !changed);
+                        let mut keys: Vec<_> = saved
+                            .index
+                            .search(&[1.0, 0.0], 2, Some(2))
+                            .unwrap()
+                            .0
+                            .into_iter()
+                            .map(|result| result.key)
+                            .collect();
+                        keys.sort();
+                        let expected = if changed {
+                            vec![b"base".to_vec(), b"change".to_vec()]
+                        } else {
+                            vec![b"base".to_vec()]
+                        };
+                        prop_assert_eq!(keys, expected);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn savepoint_fork_preserves_flushed_mutation_history() {
+        let store = MemoryKV::new();
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let index = HnswIndex::create("flushed", HnswConfig::default().with_dimension(2)).unwrap();
+        let mut entry = HnswTxnEntry::loaded(index);
+        entry
+            .index
+            .upsert_staged(b"staged", &[1.0, 0.0], b"", &mut entry.state)
+            .unwrap();
+        entry.mutable_accessed = true;
+        entry
+            .index
+            .commit_staged(&mut txn, &mut entry.state)
+            .unwrap();
+        assert!(!entry.dirty);
+        assert!(entry.clone_unmodified_load().is_none());
+        // Flushing is not committing: a saved/restored graph must preserve this
+        // publication prohibition even without a dirty bit or staged undo.
+        let saved = entry.fork_for_savepoint();
+        assert!(saved.clone_unmodified_load().is_none());
+    }
+
+    #[test]
+    fn savepoint_fork_preserves_independent_staged_undo() {
+        let mut index =
+            HnswIndex::create("savepoint", HnswConfig::default().with_dimension(2)).unwrap();
+        index.upsert(b"before", &[1.0, 0.0], b"").unwrap();
+        let mut entry = HnswTxnEntry::loaded(index);
+        entry
+            .index
+            .upsert_staged(b"staged", &[2.0, 0.0], b"", &mut entry.state)
+            .unwrap();
+        entry.dirty = true;
+        entry.mutable_accessed = true;
+        let mut saved = entry.fork_for_savepoint();
+        assert!(saved.dirty);
+        assert!(saved.clone_unmodified_load().is_none());
+        saved.index.rollback(&mut saved.state).unwrap();
+        let keys = |index: &HnswIndex| {
+            let mut keys: Vec<_> = index
+                .search(&[1.0, 0.0], 2, Some(2))
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|result| result.key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&saved.index), vec![b"before".to_vec()]);
+        assert_eq!(
+            keys(&entry.index),
+            vec![b"before".to_vec(), b"staged".to_vec()]
+        );
+        entry.index.rollback(&mut entry.state).unwrap();
+        assert_eq!(keys(&entry.index), vec![b"before".to_vec()]);
     }
 
     #[test]
