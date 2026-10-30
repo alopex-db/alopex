@@ -12,6 +12,11 @@ fn main() {
         build_support::ALLOW_LOCAL_BUILD_ENV
     );
 
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        build_support::SUPPLEMENT_SHA256_ENV
+    );
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let target = env::var("TARGET").expect("TARGET");
     let explicit_dir = env::var_os("NIM_SQL_PARSER_LIB_DIR");
@@ -28,6 +33,12 @@ fn main() {
         "cargo:rerun-if-changed={}",
         resolved.directory.join("SHA256SUMS").display()
     );
+    let supplement = resolved.directory.join(build_support::SUPPLEMENT_FILENAME);
+    // Watching a nonexistent optional file makes Cargo rerun this script on
+    // every build. Resolution already fails if a required supplement is absent.
+    if supplement.is_file() {
+        println!("cargo:rerun-if-changed={}", supplement.display());
+    }
     println!("cargo:rerun-if-changed={}", resolved.library_path.display());
 
     println!(

@@ -14,11 +14,13 @@ pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
 const VENDOR_MANIFEST_RELATIVE_PATH: &str = "nim-sql-parser/vendor/parser-vendor-manifest.json";
+pub(crate) const SUPPLEMENT_SHA256_ENV: &str = "ALOPEX_NIM_PARSER_SUPPLEMENT_SHA256";
+pub(crate) const SUPPLEMENT_FILENAME: &str = "PARSER_SUPPLEMENT.json";
+const INTEL_TARGET: &str = "x86_64-apple-darwin";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
-const REQUIRED_TARGETS: [&str; 4] = [
+const REQUIRED_TARGETS: [&str; 3] = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
@@ -107,21 +109,42 @@ pub(crate) fn resolve_native_library(
     target: &str,
     explicit_dir: Option<&OsStr>,
 ) -> Result<ResolvedNativeLibrary, ResolveError> {
-    resolve_native_library_with_options(
+    let supplement_pin = env::var(SUPPLEMENT_SHA256_ENV).ok();
+    resolve_native_library_with_supplement(
         manifest_dir,
         target,
         explicit_dir,
         local_build_allowed(),
         VENDOR_MANIFEST_SHA256,
+        supplement_pin.as_deref(),
     )
 }
 
+#[cfg(test)]
 fn resolve_native_library_with_options(
     manifest_dir: &Path,
     target: &str,
     explicit_dir: Option<&OsStr>,
     allow_local_build: bool,
     expected_manifest_sha256: &str,
+) -> Result<ResolvedNativeLibrary, ResolveError> {
+    resolve_native_library_with_supplement(
+        manifest_dir,
+        target,
+        explicit_dir,
+        allow_local_build,
+        expected_manifest_sha256,
+        None,
+    )
+}
+
+fn resolve_native_library_with_supplement(
+    manifest_dir: &Path,
+    target: &str,
+    explicit_dir: Option<&OsStr>,
+    allow_local_build: bool,
+    expected_manifest_sha256: &str,
+    supplement_pin: Option<&str>,
 ) -> Result<ResolvedNativeLibrary, ResolveError> {
     let target_spec = target_spec(target)?;
 
@@ -160,15 +183,20 @@ fn resolve_native_library_with_options(
     let manifest: VendorManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|cause| error(format!("invalid parser vendor manifest: {cause}")))?;
     validate_manifest(&manifest)?;
-    let asset = manifest
-        .assets
-        .iter()
-        .find(|asset| asset.target == target)
-        .ok_or_else(|| {
-            error(format!(
-                "parser vendor manifest has no asset for target {target}"
-            ))
-        })?;
+    let supplemental_asset;
+    let asset = if let Some(asset) = manifest.assets.iter().find(|asset| asset.target == target) {
+        // Existing pinned assets always take precedence, including Intel.
+        asset
+    } else if target == INTEL_TARGET
+        && let (Some(directory), Some(pin)) = (explicit_dir, supplement_pin)
+    {
+        supplemental_asset = read_supplement(Path::new(directory), pin, &manifest_bytes)?;
+        &supplemental_asset
+    } else {
+        return Err(error(format!(
+            "parser vendor manifest has no asset for target {target}"
+        )));
+    };
 
     let (directory, directory_description) = if let Some(explicit_dir) = explicit_dir {
         if explicit_dir.is_empty() {
@@ -284,53 +312,147 @@ fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
         .iter()
         .map(|asset| asset.target.as_str())
         .collect();
-    if targets != REQUIRED_TARGETS {
+    if targets.windows(2).any(|pair| pair[0] >= pair[1])
+        || REQUIRED_TARGETS
+            .iter()
+            .any(|required| !targets.contains(required))
+    {
         return Err(error(
             "parser vendor manifest target matrix is incomplete, duplicated, or unsorted",
         ));
     }
 
     for asset in &manifest.assets {
-        let spec = target_spec(&asset.target)?;
-        let expected_path = format!(
-            "alopex-sql-parser/{}/{}",
-            asset.target, spec.library_filename
-        );
-        if asset.library.path != expected_path {
-            return Err(error(format!(
-                "parser vendor manifest library path mismatch for {}",
-                asset.target
-            )));
-        }
-        if asset.library.size == 0 {
-            return Err(error(format!(
-                "parser vendor manifest library size is zero for {}",
-                asset.target
-            )));
-        }
-        require_sha256(&asset.library.sha256, "parser vendor library SHA-256")?;
-        let expected_static_path = format!(
-            "alopex-sql-parser/{}/{}",
-            asset.target, spec.static_library_filename
-        );
-        if asset.static_library.path != expected_static_path {
-            return Err(error(format!(
-                "parser vendor static library path mismatch for {}",
-                asset.target
-            )));
-        }
-        if asset.static_library.size == 0 {
-            return Err(error(format!(
-                "parser vendor static library size is zero for {}",
-                asset.target
-            )));
-        }
-        require_sha256(
-            &asset.static_library.sha256,
-            "parser vendor static library SHA-256",
-        )?;
+        validate_asset(asset)?;
     }
     Ok(())
+}
+
+fn validate_asset(asset: &VendorAsset) -> Result<(), ResolveError> {
+    let spec = target_spec(&asset.target)?;
+    let expected_path = format!(
+        "alopex-sql-parser/{}/{}",
+        asset.target, spec.library_filename
+    );
+    if asset.library.path != expected_path {
+        return Err(error(format!(
+            "parser vendor manifest library path mismatch for {}",
+            asset.target
+        )));
+    }
+    if asset.library.size == 0 {
+        return Err(error(format!(
+            "parser vendor manifest library size is zero for {}",
+            asset.target
+        )));
+    }
+    require_sha256(&asset.library.sha256, "parser vendor library SHA-256")?;
+    let expected_static_path = format!(
+        "alopex-sql-parser/{}/{}",
+        asset.target, spec.static_library_filename
+    );
+    if asset.static_library.path != expected_static_path {
+        return Err(error(format!(
+            "parser vendor static library path mismatch for {}",
+            asset.target
+        )));
+    }
+    if asset.static_library.size == 0 {
+        return Err(error(format!(
+            "parser vendor static library size is zero for {}",
+            asset.target
+        )));
+    }
+    require_sha256(
+        &asset.static_library.sha256,
+        "parser vendor static library SHA-256",
+    )?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserSupplement {
+    schema: String,
+    primary_manifest_sha256: String,
+    source: SupplementSource,
+    record: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupplementSource {
+    tag: String,
+    tag_sha: String,
+}
+
+fn read_supplement(
+    directory: &Path,
+    pin: &str,
+    primary_bytes: &[u8],
+) -> Result<VendorAsset, ResolveError> {
+    require_sha256(pin, "parser supplement pin")?;
+    require_real_directory(directory, "explicit native parser directory")?;
+    let bytes = read_small_regular_file(
+        &directory.join(SUPPLEMENT_FILENAME),
+        "parser supplement",
+        MAX_MANIFEST_BYTES,
+    )?;
+    if sha256_bytes(&bytes) != pin {
+        return Err(error("parser supplement SHA-256 mismatch"));
+    }
+    let supplement: ParserSupplement = serde_json::from_slice(&bytes)
+        .map_err(|cause| error(format!("invalid parser supplement: {cause}")))?;
+    if supplement.schema != "alopex-parser-supplement-v1"
+        || supplement.primary_manifest_sha256 != sha256_bytes(primary_bytes)
+    {
+        return Err(error(
+            "parser supplement schema or primary manifest mismatch",
+        ));
+    }
+    if supplement.source.tag != format!("v{REQUIRED_ALOPEX_VERSION}")
+        || supplement.source.tag_sha.len() != 40
+        || !supplement
+            .source
+            .tag_sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(error("parser supplement source identity mismatch"));
+    }
+    let primary: serde_json::Value = serde_json::from_slice(primary_bytes)
+        .map_err(|cause| error(format!("invalid primary manifest: {cause}")))?;
+    let record = &supplement.record;
+    if record["schema"] != "alopex-parser-target-record-v2" || record["target"] != INTEL_TARGET {
+        return Err(error("parser supplement record schema or target mismatch"));
+    }
+    for key in [
+        "alopex_version",
+        "contract_version",
+        "packages",
+        "packing",
+        "parser_source",
+        "registry_metadata",
+    ] {
+        if record.get(key).is_none() || record[key] != primary[key] {
+            return Err(error(format!("parser supplement input mismatch: {key}")));
+        }
+    }
+    for (key, pointer) in [
+        ("build_profile", "/builder/compile/profile"),
+        ("nim_version", "/builder/nim/version"),
+        ("nimble_release_sha", "/builder/nimble/release_sha"),
+        ("nimble_version", "/builder/nimble/version"),
+    ] {
+        let value = record.pointer(pointer);
+        if value.is_none() || value != primary["builder_requirements"].get(key) {
+            return Err(error(format!("parser supplement builder mismatch: {key}")));
+        }
+    }
+    let asset: VendorAsset = serde_json::from_value(record.clone())
+        .map_err(|cause| error(format!("invalid parser supplement asset: {cause}")))?;
+    validate_asset(&asset)?;
+    Ok(asset)
 }
 
 fn verify_target_directory(
@@ -494,6 +616,12 @@ mod tests {
 
     const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
     const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+    // Independent release contract, not derived from the production constant.
+    const PRIMARY_TARGETS: [&str; 3] = [
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ];
 
     struct Fixture {
         _temporary: TempDir,
@@ -617,6 +745,320 @@ mod tests {
         let destination = destination_vendor.join(target);
         fs::create_dir_all(&destination).expect("target directory");
         copy_target_contents(&source_vendor.join(target), &destination);
+    }
+
+    fn rewrite_fixture_targets(
+        fixture: &Fixture,
+        change: impl FnOnce(&mut Vec<serde_json::Value>),
+    ) {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.manifest()).unwrap()).unwrap();
+        change(manifest["assets"].as_array_mut().unwrap());
+        fs::write(fixture.manifest(), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn primary_manifest_resolves_each_required_explicit_target_without_intel() {
+        for target in PRIMARY_TARGETS {
+            let fixture = Fixture::new(false);
+            rewrite_fixture_targets(&fixture, |assets| {
+                assets.retain(|asset| asset["target"] != "x86_64-apple-darwin");
+            });
+            let explicit = fixture.explicit_dir(target);
+            let resolved = resolve_native_library_with_options(
+                &fixture.crate_root,
+                target,
+                Some(explicit.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .unwrap();
+            assert_eq!(resolved.directory, explicit);
+        }
+    }
+
+    #[test]
+    fn primary_manifest_rejects_each_missing_required_target() {
+        for missing in PRIMARY_TARGETS {
+            let fixture = Fixture::new(true);
+            rewrite_fixture_targets(&fixture, |assets| {
+                assets.retain(|asset| asset["target"] != missing);
+            });
+            let failure = resolve_native_library_with_options(
+                &fixture.crate_root,
+                LINUX_TARGET,
+                None,
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(failure.contains("target matrix"), "{missing}: {failure}");
+        }
+    }
+
+    #[test]
+    fn primary_manifest_rejects_duplicate_unsorted_and_unsupported_targets() {
+        for mode in ["duplicate", "unsorted", "unsupported"] {
+            let fixture = Fixture::new(true);
+            rewrite_fixture_targets(&fixture, |assets| match mode {
+                "duplicate" => assets.insert(0, assets[0].clone()),
+                "unsorted" => assets.reverse(),
+                _ => {
+                    let mut extra = assets[0].clone();
+                    extra["target"] = serde_json::json!("zz-unsupported-target");
+                    assets.push(extra);
+                }
+            });
+            assert!(
+                resolve_native_library_with_options(
+                    &fixture.crate_root,
+                    LINUX_TARGET,
+                    None,
+                    false,
+                    &fixture.manifest_sha256(),
+                )
+                .is_err(),
+                "{mode}"
+            );
+        }
+    }
+
+    fn supplement_fixture() -> (Fixture, PathBuf, serde_json::Value) {
+        let fixture = Fixture::new(false);
+        let directory = fixture.explicit_dir(INTEL_TARGET);
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.manifest()).unwrap()).unwrap();
+        let mut record = original["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["target"] == INTEL_TARGET)
+            .unwrap()
+            .clone();
+        for key in [
+            "alopex_version",
+            "contract_version",
+            "packages",
+            "packing",
+            "parser_source",
+            "registry_metadata",
+        ] {
+            record[key] = original[key].clone();
+        }
+        record["schema"] = "alopex-parser-target-record-v2".into();
+        rewrite_fixture_targets(&fixture, |assets| {
+            assets.retain(|a| a["target"] != INTEL_TARGET)
+        });
+        let supplement = serde_json::json!({
+            "schema": "alopex-parser-supplement-v1",
+            "primary_manifest_sha256": fixture.manifest_sha256(),
+            "source": {"tag": format!("v{REQUIRED_ALOPEX_VERSION}"), "tag_sha": "a".repeat(40)},
+            "record": record,
+        });
+        (fixture, directory, supplement)
+    }
+
+    fn write_supplement(directory: &Path, value: &serde_json::Value) -> String {
+        let bytes = serde_json::to_vec(value).unwrap();
+        fs::write(directory.join(SUPPLEMENT_FILENAME), &bytes).unwrap();
+        sha256_bytes(&bytes)
+    }
+
+    #[test]
+    fn supplement_resolves_only_with_explicit_directory_and_matching_pin() {
+        let (fixture, directory, value) = supplement_fixture();
+        let pin = write_supplement(&directory, &value);
+        let before = fs::read(fixture.manifest()).unwrap();
+        let result = resolve_native_library_with_supplement(
+            &fixture.crate_root,
+            INTEL_TARGET,
+            Some(directory.as_os_str()),
+            false,
+            &fixture.manifest_sha256(),
+            Some(&pin),
+        )
+        .unwrap();
+        assert_eq!(result.directory, directory);
+        assert_eq!(before, fs::read(fixture.manifest()).unwrap());
+        for bad_pin in [
+            None,
+            Some(""),
+            Some("not-a-digest"),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        ] {
+            assert!(
+                resolve_native_library_with_supplement(
+                    &fixture.crate_root,
+                    INTEL_TARGET,
+                    Some(directory.as_os_str()),
+                    false,
+                    &fixture.manifest_sha256(),
+                    bad_pin,
+                )
+                .is_err(),
+                "accepted pin {bad_pin:?}"
+            );
+        }
+        assert!(
+            resolve_native_library_with_supplement(
+                &fixture.crate_root,
+                INTEL_TARGET,
+                None,
+                false,
+                &fixture.manifest_sha256(),
+                Some(&pin),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn supplement_rejects_each_identity_mismatch_even_with_matching_pin() {
+        let (fixture, directory, original) = supplement_fixture();
+        for (pointer, wrong) in [
+            ("/schema", serde_json::json!("unknown")),
+            (
+                "/primary_manifest_sha256",
+                serde_json::json!("0".repeat(64)),
+            ),
+            ("/source/tag", serde_json::json!("v0.0.0")),
+            ("/source/tag_sha", serde_json::json!("wrong")),
+            ("/record/schema", serde_json::json!("old-schema")),
+            ("/record/target", serde_json::json!(LINUX_TARGET)),
+            ("/record/alopex_version", serde_json::json!("0.0.0")),
+            ("/record/contract_version", serde_json::json!("0.0.0")),
+            ("/record/packages", serde_json::json!([])),
+            ("/record/packing", serde_json::json!({})),
+            ("/record/parser_source", serde_json::json!({})),
+            ("/record/registry_metadata", serde_json::json!({})),
+            (
+                "/record/builder/compile/profile",
+                serde_json::json!("debug"),
+            ),
+            ("/record/builder/nim/version", serde_json::json!("0.0.0")),
+            ("/record/builder/nimble/version", serde_json::json!("0.0.0")),
+            (
+                "/record/builder/nimble/release_sha",
+                serde_json::json!("b".repeat(40)),
+            ),
+            ("/record/library/path", serde_json::json!("../escape")),
+            (
+                "/record/static_library/path",
+                serde_json::json!("../escape"),
+            ),
+            ("/record/library/size", serde_json::json!(0)),
+            (
+                "/record/static_library/sha256",
+                serde_json::json!("INVALID"),
+            ),
+        ] {
+            let mut value = original.clone();
+            *value.pointer_mut(pointer).expect(pointer) = wrong;
+            let pin = write_supplement(&directory, &value);
+            assert!(
+                resolve_native_library_with_supplement(
+                    &fixture.crate_root,
+                    INTEL_TARGET,
+                    Some(directory.as_os_str()),
+                    false,
+                    &fixture.manifest_sha256(),
+                    Some(&pin),
+                )
+                .is_err(),
+                "accepted changed {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn supplement_rejects_corrupt_libraries_and_sidecars() {
+        for filename in [
+            "libalopex_sql_parser.dylib",
+            "libalopex_sql_parser.a",
+            "CONTRACT_VERSION",
+            "SHA256SUMS",
+        ] {
+            let (fixture, directory, value) = supplement_fixture();
+            let pin = write_supplement(&directory, &value);
+            fs::write(directory.join(filename), b"corrupted").unwrap();
+            assert!(
+                resolve_native_library_with_supplement(
+                    &fixture.crate_root,
+                    INTEL_TARGET,
+                    Some(directory.as_os_str()),
+                    false,
+                    &fixture.manifest_sha256(),
+                    Some(&pin),
+                )
+                .is_err(),
+                "accepted corrupt {filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn supplement_cannot_override_an_existing_primary_asset() {
+        let fixture = Fixture::new(false);
+        let directory = fixture.explicit_dir(INTEL_TARGET);
+        // A supplement cannot replace or invalidate an already pinned asset.
+        fs::write(directory.join(SUPPLEMENT_FILENAME), b"untrusted supplement").unwrap();
+        assert!(
+            resolve_native_library_with_supplement(
+                &fixture.crate_root,
+                INTEL_TARGET,
+                Some(directory.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+                Some("untrusted"),
+            )
+            .is_ok()
+        );
+        fs::write(directory.join("libalopex_sql_parser.dylib"), b"replacement").unwrap();
+        assert!(
+            resolve_native_library_with_supplement(
+                &fixture.crate_root,
+                INTEL_TARGET,
+                Some(directory.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+                Some("untrusted"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn optional_intel_requires_a_manifest_bound_asset_even_with_explicit_directory() {
+        let fixture = Fixture::new(false);
+        let target = "x86_64-apple-darwin";
+        let explicit = fixture.explicit_dir(target);
+        assert!(
+            resolve_native_library_with_options(
+                &fixture.crate_root,
+                target,
+                Some(explicit.as_os_str()),
+                false,
+                &fixture.manifest_sha256(),
+            )
+            .is_ok()
+        );
+        rewrite_fixture_targets(&fixture, |assets| {
+            assets.retain(|asset| asset["target"] != target);
+        });
+        let failure = resolve_native_library_with_options(
+            &fixture.crate_root,
+            target,
+            Some(explicit.as_os_str()),
+            false,
+            &fixture.manifest_sha256(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            failure.contains("no asset for target x86_64-apple-darwin"),
+            "{failure}"
+        );
     }
 
     fn copy_target_contents(source: &Path, destination: &Path) {

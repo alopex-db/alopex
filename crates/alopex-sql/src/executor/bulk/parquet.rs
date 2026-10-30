@@ -4,10 +4,10 @@ use std::sync::Arc;
 use alopex_core::sql::stream::ByteSized;
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, MapArray, StringArray, StructArray, Time64MicrosecondArray,
-    TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeListArray,
+    Float32Array, Float64Array, Int32Array, Int64Array, IntervalMonthDayNanoArray,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, StringArray,
+    StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -512,6 +512,18 @@ impl BulkReader for ParquetReader {
 
 fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
     match dt {
+        ArrowDataType::List(field)
+        | ArrowDataType::LargeList(field)
+        | ArrowDataType::FixedSizeList(field, _)
+            if matches!(
+                field.data_type(),
+                ArrowDataType::Float32 | ArrowDataType::Float64
+            ) =>
+        {
+            Ok(ResolvedType::Array(Box::new(map_arrow_type(
+                field.data_type(),
+            )?)))
+        }
         ArrowDataType::Int32 => Ok(ResolvedType::Integer),
         ArrowDataType::Int64 => Ok(ResolvedType::BigInt),
         ArrowDataType::Float32 => Ok(ResolvedType::Float),
@@ -544,6 +556,9 @@ fn arrow_value_to_sql(
 ) -> Result<SqlValue> {
     if array.is_null(row_idx) {
         return Ok(SqlValue::Null);
+    }
+    if let ResolvedType::Vector { dimension, .. } = expected {
+        return super::vector_parquet::read(array, *dimension, row_idx, source_row_idx);
     }
 
     match (dt, expected) {
@@ -622,9 +637,22 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             crate::executor::evaluator::nested::parse_typed_json(arr.value(row_idx), expected)
         }
-        (ArrowDataType::List(_), ResolvedType::Array(element)) => {
-            let arr = array.as_any().downcast_ref::<ListArray>().unwrap();
-            let values = arr.value(row_idx);
+        (
+            ArrowDataType::List(_) | ArrowDataType::FixedSizeList(_, _),
+            ResolvedType::Array(element),
+        ) => {
+            let values = match dt {
+                ArrowDataType::List(_) => array
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap()
+                    .value(row_idx),
+                _ => array
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .unwrap()
+                    .value(row_idx),
+            };
             (0..values.len())
                 .map(|index| {
                     arrow_value_to_sql(

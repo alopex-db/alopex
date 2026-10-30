@@ -17,7 +17,8 @@ bytes already written; callers must discard stream output after an error.
 The regression cases use two one-row COPY imports, or an empty table. They
 cover disk reopen, full scalar values (TEXT/empty/NULL, INTEGER, BIGINT, DOUBLE,
 BOOLEAN, including opposite BIGINT extremes), CSV file/stream and Parquet, with row-table controls. VECTOR Parquet
-is a separate contract tracked by [#693](https://github.com/alopex-db/alopex/issues/693).
+is described by the separate [VECTOR interchange contract](vector-parquet.md)
+tracked by [#693](https://github.com/alopex-db/alopex/issues/693).
 A related range-hint overflow during re-import is also corrected: the unsigned
 distance between signed integer extrema is computed without signed subtraction.
 
