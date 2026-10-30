@@ -1737,7 +1737,7 @@ impl<'a> MergedScanIter<'a> {
 
     fn advance_data(&mut self) {
         self.data_peek = None;
-        while let Some((k, (v, ver))) = self.data_iter.next() {
+        for (k, (v, ver)) in self.data_iter.by_ref() {
             if let Some(end) = &self.end {
                 if k >= end {
                     return;
