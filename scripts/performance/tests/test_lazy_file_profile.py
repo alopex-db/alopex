@@ -107,8 +107,9 @@ class Contracts(unittest.TestCase):
 
     def test_full_values_types_nulls_order_and_late_batch_are_required(self):
         operation, snapshot, expected = d.prepare(FakeOperations(3, []), "csv-batches", Path("fake.csv"))
+        batches, source, plan = operation()
         with self.assertRaises(AssertionError):
-            d.workload.assert_equal(snapshot(operation()[:1]), expected)
+            d.workload.assert_equal(snapshot((batches[:1], source, plan)), expected)
         for mutate in [
             lambda x: x["add"].__setitem__(-1, 99),
             lambda x: x["eq"].__setitem__(0, 1),
@@ -122,7 +123,37 @@ class Contracts(unittest.TestCase):
         reversed_values = dict(reversed(list(expected.items())))
         bad = SimpleNamespace(to_dict=lambda as_series=False: reversed_values)
         with self.assertRaisesRegex(RuntimeError, "batch column order mismatch"):
-            snapshot([bad])
+            snapshot(([bad], None, None))
+
+    def test_plan_disposal_stays_outside_timer(self):
+        events = []
+        ops = FakeOperations(3, events)
+
+        class Plan:
+            def __init__(self, label):
+                self.label = label
+
+            def select(self, *names):
+                ops.select(*names)
+                return Plan("projection")
+
+            def collect(self):
+                return ops.collect()
+
+            def __del__(self):
+                events.append(("release", self.label))
+
+        ops.api.LazyFrame.scan_csv = lambda path: Plan("source")
+        operation, snapshot, expected = d.prepare(ops, "csv-collect", Path("fake.csv"))
+        times = iter([100, 200])
+
+        def clock():
+            events.append("timer")
+            return next(times)
+        d.measure(operation, snapshot, expected, warmups=0, samples=1, clock=clock, record=lambda _: None)
+        end = len(events) - 1 - events[::-1].index("timer")
+        for label in ("source", "projection"):
+            self.assertGreater(events.index(("release", label)), end)
 
     def test_known_parquet_string_cases_stay_excluded(self):
         self.assertEqual(set(d.OPERATIONS), {"csv-collect", "csv-batches", "parquet-numeric-collect", "parquet-numeric-batches"})

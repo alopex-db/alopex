@@ -31,11 +31,15 @@ def prepare(operations, case, fixture):
         plan = (source.select(*operations.expressions()[:-1]) if "-numeric-" in case
                 else operations.select_plan(source))
         if mode == "collect":
-            return [plan.collect()]
-        with plan.collect_batches(chunk_size=8192) as stream:
-            return list(stream)
+            batches = [plan.collect()]
+        else:
+            with plan.collect_batches(chunk_size=8192) as stream:
+                batches = list(stream)
+        # The original runner releases plans with results after the timer.
+        return batches, source, plan
 
-    def snapshot(batches):
+    def snapshot(materialized):
+        batches, _, _ = materialized
         actual = {name: [] for name in expected}
         for batch in batches:
             values = batch.to_dict(as_series=False)
