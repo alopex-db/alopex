@@ -113,6 +113,18 @@ _SQL_VALUE_TAGS = frozenset(
     )
 )
 
+# These exact JSON payload types need no conversion. Subclasses and other
+# payload types still go through the full validation below; in particular bool
+# must never pass as Integer, nor an int remain an int for Double.
+_SQL_PASSTHROUGH_TYPES = {
+    "Integer": int,
+    "BigInt": int,
+    "Timestamp": int,
+    "Boolean": bool,
+    "Text": str,
+    "Double": float,
+}
+
 SqlResult = Union[List[Dict[str, Any]], int, None]
 
 
@@ -214,6 +226,8 @@ def _unwrap_sql_value(value: Any) -> Any:
     if len(value) != 1:
         raise _protocol_error(f"SqlValue is not a single-key object: {value!r}")
     ((tag, inner),) = value.items()
+    if type(inner) is _SQL_PASSTHROUGH_TYPES.get(tag):
+        return inner
     if tag not in _SQL_VALUE_TAGS:
         raise _protocol_error(
             f"unknown SqlValue tag: {tag!r} ({value!r}). When alopex-sql gains a "

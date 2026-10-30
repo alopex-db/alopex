@@ -152,6 +152,153 @@ struct CountingKV {
     reads: RowReads,
 }
 
+struct PrimaryKeyDeleteFixture {
+    store: Arc<CountingKV>,
+    catalog: Arc<RwLock<MemoryCatalog>>,
+    executor: Executor<CountingKV, MemoryCatalog>,
+}
+
+impl PrimaryKeyDeleteFixture {
+    fn new(primary_key: bool) -> Self {
+        let store = Arc::new(CountingKV::default());
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut fixture = Self {
+            executor: Executor::new(store.clone(), catalog.clone()),
+            store,
+            catalog,
+        };
+        let key = if primary_key { "PRIMARY KEY" } else { "" };
+        fixture.run(&format!("CREATE TABLE items(id INTEGER {key},v INTEGER)"));
+        fixture.run("CREATE INDEX by_v ON items(v)");
+        // SQL primary keys intentionally differ from physical row IDs.
+        fixture.run("INSERT INTO items VALUES (42,10),(7,20),(99,30)");
+        fixture.store.reads.reset();
+        fixture
+    }
+
+    fn plan(&self, sql: &str) -> LogicalPlan {
+        let statements = alopex_sql::Parser::parse_sql(&alopex_sql::AlopexDialect, sql).unwrap();
+        assert_eq!(statements.len(), 1);
+        alopex_sql::Planner::new(&*self.catalog.read().unwrap())
+            .plan(&statements[0])
+            .unwrap()
+    }
+
+    fn run(&mut self, sql: &str) -> ExecutionResult {
+        self.executor.execute(self.plan(sql)).unwrap()
+    }
+
+    fn rows(&mut self, sql: &str) -> Vec<Vec<SqlValue>> {
+        let ExecutionResult::Query(result) = self.run(sql) else {
+            panic!("expected rows");
+        };
+        result.rows
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn delete_primary_key_hit_avoids_scan_and_removes_secondary_entry() {
+    let mut fixture = PrimaryKeyDeleteFixture::new(true);
+    assert_eq!(
+        fixture.rows("DELETE FROM items WHERE id=7 RETURNING id,v"),
+        vec![vec![SqlValue::Integer(7), SqlValue::Integer(20)]]
+    );
+    let (gets, scans) = fixture.store.reads.snapshot();
+    assert!(gets > 0, "must fetch the indexed target");
+    assert_eq!(scans, 0, "point DELETE must not enumerate table rows");
+    let index = fixture
+        .catalog
+        .read()
+        .unwrap()
+        .get_index("by_v")
+        .unwrap()
+        .clone();
+    let bridge = alopex_sql::storage::TxnBridge::new(fixture.store.clone());
+    let mut read = bridge.begin_read().unwrap();
+    assert!(
+        read.index_storage(index.index_id, index.unique, index.column_indices)
+            .lookup(&SqlValue::Integer(20))
+            .unwrap()
+            .is_empty()
+    );
+    drop(read);
+    // Reusing the deleted primary key also detects a stale unique index entry.
+    fixture.run("INSERT INTO items VALUES (7,70)");
+    assert_eq!(
+        fixture.rows("SELECT id,v FROM items ORDER BY id"),
+        vec![
+            vec![SqlValue::Integer(7), SqlValue::Integer(70)],
+            vec![SqlValue::Integer(42), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(99), SqlValue::Integer(30)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn delete_primary_key_miss_and_null_do_not_scan_or_change_rows() {
+    let mut fixture = PrimaryKeyDeleteFixture::new(true);
+    for predicate in ["id=100", "id=NULL"] {
+        fixture.store.reads.reset();
+        assert!(matches!(
+            fixture.run(&format!("DELETE FROM items WHERE {predicate}")),
+            ExecutionResult::RowsAffected(0)
+        ));
+        assert_eq!(fixture.store.reads.snapshot(), (0, 0), "{predicate}");
+    }
+    assert_eq!(
+        fixture.rows("SELECT id FROM items ORDER BY id"),
+        vec![
+            vec![SqlValue::Integer(7)],
+            vec![SqlValue::Integer(42)],
+            vec![SqlValue::Integer(99)]
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn delete_primary_key_reversed_equality_uses_index() {
+    let mut fixture = PrimaryKeyDeleteFixture::new(true);
+    assert!(matches!(
+        fixture.run("DELETE FROM items WHERE 7=id"),
+        ExecutionResult::RowsAffected(1)
+    ));
+    assert_eq!(fixture.store.reads.snapshot().1, 0);
+    assert_eq!(
+        fixture.rows("SELECT id FROM items ORDER BY id"),
+        vec![vec![SqlValue::Integer(42)], vec![SqlValue::Integer(99)]]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn delete_primary_key_scan_fallbacks_keep_all_matches() {
+    for (keyed, predicate, remaining) in [
+        (false, "id=7", vec![42, 99]),
+        (true, "id=7 OR id=99", vec![42]),
+        (true, "v=20", vec![42, 99]),
+        (true, "id=7.5", vec![7, 42, 99]),
+        (true, "id=7 AND v=99", vec![7, 42, 99]),
+    ] {
+        let mut fixture = PrimaryKeyDeleteFixture::new(keyed);
+        fixture.run(&format!("DELETE FROM items WHERE {predicate}"));
+        assert!(
+            fixture.store.reads.snapshot().1 > 0,
+            "{predicate} needs scan fallback"
+        );
+        assert_eq!(
+            fixture.rows("SELECT id FROM items ORDER BY id"),
+            remaining
+                .into_iter()
+                .map(|id| vec![SqlValue::Integer(id)])
+                .collect::<Vec<_>>(),
+            "{predicate}"
+        );
+    }
+}
+
 struct CountingTransaction<'a> {
     inner: MemoryTransaction<'a>,
     reads: &'a RowReads,

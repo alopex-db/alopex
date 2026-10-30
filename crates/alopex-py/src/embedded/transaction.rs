@@ -1,4 +1,5 @@
 use super::scan_cursor;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
 
 use alopex_sql::{AlopexDialect, Parser};
@@ -140,7 +141,7 @@ pub(super) fn with_prepared_transaction<T: Send>(
 /// Close tracked sessions without exposing lifecycle state or retaining locks across GIL attach.
 pub(super) fn rollback_tracked_for_database_close(
     py: Python<'_>,
-    tracked: &Mutex<Vec<Weak<PyTransactionInner>>>,
+    tracked: &Mutex<VecDeque<Weak<PyTransactionInner>>>,
     #[cfg(test)] rollback_fail_count: &std::sync::atomic::AtomicUsize,
 ) -> PyResult<()> {
     enum CloseError {
@@ -1535,7 +1536,9 @@ mod tests {
             db.execute_sql("CREATE TABLE prepared_race (id INTEGER PRIMARY KEY)")
                 .unwrap();
             let txn = Arc::new(transaction(Arc::clone(&db), TxnMode::ReadWrite));
-            let tracked = Arc::new(Mutex::new(vec![Arc::downgrade(&txn.inner)]));
+            let tracked = Arc::new(Mutex::new(std::collections::VecDeque::from([
+                Arc::downgrade(&txn.inner),
+            ])));
             let statement = alopex_sql::Parser::parse_sql(
                 &alopex_sql::AlopexDialect,
                 "INSERT INTO prepared_race VALUES (?)",
