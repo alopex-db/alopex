@@ -743,7 +743,7 @@ mod tests {
         let mut framer = fragmented(b"abc\n", 2, 8, Some(b'"'), Some(2));
         let error = framer.next_frame(1, &context).err().unwrap();
         assert!(
-            matches!(error, DataFrameError::Io { path: Some(path), .. } if path == PathBuf::from("fragmented.csv"))
+            matches!(error, DataFrameError::Io { path: Some(path), .. } if path.as_path() == std::path::Path::new("fragmented.csv"))
         );
         assert_eq!(context.budget.usage().reserved_bytes, 0);
         let mut framer = fragmented(b"\"unterminated", 2, 32, Some(b'"'), None);
