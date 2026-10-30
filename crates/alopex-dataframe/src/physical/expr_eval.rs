@@ -206,8 +206,10 @@ impl<'a> BatchExprEvaluator<'a> {
             .collect::<Result<Vec<_>>>()?;
 
         let mut builder = StringBuilder::new();
+        // Arrow copies each appended value, so retain capacity only for this batch.
+        let mut output = String::new();
         for row in 0..self.batch.num_rows() {
-            let mut output = String::new();
+            output.clear();
             let mut included = 0usize;
             let mut propagate_null = false;
 
@@ -234,7 +236,7 @@ impl<'a> BatchExprEvaluator<'a> {
             if propagate_null || included == 0 {
                 builder.append_null();
             } else {
-                builder.append_value(output);
+                builder.append_value(&output);
             }
         }
         Ok(Arc::new(builder.finish()))
