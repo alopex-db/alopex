@@ -1,0 +1,1166 @@
+{
+  "schema": "alopex-runtime-release-composition-v1",
+  "owner_issue": 690,
+  "base": "8a77ba7a0e88732b0ed0d2da162c5948ae907359",
+  "source_composition": {
+    "product_head": "5a29eb71dcfe4adecd0ab3ec138239c59cb90ae5",
+    "product_tree": "42492114021991618ca949549a6853135c75a923",
+    "sources": [
+      {
+        "pr": 747,
+        "head": "f1bf9ba0ab26571e66b0ead0257b0ebfa7da3e03",
+        "branch": "fix/680-knn-contract-evidence",
+        "title": "fix(sql): enforce parser source contracts and verify bound kNN options"
+      },
+      {
+        "pr": 754,
+        "head": "f5982443b483b0a55839e702d2d0068fc65fbbb0",
+        "branch": "fix/681-cache-observations",
+        "title": "fix(embedded): distinguish HNSW capacity eviction and reset warning periods"
+      },
+      {
+        "pr": 762,
+        "head": "b1ac2bff328ee6bb10b9fa16aa95aeed9de3c6b4",
+        "branch": "feat/693-vector-parquet",
+        "title": "feat(io): support VECTOR Parquet interchange (#693)"
+      },
+      {
+        "pr": 770,
+        "head": "77d2e110b963a3bdb1abdb443e0ad328ae52ec21",
+        "branch": "fix/684-lsm-before-images",
+        "title": "perf(transaction): avoid full SQL scans at LSM transaction begin"
+      },
+      {
+        "pr": 772,
+        "head": "151ed43691051d7b13a7cf2bdc569be5050d5299",
+        "branch": "perf/682-public-api-cost",
+        "title": "test(wal): measure bounded public Python KV/SQL commit costs"
+      },
+      {
+        "pr": 763,
+        "head": "cdd753888f2135d946d3992305cdde21222c77f8",
+        "branch": "fix/688-core-latest",
+        "title": "fix(release): preserve Core latest after Python publication (#688)"
+      },
+      {
+        "pr": 775,
+        "head": "a4350a06919944a383bc5072e7a9053348df1a8a",
+        "branch": "ci/431-public-verification-budget",
+        "title": "ci(release): bound public verification workspace and cleanup (#431)"
+      }
+    ],
+    "all_sources_ancestors": true,
+    "files": [
+      {
+        "path": ".github/workflows/alopex-py-release.yml",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "a446435ba96038e601d375f6713831ba3e60f463"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "owners": [
+          747
+        ],
+        "matches_source": [],
+        "blob": "e20ca8ec9f525f9ed390d1258c9f0484182e86ad",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": ".github/workflows/public-release-verification.yml",
+        "owners": [
+          763,
+          775
+        ],
+        "matches_source": [],
+        "blob": "3be9a41e3b82f87ec327b9a31d306cff9dbf9b7c",
+        "resolution": "workflow artifact union with regression and two caught negative controls"
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "417d929a3fdda659fa70a663ec808aa201725b3f"
+      },
+      {
+        "path": "crates/alopex-core/src/kv/any.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "caadfeec88f36689dbda1db3033be8d671b9f6ce"
+      },
+      {
+        "path": "crates/alopex-core/src/kv/lsm_journal_tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "f25e9bc6c2338d92d32989b3553f0f7748e5edf0"
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/journal_tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ab6990764768b80a30898ee8de8eaee71e8fcc32"
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/mod.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [],
+        "blob": "8fc5a627e3a7a4d1b5c4528ab9168f3e8f49fb89",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/overflow/tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "cc4696b7d352d834fad69b6a3cd63f7996c21d6a"
+      },
+      {
+        "path": "crates/alopex-embedded/examples/begin_profile.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "a1c6e9121bbb9b5fbb34b6f823a5a414cc43d26f"
+      },
+      {
+        "path": "crates/alopex-embedded/examples/begin_resources.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "f73ebbfbac7337f1d773fbdff1cab65a59019693"
+      },
+      {
+        "path": "crates/alopex-embedded/src/hnsw_cache.rs",
+        "owners": [
+          754
+        ],
+        "matches_source": [
+          754
+        ],
+        "blob": "8a2a55215d5f41b12775ea4563ce17d4ffd2363c"
+      },
+      {
+        "path": "crates/alopex-embedded/src/lib.rs",
+        "owners": [
+          754
+        ],
+        "matches_source": [],
+        "blob": "20f01290b6ff1eb01c0e16f41e8dce7686f55c90",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-embedded/tests/knn_bound_options.rs",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "c60514bbd673f452d89815d4da7cb767bf183851"
+      },
+      {
+        "path": "crates/alopex-embedded/tests/lsm_journal_before_images.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ec3414618fa6c33f290a1c85af886f8be00f3912"
+      },
+      {
+        "path": "crates/alopex-embedded/tests/vector_parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "d2e99880429606bf5324c3aaa9c617a1b91eed5c"
+      },
+      {
+        "path": "crates/alopex-py/tests/test_lsm_journal.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "607408f8ce5cd9c118db06e0ca99a48fa7299f98"
+      },
+      {
+        "path": "crates/alopex-py/tests/test_vector_parquet.py",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "848349df08ee0b4537b52c8901cf4aac2e2febc0"
+      },
+      {
+        "path": "crates/alopex-sql/build.rs",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "4c7a92a579984b512981556483caf4bc24fe082d"
+      },
+      {
+        "path": "crates/alopex-sql/build_support.rs",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "16c65db43eb6baef41ede2b637ac1a56864ec38e"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/mod.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "afc411a1a88e922c3fc51aa5bc0a227be63786f9"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "4b88e904890d0977772edb81838ee4bd2c366107"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/vector_parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "5710ac726c81a97875f3421d83081b8a602f54da"
+      },
+      {
+        "path": "crates/alopex-sql/src/planner/mod.rs",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "1671e225fd662ab66066802ce39ab3b7f4aa6929"
+      },
+      {
+        "path": "crates/alopex-sql/src/storage/bridge.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [],
+        "blob": "2422e7869e52964adfe8ace656561624f504a819",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-sql/tests/fixtures/parser_wire_provenance.md",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "af9cd83039eaa0f7ada2ad39906ed5a9873b8c06"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-baseline.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "1029c5fb9676076052f01935f2d69eebba8b631f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-hnsw-resources.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "acda35a566a61dafcfa47a33172cb42eb397f861"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-lsm-fix.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "9d8e8875d6b45eb5c54e6ccf995083e711ef2522"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-native-resources.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "66d89bb9ad384ad58b4351298802b31dc07b2d72"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-python-comparison.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "66abacbfa8c6232835e7d4c086c76764c4cc441f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-first-write-comparison.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "5bf22b986cc38c10ae33942ab84bb08a089a4381"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/wal-overflow-public-api-cost.json",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "3bcd751e14b41a9d1e04fc25dc6c1c3cccfd975f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/wal-overflow-public-api-cost.md",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "26e65ce79659edd3dff6d449e07e8aecaa1e14f3"
+      },
+      {
+        "path": "docs/columnar-export.md",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "1f01f87440b4bb4d39b9f8966828cafc3a97cc0d"
+      },
+      {
+        "path": "docs/hnsw-cache-observations.md",
+        "owners": [
+          754
+        ],
+        "matches_source": [
+          754
+        ],
+        "blob": "419b5185188e437051ecb07f66f1e971b8f5e36f"
+      },
+      {
+        "path": "docs/release-pipeline-responsibilities.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [],
+        "blob": "c878e28d04804339e7b6acaa909759b2e12a08ab",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "docs/release/core-latest.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "cdfcc83e361a22d9dd841c67d58f6be5f34ae1f0"
+      },
+      {
+        "path": "docs/release/optional-intel-parser.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "f33b459557edb090a83ec06db59f17396e5d9b03"
+      },
+      {
+        "path": "docs/release/report-publication.md",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "fe25c3d841a9de4ab37ded8abfd023ef6c8813da"
+      },
+      {
+        "path": "docs/sql-explain.md",
+        "owners": [
+          747
+        ],
+        "matches_source": [],
+        "blob": "eb83514c34710d06e65be30f636cd4f44d10bd77",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "docs/vector-parquet.md",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "4984c9a1bb60eab4f064812078da52edfcb2bc78"
+      },
+      {
+        "path": "scripts/ci/check_parser_wire_contract.py",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "8bfa7b3a38bc9cfdd730a5a302803ee50e24e187"
+      },
+      {
+        "path": "scripts/ci/test_parser_source_contract.py",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "30acc2c8284e089caec5f28461944a7b00acd3b7"
+      },
+      {
+        "path": "scripts/compatibility/README.md",
+        "owners": [
+          772
+        ],
+        "matches_source": [],
+        "blob": "9cacb1d25c5545f98cd82b56c1afcb684015a92e",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "scripts/compatibility/public_api_cost.py",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "bf25c9bfb3ccdbd1bbbd2a2e859a12174e231760"
+      },
+      {
+        "path": "scripts/compatibility/test_public_api_cost.py",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "700b2ec7d7c3886cc7847db0d7019aa8b523a118"
+      },
+      {
+        "path": "scripts/compatibility/vector_parquet_legacy.py",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "fc778197c1607681a129106d7bd8bade73568849"
+      },
+      {
+        "path": "scripts/performance/begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "6bcb0810926530906404a6719acb969e6b084528"
+      },
+      {
+        "path": "scripts/performance/begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ba29a73288681b9fa92951166adfa121d9aef288"
+      },
+      {
+        "path": "scripts/performance/first_write_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "e89b4d11aa6517e053fd31c193e6268819f430ff"
+      },
+      {
+        "path": "scripts/performance/run_begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "bdcd5862d12ce6b45052918cc1f7ab8026ec39dc"
+      },
+      {
+        "path": "scripts/performance/run_begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "c56a993337b3a5a8afb3fefe90aa73dee5a8d0b2"
+      },
+      {
+        "path": "scripts/performance/run_first_write_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "9c59921b047d2af3a804092ae22fa8312c9a0deb"
+      },
+      {
+        "path": "scripts/performance/run_native_begin_resources.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "fa52dee714ed27565ed2aed66bb58a39f941ad94"
+      },
+      {
+        "path": "scripts/performance/tests/test_begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "3a5d37c4ae13431ab499c7d0a4ed02573bd81e50"
+      },
+      {
+        "path": "scripts/performance/tests/test_begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "644c30d9bb4de08d5809b64bcd53e32e5ee936e8"
+      },
+      {
+        "path": "scripts/release/intel_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "086527024325e3cbaeabeb1b49ef8366cdbedf80"
+      },
+      {
+        "path": "scripts/release/parser_asset_manifest.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "f396efeffade61d07b900614ca85cda65e7868ed"
+      },
+      {
+        "path": "scripts/release/parser_supplement.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "e5a3789971c374894d1d1612fafb9189c25d8249"
+      },
+      {
+        "path": "scripts/release/primary_distributions.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "dafa772347d8f153dc4b9157e89c459cdacea5e1"
+      },
+      {
+        "path": "scripts/release/publication_failure.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "988f328e4c25b4e57623c1755038917cf41bf82b"
+      },
+      {
+        "path": "scripts/release/publication_record.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "79f348e0022231e5d7d8d540e1631729168004be"
+      },
+      {
+        "path": "scripts/release/report_pair.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "a654c8c05262db232b7c5c3d9dc7962a153355f2"
+      },
+      {
+        "path": "scripts/release/retarget_python_parser_source.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "27f091def4a33e4dbfdced644d9749de9e824cc0"
+      },
+      {
+        "path": "scripts/release/tests/test_alopex_final_join_workflow.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "eca4be8f3f9e36a754fff9694da69b5a835779fc"
+      },
+      {
+        "path": "scripts/release/tests/test_intel_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "fd61e01521f8901251c4f68735abb002b7493feb"
+      },
+      {
+        "path": "scripts/release/tests/test_latest_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "6159420179ff88e8339ca24855386d85bda1bb19"
+      },
+      {
+        "path": "scripts/release/tests/test_parser_asset_manifest.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "881c7981846c126f9bb2fb759e0128148e8b2d2a"
+      },
+      {
+        "path": "scripts/release/tests/test_parser_supplement.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "b2bf954a42a90de8a35a96643f24da32ad09a2d1"
+      },
+      {
+        "path": "scripts/release/tests/test_public_release_workflow.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "8da8ffafa396726617ce4e98a7089b5fbdf56ab4"
+      },
+      {
+        "path": "scripts/release/tests/test_public_verification_cleanup.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [],
+        "blob": "939581230b93bfc574f1d4097b76f88d1ad35a63",
+        "normalized_source_patch_equal": false
+      },
+      {
+        "path": "scripts/release/tests/test_publication_failure.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "5a107f5352c10ffbda0adccf03875a943b0b10c2"
+      },
+      {
+        "path": "scripts/release/tests/test_release_contract.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "a9bdde2cef7b97ae2e646fceff4afc47ed530c53"
+      },
+      {
+        "path": "scripts/release/tests/test_report_pair.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "e54de68501418eb0d2eb544d17565d34cf23b4a9"
+      },
+      {
+        "path": "scripts/release/tests/test_report_publish_shell.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "c86d5a8527a311e4139ec01d9fa4b2d35af3c4c0"
+      },
+      {
+        "path": "scripts/release/tests/test_retarget_python_parser_source.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "d78800d6162a8a910bd1c02bd7f558c5ce119693"
+      },
+      {
+        "path": "scripts/release/tests/test_verify_release_join.sh",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "0adc74d02cac15588132483082b91554be1e9d58"
+      },
+      {
+        "path": "scripts/release/verify-release/run.sh",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "45964eea16fdf32a102e19a4cbd416970f29dbcf"
+      },
+      {
+        "path": "scripts/release/verify_latest_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "fc5c90e4d712a7a32e5f9740d5fc190e51c70a5c"
+      }
+    ]
+  },
+  "merge_steps": [
+    {
+      "pr": 747,
+      "status": 0,
+      "head": "e72d01410a50762be1999f89f37d99e5d65eff91"
+    },
+    {
+      "pr": 754,
+      "status": 0,
+      "head": "9e7b8307dce606a1db9c3cfc8090a82096b03216"
+    },
+    {
+      "pr": 762,
+      "status": 0,
+      "head": "1d13ff8211e9c9474b3164c7d914cbd2ba113aaf"
+    },
+    {
+      "pr": 770,
+      "status": 0,
+      "head": "11d7117ae583f75df1158c708081f2520076a504"
+    },
+    {
+      "pr": 772,
+      "status": 0,
+      "head": "93351663ef17d854cd85b5c31891032e675cb764"
+    },
+    {
+      "pr": 763,
+      "status": 0,
+      "head": "429f349910f5527ced34b6f8bbc8574ebd639c7c"
+    },
+    {
+      "pr": 775,
+      "status": 1,
+      "head": "429f349910f5527ced34b6f8bbc8574ebd639c7c",
+      "resolution": {
+        "head": "5a29eb71dcfe4adecd0ab3ec138239c59cb90ae5",
+        "path": ".github/workflows/public-release-verification.yml",
+        "behavior": "union latest identity and failure/storage artifact paths, with tiny cleanup/upload regression"
+      }
+    }
+  ],
+  "native_checks": [
+    {
+      "name": "core-journal",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "journal_"
+      ],
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "core-aggregate",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "aggregate_"
+      ],
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "core-capacity",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "overwrite_delete_and_savepoint_restore_capacity"
+      ],
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-journal",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "lsm_journal_before_images",
+        "--test",
+        "wal_overflow_journal"
+      ],
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-cache",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--lib",
+        "hnsw_cache"
+      ],
+      "passed": 30,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-public",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "hnsw_cold_publication",
+        "--test",
+        "hnsw_savepoint_cache",
+        "--test",
+        "hnsw_transaction_cache",
+        "--test",
+        "hnsw_two_index_eviction",
+        "--test",
+        "knn_bound_options",
+        "--test",
+        "vector_parquet"
+      ],
+      "passed": 55,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "sql-bulk",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-sql",
+        "--lib",
+        "executor::bulk::"
+      ],
+      "passed": 52,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "release_python": {
+    "total": 203,
+    "passed": 201,
+    "skipped": 2,
+    "skip_reasons": [
+      "native Windows path aliases",
+      "native x86_64 Linux Docker parser build"
+    ]
+  },
+  "parser_contracts": {
+    "passed": 17
+  },
+  "negative_controls": {
+    "results": [
+      {
+        "control": "omit-latest",
+        "exit": 1,
+        "result": "caught"
+      },
+      {
+        "control": "omit-storage",
+        "exit": 1,
+        "result": "caught"
+      }
+    ],
+    "restored_sha256": "b62e9e3f04e15363c65498925f184efb16e3b8889d98f1a1107f69b4b6491953",
+    "restored_exit": 0
+  },
+  "other_checks": {
+    "change_scope": "passed",
+    "release_join": "passed",
+    "release_reporting": "passed",
+    "fmt": "passed",
+    "diff_check": "passed",
+    "changed_workflow_yaml_parse": 4,
+    "actionlint": "unavailable"
+  },
+  "storage": {
+    "initial_bytes": 19349020672,
+    "peak_bytes": 19628228608,
+    "after_cleanup_bytes": 19351900160,
+    "declared_additional_bytes": 3000000000,
+    "stop_bytes": 40000000000,
+    "hard_limit_bytes": 50000000000
+  },
+  "cleanup": {
+    "native_executables": [
+      {
+        "path": "target/debug/deps/alopex_core-0ba0a637acb03ac4",
+        "size": 10525216,
+        "sha256": "fee0c9dec2d4d6290120b10cf8839f9aad7e3bc597b6148dedbfa1d1a375f3a2"
+      },
+      {
+        "path": "target/debug/deps/alopex_embedded-e552725521824c1e",
+        "size": 33773616,
+        "sha256": "8d0ff5860dcf35f4e64d822f1333ef6cc448cee1ae490d108039e65a7c9eb6ff"
+      },
+      {
+        "path": "target/debug/deps/alopex_sql-6c5ab597ba6f744b",
+        "size": 33245760,
+        "sha256": "c896b7a5dc2ff26ce49e671a708f242704bf5d0fdd85c5d47dc3491e26e08958"
+      },
+      {
+        "path": "target/debug/deps/hnsw_cold_publication-117cd860248cbfd4",
+        "size": 31361968,
+        "sha256": "0776643d89df21455d766b7fd2238c7e7cebcde4fd49e539041c8855f18c0c9b"
+      },
+      {
+        "path": "target/debug/deps/hnsw_savepoint_cache-10686190f74d84a4",
+        "size": 31390512,
+        "sha256": "bfc71494b63bfc083008ab16e01bcbc29da98b447917c1888dc03ceaafa6c853"
+      },
+      {
+        "path": "target/debug/deps/hnsw_transaction_cache-e1c5317508d861c0",
+        "size": 31303104,
+        "sha256": "4221525a999adc2d014ad9157dfe5be57a848ecf5a5fe2cd6da1e0430dfa9b1f"
+      },
+      {
+        "path": "target/debug/deps/hnsw_two_index_eviction-3406a34218ff4713",
+        "size": 31359696,
+        "sha256": "7c744e2d94d88d97b7789b21866b375ce178cda702bf994a3f2ca90710c94930"
+      },
+      {
+        "path": "target/debug/deps/knn_bound_options-6c805b0980458421",
+        "size": 31562160,
+        "sha256": "2ec25d2a8da57da0a06ccc05c10a2cc278ddb23fb3ff6d61bfd1bd5495873e48"
+      },
+      {
+        "path": "target/debug/deps/lsm_journal_before_images-33a92ce9433b24c9",
+        "size": 4579632,
+        "sha256": "87b7276402fcd92e007e3a8ff2e75d6c831d207cad8906cb3c169dedec380543"
+      },
+      {
+        "path": "target/debug/deps/vector_parquet-116a961e9e1f6daf",
+        "size": 31103712,
+        "sha256": "fca5e656fe5c52e820c2710865b6e8ad83eb075ba713bea3eccc1627ed0fa040"
+      },
+      {
+        "path": "target/debug/deps/wal_overflow_journal-107d8f5e4d0c9828",
+        "size": 2700928,
+        "sha256": "7e7876ff340b1d72b614b3408c5278d2f010787e64316a5892d05217a9cd86d9"
+      }
+    ],
+    "parser_archive_removed": true,
+    "parser_extracted_removed": true,
+    "retained": "Compact logs and shared Cargo dependencies for active v0.8.17 release work; owner Codex"
+  },
+  "parser": {
+    "release": "v0.8.16",
+    "contract": "0.28.0",
+    "target": "aarch64-apple-darwin",
+    "archive_sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d",
+    "development_override": true,
+    "release_qualification": false
+  },
+  "logs": {
+    "change-scope.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cleanup-restored.log": "97b2f5a9d8feeedf564629023bd23afe8368f887dac126643c706d8bc935d90e",
+    "core-aggregate.log": "5e8da12d0c057845ce26767707513b41aca03918e1fa36559fa0f59b114163ec",
+    "core-capacity.log": "e21622de17f9b47e56d51e6d6b6c0d322d3b4ac2c8726b4a24a9600899f91481",
+    "core-journal.log": "6d301a9534fd95091a7afeb7efde3a4feb5d440629cb373494f801ff9c66cff7",
+    "embedded-cache.log": "cca741d2e8ce1f5d5d05f2f1e56b960658f74d7b5eb685c4c3b099ddfff5e5d6",
+    "embedded-journal.log": "f854ac789baf22c35d1bcf9c8fc374a3e7025459e68af158de48da3d45ff55cf",
+    "embedded-public.log": "b19e87b2748e81976a6db0f5cf0f0901c3de2dde2760c39fa72789e4128d47c6",
+    "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "merge-747.log": "e1296dd408b76a2f2382a768c8a1a5cb19ec43edb651f1d2bcddf2f6412eb0c8",
+    "merge-754.log": "64881f4f641c13bd164ccc710a7f0ace5b85456ddee40e1dcaf9b8063b405b97",
+    "merge-762.log": "94938341dbfd7d48b85cf4b8a1bedaccb513c6fc83f6c3ec38bae36cacd5227d",
+    "merge-763.log": "26207f5fe3e7b1587ee0af573914b748b20e23c2871b3b55b1281a2039d13b9f",
+    "merge-770.log": "a04a1da1e2d745757ebecf02b507624b4ea414280aeb1f0385fd3fdd9b2a01fb",
+    "merge-772.log": "f32c9f5ef7fb34e49a083b6a066dbb52220d5d4541028aa2f808273c52e95358",
+    "merge-775.log": "2159fdca8d06e6af3b00f9af5455d1bf5340f2cc333e4e6cdb91be271cf825e0",
+    "omit-latest.log": "476b98f7c649e150ce858ed45408504f76bea16868fadc967bc97ea8a0517814",
+    "omit-storage.log": "88df75100b85dcca352557d8965945cab3096fb8c7f5690e0409830c0fcd486f",
+    "parser-contracts.log": "af4d98b93bbd8c583e7b7fbe07b18459c84502946a6add8ffa3111103fdbec75",
+    "release-join.log": "f0b2a820fa658bf27775f5abd083980fb7980a5babde1f04f65c37b2b425692c",
+    "release-reporting.log": "e1bb5a14a8aae03dc10854e1ca09f5775aa29ebaf207417b89944fc292500f80",
+    "release-tests.log": "1b5574c1734219704f99be5e6f8e469d8280a90d8b022c41c39466a7aa7dc7c8",
+    "sql-bulk.log": "4cd1319091b7dc611afba651ae0dd26d4f9b82b06a7349516b6ae2b46f635901",
+    "workflow-yaml.log": "37b7b2d680835702e55b3a6a38379aa82db4cb5728ea7efc7602ade0010eadd8"
+  },
+  "integration": "Draft stack on #793; not candidate acceptance",
+  "remaining": [
+    "Required CI and candidate integration",
+    "Frozen-candidate functional and performance acceptance",
+    "RC/package qualification",
+    "Publication and postrelease verification",
+    "main merge"
+  ],
+  "next_action": "Check required #791 CI, then integrate/retarget composition chain in order; owner Codex"
+}
