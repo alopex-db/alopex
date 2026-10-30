@@ -1,0 +1,295 @@
+{
+  "source": "5e05f0149e93e92455e59fe8c3a4cdfbec19e578",
+  "binary_sha256": "a14ab01f10cf37b27f0fdd7e422bc79128507499d63519b02023b67cc47b95dd",
+  "example_source_sha256": "aa06599e8f162cd1ca9a19490fd83b887aec690f7c328791500e8db55d90437a",
+  "runner_sha256": "00157be9c59ff5724494320ae54f5d25c026a2dd291750d740d099a2a932b558",
+  "rows": 100000,
+  "dimensions": 384,
+  "rss_limit": 8000000000,
+  "timeout_seconds": 900,
+  "base_candidate": "a40e39cb3d833363c8683faee5701b267d3917dc",
+  "date": "2026-10-29",
+  "platform": "macOS aarch64",
+  "physical_memory_bytes": 51539607552,
+  "logical_cpus": 18,
+  "profile": "test (opt-level=1), incremental=0, dev/test debug=0, build jobs=2",
+  "runtime_threads": {
+    "RAYON_NUM_THREADS": 2,
+    "OMP_NUM_THREADS": 2
+  },
+  "parser": "Explicit development override: published alopex-sql 0.8.16 aarch64-apple-darwin parser; not release artifact qualification",
+  "outcome": "passed",
+  "events": [
+    {
+      "phase": "seed",
+      "data": {
+        "event": "start",
+        "rows": 100000,
+        "dimensions": 384
+      }
+    },
+    {
+      "phase": "seed",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 1848117875
+      }
+    },
+    {
+      "phase": "index_build",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "index_build",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 174249296709
+      }
+    },
+    {
+      "phase": "cold_transaction_1",
+      "data": {
+        "event": "start",
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 0,
+          "entries": 0,
+          "hits": 0,
+          "misses": 0,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 0,
+          "indexes": []
+        }
+      }
+    },
+    {
+      "phase": "cold_transaction_1",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 238852417,
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 0,
+          "entries": 0,
+          "hits": 0,
+          "misses": 1,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 226587167,
+          "indexes": []
+        }
+      }
+    },
+    {
+      "phase": "cold_transaction_2",
+      "data": {
+        "event": "start",
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 0,
+          "entries": 0,
+          "hits": 0,
+          "misses": 1,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 226587167,
+          "indexes": []
+        }
+      }
+    },
+    {
+      "phase": "cold_transaction_2",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 221146417,
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 0,
+          "entries": 0,
+          "hits": 0,
+          "misses": 2,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 435351792,
+          "indexes": []
+        }
+      }
+    },
+    {
+      "phase": "warm",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "warm",
+      "data": {
+        "event": "end",
+        "graph_bytes": 180643400,
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 180643400,
+          "entries": 1,
+          "hits": 0,
+          "misses": 3,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 644268584,
+          "indexes": [
+            {
+              "name": "ih",
+              "bytes": 180643400,
+              "hits": 0,
+              "last_access_ns": 176790243792
+            }
+          ]
+        }
+      }
+    },
+    {
+      "phase": "writer_begin",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "writer_begin",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 22417
+      }
+    },
+    {
+      "phase": "first_insert",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "first_insert",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 712189167,
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 180643400,
+          "entries": 1,
+          "hits": 1,
+          "misses": 3,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 644268584,
+          "indexes": [
+            {
+              "name": "ih",
+              "bytes": 180643400,
+              "hits": 1,
+              "last_access_ns": 176800849750
+            }
+          ]
+        }
+      }
+    },
+    {
+      "phase": "second_insert",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "second_insert",
+      "data": {
+        "event": "end",
+        "elapsed_ns": 555080584,
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 180643400,
+          "entries": 1,
+          "hits": 2,
+          "misses": 3,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 644268584,
+          "indexes": [
+            {
+              "name": "ih",
+              "bytes": 180643400,
+              "hits": 1,
+              "last_access_ns": 176800849750
+            }
+          ]
+        }
+      }
+    },
+    {
+      "phase": "rollback",
+      "data": {
+        "event": "start"
+      }
+    },
+    {
+      "phase": "rollback",
+      "data": {
+        "event": "end"
+      }
+    },
+    {
+      "phase": "complete",
+      "data": {
+        "stats": {
+          "limit_bytes": 268435456,
+          "limit_entries": 128,
+          "used_bytes": 180643400,
+          "entries": 1,
+          "hits": 2,
+          "misses": 3,
+          "evictions": 0,
+          "oversize_skips": 0,
+          "invalidations": 0,
+          "load_ns_total": 644268584,
+          "indexes": [
+            {
+              "name": "ih",
+              "bytes": 180643400,
+              "hits": 1,
+              "last_access_ns": 176800849750
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "phase_sampled_peak_rss_bytes": {
+    "seed": 942669824,
+    "index_build": 1509670912,
+    "cold_transaction_1": 1524957184,
+    "cold_transaction_2": 1525071872,
+    "warm": 1525071872,
+    "writer_begin": 1525104640,
+    "first_insert": 1975140352,
+    "second_insert": 1979957248,
+    "rollback": 1979957248,
+    "complete": 1945632768
+  },
+  "children_lifetime_peak_rss_bytes": 1979957248,
+  "peak_scope": "Original runner labelled RUSAGE_CHILDREN as process lifetime peak. It includes workload and monitor utilities. Only per-phase ps samples identify workload RSS; samples are lower bounds, not exact maxima. The runner label is corrected after this baseline; no measurement was repeated.",
+  "initial_host_bytes": 13449752576,
+  "final_host_bytes": 13449998336
+}
