@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
@@ -29,6 +30,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::{Receiver, Sender};
 
+/// A Weak still pins its Arc allocation after the transaction handle is gone.
+/// Rotate a fixed amount of tracking work on each successful begin: live entries
+/// remain available to close/retry, and expired entries cannot hide behind them.
+/// A full retain on every begin would become quadratic for many live handles.
+fn sweep_expired_transactions<T>(tracked: &mut VecDeque<Weak<T>>) {
+    for _ in 0..tracked.len().min(8) {
+        if let Some(weak) = tracked.pop_front() {
+            if weak.strong_count() > 0 {
+                tracked.push_back(weak);
+            }
+        }
+    }
+}
+
 #[pyclass(name = "Database")]
 pub struct PyDatabase {
     inner: Option<Arc<alopex_embedded::Database>>,
@@ -36,7 +51,7 @@ pub struct PyDatabase {
     control: Arc<DatabaseControl>,
     streams: Arc<StreamLeaseRegistry>,
     dataframe_streams: Arc<DataFrameStreamRegistry>,
-    txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
+    txns: Arc<Mutex<VecDeque<Weak<PyTransactionInner>>>>,
     #[cfg(test)]
     rollback_fail_count: AtomicUsize,
     #[cfg(test)]
@@ -373,7 +388,7 @@ impl PyDatabase {
             control: Arc::new(DatabaseControl::new(thread_mode)),
             streams: Arc::new(StreamLeaseRegistry::default()),
             dataframe_streams: Arc::new(DataFrameStreamRegistry::default()),
-            txns: Arc::new(Mutex::new(Vec::new())),
+            txns: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(test)]
             rollback_fail_count: AtomicUsize::new(0),
             #[cfg(test)]
@@ -810,7 +825,8 @@ impl PyDatabase {
             self.control.clone(),
             self.streams.clone(),
         )?;
-        guard.push(Arc::downgrade(&py_txn.inner));
+        sweep_expired_transactions(&mut guard);
+        guard.push_back(Arc::downgrade(&py_txn.inner));
         Ok(py_txn)
     }
 
@@ -1439,6 +1455,86 @@ mod tests {
                 .execute_sql(py, "SELECT id FROM t WHERE id = ?", Some(scalar))
                 .expect_err("scalar params");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+        });
+    }
+
+    #[test]
+    fn tracking_reclaims_dropped_handles_before_database_close() {
+        with_py(|py| {
+            for mode in [
+                alopex_core::TxnMode::ReadOnly,
+                alopex_core::TxnMode::ReadWrite,
+            ] {
+                let db = PyDatabase::new(None, None, None).unwrap();
+                for _ in 0..3 {
+                    let txn = Py::new(py, db.begin(Some(mode.into())).unwrap()).unwrap();
+                    txn.bind(py).call_method0("rollback").unwrap();
+                    drop(txn);
+                    // Only the handle from this begin may await the next sweep.
+                    // An unbounded list of expired Weak entries retains each Arc allocation.
+                    assert_eq!(db.txns.lock().unwrap().len(), 1);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn tracking_sweep_checks_at_most_eight_expired_entries() {
+        use std::sync::Arc;
+
+        let mut tracked = (0..9).map(|_| Arc::downgrade(&Arc::new(()))).collect();
+        super::sweep_expired_transactions(&mut tracked);
+        assert_eq!(
+            tracked.len(),
+            1,
+            "one begin must not sweep the entire backlog"
+        );
+        super::sweep_expired_transactions(&mut tracked);
+        assert!(tracked.is_empty());
+    }
+
+    #[test]
+    fn tracking_sweep_rotates_live_entries_to_reach_expired_tail() {
+        use std::sync::{Arc, Weak};
+
+        let live: Vec<_> = (0..12).map(Arc::new).collect();
+        let mut tracked: std::collections::VecDeque<_> = live.iter().map(Arc::downgrade).collect();
+        tracked.push_back(Arc::downgrade(&Arc::new(99)));
+        super::sweep_expired_transactions(&mut tracked);
+        assert_eq!(tracked.len(), 13, "tail is outside the first sweep budget");
+        super::sweep_expired_transactions(&mut tracked);
+        assert_eq!(tracked.len(), 12);
+        for handle in &live {
+            assert_eq!(Arc::strong_count(handle), 1);
+            assert_eq!(
+                tracked
+                    .iter()
+                    .filter(|weak| Weak::ptr_eq(weak, &Arc::downgrade(handle)))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn tracking_churn_preserves_live_handles_for_close_retry() {
+        with_py(|py| {
+            let mut db = PyDatabase::new(None, None, None).unwrap();
+            let live = [db.begin(None).unwrap(), db.begin(None).unwrap()];
+            for _ in 0..3 {
+                let txn = Py::new(py, db.begin(None).unwrap()).unwrap();
+                txn.bind(py).call_method0("rollback").unwrap();
+                drop(txn);
+            }
+            db.inject_rollback_failure_once();
+            db.close(py)
+                .expect_err("failed live handle must stay tracked");
+            assert_eq!(db.txns.lock().unwrap().len(), 1);
+            db.close(py).unwrap();
+            assert!(db.txns.lock().unwrap().is_empty());
+            for txn in &live {
+                assert!(txn.inner.txn.lock().unwrap().is_none());
+            }
         });
     }
 
