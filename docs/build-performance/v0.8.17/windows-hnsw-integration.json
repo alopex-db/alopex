@@ -1,0 +1,370 @@
+{
+  "plan": {
+    "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+    "old_base": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+    "targets": {
+      "749": "ed48e081ee7647183c3c0b3249c6d0ede425a116",
+      "771": "c49b722cd50852205d99dbf8498004db5c81cc79"
+    },
+    "initial_host_bytes": 19234160640,
+    "unanswered": "Do the two green PRs compose with current candidate without changing owned behavior/evidence files?",
+    "action": "Merge candidate into each existing owned branch; compare parent-relative binary diff and owned blobs; push and require new composition CI",
+    "no_execution": "No builds, native/manual tests, worktrees or fixtures; no rerun of unchanged evidence for freshness",
+    "output": "/private/tmp/alopex-749-771-efa-composition",
+    "cleanup": "Retain only compact composition and CI evidence; preserve existing .codex/worktrees"
+  },
+  "component_composition": [
+    {
+      "number": 749,
+      "branch": "perf/681-transaction-cache-evidence",
+      "old_head": "ed48e081ee7647183c3c0b3249c6d0ede425a116",
+      "new_head": "ebc944be236faf3b9223a34ad65e32b3de130985",
+      "old_base": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+      "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+      "new_tree": "ad5dc21c156e472697781cacfdbc8af62f19fe3b",
+      "owned_blobs": {
+        "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs": "18205edbe691331fe6b1ce1ce18ae1d1df9b6837",
+        "docs/build-performance/v0.8.17/hnsw-transaction-cache-baseline.json": "64ffc720c58d2d37ef4877125415dfe046def84d",
+        "docs/build-performance/v0.8.17/hnsw-transaction-cache-baseline.md": "9474a90493daa4d82e9d55a858dd4bcc8b1965db",
+        "scripts/performance/issue681_manual.py": "ce29964486d58e77090b900cc841c5550fa53aa0"
+      },
+      "candidate_delta_files": [
+        "docs/build-performance/v0.8.17/sql-delete-baseline.json",
+        "docs/build-performance/v0.8.17/sql-delete-baseline.md",
+        "scripts/performance/run_sql_delete_profile.py",
+        "scripts/performance/sql_delete_profile.py",
+        "scripts/performance/tests/test_sql_delete_profile.py"
+      ],
+      "candidate_delta_disjoint": true,
+      "parent_relative_binary_diff_sha256": "a35bf2347108f3c8c260c01d790690d7451b2c9bb9cab9506e59c61d197fef31",
+      "owned_blobs_and_diff_identical": true
+    },
+    {
+      "number": 771,
+      "branch": "feat/682-windows-public-overflow",
+      "old_head": "c49b722cd50852205d99dbf8498004db5c81cc79",
+      "new_head": "a547e5e90de50fa4b4cce55efbb25df6959e1fbf",
+      "old_base": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+      "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+      "new_tree": "9ba9e626df220d45a7b6aa09da6286562a5e0d73",
+      "owned_blobs": {
+        ".github/workflows/ci.yml": "2a1883c45897396562f97c486b080343ea445178",
+        ".github/workflows/compatibility.yml": "ba7cdc40649f8117c1d7b1b57f871d43736c6328",
+        "crates/alopex-core/src/lsm/mod.rs": "eb6b8b71a064cf2261572446b910a33c8a1c080b",
+        "crates/alopex-core/src/lsm/overflow.rs": "554c6395e458aa5cfeb80382e97ed35664df2ec3",
+        "crates/alopex-core/src/lsm/overflow/inline_lifecycle_tests.rs": "c66af6e6b95f372bfab449a80782482c6f410147",
+        "crates/alopex-core/src/lsm/overflow/lifecycle_tests.rs": "bbe4b278bd2aa44d3671cd2ee397b8c6b33de783",
+        "crates/alopex-core/src/lsm/overflow/publication_acceptance.rs": "54a45889c9b5c1a6188d84664b5fe385133e4827",
+        "crates/alopex-core/src/lsm/publication_tests.rs": "09cb86350962b1c800e2aebb636bdb2e1bbc9041",
+        "crates/alopex-core/src/lsm/wal/overflow.rs": "2e0d2118a2d1a07ccb54b516174d529ad7b90141",
+        "crates/alopex-core/src/lsm/wal/overflow/windows_tests.rs": "d324c9abbbb1c303ac939a490eaf972bfe91fd15",
+        "crates/alopex-embedded/tests/wal_overflow.rs": "698f5e0998531e9bce69703723c5211b6d6154f6",
+        "crates/alopex-embedded/tests/wal_overflow_journal.rs": "5061990fcb57c339d1becda5b034c347af9ae3d9",
+        "crates/alopex-embedded/tests/wal_publication.rs": "7ab5f525b8faf88de44ff76772c1bb407bdcbeed",
+        "crates/alopex-py/src/types/config.rs": "486874e19c70ba1e67bf52a676172ee3d1d9297b",
+        "crates/alopex-py/tests/test_wal_overflow.py": "bdadc36a21aaf4886100c949187e7cea38670f4a",
+        "docs/build-performance/v0.8.17/windows-overflow-public.json": "d253dff3d1407985aaa8ee9dec4cd929074a7e65",
+        "docs/release-pipeline-responsibilities.md": "489d16a09824b9474cc9af8ec49e7a8a18004ab9",
+        "docs/wal-overflow-format.md": "9b87c1c9e24af891936642eccaff35d277f86755",
+        "docs/windows-overflow-acceptance.md": "8ffb324cc058e33a31fcb4ba3df6016ae3865549",
+        "scripts/ci/windows-wal-contract.py": "73ae8a3da60693385ea6082e995dda910ad7c04f",
+        "scripts/compatibility/README.md": "46b4853429639408e9ea8cf6b1f1077ce95c082b",
+        "scripts/compatibility/publication_python.py": "cf9a0d5e0622fb1643416d915d22594297aa87d5",
+        "scripts/compatibility/test_windows_overflow_acceptance.py": "a4298f96885e0c7c05df332a2ceb500569158a2b",
+        "scripts/compatibility/windows_overflow_acceptance.py": "31eea5270b19edb44513dfaae18bf34150980556"
+      },
+      "candidate_delta_files": [
+        "docs/build-performance/v0.8.17/sql-delete-baseline.json",
+        "docs/build-performance/v0.8.17/sql-delete-baseline.md",
+        "scripts/performance/run_sql_delete_profile.py",
+        "scripts/performance/sql_delete_profile.py",
+        "scripts/performance/tests/test_sql_delete_profile.py"
+      ],
+      "candidate_delta_disjoint": true,
+      "parent_relative_binary_diff_sha256": "7d22768399ea89afa2705594de226da97dbf74b81d83eaf257b9859d5a6469eb",
+      "owned_blobs_and_diff_identical": true
+    }
+  ],
+  "integration": {
+    "branch": "integration/v0.8.17-windows-hnsw-gates",
+    "head": "b5dc623fc4afe2fc00237531ebfca3ef62c87eff",
+    "tree": "2ba25aef478fc6d3dbdbfb0a262f424ea1064b0e",
+    "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+    "sources": [
+      {
+        "pr": 756,
+        "source": "529867615d6098795f0426930e6e26625c8158a1",
+        "merge_head": "74dcf1b73e617f8c0bfbb8140c9fe1e79a87aeb8"
+      },
+      {
+        "pr": 749,
+        "source": "ebc944be236faf3b9223a34ad65e32b3de130985",
+        "merge_head": "a0f1354d90e9adee00e0847a7ec312d720411ae1"
+      },
+      {
+        "pr": 771,
+        "source": "a547e5e90de50fa4b4cce55efbb25df6959e1fbf",
+        "merge_head": "b5dc623fc4afe2fc00237531ebfca3ef62c87eff"
+      }
+    ],
+    "owned_files": {
+      "crates/alopex-core/src/vector/hnsw/tests/graph_tests.rs": {
+        "issue_pr": 756,
+        "blob": "bd3a9e3688d617415317bbdc526d6aad79c8c28f"
+      },
+      "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs": {
+        "issue_pr": 756,
+        "blob": "c0a41af6f4f90795603f1e484f0b9adbf22918ba"
+      },
+      "docs/hnsw-manual-scale-cases.md": {
+        "issue_pr": 756,
+        "blob": "d8381c3745ce25cbc4381758d604541c0ce205b4"
+      },
+      "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs": {
+        "issue_pr": 749,
+        "blob": "18205edbe691331fe6b1ce1ce18ae1d1df9b6837"
+      },
+      "docs/build-performance/v0.8.17/hnsw-transaction-cache-baseline.json": {
+        "issue_pr": 749,
+        "blob": "64ffc720c58d2d37ef4877125415dfe046def84d"
+      },
+      "docs/build-performance/v0.8.17/hnsw-transaction-cache-baseline.md": {
+        "issue_pr": 749,
+        "blob": "9474a90493daa4d82e9d55a858dd4bcc8b1965db"
+      },
+      "scripts/performance/issue681_manual.py": {
+        "issue_pr": 749,
+        "blob": "ce29964486d58e77090b900cc841c5550fa53aa0"
+      },
+      ".github/workflows/ci.yml": {
+        "issue_pr": 771,
+        "blob": "2a1883c45897396562f97c486b080343ea445178"
+      },
+      ".github/workflows/compatibility.yml": {
+        "issue_pr": 771,
+        "blob": "ba7cdc40649f8117c1d7b1b57f871d43736c6328"
+      },
+      "crates/alopex-core/src/lsm/mod.rs": {
+        "issue_pr": 771,
+        "blob": "eb6b8b71a064cf2261572446b910a33c8a1c080b"
+      },
+      "crates/alopex-core/src/lsm/overflow.rs": {
+        "issue_pr": 771,
+        "blob": "554c6395e458aa5cfeb80382e97ed35664df2ec3"
+      },
+      "crates/alopex-core/src/lsm/overflow/inline_lifecycle_tests.rs": {
+        "issue_pr": 771,
+        "blob": "c66af6e6b95f372bfab449a80782482c6f410147"
+      },
+      "crates/alopex-core/src/lsm/overflow/lifecycle_tests.rs": {
+        "issue_pr": 771,
+        "blob": "bbe4b278bd2aa44d3671cd2ee397b8c6b33de783"
+      },
+      "crates/alopex-core/src/lsm/overflow/publication_acceptance.rs": {
+        "issue_pr": 771,
+        "blob": "54a45889c9b5c1a6188d84664b5fe385133e4827"
+      },
+      "crates/alopex-core/src/lsm/publication_tests.rs": {
+        "issue_pr": 771,
+        "blob": "09cb86350962b1c800e2aebb636bdb2e1bbc9041"
+      },
+      "crates/alopex-core/src/lsm/wal/overflow.rs": {
+        "issue_pr": 771,
+        "blob": "2e0d2118a2d1a07ccb54b516174d529ad7b90141"
+      },
+      "crates/alopex-core/src/lsm/wal/overflow/windows_tests.rs": {
+        "issue_pr": 771,
+        "blob": "d324c9abbbb1c303ac939a490eaf972bfe91fd15"
+      },
+      "crates/alopex-embedded/tests/wal_overflow.rs": {
+        "issue_pr": 771,
+        "blob": "698f5e0998531e9bce69703723c5211b6d6154f6"
+      },
+      "crates/alopex-embedded/tests/wal_overflow_journal.rs": {
+        "issue_pr": 771,
+        "blob": "5061990fcb57c339d1becda5b034c347af9ae3d9"
+      },
+      "crates/alopex-embedded/tests/wal_publication.rs": {
+        "issue_pr": 771,
+        "blob": "7ab5f525b8faf88de44ff76772c1bb407bdcbeed"
+      },
+      "crates/alopex-py/src/types/config.rs": {
+        "issue_pr": 771,
+        "blob": "486874e19c70ba1e67bf52a676172ee3d1d9297b"
+      },
+      "crates/alopex-py/tests/test_wal_overflow.py": {
+        "issue_pr": 771,
+        "blob": "bdadc36a21aaf4886100c949187e7cea38670f4a"
+      },
+      "docs/build-performance/v0.8.17/windows-overflow-public.json": {
+        "issue_pr": 771,
+        "blob": "d253dff3d1407985aaa8ee9dec4cd929074a7e65"
+      },
+      "docs/release-pipeline-responsibilities.md": {
+        "issue_pr": 771,
+        "blob": "489d16a09824b9474cc9af8ec49e7a8a18004ab9"
+      },
+      "docs/wal-overflow-format.md": {
+        "issue_pr": 771,
+        "blob": "9b87c1c9e24af891936642eccaff35d277f86755"
+      },
+      "docs/windows-overflow-acceptance.md": {
+        "issue_pr": 771,
+        "blob": "8ffb324cc058e33a31fcb4ba3df6016ae3865549"
+      },
+      "scripts/ci/windows-wal-contract.py": {
+        "issue_pr": 771,
+        "blob": "73ae8a3da60693385ea6082e995dda910ad7c04f"
+      },
+      "scripts/compatibility/README.md": {
+        "issue_pr": 771,
+        "blob": "46b4853429639408e9ea8cf6b1f1077ce95c082b"
+      },
+      "scripts/compatibility/publication_python.py": {
+        "issue_pr": 771,
+        "blob": "cf9a0d5e0622fb1643416d915d22594297aa87d5"
+      },
+      "scripts/compatibility/test_windows_overflow_acceptance.py": {
+        "issue_pr": 771,
+        "blob": "a4298f96885e0c7c05df332a2ceb500569158a2b"
+      },
+      "scripts/compatibility/windows_overflow_acceptance.py": {
+        "issue_pr": 771,
+        "blob": "31eea5270b19edb44513dfaae18bf34150980556"
+      }
+    },
+    "all31_source_blobs_unchanged": true,
+    "no_extra_files": true,
+    "parent_relative_diff_sha256": "a88082dba263606354f1ef6342590021df40ebc3cfb38702262adc595de4830a",
+    "normal_ci_scale_cases_ignored": 3,
+    "reason": "Include #756 before submitting the composed PR, so new normal CI never re-enables the three large HNSW diagnostic cases. One combined CI validates this union; no redundant branch pushes.",
+    "validation": "Source blobs, disjoint ownership, exact file union, ancestry, reversed attributes, git diff --check. No native builds/tests/worktrees/fixtures.",
+    "receipt_added_after_source_head": true
+  },
+  "windows_native_verification": {
+    "job": 123780773965,
+    "run": 40964107180,
+    "head": "c49b722cd50852205d99dbf8498004db5c81cc79",
+    "counts": [
+      3,
+      33,
+      5,
+      12,
+      10,
+      13,
+      4,
+      17,
+      4,
+      2,
+      12,
+      9,
+      2,
+      8
+    ],
+    "total": 134,
+    "selected_log": [
+      "##[group]Checking out the ref",
+      "HEAD is now at b951e71 Merge c49b722cd50852205d99dbf8498004db5c81cc79 into e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+      "{\"allocated_bytes\": 205571608}",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 583 filtered out; finished in 0.05s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 553 filtered out; finished in 0.99s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 581 filtered out; finished in 0.07s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 574 filtered out; finished in 0.51s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.24s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.08s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.04s",
+      "test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 569 filtered out; finished in 0.16s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.41s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 584 filtered out; finished in 0.15s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 574 filtered out; finished in 1.33s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.17s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 578 filtered out; finished in 0.06s",
+      "{\"allocated_bytes\": 1011976168}",
+      "Artifact windows-wal-contract.zip successfully finalized. Artifact ID 12942878009",
+      "Artifact windows-wal-contract has been successfully uploaded! Final size is 26294 bytes. Artifact ID is 12942878009"
+    ],
+    "merge_sha": "b951e71f0032939bc8b2e28eee56cf3f706bedb4",
+    "tree": "66bb2d1e6e1eb0a8f0b34c7a4cce92fa5ee39b25",
+    "parents": [
+      "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+      "c49b722cd50852205d99dbf8498004db5c81cc79"
+    ],
+    "source_binding": "Windows job checked out b951e71f0032939bc8b2e28eee56cf3f706bedb4; GitHub Git commit metadata confirms tree66bb2d1e6e1eb0a8f0b34c7a4cce92fa5ee39b25 equals PR771 headc49b722. Source/filter script requires all14 result counts; sum134, no failures/ignored."
+  },
+  "ci_before": [
+    {
+      "n": 749,
+      "sha": "ed48e081ee7647183c3c0b3249c6d0ede425a116",
+      "counts": {
+        "success": 41,
+        "skipped": 3
+      },
+      "incomplete": []
+    },
+    {
+      "n": 771,
+      "sha": "c49b722cd50852205d99dbf8498004db5c81cc79",
+      "counts": {
+        "success": 48,
+        "skipped": 4
+      },
+      "incomplete": []
+    },
+    {
+      "n": "candidate",
+      "sha": "efa97d586706c2e48cca49313e042f826de19f19",
+      "counts": {
+        "queued": 3,
+        "success": 15,
+        "in_progress": 2,
+        "skipped": 3
+      },
+      "incomplete": [
+        {
+          "name": "Code Coverage",
+          "status": "queued",
+          "conclusion": null,
+          "url": "https://github.com/alopex-db/alopex/actions/runs/40997461027/job/123881323929"
+        },
+        {
+          "name": "Build (macos-latest)",
+          "status": "queued",
+          "conclusion": null,
+          "url": "https://github.com/alopex-db/alopex/actions/runs/40997461027/job/123881323521"
+        },
+        {
+          "name": "Build (ubuntu-latest)",
+          "status": "in_progress",
+          "conclusion": null,
+          "url": "https://github.com/alopex-db/alopex/actions/runs/40997461027/job/123881323498"
+        },
+        {
+          "name": "Test Suite (ubuntu-latest, beta)",
+          "status": "in_progress",
+          "conclusion": null,
+          "url": "https://github.com/alopex-db/alopex/actions/runs/40997461027/job/123881323424"
+        },
+        {
+          "name": "Test Suite (macos-latest, stable)",
+          "status": "queued",
+          "conclusion": null,
+          "url": "https://github.com/alopex-db/alopex/actions/runs/40997461027/job/123881323401"
+        }
+      ]
+    }
+  ],
+  "status": "Integration submitted for fresh exact-composition CI; not candidate/release acceptance",
+  "hnsw_remaining": {
+    "remediation_head": "91d6144950c12e42b57578e31895abef5712fb4a",
+    "not_in_performance_head": "dcbd746fc6fad8ba095c9c7fbb8e5bc88a90181a",
+    "evidence": "hnsw-transaction-cache-after.md in perf/681-after-measurement retains single-pair index build +9.87%; first insert712.189→5.130ms and shared second reader221.146→0.626ms. No remeasurement this turn.",
+    "next_condition": "Compose the HNSW remediation and other adopted performance sources before final search/build acceptance; do not profile pre-remediation code as the fixed candidate."
+  },
+  "verification": [
+    "31 source files are a disjoint union of #756/#749/#771 and match their original blobs exactly",
+    "Both refreshed component branches have identical parent-relative binary diffs to their previous heads",
+    "Reversing only three ignore attribute changes reproduces both original candidate HNSW test files",
+    "No new production implementation, local native build, worktree, fixture or manual performance rerun"
+  ]
+}
