@@ -1,6 +1,7 @@
 //! Planned limits and observed outcomes for adaptive B-tree access.
 use super::{MAX_BTREE_INDEX_BYTES, MAX_BTREE_INDEX_CANDIDATES, Row};
 use crate::executor::MemoryPolicy;
+use crate::planner::LogicalPlan;
 use crate::planner::typed_expr::TypedExpr;
 use std::{cell::RefCell, rc::Rc};
 
@@ -75,16 +76,50 @@ impl Drop for BtreeTrace {
     }
 }
 
-pub(super) fn record(table: &str, index: &str, predicate: &TypedExpr, outcome: &IndexScanOutcome) {
+pub(super) fn tracing() -> bool {
+    ACTIVE_TRACE.with(|active| active.borrow().is_some())
+}
+
+/// Addresses are lookup keys for this owned execution tree only, never
+/// dereferenced or exposed. Boxed scan children retain their address as their
+/// parents move into the executor. Clone sites explicitly rebind these keys.
+pub(super) fn scan_addresses(plan: &LogicalPlan) -> Vec<usize> {
+    fn collect(plan: &LogicalPlan, addresses: &mut Vec<usize>) {
+        if matches!(plan, LogicalPlan::Scan { .. }) {
+            addresses.push(plan as *const LogicalPlan as usize);
+        }
+        for child in plan.explain_children() {
+            collect(child, addresses);
+        }
+    }
+    let mut addresses = Vec::new();
+    collect(plan, &mut addresses);
+    addresses
+}
+
+pub(super) fn record(
+    table: &str,
+    index: &str,
+    predicate: &TypedExpr,
+    outcome: &IndexScanOutcome,
+    probe_id: Option<usize>,
+) {
     ACTIVE_TRACE.with(|active| {
         if let Some(stats) = active.borrow().as_ref() {
-            record_into(&mut stats.borrow_mut(), table, index, predicate, outcome);
+            record_into_node(
+                &mut stats.borrow_mut(),
+                table,
+                index,
+                predicate,
+                outcome,
+                probe_id,
+            );
         }
     });
 }
 
-// Include the predicate so self-joins using one index with different bounds
-// do not borrow each other's outcome. Identical probes aggregate their loops.
+// Retain the predicate as a guard in addition to the statement-local node ID.
+// Only repeated execution of the same plan occurrence aggregates loops.
 fn probe_key(table: &str, index: &str, predicate: &TypedExpr) -> String {
     format!("{table}/{index}/{predicate:?}")
 }
@@ -94,33 +129,41 @@ pub(crate) struct BtreeChoice {
     pub index: String,
     key: String,
     limits: BtreeLimits,
+    probe_id: Option<usize>,
 }
 
 pub(crate) struct BtreeAccessStats {
     key: String,
+    probe_id: Option<usize>,
     candidates: u64,
     loops: u64,
     fallbacks: u64,
+    candidate_cap_fallbacks: u64,
+    byte_budget_fallbacks: u64,
     last_fallback: Option<BtreeFallback>,
 }
 
-fn record_into(
+fn record_into_node(
     stats: &mut Vec<BtreeAccessStats>,
     table: &str,
     index: &str,
     predicate: &TypedExpr,
     outcome: &IndexScanOutcome,
+    probe_id: Option<usize>,
 ) {
     let key = probe_key(table, index, predicate);
     let position = stats
         .iter()
-        .position(|stats| stats.key == key)
+        .position(|stats| stats.key == key && stats.probe_id == probe_id)
         .unwrap_or_else(|| {
             stats.push(BtreeAccessStats {
                 key,
+                probe_id,
                 candidates: 0,
                 loops: 0,
                 fallbacks: 0,
+                candidate_cap_fallbacks: 0,
+                byte_budget_fallbacks: 0,
                 last_fallback: None,
             });
             stats.len() - 1
@@ -134,6 +177,15 @@ fn record_into(
     entry.loops = entry.loops.saturating_add(1);
     if reason.is_some() {
         entry.fallbacks = entry.fallbacks.saturating_add(1);
+    }
+    match reason {
+        Some(BtreeFallback::CandidateCap) => {
+            entry.candidate_cap_fallbacks = entry.candidate_cap_fallbacks.saturating_add(1);
+        }
+        Some(BtreeFallback::ByteBudget) => {
+            entry.byte_budget_fallbacks = entry.byte_budget_fallbacks.saturating_add(1);
+        }
+        None => {}
     }
     entry.last_fallback = reason;
 }
@@ -149,11 +201,19 @@ impl BtreeChoice {
             index: index.to_owned(),
             key: probe_key(table, index, predicate),
             limits: BtreeLimits::new(memory),
+            probe_id: None,
         }
     }
 
+    pub(super) fn for_node(mut self, probe_id: usize) -> Self {
+        self.probe_id = Some(probe_id);
+        self
+    }
+
     fn actual<'a>(&self, stats: &'a [BtreeAccessStats]) -> Option<&'a BtreeAccessStats> {
-        stats.iter().find(|stats| stats.key == self.key)
+        stats
+            .iter()
+            .find(|stats| stats.key == self.key && stats.probe_id == self.probe_id)
     }
 
     pub(crate) fn annotate_json(
@@ -170,11 +230,16 @@ impl BtreeChoice {
             let path = actual.map_or("NotExecuted", BtreeAccessStats::path);
             node["actual"] = serde_json::json!({"path":path,
                 "candidates_examined":actual.map_or(0, |s| s.candidates),
+                "candidates_complete":actual.is_none_or(|s| s.candidate_cap_fallbacks == 0),
                 "loops":actual.map_or(0, |s| s.loops),
                 "fallbacks":actual.map_or(0, |s| s.fallbacks),
-                "fallback":actual.map_or("none", BtreeAccessStats::reason)});
-            if path == "Scan" {
-                node["node"] = serde_json::json!("Scan");
+                "fallback":actual.map_or("none", BtreeAccessStats::reason),
+                "last_fallback":actual.map_or("none", BtreeAccessStats::last_reason),
+                "fallback_counts": {
+                    "CandidateCap":actual.map_or(0, |s| s.candidate_cap_fallbacks),
+                    "ByteBudget":actual.map_or(0, |s| s.byte_budget_fallbacks)}});
+            if path != "IndexScan" {
+                node["node"] = serde_json::json!(path);
                 node["planned"] = serde_json::json!("IndexScan");
             }
         }
@@ -185,7 +250,8 @@ impl BtreeChoice {
         if let Some(stats) = stats {
             let actual = self.actual(stats);
             let path = actual.map_or("NotExecuted", BtreeAccessStats::path);
-            if path == "Scan" {
+            if path != "IndexScan" {
+                text = text.replacen("Scan table=", &format!("{path} table="), 1);
                 text.push_str(&format!(" planned=IndexScan index={}", self.index));
             } else {
                 text = text.replacen(
@@ -194,10 +260,16 @@ impl BtreeChoice {
                     1,
                 );
             }
-            text.push_str(&format!(" actual_path={path} candidates={} max_candidates={} max_bytes={} loops={} fallback={} fallbacks={}",
+            let candidate_relation = if actual.is_some_and(|s| s.candidate_cap_fallbacks > 0) {
+                ">="
+            } else {
+                "="
+            };
+            text.push_str(&format!(" actual_path={path} candidates{candidate_relation}{} max_candidates={} max_bytes={} loops={} fallback={} fallbacks={} candidate_cap_fallbacks={} byte_budget_fallbacks={} last_fallback={}",
                 actual.map_or(0, |s| s.candidates), self.limits.max_candidates, self.limits.max_bytes,
                 actual.map_or(0, |s| s.loops), actual.map_or("none", BtreeAccessStats::reason),
-                actual.map_or(0, |s| s.fallbacks)));
+                actual.map_or(0, |s| s.fallbacks), actual.map_or(0, |s| s.candidate_cap_fallbacks),
+                actual.map_or(0, |s| s.byte_budget_fallbacks), actual.map_or("none", BtreeAccessStats::last_reason)));
         } else {
             text = text.replacen(
                 "Scan table=",
@@ -227,6 +299,17 @@ impl BtreeAccessStats {
         }
     }
     fn reason(&self) -> &'static str {
+        match (
+            self.candidate_cap_fallbacks > 0,
+            self.byte_budget_fallbacks > 0,
+        ) {
+            (true, true) => "Mixed",
+            (true, false) => "CandidateCap",
+            (false, true) => "ByteBudget",
+            (false, false) => "none",
+        }
+    }
+    fn last_reason(&self) -> &'static str {
         match self.last_fallback {
             Some(BtreeFallback::CandidateCap) => "CandidateCap",
             Some(BtreeFallback::ByteBudget) => "ByteBudget",
@@ -247,6 +330,16 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use std::sync::{Arc, RwLock};
 
+    fn record_into(
+        stats: &mut Vec<BtreeAccessStats>,
+        table: &str,
+        index: &str,
+        predicate: &TypedExpr,
+        outcome: &IndexScanOutcome,
+    ) {
+        record_into_node(stats, table, index, predicate, outcome, None);
+    }
+
     fn probe(index: &str) {
         let predicate = TypedExpr::literal(
             crate::ast::expr::Literal::Number("1".into()),
@@ -261,6 +354,194 @@ mod tests {
                 rows: Vec::new(),
                 candidates: 1,
             },
+            None,
+        );
+    }
+
+    #[test]
+    fn btree_observation_does_not_borrow_an_identical_siblings_execution() {
+        let predicate = TypedExpr::literal(
+            crate::ast::expr::Literal::Number("1".into()),
+            crate::planner::types::ResolvedType::Integer,
+            crate::Span::default(),
+        );
+        let mut stats = Vec::new();
+        record_into_node(
+            &mut stats,
+            "t",
+            "idx",
+            &predicate,
+            &IndexScanOutcome::Rows {
+                rows: Vec::new(),
+                candidates: 1,
+            },
+            Some(1),
+        );
+        for (id, path, loops) in [(0, "NotExecuted", 0), (1, "IndexScan", 1)] {
+            let choice = BtreeChoice::new("t", "idx", &predicate, None).for_node(id);
+            let mut node = serde_json::json!({});
+            choice.annotate_json(&mut node, Some(&stats));
+            assert_eq!(node["actual"]["path"], path);
+            assert_eq!(node["actual"]["loops"], loops);
+        }
+    }
+
+    #[test]
+    fn btree_observation_clone_rebinds_only_cloned_scan_addresses() {
+        let plan = LogicalPlan::Scan {
+            table: "t".into(),
+            projection: crate::planner::Projection::All(vec![]),
+        };
+        let cloned = plan.clone();
+        let trace = BtreeTrace::start();
+        let mut context = super::super::QueryExecutionContext::default().with_btree_plan(&plan);
+        context.btree_probe_ids.insert(usize::MAX, 42);
+        let next = context.for_plan_clone(&plan, &cloned);
+        assert_eq!(next.btree_probe_ids.len(), 1);
+        assert_eq!(
+            next.btree_probe_ids
+                .get(&(std::ptr::from_ref(&cloned) as usize)),
+            Some(&0)
+        );
+        assert!(
+            !next
+                .btree_probe_ids
+                .contains_key(&(std::ptr::from_ref(&plan) as usize))
+        );
+        drop(trace);
+    }
+
+    #[test]
+    fn btree_observation_retains_all_fallback_reasons_and_marks_incomplete_candidates() {
+        let predicate = TypedExpr::literal(
+            crate::ast::expr::Literal::Number("1".into()),
+            crate::planner::types::ResolvedType::Integer,
+            crate::Span::default(),
+        );
+        let memory = MemoryPolicy::new(Some(32), SpillPolicy::FailFast);
+        let choice = BtreeChoice::new("t", "idx", &predicate, Some(&memory));
+        let mut stats = Vec::new();
+        for outcome in [
+            IndexScanOutcome::Fallback {
+                candidates: 5,
+                reason: BtreeFallback::CandidateCap,
+            },
+            IndexScanOutcome::Fallback {
+                candidates: 1,
+                reason: BtreeFallback::ByteBudget,
+            },
+            IndexScanOutcome::Rows {
+                rows: Vec::new(),
+                candidates: 1,
+            },
+        ] {
+            record_into(&mut stats, "t", "idx", &predicate, &outcome);
+        }
+        let mut node = serde_json::json!({"node":"Scan"});
+        choice.annotate_json(&mut node, Some(&stats));
+        assert_eq!(node["node"], "Adaptive");
+        assert_eq!(node["planned"], "IndexScan");
+        assert_eq!(node["actual"]["loops"], 3);
+        assert_eq!(node["actual"]["fallbacks"], 2);
+        assert_eq!(node["actual"]["fallback"], "Mixed");
+        assert_eq!(node["actual"]["last_fallback"], "none");
+        assert_eq!(
+            node["actual"]["fallback_counts"],
+            serde_json::json!({"CandidateCap":1,"ByteBudget":1})
+        );
+        assert_eq!(node["actual"]["candidates_examined"], 7);
+        assert_eq!(node["actual"]["candidates_complete"], false);
+        let text = choice.annotate_text("  Scan table=t\n", Some(&stats));
+        assert!(
+            text.starts_with("  Adaptive table=t planned=IndexScan index=idx"),
+            "{text}"
+        );
+        assert!(text.contains("candidates>=7"), "{text}");
+        assert!(text.contains("fallback=Mixed"), "{text}");
+        assert!(
+            text.contains("candidate_cap_fallbacks=1 byte_budget_fallbacks=1"),
+            "{text}"
+        );
+        assert!(text.ends_with("last_fallback=none\n"), "{text}");
+    }
+
+    #[test]
+    fn btree_observation_single_reason_survives_later_index_loop() {
+        let predicate = TypedExpr::literal(
+            crate::ast::expr::Literal::Number("1".into()),
+            crate::planner::types::ResolvedType::Integer,
+            crate::Span::default(),
+        );
+        for reason in [BtreeFallback::CandidateCap, BtreeFallback::ByteBudget] {
+            let choice = BtreeChoice::new("t", "idx", &predicate, None);
+            let mut stats = Vec::new();
+            record_into(
+                &mut stats,
+                "t",
+                "idx",
+                &predicate,
+                &IndexScanOutcome::Fallback {
+                    candidates: 1,
+                    reason,
+                },
+            );
+            record_into(
+                &mut stats,
+                "t",
+                "idx",
+                &predicate,
+                &IndexScanOutcome::Rows {
+                    rows: Vec::new(),
+                    candidates: 1,
+                },
+            );
+            let mut node = serde_json::json!({"node":"Scan"});
+            choice.annotate_json(&mut node, Some(&stats));
+            assert_eq!(node["actual"]["fallback"], format!("{reason:?}"));
+            assert_eq!(node["actual"]["last_fallback"], "none");
+            assert_eq!(
+                node["actual"]["candidates_complete"],
+                reason != BtreeFallback::CandidateCap
+            );
+        }
+    }
+
+    #[test]
+    fn btree_observation_completed_index_and_plain_plan_remain_distinct() {
+        let predicate = TypedExpr::literal(
+            crate::ast::expr::Literal::Number("1".into()),
+            crate::planner::types::ResolvedType::Integer,
+            crate::Span::default(),
+        );
+        let choice = BtreeChoice::new("t", "idx", &predicate, None);
+        let mut stats = Vec::new();
+        record_into(
+            &mut stats,
+            "t",
+            "idx",
+            &predicate,
+            &IndexScanOutcome::Rows {
+                rows: Vec::new(),
+                candidates: 1,
+            },
+        );
+        let mut node = serde_json::json!({"node":"Scan"});
+        choice.annotate_json(&mut node, Some(&stats));
+        assert_eq!(node["node"], "IndexScan");
+        assert_eq!(node["actual"]["fallback"], "none");
+        assert_eq!(node["actual"]["candidates_complete"], true);
+        let text = choice.annotate_text("Scan table=t", Some(&stats));
+        assert!(text.starts_with("IndexScan index=idx table=t"), "{text}");
+        assert!(text.contains("candidates=1"), "{text}");
+        assert!(!text.contains("planned="), "{text}");
+        let mut planned = serde_json::json!({"node":"Scan"});
+        choice.annotate_json(&mut planned, None);
+        assert_eq!(planned["node"], "IndexScan");
+        assert!(planned.get("actual").is_none());
+        assert!(
+            choice
+                .annotate_text("Scan table=t", None)
+                .contains("adaptive=true")
         );
     }
 
