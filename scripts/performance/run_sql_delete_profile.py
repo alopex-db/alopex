@@ -49,7 +49,7 @@ def stop_group(child):
 def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
          default_rows=(3, 1000, 10000), operations=("noop", "query", "delete"),
          profile_operations=("delete",), row_count=lambda operation, rows: rows,
-         default_surfaces=("embedded", "server"),
+         default_surfaces=("embedded", "server"), worker_threads=2,
          scope="internal diagnostic; profile sample covers operation/restore/validation, not isolated DELETE"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, required=True)
@@ -98,7 +98,7 @@ def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
                         command.extend(["--server-bin", str(args.server)])
                     if args.profile:
                         command.append("--profile")
-                    env = dict(os.environ, RAYON_NUM_THREADS="2", TOKIO_WORKER_THREADS="2", OMP_NUM_THREADS="2",
+                    env = dict(os.environ, RAYON_NUM_THREADS=str(worker_threads), TOKIO_WORKER_THREADS=str(worker_threads), OMP_NUM_THREADS=str(worker_threads),
                                OPENBLAS_NUM_THREADS="1", PYTHONDONTWRITEBYTECODE="1", TMPDIR=tmp)
                     sampler = None
                     failure = None
