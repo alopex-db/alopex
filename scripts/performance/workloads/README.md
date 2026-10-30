@@ -39,3 +39,20 @@ observations separate from complete 8,192-row-chunk consumption. Extra full
 collect/stream typed-value, NULL and order oracles run outside the original timers.
 The reconstructed 34,250-row CSV matches the original manifest SHA256
 `eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff`.
+
+`sqlite_composite_v0816.py` freezes nine SQL helper function bodies from the
+same corrected original source (whole-file SHA256
+`7ba8a8e9da92987d2f0dbdc6ef3d98f2a12e5c4dc087651ae279a1dd6fbf1800`).
+Development extraction verifies each function's AST against that source. The
+`*-original` diagnostic lane retains the original memory DB, SQL operation
+sequence, discarded query returns and unspecified SQLite foreign-key setting.
+It must not be presented as proof of equal constraint enforcement.
+
+`sqlite_composite_profile.py` adds a separate `*-checked` lane: the same five
+operation groups, an explicit alias on the ordered SELECT, retained SELECT
+results checked after timing, and SQLite foreign keys enabled and verified.
+Negative FK/CHECK and intermediate savepoint state are checked outside timing.
+Every timed sample is followed by full typed fixture/rollback validation. The
+original and checked timing boundaries differ and their results stay separate.
+Five phase clocks run only in separate observations, outside the primary timing
+samples. These manual drivers and their supervisor reject ordinary CI.
