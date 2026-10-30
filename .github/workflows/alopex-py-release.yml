@@ -559,6 +559,7 @@ jobs:
         with:
           tag_name: ${{ inputs.source_ref || github.ref_name }}
           files: wheels/*
+          make_latest: "false"
 
   final-release-join:
     name: final-release-join
@@ -711,6 +712,22 @@ jobs:
           (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
           PY
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
+
+      - name: Verify Core remains latest after Python publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release/verify_latest_release.py \
+            --repository "${GITHUB_REPOSITORY}" --version "${VERSION}" \
+            --output join-assets/latest-release.json
+
+      - name: Record final public release identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-release-identities-${{ github.run_id }}-${{ github.run_attempt }}
+          path: join-assets/*.json
+          if-no-files-found: error
 
   intel-qualify:
     name: Qualify optional Intel artifacts
