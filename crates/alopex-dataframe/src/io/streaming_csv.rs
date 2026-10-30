@@ -5,7 +5,7 @@
 //! decoder for that group.
 
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -384,7 +384,11 @@ impl<R: Read> BoundedCsvFramer<R> {
         let mut rows: usize = 0;
 
         loop {
-            let Some(byte) = self.read_byte()? else {
+            let available = self
+                .reader
+                .fill_buf()
+                .map_err(|source| DataFrameError::io_with_path(source, &self.path))?;
+            if available.is_empty() {
                 self.eof = true;
                 if bytes.is_empty() {
                     return Ok(None);
@@ -394,18 +398,42 @@ impl<R: Read> BoundedCsvFramer<R> {
                     rows = rows.saturating_add(1);
                 }
                 break;
-            };
+            }
 
-            if bytes.len() == self.byte_cap {
+            // Inspect the buffered slice once, then copy only this frame's prefix.
+            // Leave subsequent records buffered for the next call.
+            let limit = available.len().min(self.byte_cap - bytes.len());
+            let mut consumed = 0;
+            let mut frame_complete = false;
+            for &byte in &available[..limit] {
+                consumed += 1;
+                if tracker.observe(byte) {
+                    rows = rows.saturating_add(1);
+                    if rows == max_rows {
+                        frame_complete = true;
+                        break;
+                    }
+                }
+            }
+            bytes.extend_from_slice(&available[..consumed]);
+
+            // A frame that exactly fills the cap is valid at EOF. Read one excess
+            // byte before rejecting it, as the quote-aware tail drain expects.
+            let overflow =
+                if !frame_complete && consumed < available.len() && bytes.len() == self.byte_cap {
+                    let byte = available[consumed];
+                    consumed += 1;
+                    Some(byte)
+                } else {
+                    None
+                };
+            self.reader.consume(consumed);
+            if let Some(byte) = overflow {
                 self.discard_record_tail(tracker, byte)?;
                 return Err(self.record_limit_error(context));
             }
-            bytes.push(byte);
-            if tracker.observe(byte) {
-                rows = rows.saturating_add(1);
-                if rows == max_rows {
-                    break;
-                }
+            if frame_complete {
+                break;
             }
         }
 
