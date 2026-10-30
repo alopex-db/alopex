@@ -1737,9 +1737,9 @@ impl<'a> MergedScanIter<'a> {
 
     fn advance_data(&mut self) {
         self.data_peek = None;
-        while let Some((k, (v, ver))) = self.data_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        while let Some((k, (v, ver))) = self.data_iter.next() {
             if let Some(end) = &self.end {
-                if k >= *end {
+                if k >= end {
                     return;
                 }
             }
@@ -1748,19 +1748,20 @@ impl<'a> MergedScanIter<'a> {
                     return;
                 }
             }
-            if ver > self.start_version {
+            if *ver > self.start_version {
                 continue;
             }
-            self.data_peek = Some((k, (v, ver)));
+            // Only visible, in-bounds entries need an owned output buffer.
+            self.data_peek = Some((k.clone(), (v.clone(), *ver)));
             return;
         }
     }
 
     fn advance_write(&mut self) {
         self.write_peek = None;
-        if let Some((k, v)) = self.write_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        if let Some((k, v)) = self.write_iter.next() {
             if let Some(end) = &self.end {
-                if k >= *end {
+                if k >= end {
                     return;
                 }
             }
@@ -1769,13 +1770,13 @@ impl<'a> MergedScanIter<'a> {
                     return;
                 }
             }
-            self.write_peek = Some((k, v));
+            self.write_peek = Some((k.clone(), v.clone()));
         }
     }
 
-    fn record_read(&mut self, key: Key, version: u64) {
+    fn record_read(&mut self, key: &Key, version: u64) {
         if self.track_reads {
-            self.read_set.insert(key, version);
+            self.read_set.insert(key.clone(), version);
         }
     }
 }
@@ -1784,21 +1785,22 @@ impl<'a> Iterator for MergedScanIter<'a> {
     type Item = (Key, Option<Value>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let data_key = self.data_peek.as_ref().map(|(k, _)| k.clone());
-        let write_key = self.write_peek.as_ref().map(|(k, _)| k.clone());
+        // Compare borrowed keys; move the selected peek into the result.
+        let data_key = self.data_peek.as_ref().map(|(k, _)| k);
+        let write_key = self.write_peek.as_ref().map(|(k, _)| k);
 
         match (data_key, write_key) {
             (Some(dk), Some(wk)) => {
                 if dk == wk {
-                    let (_, (_, ver)) = self.data_peek.take().unwrap();
+                    let (k, (_, ver)) = self.data_peek.take().unwrap();
                     let (_, write_val) = self.write_peek.take().unwrap();
-                    self.record_read(dk.clone(), ver);
+                    self.record_read(&k, ver);
                     self.advance_data();
                     self.advance_write();
-                    Some((dk, write_val))
+                    Some((k, write_val))
                 } else if dk < wk {
                     let (k, (v, ver)) = self.data_peek.take().unwrap();
-                    self.record_read(k.clone(), ver);
+                    self.record_read(&k, ver);
                     self.advance_data();
                     Some((k, Some(v)))
                 } else {
@@ -1809,7 +1811,7 @@ impl<'a> Iterator for MergedScanIter<'a> {
             }
             (Some(_), None) => {
                 let (k, (v, ver)) = self.data_peek.take().unwrap();
-                self.record_read(k.clone(), ver);
+                self.record_read(&k, ver);
                 self.advance_data();
                 Some((k, Some(v)))
             }
