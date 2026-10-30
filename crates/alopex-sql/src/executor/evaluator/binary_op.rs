@@ -641,6 +641,128 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compare_preserves_numeric_and_non_numeric_orderings() {
+        let kinds = [
+            OrderingKind::Eq,
+            OrderingKind::Neq,
+            OrderingKind::Lt,
+            OrderingKind::Gt,
+            OrderingKind::Le,
+            OrderingKind::Ge,
+        ];
+        for (lower, higher) in [
+            (SqlValue::Boolean(false), SqlValue::Boolean(true)),
+            (SqlValue::Text("a".into()), SqlValue::Text("b".into())),
+            (SqlValue::Blob(vec![0]), SqlValue::Blob(vec![1])),
+            (SqlValue::Float(1.0), SqlValue::Double(2.0)),
+            (SqlValue::Double(1.5), SqlValue::Integer(2)),
+            (
+                SqlValue::Integer(i32::MAX),
+                SqlValue::BigInt(i64::from(i32::MAX) + 1),
+            ),
+            (SqlValue::BigInt(1 << 53), SqlValue::BigInt((1 << 53) + 1)),
+            (
+                SqlValue::Double(f64::NEG_INFINITY),
+                SqlValue::Double(f64::INFINITY),
+            ),
+        ] {
+            for (left, right, expected) in [
+                (&lower, &higher, [false, true, true, false, true, false]),
+                (&higher, &lower, [false, true, false, true, false, true]),
+                (&lower, &lower, [true, false, false, false, true, true]),
+            ] {
+                for (kind, expected) in kinds.into_iter().zip(expected) {
+                    assert_eq!(
+                        compare(left.clone(), right.clone(), kind).unwrap(),
+                        SqlValue::Boolean(expected)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            compare(
+                SqlValue::Float(-0.0),
+                SqlValue::Double(0.0),
+                OrderingKind::Eq
+            )
+            .unwrap(),
+            SqlValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn compare_null_precedes_unordered_or_mismatched_operands() {
+        for other in [
+            SqlValue::Boolean(true),
+            SqlValue::Double(f64::NAN),
+            SqlValue::Null,
+        ] {
+            for kind in [
+                OrderingKind::Eq,
+                OrderingKind::Neq,
+                OrderingKind::Lt,
+                OrderingKind::Gt,
+                OrderingKind::Le,
+                OrderingKind::Ge,
+            ] {
+                assert_eq!(
+                    compare(SqlValue::Null, other.clone(), kind).unwrap(),
+                    SqlValue::Null
+                );
+                assert_eq!(
+                    compare(other.clone(), SqlValue::Null, kind).unwrap(),
+                    SqlValue::Null
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compare_preserves_unordered_and_mismatched_type_errors() {
+        for (left, right, actual) in [
+            (
+                SqlValue::Double(f64::NAN),
+                SqlValue::Integer(1),
+                r#""Double" vs "Integer""#,
+            ),
+            (
+                SqlValue::Integer(1),
+                SqlValue::Float(f32::NAN),
+                r#""Integer" vs "Float""#,
+            ),
+            (
+                SqlValue::Boolean(true),
+                SqlValue::Text("true".into()),
+                r#""Boolean" vs "Text""#,
+            ),
+            (
+                SqlValue::Vector(vec![1.0]),
+                SqlValue::Vector(vec![1.0]),
+                r#""Vector" vs "Vector""#,
+            ),
+        ] {
+            for kind in [
+                OrderingKind::Eq,
+                OrderingKind::Neq,
+                OrderingKind::Lt,
+                OrderingKind::Gt,
+                OrderingKind::Le,
+                OrderingKind::Ge,
+            ] {
+                let Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+                    expected,
+                    actual: observed,
+                })) = compare(left.clone(), right.clone(), kind)
+                else {
+                    panic!("expected a comparison type error");
+                };
+                assert_eq!(expected, "Comparable");
+                assert_eq!(observed, actual);
+            }
+        }
+    }
+
+    #[test]
     fn add_null_propagates() {
         assert_eq!(
             add(SqlValue::Null, SqlValue::Integer(1)).unwrap(),
