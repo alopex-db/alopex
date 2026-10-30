@@ -1414,6 +1414,187 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn point_fixture(
+        path: &Path,
+        entries: &[SSTableEntry],
+        compression: CompressionType,
+        block_size: usize,
+    ) -> SSTableReader {
+        let mut writer = SSTableWriter::create(
+            path,
+            SSTableConfig {
+                compression,
+                block_size,
+                enable_bloom_filter: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for entry in entries {
+            writer.append(entry.clone()).unwrap();
+        }
+        writer.finish().unwrap();
+        SSTableReader::open(path).unwrap()
+    }
+
+    fn check_point_versions(compression: CompressionType) {
+        let entries = vec![
+            SSTableEntry {
+                key: b"a".to_vec(),
+                value: None,
+                timestamp: 3,
+                sequence: 2,
+            },
+            SSTableEntry {
+                key: b"a".to_vec(),
+                value: Some(b"tie".to_vec()),
+                timestamp: 3,
+                sequence: 1,
+            },
+            SSTableEntry {
+                key: b"a".to_vec(),
+                value: Some(b"old".to_vec()),
+                timestamp: 1,
+                sequence: 1,
+            },
+            SSTableEntry {
+                key: b"c".to_vec(),
+                value: Some(Vec::new()),
+                timestamp: 2,
+                sequence: 1,
+            },
+        ];
+        let dir = tempdir().unwrap();
+        for block_size in [64, 256] {
+            let mut reader = point_fixture(
+                &dir.path().join("point.sst"),
+                &entries,
+                compression,
+                block_size,
+            );
+            let pool = BufferPool::new(crate::lsm::buffer_pool::BufferPoolConfig::default());
+            let metrics = LsmMetrics::default();
+            for key in [b"".as_slice(), b"a", b"b", b"c", b"d"] {
+                for timestamp in 0..=4 {
+                    let expected = entries
+                        .iter()
+                        .find(|entry| entry.key == key && entry.timestamp <= timestamp)
+                        .cloned();
+                    assert_eq!(reader.get(key, timestamp).unwrap(), expected);
+                    assert_eq!(
+                        reader
+                            .get_with_buffer_pool(&pool, &metrics, 1, key, timestamp)
+                            .unwrap(),
+                        expected
+                    );
+                }
+            }
+            assert!(pool.stats().hits > 0);
+        }
+    }
+
+    #[test]
+    fn sstable_point_versions_none() {
+        check_point_versions(CompressionType::None);
+    }
+
+    #[cfg(feature = "compression-lz4")]
+    #[test]
+    fn sstable_point_versions_lz4() {
+        check_point_versions(CompressionType::Lz4);
+    }
+
+    #[cfg(feature = "compression-zstd")]
+    #[test]
+    fn sstable_point_versions_zstd() {
+        check_point_versions(CompressionType::Zstd { level: 1 });
+    }
+
+    #[test]
+    fn sstable_point_rejects_malformed_tail_after_matching_entry() {
+        // The first entry matches, but every encoding error later in the same block must surface.
+        let dir = tempdir().unwrap();
+        let entries = vec![
+            SSTableEntry {
+                key: b"a".to_vec(),
+                value: Some(b"v".to_vec()),
+                timestamp: 1,
+                sequence: 1,
+            },
+            SSTableEntry {
+                key: b"z".to_vec(),
+                value: None,
+                timestamp: 1,
+                sequence: 1,
+            },
+        ];
+        let mut reader = point_fixture(
+            &dir.path().join("tail.sst"),
+            &entries,
+            CompressionType::None,
+            256,
+        );
+        let original = reader.read_block_cached(None, None, 0, 0).unwrap();
+        let second = 8 + 25 + 1 + 1;
+        for case in 0..6 {
+            let mut block = original.clone();
+            match case {
+                0 => block[second] = 255,
+                1 => block.truncate(second + 4 + 4), // truncated fixed entry fields
+                2 => block[second + 17..second + 21].copy_from_slice(&u32::MAX.to_le_bytes()),
+                3 => block[0..4].copy_from_slice(&3_u32.to_le_bytes()),
+                4 => {
+                    block.insert(block.len() - 4, 0);
+                } // trailing incomplete entry
+                5 => block[0..4].copy_from_slice(&1_u32.to_le_bytes()),
+                _ => unreachable!(),
+            }
+            // Correct envelope checksums/length: this test targets entry validation, not CRC rejection.
+            let len = block.len();
+            block[4..8].copy_from_slice(&((len - 12) as u32).to_le_bytes());
+            let checksum = crc32(&block[..len - 4]);
+            block[len - 4..].copy_from_slice(&checksum.to_le_bytes());
+            let pool = BufferPool::new(crate::lsm::buffer_pool::BufferPoolConfig::default());
+            assert!(pool.put(
+                BlockId {
+                    file_id: 1,
+                    block_offset: reader.index[0].offset,
+                },
+                Arc::new(DataBlock::new(block)),
+            ));
+            for timestamp in [0, 1] {
+                assert!(
+                    matches!(
+                        reader.get_with_buffer_pool(
+                            &pool,
+                            &LsmMetrics::default(),
+                            1,
+                            b"a",
+                            timestamp
+                        ),
+                        Err(Error::InvalidFormat(_))
+                    ),
+                    "case {case}, timestamp {timestamp}"
+                );
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn sstable_point_matches_small_version_model(rows in proptest::collection::vec((0u8..4, 0u64..4, proptest::option::of(proptest::collection::vec(proptest::num::u8::ANY, 0..4))), 1..7), timestamp in 0u64..5) {
+            let mut entries: Vec<_> = rows.into_iter().enumerate().map(|(i,(key,timestamp,value))| SSTableEntry { key: vec![key], value, timestamp, sequence: i as u64 }).collect();
+            entries.sort_by(|a,b| a.key.cmp(&b.key).then(b.timestamp.cmp(&a.timestamp)).then(b.sequence.cmp(&a.sequence)));
+            let dir = tempdir().unwrap();
+            let mut reader = point_fixture(&dir.path().join("model.sst"), &entries, CompressionType::None, 64);
+            for key in 0..5 {
+                let expected = entries.iter().find(|e| e.key == [key] && e.timestamp <= timestamp).cloned();
+                proptest::prop_assert_eq!(reader.get(&[key], timestamp).unwrap(), expected);
+            }
+        }
+    }
+
     #[test]
     fn sstable_header_footer_roundtrip() {
         let h = SSTableHeader {
