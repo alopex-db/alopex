@@ -1,0 +1,190 @@
+{
+  "status": "composed; exact composition CI pending; no candidate acceptance claim",
+  "base_pr": 791,
+  "base": "73184555fc48c19ce4c04788c496e0b398398299",
+  "head": "f99f3aa1b50ee42d20789ca609456d7836b9ab52",
+  "tree": "2faf45e4e76bf2c08b1b903c3656f2d55cb390fa",
+  "branch": "fix/v0.8.17-hnsw-composition",
+  "sources": [
+    {
+      "number": 750,
+      "head": "d557d82f1b68970e5af3b10d3f46005b8c3988c7",
+      "title": "fix(core): preserve MemoryKV snapshots across updates and deletes (#748)"
+    },
+    {
+      "number": 751,
+      "head": "6214c3ed8a439b9e670c72ecdaf2080234342736",
+      "title": "perf(embedded): reuse unmodified HNSW graphs after explicit transactions"
+    },
+    {
+      "number": 752,
+      "head": "90301e297a1e55368505673d6f85bfe308ebe549",
+      "title": "perf(core): persist changed HNSW nodes including reverse edges"
+    },
+    {
+      "number": 753,
+      "head": "62e9d018c26846bfc25851a73840abd744b4588b",
+      "title": "perf(core): update HNSW checksums and key mappings by delta"
+    },
+    {
+      "number": 755,
+      "head": "186ca4ffdc337a1eff04d7543858f590be8ab560",
+      "title": "perf(core): share HNSW snapshot pages and node payloads"
+    },
+    {
+      "number": 757,
+      "head": "9c3f4629a7070ebe10f501512416aa1acd8f01af",
+      "title": "fix(embedded): skip contended HNSW cache at transaction begin"
+    },
+    {
+      "number": 758,
+      "head": "7602e880ed8b45ee3c983a8b7d76153dccb1daf3",
+      "title": "fix(embedded): retain SQL HNSW graphs across savepoints"
+    },
+    {
+      "number": 759,
+      "head": "b4e05a96dda6192fbfbb731779ef0bec988c87a4",
+      "title": "perf(vector): update HNSW statistics from changed slots"
+    },
+    {
+      "number": 760,
+      "head": "2085048699010852da9ccd1abbd9a80fef6d05fd",
+      "title": "test(vector): cover public transaction byte-budget eviction"
+    },
+    {
+      "number": 761,
+      "head": "91d6144950c12e42b57578e31895abef5712fb4a",
+      "title": "docs(perf): record HNSW transaction remediation comparison"
+    }
+  ],
+  "source_blobs": {
+    "crates/alopex-core/src/kv/memory.rs": "3afe9deb17190cfeaf19c04de4c34484b137da80",
+    "crates/alopex-core/src/kv/owned.rs": "5d74c881de1796a3f07eabc3ea4fb819b8fbc1e7",
+    "crates/alopex-core/src/vector/hnsw/cow.rs": "a62682c6a6e240cde47702613e01b0fdc2dc72b7",
+    "crates/alopex-core/src/vector/hnsw/graph.rs": "89af112a27144746b901428b26950d6b0c7a5e7c",
+    "crates/alopex-core/src/vector/hnsw/mod.rs": "cb09aafc9eb2041543b61ed98c0099ee6d6903ba",
+    "crates/alopex-core/src/vector/hnsw/stats.rs": "a25b8eac104c53c1b9271ae9734aba391f9c9684",
+    "crates/alopex-core/src/vector/hnsw/storage.rs": "f1a164bc53cb99ce4654c5152ee3201aaeb109fe",
+    "crates/alopex-core/src/vector/hnsw/tests/dirty_write_tests.rs": "4c82c2de42a066e1cae5191df0f853f2e132c51d",
+    "crates/alopex-core/src/vector/hnsw/tests/mod.rs": "4f7d0ac5f1c68d0b961c1191df81b9be1fd29e52",
+    "crates/alopex-core/src/vector/hnsw/tests/storage_tests.rs": "86036588ec1cfe1846a8f1f1899db4905f5880c4",
+    "crates/alopex-core/tests/memory_snapshot_overwrite.rs": "e6bdee9997c178daa9b5629a880e6ac4b6453875",
+    "crates/alopex-embedded/src/hnsw_begin_tests.rs": "6a1dc169472510f6c7805c90ce12f2656228f5bc",
+    "crates/alopex-embedded/src/lib.rs": "0a17e594fe9b97d2959d7cd39a2a4a3cfac53102",
+    "crates/alopex-embedded/src/owned_session.rs": "8f300a9f9adc193f4a9a1c73cba5348101e4b7cb",
+    "crates/alopex-embedded/tests/hnsw_cold_publication.rs": "b88d73f03efe4813c91e76b39e6cf28c0412b9fa",
+    "crates/alopex-embedded/tests/hnsw_savepoint_cache.rs": "3ad2df2952998cf81e66c638faa4e4f23909b9c0",
+    "crates/alopex-embedded/tests/hnsw_transaction_cache.rs": "371e927702ad3e366cf7598d9576324e7740b578",
+    "crates/alopex-embedded/tests/hnsw_two_index_eviction.rs": "4212497f8b0f923e995ed41b8a09dfcd8cc69051",
+    "crates/alopex-sql/src/storage/bridge.rs": "42fee407cd5320629be6dd3551d8d86a0fb00089",
+    "docs/build-performance/v0.8.17/hnsw-transaction-cache-after.json": "a64d02d3764cc011cf37a24d7bbbd8cda3ce1bdd",
+    "docs/build-performance/v0.8.17/hnsw-transaction-cache-after.md": "1855ea1a7197f255dd03c535a949fb08c6a1dfdd",
+    "docs/hnsw-copy-on-write.md": "9544ff15515b04c3357399f0fcce186a0b103beb",
+    "docs/hnsw-delta-checksums.md": "772b139a4a1d0964f9003de83a180d190fe588da",
+    "docs/hnsw-incremental-node-writes.md": "2b26d156c3893bfa2f08d26974821fa342bd54ae",
+    "docs/hnsw-savepoint-cache.md": "d8be358c04c2ccf71ea465e35f96a1981938c310",
+    "docs/hnsw-statistics-deltas.md": "9040a78a804555b2f26a45c52465b06457a7ce9f",
+    "docs/hnsw-transaction-cache-publication.md": "07e9ffa48ab75c3a4d801d309e155a0b0bcc6519",
+    "docs/hnsw-transaction-start.md": "b8b76f013f6b6c51b358f73dfa62cba438fab485",
+    "docs/hnsw-two-index-eviction.md": "5ab5387091609c963fd6ae6c84fb00e1a38d177b",
+    "docs/memory-snapshot-isolation.md": "1ff751028356477cff6d7510bb675a4fd7b2ce9d",
+    "scripts/ci/windows-wal-contract.py": "fcde5f49f0113bacb14fa1166f7020fa96c314db"
+  },
+  "source_proof": {
+    "unchanged_from_stack": 29,
+    "storage_test_difference": "Only two existing large diagnostics made unconditionally ignored, inherited from #756/#791",
+    "windows_runner": "Exact command and expected-result union, 23 groups / 236 cases; other executable AST identical to #791",
+    "normal_ci_large_hnsw_diagnostics_ignored": 3
+  },
+  "checks": {
+    "750": {
+      "success": 48,
+      "skipped": 3
+    },
+    "760": {
+      "success": 41,
+      "skipped": 3
+    },
+    "761": {
+      "success": 20,
+      "skipped": 3
+    }
+  },
+  "windows_prior_source": {
+    "job": 123543496365,
+    "run": 40893972750,
+    "head": "2085048699010852da9ccd1abbd9a80fef6d05fd",
+    "merge": "c53b6eb513dc186e9c827923efdf64dd2248f5e0",
+    "tree": "674f99e41dc72a3f5e4f455e76cd6d1b0817b0f5",
+    "total": 226,
+    "counts": [
+      3,
+      33,
+      6,
+      12,
+      10,
+      13,
+      4,
+      17,
+      4,
+      2,
+      12,
+      8,
+      20,
+      5,
+      21,
+      4,
+      6,
+      13,
+      11,
+      7,
+      15
+    ],
+    "selected_log": [
+      "2026-10-29T15:50:48.8030819Z HEAD is now at c53b6eb Merge 2085048699010852da9ccd1abbd9a80fef6d05fd into b4e05a96dda6192fbfbb731779ef0bec988c87a4",
+      "2026-10-29T15:51:02.3078788Z {\"allocated_bytes\": 205555232}",
+      "2026-10-29T16:21:55.7631238Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 613 filtered out; finished in 0.08s",
+      "2026-10-29T16:22:02.4518107Z test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 583 filtered out; finished in 1.41s",
+      "2026-10-29T16:22:07.6740018Z test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 610 filtered out; finished in 0.08s",
+      "2026-10-29T16:22:13.9696590Z test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 604 filtered out; finished in 1.16s",
+      "2026-10-29T16:22:19.2887040Z test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 606 filtered out; finished in 0.22s",
+      "2026-10-29T16:22:24.5061541Z test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 603 filtered out; finished in 0.08s",
+      "2026-10-29T16:22:29.7382088Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.05s",
+      "2026-10-29T16:22:35.1925624Z test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 599 filtered out; finished in 0.28s",
+      "2026-10-29T16:22:40.9982139Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.58s",
+      "2026-10-29T16:22:46.4788089Z test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 614 filtered out; finished in 0.35s",
+      "2026-10-29T16:22:53.8078793Z test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 604 filtered out; finished in 2.19s",
+      "2026-10-29T16:22:58.9912787Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 608 filtered out; finished in 0.06s",
+      "2026-10-29T16:23:27.9234958Z test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "2026-10-29T16:31:38.1138363Z test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "2026-10-29T16:34:53.6996520Z test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "2026-10-29T16:34:59.0216523Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.00s",
+      "2026-10-29T16:38:12.8492287Z test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "2026-10-29T16:41:37.5423451Z test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.21s",
+      "2026-10-29T16:46:28.3531633Z test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 10.87s",
+      "2026-10-29T16:46:33.6979385Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 609 filtered out; finished in 0.00s",
+      "2026-10-29T16:46:38.9218683Z test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 601 filtered out; finished in 0.01s",
+      "2026-10-29T16:46:42.8227976Z {\"allocated_bytes\": 1012008944}",
+      "2026-10-29T16:46:44.6287120Z Artifact windows-wal-contract.zip successfully finalized. Artifact ID 12916015782",
+      "2026-10-29T16:46:44.6288392Z Artifact windows-wal-contract has been successfully uploaded! Final size is 33530 bytes. Artifact ID is 12916015782"
+    ]
+  },
+  "validation": {
+    "fmt": "cargo fmt --all -- --check passed",
+    "diff": "git diff --check passed",
+    "native_builds_or_tests": 0,
+    "mutation": "not rerun: production blobs unchanged from independently validated source; new composition pending CI",
+    "coupling": "not rerun: no new production changes or dependencies",
+    "Miri": "not rerun; prior MemoryKV evidence records unavailable toolchain",
+    "strengthening": "source equality, runner AST union, native case-count reconciliation, retained bounded source tests"
+  },
+  "storage_before_bytes": 19218825216,
+  "cleanup": "No new worktree, build output, wheel, parser or fixture; compact receipts only",
+  "remaining": [
+    "Required composed PR and candidate CI",
+    "Candidate inclusion and #748/#681 acceptance",
+    "HNSW index-build +9.87% and writer-begin RSS observation remain unresolved; original single-run measurement retained",
+    "Merge other adopted fixes before frozen-candidate performance and package qualification",
+    "Release publication, post-release verification and main merge"
+  ]
+}
