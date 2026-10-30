@@ -138,3 +138,15 @@ contract test then requires their new workflow-qualified names.
   already-published bytes.
 - Candidate views can be regenerated from `candidate-manifest.json`; Markdown is
   never an input.
+
+## Optional Intel delivery (v0.8.17 onward)
+
+| Job | Responsibility | Evidence |
+|---|---|---|
+| `alopex-py-release.yml:intel-qualify` | Build and execute the optional Intel CLI/parser/wheel and a published-crate consumer from the same immutable Core source, in an independent `mode=intel` run | Sealed `optional-intel-qualified` artifact with exact digests and four native smoke logs |
+| `alopex-py-release.yml:intel-publish` | Reverify the qualification run and frozen Core identity, compare existing PyPI/GitHub bytes, then publish only missing Intel artifacts | Versioned Intel manifest; byte-identical retries reuse the qualification run without rebuilding |
+
+Neither job is in the primary Core/RC/Python dependency graph. Primary Linux,
+Windows, and Apple Silicon jobs remain mandatory. The optional workflow uses
+stable Core assets and can run after primary delivery; queued, running, or failed
+Intel jobs do not change primary qualification or publication status.

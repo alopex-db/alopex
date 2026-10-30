@@ -43,7 +43,12 @@ candidate = {
         "head_sha": python_sha,
         "peeled_sha": python_sha,
         "registry": "pypi",
-        "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],
+        "distributions": [{"name": name, "status": "published", "sha256": digest} for name in (
+            f"alopex-{version}-cp38-abi3-manylinux_2_17_x86_64.whl",
+            f"alopex-{version}-cp38-abi3-win_amd64.whl",
+            f"alopex-{version}-cp38-abi3-macosx_11_0_arm64.whl",
+            f"alopex-{version}.tar.gz",
+        )],
     },
     "parser": {
         "contract": "0.28.0",
@@ -83,6 +88,22 @@ assert_fail() {
 }
 
 assert_success bash "${RUNNER}" --verify-join "${TEMP_ROOT}/candidate.json"
+
+python3 - "${TEMP_ROOT}" <<'PYFIX'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+data = json.loads((root / "candidate.json").read_text())
+data["parser"]["assets"] = [a for a in data["parser"]["assets"] if a["target"] != "x86_64-apple-darwin"]
+(root / "primary-only.json").write_text(json.dumps(data))
+for index, target in enumerate(a["target"] for a in data["parser"]["assets"]):
+    altered = json.loads(json.dumps(data))
+    altered["parser"]["assets"] = [a for a in altered["parser"]["assets"] if a["target"] != target]
+    (root / f"missing-primary-{index}.json").write_text(json.dumps(altered))
+PYFIX
+assert_success bash "${RUNNER}" --verify-join "${TEMP_ROOT}/primary-only.json"
+for candidate in "${TEMP_ROOT}"/missing-primary-*.json; do
+    assert_fail bash "${RUNNER}" --verify-join "$candidate"
+done
 
 python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
 import json
