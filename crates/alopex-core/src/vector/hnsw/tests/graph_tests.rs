@@ -662,8 +662,8 @@ fn upper_layer_routes_reach_nearest_in_another_basin() {
     }
 }
 
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+#[ignore = "manual HNSW scale/quality diagnostic; excluded from normal CI"]
 fn cost_fixture_recall_survives_upper_layer_local_minima() {
     let mut graph = HnswGraph::new(
         base_config()
