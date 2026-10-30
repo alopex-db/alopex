@@ -541,9 +541,11 @@ mod tests {
 
     use arrow::array::Int64Array;
 
-    use super::{BoundedCsvFramer, CsvBatchSourceFactory};
+    use proptest::prelude::*;
+
+    use super::{BoundedCsvFramer, CsvBatchSourceFactory, FramedBytes, QuoteTracker};
     use crate::io::CsvReadOptions;
-    use crate::physical::budget::StreamOptions;
+    use crate::physical::budget::{ResourceScope, StreamOptions};
     use crate::physical::BatchOpenContext;
     use crate::physical::DataFrameStream;
     use crate::DataFrameError;
@@ -554,6 +556,204 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             NonZeroUsize::new(batch_rows).unwrap(),
         )
+    }
+
+    struct FragmentedReader {
+        inner: Cursor<Vec<u8>>,
+        fragment: usize,
+        fail_at: Option<usize>,
+        failed: bool,
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let mut limit = output.len().min(self.fragment);
+            if let Some(at) = self.fail_at.filter(|_| !self.failed) {
+                let position = self.inner.position() as usize;
+                if position == at {
+                    self.failed = true;
+                    return Err(std::io::Error::other("injected read failure"));
+                }
+                limit = limit.min(at.saturating_sub(position));
+            }
+            self.inner.read(&mut output[..limit])
+        }
+    }
+
+    fn fragmented(
+        bytes: &[u8],
+        fragment: usize,
+        cap: usize,
+        quote: Option<u8>,
+        fail_at: Option<usize>,
+    ) -> BoundedCsvFramer<FragmentedReader> {
+        BoundedCsvFramer::new(
+            FragmentedReader {
+                inner: Cursor::new(bytes.to_vec()),
+                fragment,
+                fail_at,
+                failed: false,
+            },
+            PathBuf::from("fragmented.csv"),
+            quote,
+            cap,
+        )
+    }
+
+    // Frozen byte-at-a-time reference from the implementation before this optimization.
+    // QuoteTracker is unchanged; explicit record oracles below check quote semantics too.
+    fn reference_next_frame<R: Read>(
+        framer: &mut BoundedCsvFramer<R>,
+        max_rows: usize,
+        context: &BatchOpenContext,
+    ) -> crate::Result<Option<FramedBytes>> {
+        if framer.eof {
+            return Ok(None);
+        }
+        let reservation = context
+            .budget
+            .reserve(ResourceScope::Source, framer.byte_cap as u64)?;
+        let mut bytes = Vec::with_capacity(framer.byte_cap);
+        let mut tracker = QuoteTracker::new(framer.quote_char);
+        let mut rows = 0usize;
+        loop {
+            let Some(byte) = framer.read_byte()? else {
+                framer.eof = true;
+                if bytes.is_empty() {
+                    return Ok(None);
+                }
+                tracker.finish()?;
+                if bytes.last() != Some(&b'\n') {
+                    rows = rows.saturating_add(1);
+                }
+                break;
+            };
+            if bytes.len() == framer.byte_cap {
+                framer.discard_record_tail(tracker, byte)?;
+                return Err(framer.record_limit_error(context));
+            }
+            bytes.push(byte);
+            if tracker.observe(byte) {
+                rows = rows.saturating_add(1);
+                if rows == max_rows {
+                    break;
+                }
+            }
+        }
+        Ok(Some(FramedBytes {
+            bytes,
+            rows,
+            _reservation: reservation,
+        }))
+    }
+
+    fn frame_snapshot(
+        result: crate::Result<Option<FramedBytes>>,
+        context: &BatchOpenContext,
+        cap: usize,
+    ) -> std::result::Result<Option<(Vec<u8>, usize)>, String> {
+        let snapshot = match result {
+            Ok(Some(frame)) => {
+                assert_eq!(context.budget.usage().reserved_bytes, cap as u64);
+                Ok(Some((frame.bytes.clone(), frame.rows)))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(format!("{error:?}")),
+        };
+        assert_eq!(context.budget.usage().reserved_bytes, 0);
+        assert_eq!(context.budget.usage().reserved_batches, 0);
+        snapshot
+    }
+
+    #[test]
+    fn fragmented_quoted_records_keep_header_boundaries_and_final_record() {
+        let records: [&[u8]; 3] = [b"1,\"a\r\nb\"\r\n", b"2,\"c\"\"d\"\n", b"3,last"];
+        let data = [b"id,label\r\n".as_slice(), records.concat().as_slice()].concat();
+        for fragment in 1..=7 {
+            let context = BatchOpenContext::new(options(4096, 1));
+            let mut framer = fragmented(&data, fragment, 64, Some(b'"'), None);
+            framer.skip_record(&context).unwrap();
+            for record in records {
+                assert_eq!(
+                    frame_snapshot(framer.next_frame(1, &context), &context, 64).unwrap(),
+                    Some((record.to_vec(), 1))
+                );
+            }
+            assert!(framer.next_frame(1, &context).unwrap().is_none());
+            assert!(framer.next_frame(1, &context).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn exact_cap_eof_and_quote_aware_overflow_drain_preserve_next_record() {
+        for fragment in 1..=5 {
+            let context = BatchOpenContext::new(options(4096, 1));
+            for input in [b"abc".as_slice(), b"ab\n".as_slice()] {
+                let mut framer = fragmented(input, fragment, 3, Some(b'"'), None);
+                assert_eq!(
+                    frame_snapshot(framer.next_frame(1, &context), &context, 3).unwrap(),
+                    Some((input.to_vec(), 1))
+                );
+                assert!(framer.next_frame(1, &context).unwrap().is_none());
+            }
+            let mut framer = fragmented(b"\"a\nb\"\nok\n", fragment, 4, Some(b'"'), None);
+            assert!(matches!(
+                framer.next_frame(1, &context),
+                Err(DataFrameError::ResourceLimitExceeded { .. })
+            ));
+            assert_eq!(context.budget.usage().reserved_bytes, 0);
+            assert_eq!(
+                frame_snapshot(framer.next_frame(1, &context), &context, 4).unwrap(),
+                Some((b"ok\n".to_vec(), 1))
+            );
+        }
+    }
+
+    #[test]
+    fn framing_error_releases_budget_and_retains_io_path() {
+        let context = BatchOpenContext::new(options(4096, 1));
+        let mut framer = fragmented(b"abc\n", 2, 8, Some(b'"'), Some(2));
+        let error = framer.next_frame(1, &context).err().unwrap();
+        assert!(
+            matches!(error, DataFrameError::Io { path: Some(path), .. } if path == PathBuf::from("fragmented.csv"))
+        );
+        assert_eq!(context.budget.usage().reserved_bytes, 0);
+        let mut framer = fragmented(b"\"unterminated", 2, 32, Some(b'"'), None);
+        assert!(matches!(
+            framer.next_frame(1, &context),
+            Err(DataFrameError::SchemaMismatch { .. })
+        ));
+        assert!(framer.next_frame(1, &context).unwrap().is_none());
+        assert_eq!(context.budget.usage().reserved_bytes, 0);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn buffered_framing_matches_byte_reference(
+            bytes in proptest::collection::vec(prop::sample::select(vec![b'a', b'b', b'"', b'\n', b'\r', b',']), 0..49),
+            fragment in 1usize..9, cap in 1usize..25, rows in 1usize..4,
+            quoted in any::<bool>(), fault in any::<bool>(), fault_index in 0usize..49,
+        ) {
+            let quote = quoted.then_some(b'"');
+            let fail_at = fault.then_some(fault_index.min(bytes.len()));
+            let mut actual = fragmented(&bytes, fragment, cap, quote, fail_at);
+            let mut reference = fragmented(&bytes, fragment, cap, quote, fail_at);
+            let actual_context = BatchOpenContext::new(options(4096, rows));
+            let reference_context = BatchOpenContext::new(options(4096, rows));
+            let mut exhausted = false;
+            for _ in 0..bytes.len()+3 {
+                let observed = frame_snapshot(actual.next_frame(rows, &actual_context), &actual_context, cap);
+                let expected = frame_snapshot(reference_next_frame(&mut reference, rows, &reference_context), &reference_context, cap);
+                prop_assert_eq!(&observed, &expected);
+                prop_assert_eq!(actual.eof, reference.eof);
+                prop_assert_eq!(actual.reader.buffer(), reference.reader.buffer());
+                prop_assert_eq!(actual.reader.get_ref().inner.position(), reference.reader.get_ref().inner.position());
+                prop_assert_eq!(actual.reader.get_ref().failed, reference.reader.get_ref().failed);
+                if matches!(observed, Ok(None)) { exhausted = true; break; }
+            }
+            prop_assert!(exhausted, "bounded input must reach EOF");
+        }
     }
 
     struct CountingReader {
