@@ -10,7 +10,7 @@ use crate::storage::flush::write_empty_vector_segment;
 use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -143,17 +143,184 @@ impl OwnedKVStore for MemoryKV {
     }
 }
 
-// The internal value stored in the BTreeMap, containing the data and its version.
-type VersionedValue = (Value, u64);
+#[derive(Clone)]
+struct MemoryVersion {
+    value: Option<Value>,
+    version: u64,
+}
+
+#[derive(Clone)]
+struct VersionedValue {
+    current: MemoryVersion,
+    // Only versions selected by an active snapshot are retained, in version order.
+    history: Vec<MemoryVersion>,
+}
+
+impl VersionedValue {
+    fn new(value: Option<Value>, version: u64) -> Self {
+        Self {
+            current: MemoryVersion { value, version },
+            history: Vec::new(),
+        }
+    }
+
+    fn at(&self, version: u64) -> Option<&MemoryVersion> {
+        if self.current.version <= version {
+            Some(&self.current)
+        } else {
+            self.history
+                .iter()
+                .rev()
+                .find(|entry| entry.version <= version)
+        }
+    }
+
+    fn history_bytes(&self) -> usize {
+        self.history
+            .iter()
+            .map(|v| 8 + v.value.as_ref().map_or(0, Vec::len))
+            .sum()
+    }
+
+    // Preserve the existing current key/value accounting, and additionally charge
+    // retained version identifiers, historical values, and deletion markers.
+    fn memory_bytes(&self, key_len: usize) -> usize {
+        let tracked_key = if !self.history.is_empty() || self.current.value.is_none() {
+            key_len
+        } else {
+            0
+        };
+        key_len
+            + self.current.value.as_ref().map_or(8, Vec::len)
+            + self.history_bytes()
+            + tracked_key
+    }
+}
+
+#[derive(Default)]
+struct MemorySnapshots {
+    active: BTreeMap<u64, usize>,
+    history_keys: BTreeSet<Key>,
+}
+
+impl MemorySnapshots {
+    fn needs(&self, version: u64, next: u64) -> bool {
+        self.active.range(version..next).next().is_some()
+    }
+
+    fn needs_deletion(&self, version: u64) -> bool {
+        self.active.range(..version).next().is_some()
+    }
+}
+
+struct MemorySnapshot {
+    state: Arc<MemorySharedState>,
+    version: u64,
+    generation: u64,
+    registered: bool,
+}
+
+impl MemorySnapshot {
+    fn new(state: Arc<MemorySharedState>) -> Self {
+        // Pair the version and registration atomically with respect to commits.
+        let data = state.data.read().unwrap();
+        let version = state.commit_version.load(Ordering::Acquire);
+        let generation = state.generation.load(Ordering::Acquire);
+        *state
+            .snapshots
+            .lock()
+            .unwrap()
+            .active
+            .entry(version)
+            .or_default() += 1;
+        drop(data);
+        Self {
+            state,
+            version,
+            generation,
+            registered: true,
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        self.generation == self.state.generation.load(Ordering::Acquire)
+    }
+
+    fn release_locked(
+        &mut self,
+        data: &mut BTreeMap<Key, VersionedValue>,
+        snapshots: &mut MemorySnapshots,
+    ) {
+        if !self.registered {
+            return;
+        }
+        self.registered = false;
+        if !self.is_current() {
+            return; // An administrative reset already released this generation.
+        }
+        let count = snapshots
+            .active
+            .get_mut(&self.version)
+            .expect("registered snapshot");
+        *count -= 1;
+        if *count == 0 {
+            snapshots.active.remove(&self.version);
+        } else {
+            return; // Other transactions still select exactly the same versions.
+        }
+        let mut released = 0;
+        // Visit changed keys only; transaction end never copies or scans the DB.
+        let keys = std::mem::take(&mut snapshots.history_keys);
+        for key in keys {
+            let entry = data.get_mut(&key).expect("history key exists");
+            let before = entry.memory_bytes(key.len());
+            let mut old = std::mem::take(&mut entry.history).into_iter().peekable();
+            while let Some(version) = old.next() {
+                let next = old.peek().map_or(entry.current.version, |v| v.version);
+                if snapshots.needs(version.version, next) {
+                    entry.history.push(version);
+                }
+            }
+            if entry.current.value.is_none() && !snapshots.needs_deletion(entry.current.version) {
+                debug_assert!(entry.history.is_empty());
+                data.remove(&key);
+                released += before;
+            } else {
+                released += before - entry.memory_bytes(key.len());
+                if !entry.history.is_empty() || entry.current.value.is_none() {
+                    snapshots.history_keys.insert(key);
+                }
+            }
+        }
+        self.state
+            .current_memory
+            .fetch_sub(released, Ordering::Relaxed);
+    }
+}
+
+impl Drop for MemorySnapshot {
+    fn drop(&mut self) {
+        if self.registered && self.is_current() {
+            let state = self.state.clone();
+            let mut data = state.data.write().unwrap();
+            let mut snapshots = state.snapshots.lock().unwrap();
+            self.release_locked(&mut data, &mut snapshots);
+        }
+    }
+}
 
 /// The underlying shared state for the in-memory store.
 struct MemorySharedState {
     /// The main data store, mapping keys to versioned values.
     data: RwLock<BTreeMap<Key, VersionedValue>>,
+    // Lock order is always data, then snapshots.
+    snapshots: Mutex<MemorySnapshots>,
     /// The next transaction ID to be allocated.
     next_txn_id: AtomicU64,
     /// The current commit version of the database. Incremented on every successful commit.
     commit_version: AtomicU64,
+    /// Administrative reset identity; transaction versions can restart at zero.
+    generation: AtomicU64,
     /// The WAL writer. If None, the store is transient.
     wal_writer: Option<RwLock<WalWriter>>,
     /// Optional WAL path for replay on reopen.
@@ -187,48 +354,70 @@ struct OwnedSnapshotGate {
 struct OwnedSnapshotGateState {
     readers: usize,
     writer: bool,
+    generation: u64,
 }
 
 impl OwnedSnapshotGate {
-    fn acquire_reader(self: &Arc<Self>) -> OwnedSnapshotReader {
+    fn reset(&self) {
         let mut state = self
             .state
             .lock()
             .expect("owned snapshot gate mutex poisoned");
-        while state.writer {
+        state.generation += 1;
+        state.readers = 0;
+        state.writer = false;
+        self.changed.notify_all();
+    }
+
+    fn acquire_reader(self: &Arc<Self>, generation: u64) -> OwnedSnapshotReader {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned snapshot gate mutex poisoned");
+        while state.generation == generation && state.writer {
             state = self
                 .changed
                 .wait(state)
                 .expect("owned snapshot gate mutex poisoned");
         }
-        state.readers = state.readers.saturating_add(1);
+        let released = state.generation != generation;
+        if !released {
+            state.readers = state.readers.saturating_add(1);
+        }
         OwnedSnapshotReader {
             gate: self.clone(),
-            released: false,
+            generation,
+            released,
         }
     }
 
-    fn acquire_writer(self: &Arc<Self>) -> OwnedSnapshotWriter {
+    fn acquire_writer(self: &Arc<Self>, expected_generation: Option<u64>) -> OwnedSnapshotWriter {
         let mut state = self
             .state
             .lock()
             .expect("owned snapshot gate mutex poisoned");
-        while state.writer || state.readers != 0 {
+        let generation = expected_generation.unwrap_or(state.generation);
+        while state.generation == generation && (state.writer || state.readers != 0) {
             state = self
                 .changed
                 .wait(state)
                 .expect("owned snapshot gate mutex poisoned");
         }
-        state.writer = true;
+        let released = state.generation != generation;
+        if !released {
+            state.writer = true;
+        }
         OwnedSnapshotWriter {
             gate: self.clone(),
-            released: false,
+            generation,
+            released,
         }
     }
 }
 
 struct OwnedSnapshotReader {
     gate: Arc<OwnedSnapshotGate>,
+    generation: u64,
     released: bool,
 }
 
@@ -240,7 +429,9 @@ impl Drop for OwnedSnapshotReader {
                 .state
                 .lock()
                 .expect("owned snapshot gate mutex poisoned");
-            state.readers = state.readers.saturating_sub(1);
+            if state.generation == self.generation {
+                state.readers = state.readers.saturating_sub(1);
+            }
             self.released = true;
             self.gate.changed.notify_all();
         }
@@ -249,6 +440,7 @@ impl Drop for OwnedSnapshotReader {
 
 struct OwnedSnapshotWriter {
     gate: Arc<OwnedSnapshotGate>,
+    generation: u64,
     released: bool,
 }
 
@@ -260,7 +452,9 @@ impl Drop for OwnedSnapshotWriter {
                 .state
                 .lock()
                 .expect("owned snapshot gate mutex poisoned");
-            state.writer = false;
+            if state.generation == self.generation {
+                state.writer = false;
+            }
             self.released = true;
             self.gate.changed.notify_all();
         }
@@ -294,8 +488,8 @@ impl MemorySharedState {
     fn recompute_current_memory(&self) {
         let data = self.data.read().unwrap();
         let mut total = 0usize;
-        for (k, (v, _)) in data.iter() {
-            total = total.saturating_add(k.len() + v.len());
+        for (k, v) in data.iter() {
+            total = total.saturating_add(v.memory_bytes(k.len()));
         }
         self.current_memory.store(total, Ordering::Relaxed);
     }
@@ -316,8 +510,10 @@ impl MemoryTxnManager {
         Self {
             state: Arc::new(MemorySharedState {
                 data: RwLock::new(BTreeMap::new()),
+                snapshots: Mutex::new(MemorySnapshots::default()),
                 next_txn_id: AtomicU64::new(1),
                 commit_version: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
                 wal_writer: wal_writer.map(RwLock::new),
                 wal_path,
                 sstable: RwLock::new(None),
@@ -383,16 +579,21 @@ impl MemoryTxnManager {
     pub fn snapshot(&self) -> Vec<(Key, Value)> {
         let data = self.state.data.read().unwrap();
         data.iter()
-            .map(|(k, (v, _))| (k.clone(), v.clone()))
+            .filter_map(|(k, v)| v.current.value.as_ref().map(|v| (k.clone(), v.clone())))
             .collect()
     }
 
-    /// Clears all data and resets memory accounting.
+    /// Administratively reset all data and memory accounting.
+    /// Existing transactions and owned cursors subsequently return `TxnClosed`.
+    /// Use transactional deletes when readers must retain their snapshots.
     pub fn clear_all(&self) {
-        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
         let mut data = self.state.data.write().unwrap();
+        let mut snapshots = self.state.snapshots.lock().unwrap();
+        self.state.generation.fetch_add(1, Ordering::AcqRel);
         data.clear();
-        drop(data);
+        snapshots.active.clear();
+        snapshots.history_keys.clear();
+        self.state.owned_snapshot_gate.reset();
         self.state.current_memory.store(0, Ordering::Relaxed);
         self.state.commit_version.store(0, Ordering::Relaxed);
     }
@@ -529,26 +730,24 @@ impl MemoryTxnManager {
         let snapshot_bytes = {
             let data = self.state.data.read().unwrap();
             let mut bytes = 0usize;
-            for (k, (v, _)) in data.iter() {
-                bytes = bytes.saturating_add(k.len() + v.len());
+            for (k, v) in data.iter() {
+                bytes = bytes.saturating_add(v.memory_bytes(k.len()));
             }
             bytes
         };
 
         let executed = self.compact_with_limit(snapshot_bytes, snapshot_bytes, || {
-            let data = self.state.data.read().unwrap();
+            let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer(None);
+            let mut data = self.state.data.write().unwrap();
             let mut rebuilt = BTreeMap::new();
-            for (k, (v, version)) in data.iter() {
-                rebuilt.insert(k.clone(), (v.clone(), *version));
+            for (k, v) in data.iter() {
+                rebuilt.insert(k.clone(), v.clone());
             }
-            drop(data);
 
             #[cfg(feature = "test-hooks")]
             self.notify_compaction(CrashTiming::During);
 
-            let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
-            let mut write_guard = self.state.data.write().unwrap();
-            *write_guard = rebuilt;
+            *data = rebuilt;
             Ok(())
         })?;
 
@@ -569,7 +768,10 @@ impl MemoryTxnManager {
 
         let data = self.state.data.read().unwrap();
         let mut writer = SstableWriter::create(path)?;
-        for (key, (value, _version)) in data.iter() {
+        for (key, entry) in data.iter() {
+            let Some(value) = &entry.current.value else {
+                continue;
+            };
             #[cfg(feature = "test-hooks")]
             {
                 let mut record = Vec::with_capacity(key.len() + value.len());
@@ -617,7 +819,7 @@ impl MemoryTxnManager {
             return Ok(());
         }
 
-        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
+        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer(None);
         let mut data = self.state.data.write().unwrap();
         let mut max_txn_id = 0;
         let mut max_version = self.state.commit_version.load(Ordering::Acquire);
@@ -646,7 +848,7 @@ impl MemoryTxnManager {
                         max_version += 1;
                         for (key, value) in writes {
                             if let Some(v) = value {
-                                data.insert(key, (v, max_version));
+                                data.insert(key, VersionedValue::new(Some(v), max_version));
                             } else {
                                 data.remove(&key);
                             }
@@ -711,7 +913,7 @@ impl MemoryTxnManager {
         for key in keys {
             if let Some(value) = reader.get(&key)? {
                 version += 1;
-                data.insert(key, (value, version));
+                data.insert(key, VersionedValue::new(Some(value), version));
             }
         }
 
@@ -729,23 +931,99 @@ impl MemoryTxnManager {
         Ok(())
     }
 
-    fn sstable_get(&self, key: &Key) -> Result<Option<Value>> {
-        let mut guard = self.state.sstable.write().unwrap();
-        if let Some(reader) = guard.as_mut() {
-            return reader.get(key);
-        }
-        Ok(None)
-    }
-
     fn begin_internal(&self, mode: TxnMode) -> Result<MemoryTransaction<'_>> {
         let txn_id = self.state.next_txn_id.fetch_add(1, Ordering::SeqCst);
-        let start_version = self.state.commit_version.load(Ordering::Acquire);
-        Ok(MemoryTransaction::new(
-            self,
-            TxnId(txn_id),
-            mode,
-            start_version,
-        ))
+        let snapshot = MemorySnapshot::new(self.state.clone());
+        Ok(MemoryTransaction::new(self, TxnId(txn_id), mode, snapshot))
+    }
+
+    fn commit_pending(
+        &self,
+        id: TxnId,
+        start_version: u64,
+        writes: &mut BTreeMap<Key, Option<Value>>,
+        read_set: &HashMap<Key, u64>,
+        snapshot: &mut Option<MemorySnapshot>,
+    ) -> Result<()> {
+        let generation = snapshot.as_ref().ok_or(Error::TxnClosed)?.generation;
+        let _snapshot_writer = self
+            .state
+            .owned_snapshot_gate
+            .acquire_writer(Some(generation));
+        let mut data = self.state.data.write().unwrap();
+        let mut snapshots = self.state.snapshots.lock().unwrap();
+        if !snapshot.as_ref().is_some_and(MemorySnapshot::is_current) {
+            return Err(Error::TxnClosed);
+        }
+        for key in read_set.keys().chain(writes.keys()) {
+            if data
+                .get(key)
+                .is_some_and(|v| v.current.version > start_version)
+            {
+                return Err(Error::TxnConflict);
+            }
+        }
+        // This transaction is terminal even if persistence fails. It must not
+        // retain its own pre-write versions or make an ordinary replacement
+        // require enough capacity for two copies of the value.
+        if let Some(snapshot) = snapshot.as_mut() {
+            snapshot.release_locked(&mut data, &mut snapshots);
+        }
+        let commit_version = self.state.commit_version.load(Ordering::Acquire) + 1;
+        let mut prospective = self.state.current_memory.load(Ordering::Relaxed);
+        for (key, value) in writes.iter() {
+            let existing = data.get(key);
+            if let Some(entry) = existing {
+                prospective -= entry.memory_bytes(key.len());
+            }
+            if value.is_none() && !snapshots.needs_deletion(commit_version) {
+                continue;
+            }
+            let mut size = key.len() + value.as_ref().map_or(8, Vec::len);
+            let mut tracks_history = value.is_none();
+            if let Some(entry) = existing {
+                size += entry.history_bytes();
+                tracks_history |= !entry.history.is_empty();
+                if snapshots.needs(entry.current.version, commit_version) {
+                    size += 8 + entry.current.value.as_ref().map_or(0, Vec::len);
+                    tracks_history = true;
+                }
+            }
+            if tracks_history {
+                size += key.len(); // The reclamation index owns its own key.
+            }
+            prospective = prospective.saturating_add(size);
+        }
+        let current = self.state.current_memory.load(Ordering::Relaxed);
+        if prospective > current {
+            self.state.check_memory_limit(prospective - current)?;
+        }
+        self.write_wal(id, writes)?;
+        for (key, value) in std::mem::take(writes) {
+            let old = data.remove(&key);
+            snapshots.history_keys.remove(&key);
+            if value.is_none() && !snapshots.needs_deletion(commit_version) {
+                continue;
+            }
+            let mut entry = VersionedValue::new(value, commit_version);
+            if let Some(old) = old {
+                entry.history = old.history;
+                if snapshots.needs(old.current.version, commit_version) {
+                    entry.history.push(old.current);
+                }
+            }
+            if !entry.history.is_empty() || entry.current.value.is_none() {
+                snapshots.history_keys.insert(key.clone());
+            }
+            data.insert(key, entry);
+        }
+        self.state
+            .current_memory
+            .store(prospective, Ordering::Relaxed);
+        self.state
+            .commit_version
+            .store(commit_version, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -755,78 +1033,26 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
     }
 
     fn commit(&'a self, mut txn: MemoryTransaction<'a>) -> Result<()> {
-        if txn.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        txn.ensure_active()?;
         if txn.mode == TxnMode::ReadOnly || txn.writes.is_empty() {
             txn.state = TxnState::Committed;
             return Ok(());
         }
 
-        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
-        let mut data = self.state.data.write().unwrap();
-
-        for key in txn.read_set.keys() {
-            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
-            if current_version > txn.start_version {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        // Detect write-write conflicts even when the key was never read.
-        for key in txn.writes.keys() {
-            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
-            if current_version > txn.start_version {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        // Compute prospective memory usage and enforce limits before mutating state.
-        let mut delta: isize = 0;
-        for (key, value) in &txn.writes {
-            let current_size = data.get(key).map(|(v, _)| key.len() + v.len()).unwrap_or(0);
-            let new_size = match value {
-                Some(v) => key.len() + v.len(),
-                None => 0,
-            };
-            delta += new_size as isize - current_size as isize;
-        }
-
-        let current_mem = self.state.current_memory.load(Ordering::Relaxed);
-        let prospective = if delta >= 0 {
-            current_mem.saturating_add(delta as usize)
-        } else {
-            current_mem.saturating_sub(delta.unsigned_abs())
-        };
-
-        if delta > 0 {
-            self.state.check_memory_limit(delta as usize)?;
-        }
-
-        let commit_version = self.state.commit_version.fetch_add(1, Ordering::AcqRel) + 1;
-
-        self.write_wal(txn.id, &txn.writes)?;
-
-        for (key, value) in std::mem::take(&mut txn.writes) {
-            if let Some(v) = value {
-                data.insert(key, (v, commit_version));
-            } else {
-                data.remove(&key);
-            }
-        }
-
-        self.state
-            .current_memory
-            .store(prospective, Ordering::Relaxed);
+        self.commit_pending(
+            txn.id,
+            txn.start_version,
+            &mut txn.writes,
+            &txn.read_set,
+            &mut txn.snapshot,
+        )?;
 
         txn.state = TxnState::Committed;
         Ok(())
     }
 
     fn rollback(&'a self, mut txn: MemoryTransaction<'a>) -> Result<()> {
-        if txn.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        txn.ensure_active()?;
         txn.state = TxnState::RolledBack;
         Ok(())
     }
@@ -839,19 +1065,26 @@ pub struct MemoryTransaction<'a> {
     mode: TxnMode,
     state: TxnState,
     start_version: u64,
+    snapshot: Option<MemorySnapshot>,
     writes: BTreeMap<Key, Option<Value>>,
     journal_before: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
 }
 
 impl<'a> MemoryTransaction<'a> {
-    fn new(manager: &'a MemoryTxnManager, id: TxnId, mode: TxnMode, start_version: u64) -> Self {
+    fn new(
+        manager: &'a MemoryTxnManager,
+        id: TxnId,
+        mode: TxnMode,
+        snapshot: MemorySnapshot,
+    ) -> Self {
         Self {
             manager,
             id,
             mode,
             state: TxnState::Active,
-            start_version,
+            start_version: snapshot.version,
+            snapshot: Some(snapshot),
             writes: BTreeMap::new(),
             journal_before: BTreeMap::new(),
             read_set: HashMap::new(),
@@ -859,7 +1092,12 @@ impl<'a> MemoryTransaction<'a> {
     }
 
     fn ensure_active(&self) -> Result<()> {
-        if self.state != TxnState::Active {
+        if self.state != TxnState::Active
+            || !self
+                .snapshot
+                .as_ref()
+                .is_some_and(MemorySnapshot::is_current)
+        {
             return Err(Error::TxnClosed);
         }
         Ok(())
@@ -875,17 +1113,17 @@ impl<'a> MemoryTransaction<'a> {
 
     /// トランザクションを消費せずにロールバックする。
     pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
         self.state = TxnState::RolledBack;
+        self.snapshot.take();
         Ok(())
     }
 
-    fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> MergedScanIter<'_> {
+    fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> Result<MergedScanIter<'_>> {
         let start_vec = start.to_vec();
         let end_vec = end.to_vec();
         let data_guard = self.manager.state.data.read().unwrap();
+        self.ensure_active()?;
         let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
         let data_iter = unsafe {
             // Safety: data_guard keeps the map alive for the lifetime of the iterator.
@@ -895,7 +1133,7 @@ impl<'a> MemoryTransaction<'a> {
             .writes
             .range((Included(start_vec.clone()), Excluded(end_vec.clone())));
 
-        MergedScanIter::new(
+        Ok(MergedScanIter::new(
             data_guard,
             data_iter,
             write_iter,
@@ -904,19 +1142,20 @@ impl<'a> MemoryTransaction<'a> {
             self.start_version,
             self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
-        )
+        ))
     }
 
-    fn scan_prefix_internal(&mut self, prefix: &[u8]) -> MergedScanIter<'_> {
+    fn scan_prefix_internal(&mut self, prefix: &[u8]) -> Result<MergedScanIter<'_>> {
         let prefix_vec = prefix.to_vec();
         let data_guard = self.manager.state.data.read().unwrap();
+        self.ensure_active()?;
         let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
         let data_iter = unsafe {
             // Safety: data_guard keeps the map alive for the lifetime of the iterator.
             (&*data_ptr).range(prefix_vec.clone()..)
         };
         let write_iter = self.writes.range(prefix_vec.clone()..);
-        MergedScanIter::new(
+        Ok(MergedScanIter::new(
             data_guard,
             data_iter,
             write_iter,
@@ -925,19 +1164,20 @@ impl<'a> MemoryTransaction<'a> {
             self.start_version,
             self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
-        )
+        ))
     }
 
-    fn scan_from_internal(&mut self, start: &[u8]) -> MergedScanIter<'_> {
+    fn scan_from_internal(&mut self, start: &[u8]) -> Result<MergedScanIter<'_>> {
         let start_vec = start.to_vec();
         let data_guard = self.manager.state.data.read().unwrap();
+        self.ensure_active()?;
         let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
         let data_iter = unsafe {
             // Safety: data_guard keeps the map alive for the lifetime of the iterator.
             (&*data_ptr).range(start_vec.clone()..)
         };
         let write_iter = self.writes.range(start_vec..);
-        MergedScanIter::new(
+        Ok(MergedScanIter::new(
             data_guard,
             data_iter,
             write_iter,
@@ -946,7 +1186,7 @@ impl<'a> MemoryTransaction<'a> {
             self.start_version,
             self.mode != TxnMode::ReadOnly,
             &mut self.read_set,
-        )
+        ))
     }
 }
 
@@ -960,42 +1200,24 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     }
 
     fn get(&mut self, key: &Key) -> Result<Option<Value>> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
 
         if let Some(value) = self.writes.get(key) {
             return Ok(value.clone());
         }
 
-        let result = {
-            let data = self.manager.state.data.read().unwrap();
-            data.get(key).cloned()
-        };
-
-        if let Some((v, version)) = result {
-            if self.mode != TxnMode::ReadOnly {
-                self.read_set.insert(key.clone(), version);
-            }
-            return Ok(Some(v));
+        let data = self.manager.state.data.read().unwrap();
+        self.ensure_active()?;
+        let visible = data.get(key).and_then(|entry| entry.at(self.start_version));
+        if self.mode != TxnMode::ReadOnly {
+            self.read_set
+                .insert(key.clone(), visible.map_or(0, |v| v.version));
         }
-
-        // Read-through to SSTable if not found in memory.
-        if let Some(value) = self.manager.sstable_get(key)? {
-            let version = self.manager.state.commit_version.load(Ordering::Acquire);
-            if self.mode != TxnMode::ReadOnly {
-                self.read_set.insert(key.clone(), version);
-            }
-            return Ok(Some(value));
-        }
-
-        Ok(None)
+        Ok(visible.and_then(|v| v.value.clone()))
     }
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
@@ -1005,9 +1227,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     }
 
     fn delete(&mut self, key: Key) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
@@ -1022,7 +1242,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
         self.ensure_active()?;
         let iter = self
-            .scan_prefix_internal(prefix)
+            .scan_prefix_internal(prefix)?
             .filter_map(|(k, v)| v.map(|val| (k, val)));
         Ok(Box::new(iter))
     }
@@ -1034,7 +1254,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
         self.ensure_active()?;
         let iter = self
-            .scan_range_internal(start, end)
+            .scan_range_internal(start, end)?
             .filter_map(|(k, v)| v.map(|val| (k, val)));
         Ok(Box::new(iter))
     }
@@ -1042,7 +1262,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
         self.ensure_active()?;
         let iter = self
-            .scan_from_internal(start)
+            .scan_from_internal(start)?
             .filter_map(|(key, value)| value.map(|value| (key, value)));
         Ok(Box::new(iter))
     }
@@ -1070,87 +1290,26 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
     }
 
     fn commit_self(mut self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
         if self.mode == TxnMode::ReadOnly || self.writes.is_empty() {
             self.state = TxnState::Committed;
             return Ok(());
         }
 
-        let _snapshot_writer = self.manager.state.owned_snapshot_gate.acquire_writer();
-        let mut data = self.manager.state.data.write().unwrap();
-
-        // Check read-set for conflicts
-        for key in self.read_set.keys() {
-            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
-            if current_version > self.start_version {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        // Check write-write conflicts
-        for key in self.writes.keys() {
-            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
-            if current_version > self.start_version {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        // Compute prospective memory usage
-        let mut delta: isize = 0;
-        for (key, value) in &self.writes {
-            let current_size = data.get(key).map(|(v, _)| key.len() + v.len()).unwrap_or(0);
-            let new_size = match value {
-                Some(v) => key.len() + v.len(),
-                None => 0,
-            };
-            delta += new_size as isize - current_size as isize;
-        }
-
-        let current_mem = self.manager.state.current_memory.load(Ordering::Relaxed);
-        let prospective = if delta >= 0 {
-            current_mem.saturating_add(delta as usize)
-        } else {
-            current_mem.saturating_sub(delta.unsigned_abs())
-        };
-
-        if delta > 0 {
-            self.manager.state.check_memory_limit(delta as usize)?;
-        }
-
-        let commit_version = self
-            .manager
-            .state
-            .commit_version
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-
-        // WAL write
-        self.manager.write_wal(self.id, &self.writes)?;
-
-        // Apply writes
-        for (key, value) in std::mem::take(&mut self.writes) {
-            if let Some(v) = value {
-                data.insert(key, (v, commit_version));
-            } else {
-                data.remove(&key);
-            }
-        }
-
-        self.manager
-            .state
-            .current_memory
-            .store(prospective, Ordering::Relaxed);
+        self.manager.commit_pending(
+            self.id,
+            self.start_version,
+            &mut self.writes,
+            &self.read_set,
+            &mut self.snapshot,
+        )?;
 
         self.state = TxnState::Committed;
         Ok(())
     }
 
     fn rollback_self(mut self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
+        self.ensure_active()?;
         self.state = TxnState::RolledBack;
         Ok(())
     }
@@ -1167,6 +1326,7 @@ struct OwnedMemoryTransactionState {
     mode: TxnMode,
     state: TxnState,
     start_version: u64,
+    snapshot: Option<MemorySnapshot>,
     writes: BTreeMap<Key, Option<Value>>,
     journal_before: BTreeMap<Key, Option<Value>>,
     read_set: HashMap<Key, u64>,
@@ -1178,14 +1338,15 @@ struct OwnedMemoryTransactionState {
 impl OwnedMemoryTransaction {
     fn new(manager: Arc<MemoryTxnManager>, mode: TxnMode) -> Self {
         let id = TxnId(manager.state.next_txn_id.fetch_add(1, Ordering::SeqCst));
-        let start_version = manager.state.commit_version.load(Ordering::Acquire);
+        let snapshot = MemorySnapshot::new(manager.state.clone());
         Self {
             manager,
             state: Arc::new(Mutex::new(OwnedMemoryTransactionState {
                 id,
                 mode,
                 state: TxnState::Active,
-                start_version,
+                start_version: snapshot.version,
+                snapshot: Some(snapshot),
                 writes: BTreeMap::new(),
                 journal_before: BTreeMap::new(),
                 read_set: HashMap::new(),
@@ -1202,12 +1363,28 @@ impl OwnedMemoryTransaction {
         prefix: Option<Vec<u8>>,
         end: Option<Key>,
     ) -> Result<Box<dyn OwnedKVScan>> {
-        let snapshot = self.manager.state.owned_snapshot_gate.acquire_reader();
+        let generation = {
+            let state = self
+                .state
+                .lock()
+                .expect("owned memory transaction mutex poisoned");
+            Self::ensure_active(&state)?;
+            if state.cursor_open {
+                return Err(Error::TxnClosed);
+            }
+            state.snapshot.as_ref().unwrap().generation
+        };
+        let snapshot = self
+            .manager
+            .state
+            .owned_snapshot_gate
+            .acquire_reader(generation);
         let mut state = self
             .state
             .lock()
             .expect("owned memory transaction mutex poisoned");
-        if state.state != TxnState::Active || state.cursor_open {
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
             return Err(Error::TxnClosed);
         }
         state.cursor_open = true;
@@ -1224,7 +1401,12 @@ impl OwnedMemoryTransaction {
     }
 
     fn ensure_active(state: &OwnedMemoryTransactionState) -> Result<()> {
-        if state.state != TxnState::Active {
+        if state.state != TxnState::Active
+            || !state
+                .snapshot
+                .as_ref()
+                .is_some_and(MemorySnapshot::is_current)
+        {
             return Err(Error::TxnClosed);
         }
         Ok(())
@@ -1287,28 +1469,17 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
             return Ok(value.clone());
         }
 
-        let result = {
-            let data = self.manager.state.data.read().unwrap();
-            data.get(key).cloned()
-        };
-        if let Some((value, version)) = result {
-            if version <= state.start_version {
-                if state.mode != TxnMode::ReadOnly {
-                    state.read_set.insert(key.clone(), version);
-                }
-                return Ok(Some(value));
-            }
-            return Ok(None);
+        let data = self.manager.state.data.read().unwrap();
+        Self::ensure_active(&state)?;
+        let visible = data
+            .get(key)
+            .and_then(|entry| entry.at(state.start_version));
+        if state.mode != TxnMode::ReadOnly {
+            state
+                .read_set
+                .insert(key.clone(), visible.map_or(0, |v| v.version));
         }
-
-        if let Some(value) = self.manager.sstable_get(key)? {
-            let start_version = state.start_version;
-            if state.mode != TxnMode::ReadOnly {
-                state.read_set.insert(key.clone(), start_version);
-            }
-            return Ok(Some(value));
-        }
-        Ok(None)
+        Ok(visible.and_then(|v| v.value.clone()))
     }
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
@@ -1457,7 +1628,7 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        let (id, mode, start_version, writes, read_set) = {
+        let (id, mode, start_version, mut writes, read_set, mut snapshot) = {
             let mut state = self
                 .state
                 .lock()
@@ -1473,59 +1644,15 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
                 state.start_version,
                 std::mem::take(&mut state.writes),
                 std::mem::take(&mut state.read_set),
+                state.snapshot.take(),
             )
         };
         if mode == TxnMode::ReadOnly || writes.is_empty() {
             return Ok(());
         }
 
-        let _snapshot_writer = self.manager.state.owned_snapshot_gate.acquire_writer();
-        let mut data = self.manager.state.data.write().unwrap();
-        for key in read_set.keys().chain(writes.keys()) {
-            let current_version = data.get(key).map(|(_, version)| *version).unwrap_or(0);
-            if current_version > start_version {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        let mut delta: isize = 0;
-        for (key, value) in &writes {
-            let current_size = data
-                .get(key)
-                .map(|(value, _)| key.len() + value.len())
-                .unwrap_or(0);
-            let new_size = value.as_ref().map_or(0, |value| key.len() + value.len());
-            delta += new_size as isize - current_size as isize;
-        }
-        let current_memory = self.manager.state.current_memory.load(Ordering::Relaxed);
-        let prospective = if delta >= 0 {
-            current_memory.saturating_add(delta as usize)
-        } else {
-            current_memory.saturating_sub(delta.unsigned_abs())
-        };
-        if delta > 0 {
-            self.manager.state.check_memory_limit(delta as usize)?;
-        }
-
-        let commit_version = self
-            .manager
-            .state
-            .commit_version
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-        self.manager.write_wal(id, &writes)?;
-        for (key, value) in writes {
-            if let Some(value) = value {
-                data.insert(key, (value, commit_version));
-            } else {
-                data.remove(&key);
-            }
-        }
         self.manager
-            .state
-            .current_memory
-            .store(prospective, Ordering::Relaxed);
-        Ok(())
+            .commit_pending(id, start_version, &mut writes, &read_set, &mut snapshot)
     }
 
     fn rollback(self: Box<Self>) -> Result<()> {
@@ -1540,6 +1667,9 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
         state.writes.clear();
         state.journal_before.clear();
         state.state = TxnState::RolledBack;
+        let snapshot = state.snapshot.take();
+        drop(state);
+        drop(snapshot);
         Ok(())
     }
 }
@@ -1562,8 +1692,15 @@ impl OwnedMemoryCursor {
             && self.end.as_ref().is_none_or(|end| key < end)
     }
 
-    fn data_candidate(&self, start_version: u64) -> Option<(Key, Option<Value>, u64)> {
+    fn data_candidate(
+        &self,
+        start_version: u64,
+        generation: u64,
+    ) -> Result<Option<(Key, Option<Value>, u64)>> {
         let data = self.manager.state.data.read().unwrap();
+        if generation != self.manager.state.generation.load(Ordering::Acquire) {
+            return Err(Error::TxnClosed);
+        }
         let entry = match &self.last_key {
             Some(last_key) => data.range::<Key, _>((Excluded(last_key), Unbounded)).next(),
             None => match &self.start {
@@ -1571,14 +1708,17 @@ impl OwnedMemoryCursor {
                 None => data.iter().next(),
             },
         };
-        let (key, (value, version)) = entry?;
-        self.key_is_in_scope(key).then(|| {
+        let Some((key, entry)) = entry else {
+            return Ok(None);
+        };
+        let visible = entry.at(start_version);
+        Ok(self.key_is_in_scope(key).then(|| {
             (
                 key.clone(),
-                (*version <= start_version).then(|| value.clone()),
-                *version,
+                visible.and_then(|v| v.value.clone()),
+                visible.map_or(entry.current.version, |v| v.version),
             )
-        })
+        }))
     }
 
     fn write_candidate(&self) -> Option<(Key, Option<Value>)> {
@@ -1608,7 +1748,8 @@ impl OwnedMemoryCursor {
             .transaction
             .lock()
             .expect("owned memory transaction mutex poisoned");
-        if transaction.state != TxnState::Active || !transaction.cursor_open {
+        OwnedMemoryTransaction::ensure_active(&transaction)?;
+        if !transaction.cursor_open {
             return Err(Error::TxnClosed);
         }
         // Invisible post-snapshot candidates consume scan work, not the read set.
@@ -1647,12 +1788,18 @@ impl OwnedKVScan for OwnedMemoryCursor {
         if self.snapshot.is_none() {
             return Ok(None);
         }
-        let start_version = self
-            .transaction
-            .lock()
-            .expect("owned memory transaction mutex poisoned")
-            .start_version;
-        let data = self.data_candidate(start_version);
+        let (start_version, generation) = {
+            let transaction = self
+                .transaction
+                .lock()
+                .expect("owned memory transaction mutex poisoned");
+            OwnedMemoryTransaction::ensure_active(&transaction)?;
+            (
+                transaction.start_version,
+                transaction.snapshot.as_ref().unwrap().generation,
+            )
+        };
+        let data = self.data_candidate(start_version, generation)?;
         let write = self.write_candidate();
         let next = match (data, write) {
             (Some((data_key, data_value, data_version)), Some((write_key, write_value))) => {
@@ -1737,7 +1884,8 @@ impl<'a> MergedScanIter<'a> {
 
     fn advance_data(&mut self) {
         self.data_peek = None;
-        while let Some((k, (v, ver))) = self.data_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        for (k, entry) in self.data_iter.by_ref() {
+            let k = k.clone();
             if let Some(end) = &self.end {
                 if k >= *end {
                     return;
@@ -1748,10 +1896,13 @@ impl<'a> MergedScanIter<'a> {
                     return;
                 }
             }
-            if ver > self.start_version {
+            let Some(visible) = entry.at(self.start_version) else {
                 continue;
-            }
-            self.data_peek = Some((k, (v, ver)));
+            };
+            let Some(value) = &visible.value else {
+                continue;
+            };
+            self.data_peek = Some((k, (value.clone(), visible.version)));
             return;
         }
     }
@@ -1844,6 +1995,46 @@ mod tests {
 
     fn value(s: &str) -> Value {
         s.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn reset_gate_old_writer_does_not_wait_on_new_readers() {
+        let gate = Arc::new(OwnedSnapshotGate::default());
+        gate.reset();
+        let reader = gate.acquire_reader(1);
+        let old_gate = gate.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _writer = old_gate.acquire_writer(Some(0));
+            sender.send(()).unwrap();
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        drop(reader);
+        worker.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "old writer waited for a new generation reader"
+        );
+    }
+
+    #[test]
+    fn reset_gate_old_reader_does_not_wait_on_new_writer() {
+        let gate = Arc::new(OwnedSnapshotGate::default());
+        gate.reset();
+        let writer = gate.acquire_writer(Some(1));
+        let old_gate = gate.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _reader = old_gate.acquire_reader(0);
+            sender.send(()).unwrap();
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        drop(writer);
+        worker.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "old reader waited for a new generation writer"
+        );
     }
 
     fn committed_value_after_reopen(wal_path: &Path, key: Key) -> Option<Value> {

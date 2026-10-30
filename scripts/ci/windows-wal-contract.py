@@ -2,6 +2,7 @@
 
 Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
 storage is bounded to 20 GB per command, 40 GB host stop, using one target.
+Build and contract phases share one target but have separate workflow deadlines.
 Artifacts contain source identity and raw results; the workflow removes target
 after retaining those results. No durability/power-loss claim for the writer.
 """
@@ -63,6 +64,10 @@ commands = [
                         "--test", "wal_overflow_journal"]),
     ("directory-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "storage::publication::directories::tests::"]),
+    ("memory-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--test", "memory_snapshot_overwrite"]),
+    ("hnsw-transaction-snapshots", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                                     "--test", "hnsw_transaction_cache"]),
 ]
 for name, command in commands:
     if (name == "release-build") != (args.phase == "build"):
@@ -85,6 +90,8 @@ for name, command in commands:
                 "public-journal": "2 passed; 0 failed; 0 ignored",
                 "inline-lifecycle": "2 passed; 0 failed",
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
-                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed"}
+                "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed",
+                "memory-snapshots": "20 passed; 0 failed; 0 ignored",
+                "hnsw-transaction-snapshots": "5 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")
