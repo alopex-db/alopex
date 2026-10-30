@@ -1,0 +1,547 @@
+{
+  "status": "passed",
+  "source": {
+    "sha": "4194599371452e10d7be712006f2fa76fb83ee17",
+    "tree": "e9832f3de5f4ef940a2eebf2713a5462f9a9c936",
+    "run_id": "40960742467",
+    "attempt": "1",
+    "runner_os": "win32",
+    "driver_sha256": "a63950ba8cee369ba16a35920185092ede92a814f4dacad4c374c67276ab0cf8"
+  },
+  "artifact": {
+    "id": 12935754854,
+    "sha256": "cf94882269f344a734262eaf9f27ef144c9aee7d562e3d076f45123397d3ed48",
+    "files": 89
+  },
+  "ordinary_python": 15,
+  "rust_boundaries": 24,
+  "python_boundaries": {
+    "status": "passed",
+    "cases": [
+      {
+        "case": "kv-error-spool_write",
+        "stage": 1,
+        "status": "passed",
+        "fixture_bytes": 879,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-spool_write",
+        "stage": 1,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-error-spool_sync",
+        "stage": 2,
+        "status": "passed",
+        "fixture_bytes": 879,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-spool_sync",
+        "stage": 2,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-error-spool_publish",
+        "stage": 3,
+        "status": "passed",
+        "fixture_bytes": 879,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-spool_publish",
+        "stage": 3,
+        "status": "passed",
+        "fixture_bytes": 1096,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-error-before_reference",
+        "stage": 4,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-before_reference",
+        "stage": 4,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-error-reference_append_sync",
+        "stage": 5,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-reference_append_sync",
+        "stage": 5,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-error-reference_force_sync",
+        "stage": 8,
+        "status": "passed",
+        "fixture_bytes": 1097,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "kv-exit-reference_force_sync",
+        "stage": 8,
+        "status": "passed",
+        "fixture_bytes": 1096,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-spool_write",
+        "stage": 1,
+        "status": "passed",
+        "fixture_bytes": 4602,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-spool_write",
+        "stage": 1,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-spool_sync",
+        "stage": 2,
+        "status": "passed",
+        "fixture_bytes": 4602,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-spool_sync",
+        "stage": 2,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-spool_publish",
+        "stage": 3,
+        "status": "passed",
+        "fixture_bytes": 4602,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-spool_publish",
+        "stage": 3,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-before_reference",
+        "stage": 4,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-before_reference",
+        "stage": 4,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-reference_append_sync",
+        "stage": 5,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-reference_append_sync",
+        "stage": 5,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-error-reference_force_sync",
+        "stage": 8,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      },
+      {
+        "case": "sql-exit-reference_force_sync",
+        "stage": 8,
+        "status": "passed",
+        "fixture_bytes": 5790,
+        "reopen_cycles": 2
+      }
+    ],
+    "native_sha256": "33f22b716ae677fd16af4e6b82f3c81f74f9a73d6f7cde8d45b3f05af5ec775b",
+    "driver_sha256": "e34775adc04ddf1d839ac8411d2657290556c48ffd1dd87f376315a48749f2f8",
+    "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+    "scope": "instrumented process exit/error boundaries, not power-loss or release-wheel qualification"
+  },
+  "python_reopen_cycles": 48,
+  "max_python_fixture_bytes": 5790,
+  "container_processes": 4,
+  "live_wal_processes": 6,
+  "old_reader_rejection": "container and WAL3 rejected without file mutation",
+  "driver_source_match": "Git blob with CRLF checkout; all reported driver/config hashes match",
+  "storage_samples": 110,
+  "peak_windows_allocated_bytes": 3546337640,
+  "final_windows_allocated_bytes": 597685320,
+  "cleanup": {
+    "allocated_bytes": 597685320,
+    "target_removed": true,
+    "work_removed": true
+  },
+  "normal_native_sha256": "8897f2f992558ab62981a2c0841fdb0f318ab4f81e85157e78a35a1f421ab63c",
+  "instrumented_native_sha256": "33f22b716ae677fd16af4e6b82f3c81f74f9a73d6f7cde8d45b3f05af5ec775b",
+  "legacy_wheel_sha256": "194401d71e5c41ab8e976330f6007529961aeeb1773aa9162a321725f079a0be",
+  "limits": [
+    "development Windows fault-injection and process-exit evidence",
+    "not hardware power-loss or release-wheel qualification",
+    "ordinary PR CI and candidate integration pending"
+  ],
+  "initial_failed_run": 40957708284,
+  "live_wal": {
+    "contract": "live WAL recovery; no mid-publication kill/power-loss claim",
+    "legacy_crate": {
+      "name": "alopex-core",
+      "version": "0.8.16",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "125438cc3db89b796360eb736572c61d8022139f2583476b56a8fee86ade8136",
+      "dependencies": [
+        "bincode",
+        "crc32fast",
+        "futures-core",
+        "getrandom",
+        "memmap2",
+        "rand",
+        "regex",
+        "serde",
+        "snap",
+        "thiserror",
+        "tracing"
+      ]
+    },
+    "binaries": {
+      "D:\\a\\alopex\\alopex\\target\\debug\\alopex-wal-v0816.exe": {
+        "bytes": 1295872,
+        "sha256": "26881fe949600af9fd46b6743db3026b35d21df6d27c72d8586a768e8f79a053"
+      },
+      "D:\\a\\alopex\\alopex\\target\\debug\\alopex-wal-current.exe": {
+        "bytes": 1573376,
+        "sha256": "29f71e4cc9f2b7d58ff148fc6c27262d08e3da8d6da89cd3ff63b4cd75d3f54a"
+      }
+    },
+    "source": {
+      "live_wal.rs": {
+        "bytes": 5329,
+        "sha256": "a88651cda8060e690e0900b66f29570e1eb4e279688dcc50e5abeaec7d95644d"
+      },
+      "live_wal.py": {
+        "bytes": 5218,
+        "sha256": "f726db0f42ab7743aaa5fbd4e55b2070ed24b5fcbd593a2b786a090582684174"
+      },
+      "wal-v0816\\Cargo.toml": {
+        "bytes": 261,
+        "sha256": "b964eaf8a5dd86e178f5ad333acba3fb28b0be9dfb152514e734689af0a59bdd"
+      },
+      "wal-v0816\\Cargo.lock": {
+        "bytes": 12129,
+        "sha256": "9693e5ce9b4148e1dc2edca295cf8c5f15f4e27e77feae95ffd59bf35a8ca6c2"
+      },
+      "wal-current\\Cargo.toml": {
+        "bytes": 321,
+        "sha256": "ed10883960ba27df00811aaa9ad13aec3bc0adfc16b60634483ad91de4213ca0"
+      },
+      "wal-current\\Cargo.lock": {
+        "bytes": 12938,
+        "sha256": "e4b059b7a171ceb46a0971efab315a772191acaa18f39c16758d1b4d5c3fb55a"
+      }
+    },
+    "checkout_head": "4194599371452e10d7be712006f2fa76fb83ee17",
+    "phases": [
+      {
+        "committed_keys": 1,
+        "destructors": false,
+        "last_lsn": 2,
+        "phase": "legacy-write",
+        "result": "pass",
+        "sync": "EveryWrite",
+        "writer_version": "0.8.16",
+        "files_before": {},
+        "files_after": {
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "1c2b34f038f5381a41c5e4e7b547d137fea215dd983a6a3b4195b617487dcd91"
+          }
+        },
+        "wal_version": 2
+      },
+      {
+        "checkpoint_lsn": null,
+        "destructors": false,
+        "entries_recovered": 1,
+        "last_lsn": 2,
+        "phase": "current-read",
+        "result": "pass",
+        "stop_reason": null,
+        "warnings": [],
+        "files_before": {
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "1c2b34f038f5381a41c5e4e7b547d137fea215dd983a6a3b4195b617487dcd91"
+          }
+        },
+        "files_after": {
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "1c2b34f038f5381a41c5e4e7b547d137fea215dd983a6a3b4195b617487dcd91"
+          }
+        },
+        "wal_version": 2
+      },
+      {
+        "checkpoint_lsn": null,
+        "destructors": false,
+        "entries_recovered": 1,
+        "last_lsn": 2,
+        "phase": "upgrade",
+        "result": "pass",
+        "stop_reason": null,
+        "warnings": [],
+        "files_before": {
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "1c2b34f038f5381a41c5e4e7b547d137fea215dd983a6a3b4195b617487dcd91"
+          }
+        },
+        "files_after": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "wal_version": 3
+      },
+      {
+        "error": "corrupted segment 0: WAL segment header invalid: invalid format: unsupported WAL version: 3",
+        "phase": "legacy-reject",
+        "result": "pass",
+        "files_before": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "files_after": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "wal_version": 3
+      },
+      {
+        "checkpoint_lsn": 4,
+        "destructors": false,
+        "entries_recovered": 1,
+        "last_lsn": 5,
+        "phase": "reopen",
+        "result": "pass",
+        "stop_reason": null,
+        "warnings": [],
+        "files_before": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "files_after": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "wal_version": 3
+      },
+      {
+        "checkpoint_lsn": 4,
+        "destructors": false,
+        "entries_recovered": 1,
+        "last_lsn": 5,
+        "phase": "reopen",
+        "result": "pass",
+        "stop_reason": null,
+        "warnings": [],
+        "files_before": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "files_after": {
+          "checkpoint.meta": {
+            "bytes": 24,
+            "sha256": "220e583ea57a54bcf153a421081576ccf59d126565de62688e480eee01b9a87b"
+          },
+          "lsm.wal": {
+            "bytes": 112,
+            "sha256": "277a9a1a809960b1822eec6df5bb5c73a25ef0889cc37ab5bf7ab97090c74cc2"
+          },
+          "overflow\\414c50584c534d310500000000000000-0000000000000005.spool": {
+            "bytes": 221,
+            "sha256": "8070000cb21be575da8ec99ba6c567d9d1a9c3f3c7aecc8711518fda008d34f0"
+          },
+          "sst\\1.sst": {
+            "bytes": 162,
+            "sha256": "1fb8ab2475358993c1024013575d3bb0e9899e87b37b23c8642832760a259b9b"
+          }
+        },
+        "wal_version": 3
+      }
+    ],
+    "result": "pass"
+  },
+  "container": {
+    "legacy-write": {
+      "phase": "legacy-write",
+      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\legacy\\Lib\\site-packages\\alopex\\_alopex.pyd",
+      "native_sha256": "7816d0721669dda998e44cc2a8181eaf883909260df67b5c8cfed4f0ebcdf445",
+      "legacy_version": "0.8.16",
+      "files": {
+        "legacy.alopex": {
+          "bytes": 468,
+          "sha256": "8f878072ac8a8a7418b4e645053cdc8e045f40185d6c9e9844152a756325c9be"
+        }
+      },
+      "result": "pass"
+    },
+    "upgrade": {
+      "phase": "upgrade",
+      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\normal\\alopex\\_alopex.cp311-win_amd64.pyd",
+      "native_sha256": "8897f2f992558ab62981a2c0841fdb0f318ab4f81e85157e78a35a1f421ab63c",
+      "legacy_version": null,
+      "files": {
+        "legacy.alopex": {
+          "bytes": 787,
+          "sha256": "ba89e03c2949b8c1ea9c0345f8123938a0d892c3f7e2dfabb5ed5005b4351cc1"
+        }
+      },
+      "result": "pass"
+    },
+    "legacy-reject": {
+      "phase": "legacy-reject",
+      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\legacy\\Lib\\site-packages\\alopex\\_alopex.pyd",
+      "native_sha256": "7816d0721669dda998e44cc2a8181eaf883909260df67b5c8cfed4f0ebcdf445",
+      "legacy_version": "0.8.16",
+      "error": "container format error: Incompatible version: file version FileVersion { major: 0, minor: 2, patch: 0 } is newer than reader version FileVersion { major: 0, minor: 1, patch: 0 }. Please upgrade Alopex DB.",
+      "code": "ALOPEX-PY999",
+      "files": {
+        "legacy.alopex": {
+          "bytes": 787,
+          "sha256": "ba89e03c2949b8c1ea9c0345f8123938a0d892c3f7e2dfabb5ed5005b4351cc1"
+        }
+      },
+      "result": "pass"
+    },
+    "reopen": {
+      "phase": "reopen",
+      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\normal\\alopex\\_alopex.cp311-win_amd64.pyd",
+      "native_sha256": "8897f2f992558ab62981a2c0841fdb0f318ab4f81e85157e78a35a1f421ab63c",
+      "legacy_version": null,
+      "files": {
+        "legacy.alopex": {
+          "bytes": 787,
+          "sha256": "981790d7252ce3d6fd307857838cc6c838f5ffdf8790e156c259ab0849a3a98d"
+        }
+      },
+      "result": "pass"
+    }
+  }
+}

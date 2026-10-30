@@ -165,23 +165,10 @@ pub(crate) fn reservation_bytes(
     Ok(bytes)
 }
 
-pub(crate) fn require_directory_sync() -> Result<()> {
-    if cfg!(windows) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "overflow WAL writes require durable directory entries; Windows support is pending",
-        )
-        .into())
-    } else {
-        Ok(())
-    }
-}
-
 // Unlike the legacy best-effort container helper, never ignore missing paths or
 // metadata errors: the reference must not outlive an unsynced directory entry.
 #[cfg(not(windows))]
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {
-    require_directory_sync()?;
     let directory = File::open(path)?;
     if !directory.metadata()?.is_dir() {
         return Err(invalid("overflow sync target is not a directory"));

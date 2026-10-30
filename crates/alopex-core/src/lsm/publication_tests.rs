@@ -265,29 +265,29 @@ fn windows_container_sharing_failure_preserves_old_bytes() {
 
 #[cfg(windows)]
 #[test]
-fn windows_public_lsm_overflow_rejects_before_touching_storage() {
+fn windows_public_lsm_overflow_rejects_invalid_budgets_before_touching_storage() {
     use wal::{operations::OperationLimits, spool::SpoolLimits};
     let dir = tempfile::tempdir().unwrap();
     let options = overflow::LsmOverflowConfig::new(
         SpoolLimits::new(512, 4096, 7).unwrap(),
         OperationLimits::new(512, 8, 64).unwrap(),
         16384,
-        7,
+        0,
         4096,
     );
     let missing = dir.path().join("missing/child");
-    assert!(
-        matches!(LsmKV::open_with_overflow(&missing, config(), options),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported)
-    );
+    assert!(matches!(
+        LsmKV::open_with_overflow(&missing, config(), options),
+        Err(Error::InvalidFormat(_))
+    ));
     assert!(!dir.path().join("missing").exists());
     let existing = dir.path().join("existing");
     fs::create_dir(&existing).unwrap();
     fs::write(existing.join("lsm.wal"), b"old").unwrap();
-    assert!(
-        matches!(LsmKV::open_with_overflow(&existing, config(), options),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported)
-    );
+    assert!(matches!(
+        LsmKV::open_with_overflow(&existing, config(), options),
+        Err(Error::InvalidFormat(_))
+    ));
     assert_eq!(fs::read(existing.join("lsm.wal")).unwrap(), b"old");
     assert_eq!(fs::read_dir(existing).unwrap().count(), 1);
 }
