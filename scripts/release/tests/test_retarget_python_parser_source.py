@@ -47,6 +47,25 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
             ],
         }
 
+    def test_v0817_accepts_primary_targets_but_rejects_each_missing_primary(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "manifest.json"
+            manifest = self.manifest()
+            manifest["alopex_version"] = "0.8.17"
+            manifest["assets"] = [a for a in manifest["assets"] if a["target"] != "x86_64-apple-darwin"]
+            source.write_text(json.dumps(manifest))
+            self.assertEqual(module._validated_manifest(source)[1], "0.8.17")
+            for target in [a["target"] for a in manifest["assets"]]:
+                altered = dict(manifest, assets=[a for a in manifest["assets"] if a["target"] != target])
+                source.write_text(json.dumps(altered))
+                with self.subTest(target=target), self.assertRaisesRegex(ValueError, "target matrix"):
+                    module._validated_manifest(source)
+            manifest["alopex_version"] = "0.8.16"
+            source.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "target matrix"):
+                module._validated_manifest(source)
+
     def test_retargets_manifest_version_and_digest_idempotently(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
