@@ -57,11 +57,17 @@ def prepare(operations, case, columns):
 def measure(operation, snapshot, expected, *, warmups=3, samples=21,
             clock=time.perf_counter_ns, record=emit):
     for iteration in range(warmups + samples):
+        usage_before = resource.getrusage(resource.RUSAGE_SELF)
         started = clock()
         actual = operation()
         elapsed = clock() - started
+        usage_after = resource.getrusage(resource.RUSAGE_SELF)
         record(dict(event="sample", iteration=iteration,
-                    phase="warmup" if iteration < warmups else "measure", total_ns=elapsed))
+                    phase="warmup" if iteration < warmups else "measure", total_ns=elapsed,
+                    operation_cpu_seconds=(usage_after.ru_utime + usage_after.ru_stime -
+                                           usage_before.ru_utime - usage_before.ru_stime),
+                    operation_input_blocks=usage_after.ru_inblock - usage_before.ru_inblock,
+                    operation_output_blocks=usage_after.ru_oublock - usage_before.ru_oublock))
         workload.assert_equal(snapshot(actual), expected)
         # Both the result and validation temporaries must be gone before the next timer.
         actual = None
