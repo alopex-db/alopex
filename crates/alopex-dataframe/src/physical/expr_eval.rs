@@ -753,6 +753,137 @@ mod tests {
     }
 
     #[test]
+    fn concat_str_keeps_rows_independent_across_lengths_nulls_and_unicode() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "first",
+                Arc::new(StringArray::from(vec![
+                    Some("longer first row"),
+                    Some(""),
+                    Some("x"),
+                    None,
+                    Some("after"),
+                    Some(""),
+                    Some("q"),
+                ])) as ArrayRef,
+            ),
+            (
+                "second",
+                Arc::new(StringArray::from(vec![
+                    Some("界"),
+                    Some(""),
+                    None,
+                    None,
+                    Some(""),
+                    None,
+                    Some("r"),
+                ])) as ArrayRef,
+            ),
+            (
+                "third",
+                Arc::new(StringArray::from(vec![
+                    Some("🙂"),
+                    Some(""),
+                    Some("z"),
+                    None,
+                    None,
+                    Some("tail"),
+                    Some("s"),
+                ])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        for (mode, expected) in [
+            (
+                ConcatStrNullBehavior::Propagate,
+                vec![
+                    Some("longer first row🔹界🔹🙂"),
+                    Some("🔹🔹"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("q🔹r🔹s"),
+                ],
+            ),
+            (
+                ConcatStrNullBehavior::Ignore,
+                vec![
+                    Some("longer first row🔹界🔹🙂"),
+                    Some("🔹🔹"),
+                    Some("x🔹z"),
+                    None,
+                    Some("after🔹"),
+                    Some("🔹tail"),
+                    Some("q🔹r🔹s"),
+                ],
+            ),
+            (
+                ConcatStrNullBehavior::Replace("?".into()),
+                vec![
+                    Some("longer first row🔹界🔹🙂"),
+                    Some("🔹🔹"),
+                    Some("x🔹?🔹z"),
+                    Some("?🔹?🔹?"),
+                    Some("after🔹🔹?"),
+                    Some("🔹?🔹tail"),
+                    Some("q🔹r🔹s"),
+                ],
+            ),
+            (
+                ConcatStrNullBehavior::Replace(String::new()),
+                vec![
+                    Some("longer first row🔹界🔹🙂"),
+                    Some("🔹🔹"),
+                    Some("x🔹🔹z"),
+                    Some("🔹🔹"),
+                    Some("after🔹🔹"),
+                    Some("🔹🔹tail"),
+                    Some("q🔹r🔹s"),
+                ],
+            ),
+        ] {
+            let expression = concat_str(
+                vec![col("first"), col("second"), col("third")],
+                "🔹",
+                mode.clone(),
+            )
+            .unwrap();
+            let output = ExprEval::evaluate(&expression, &batch).unwrap();
+            let actual = output.as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(actual.iter().collect::<Vec<_>>(), expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn concat_str_handles_empty_separator_and_empty_batch() {
+        for values in [vec![], vec![Some("ab"), None, Some(""), Some("界")]] {
+            let batch = RecordBatch::try_from_iter(vec![(
+                "text",
+                Arc::new(StringArray::from(values.clone())) as ArrayRef,
+            )])
+            .unwrap();
+            for mode in [
+                ConcatStrNullBehavior::Propagate,
+                ConcatStrNullBehavior::Ignore,
+                ConcatStrNullBehavior::Replace(String::new()),
+            ] {
+                let expression = concat_str(vec![col("text"), lit("")], "", mode.clone()).unwrap();
+                let output = ExprEval::evaluate(&expression, &batch).unwrap();
+                let actual = output.as_any().downcast_ref::<StringArray>().unwrap();
+                let expected = values
+                    .iter()
+                    .map(|value| match mode {
+                        ConcatStrNullBehavior::Propagate => *value,
+                        _ => Some(value.unwrap_or("")),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.iter().collect::<Vec<_>>(), expected, "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
     fn concat_str_rejects_non_utf8_input_before_projecting_output() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("text", DataType::Utf8, true),
