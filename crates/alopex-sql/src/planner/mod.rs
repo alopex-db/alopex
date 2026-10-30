@@ -5990,7 +5990,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         _ => None,
                     };
                     let value = integer.filter(|value| (1..=MAX_HNSW_EF_SEARCH).contains(value)).ok_or_else(|| {
-                        PlannerError::invalid_expression(format!("{context} must be an integer between 1 and {MAX_HNSW_EF_SEARCH}, got {}", typed.resolved_type.type_name()))
+                        PlannerError::invalid_expression(format!("{context} must be an integer between 1 and {MAX_HNSW_EF_SEARCH}, got {value:?} ({})", typed.resolved_type.type_name()))
                     })?;
                     if parsed.ef_search.replace(value).is_some() {
                         return Err(PlannerError::invalid_expression(
@@ -6001,7 +6001,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 "enable_hnsw" => {
                     let SqlValue::Boolean(value) = value else {
                         return Err(PlannerError::invalid_expression(format!(
-                            "{context} must be BOOLEAN, got {}",
+                            "{context} must be BOOLEAN, got {value:?} ({})",
                             typed.resolved_type.type_name()
                         )));
                     };
