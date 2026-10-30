@@ -49,18 +49,21 @@ def stop_group(child):
 def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
          default_rows=(3, 1000, 10000), operations=("noop", "query", "delete"),
          profile_operations=("delete",), row_count=lambda operation, rows: rows,
+         default_surfaces=("embedded", "server"),
          scope="internal diagnostic; profile sample covers operation/restore/validation, not isolated DELETE"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, required=True)
-    parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--server", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--rows", type=int, nargs="+", choices=row_choices, default=default_rows)
     parser.add_argument("--operations", nargs="+", choices=operations, default=operations)
-    parser.add_argument("--surfaces", nargs="+", choices=["embedded", "server"], default=["embedded", "server"])
+    parser.add_argument("--surfaces", nargs="+", choices=["embedded", "server"], default=default_surfaces)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     if sys.platform != "darwin" or os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         parser.error("manual macOS diagnosis only; never run as CI")
+    if "server" in args.surfaces and args.server is None:
+        parser.error("--server is required for the server surface")
     if args.profile and not set(args.operations).issubset(profile_operations):
         parser.error("profile operations must be selected from "+", ".join(profile_operations))
     args.output.mkdir(parents=True, exist_ok=False)
@@ -69,7 +72,7 @@ def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
         raise RuntimeError("insufficient measured host budget")
     initial_used = shutil.disk_usage(ROOT).used
     identity = dict(source_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                    server_sha256=hashlib.sha256(args.server.read_bytes()).hexdigest(),
+                    server_sha256=hashlib.sha256(args.server.read_bytes()).hexdigest() if args.server else None,
                     supervisor_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     driver_sha256=hashlib.sha256((ROOT / "scripts/performance" / driver_name).read_bytes()).hexdigest(),
                     entrypoint_sha256=hashlib.sha256(Path(sys.argv[0]).read_bytes()).hexdigest(), scope=scope)
@@ -90,7 +93,9 @@ def main(*, driver_name="sql_delete_profile.py", row_choices=(3, 1000, 10000),
                     work = Path(tmp) / "work"
                     command = [str(args.python), "-B", str(ROOT / "scripts/performance" / driver_name), "--manual",
                                "--surface", surface, "--rows", str(fixture_rows), "--operation", operation,
-                               "--work", str(work), "--server-bin", str(args.server)]
+                               "--work", str(work)]
+                    if args.server:
+                        command.extend(["--server-bin", str(args.server)])
                     if args.profile:
                         command.append("--profile")
                     env = dict(os.environ, RAYON_NUM_THREADS="2", TOKIO_WORKER_THREADS="2", OMP_NUM_THREADS="2",
