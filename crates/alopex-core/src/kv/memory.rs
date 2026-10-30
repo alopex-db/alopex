@@ -1737,9 +1737,9 @@ impl<'a> MergedScanIter<'a> {
 
     fn advance_data(&mut self) {
         self.data_peek = None;
-        while let Some((k, (v, ver))) = self.data_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        for (k, (v, ver)) in self.data_iter.by_ref() {
             if let Some(end) = &self.end {
-                if k >= *end {
+                if k >= end {
                     return;
                 }
             }
@@ -1748,19 +1748,20 @@ impl<'a> MergedScanIter<'a> {
                     return;
                 }
             }
-            if ver > self.start_version {
+            if *ver > self.start_version {
                 continue;
             }
-            self.data_peek = Some((k, (v, ver)));
+            // Only visible, in-bounds entries need an owned output buffer.
+            self.data_peek = Some((k.clone(), (v.clone(), *ver)));
             return;
         }
     }
 
     fn advance_write(&mut self) {
         self.write_peek = None;
-        if let Some((k, v)) = self.write_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        if let Some((k, v)) = self.write_iter.next() {
             if let Some(end) = &self.end {
-                if k >= *end {
+                if k >= end {
                     return;
                 }
             }
@@ -1769,13 +1770,13 @@ impl<'a> MergedScanIter<'a> {
                     return;
                 }
             }
-            self.write_peek = Some((k, v));
+            self.write_peek = Some((k.clone(), v.clone()));
         }
     }
 
-    fn record_read(&mut self, key: Key, version: u64) {
+    fn record_read(&mut self, key: &Key, version: u64) {
         if self.track_reads {
-            self.read_set.insert(key, version);
+            self.read_set.insert(key.clone(), version);
         }
     }
 }
@@ -1784,21 +1785,22 @@ impl<'a> Iterator for MergedScanIter<'a> {
     type Item = (Key, Option<Value>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let data_key = self.data_peek.as_ref().map(|(k, _)| k.clone());
-        let write_key = self.write_peek.as_ref().map(|(k, _)| k.clone());
+        // Compare borrowed keys; move the selected peek into the result.
+        let data_key = self.data_peek.as_ref().map(|(k, _)| k);
+        let write_key = self.write_peek.as_ref().map(|(k, _)| k);
 
         match (data_key, write_key) {
             (Some(dk), Some(wk)) => {
                 if dk == wk {
-                    let (_, (_, ver)) = self.data_peek.take().unwrap();
+                    let (k, (_, ver)) = self.data_peek.take().unwrap();
                     let (_, write_val) = self.write_peek.take().unwrap();
-                    self.record_read(dk.clone(), ver);
+                    self.record_read(&k, ver);
                     self.advance_data();
                     self.advance_write();
-                    Some((dk, write_val))
+                    Some((k, write_val))
                 } else if dk < wk {
                     let (k, (v, ver)) = self.data_peek.take().unwrap();
-                    self.record_read(k.clone(), ver);
+                    self.record_read(&k, ver);
                     self.advance_data();
                     Some((k, Some(v)))
                 } else {
@@ -1809,7 +1811,7 @@ impl<'a> Iterator for MergedScanIter<'a> {
             }
             (Some(_), None) => {
                 let (k, (v, ver)) = self.data_peek.take().unwrap();
-                self.record_read(k.clone(), ver);
+                self.record_read(&k, ver);
                 self.advance_data();
                 Some((k, Some(v)))
             }
@@ -2197,6 +2199,120 @@ mod tests {
             vec![(key("k1"), value("v1"))]
         );
         assert!(reader.read_set.is_empty());
+    }
+
+    fn check_scan_overlay_model(
+        seed_entries: Vec<(u8, u8)>,
+        later_entries: Vec<(u8, u8)>,
+        pending: Vec<(u8, Option<u8>)>,
+        read_only: bool,
+    ) {
+        let encode = |n: u8| vec![n / 8, n % 8];
+        let seed: BTreeMap<_, _> = seed_entries.into_iter().collect();
+        let later: BTreeMap<_, _> = later_entries.into_iter().collect();
+        let pending: BTreeMap<_, _> = pending.into_iter().collect();
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+        let mut writer = manager.begin(TxnMode::ReadWrite).unwrap();
+        for (&k, &v) in &seed {
+            writer.put(encode(k), vec![v]).unwrap();
+        }
+        manager.commit(writer).unwrap();
+        let mode = if read_only {
+            TxnMode::ReadOnly
+        } else {
+            TxnMode::ReadWrite
+        };
+        let mut txn = manager.begin(mode).unwrap();
+        let snapshot = txn.start_version;
+        let mut writer = manager.begin(TxnMode::ReadWrite).unwrap();
+        for (&k, &v) in &later {
+            writer.put(encode(k), vec![v]).unwrap();
+        }
+        manager.commit(writer).unwrap();
+
+        // The memory store keeps the latest version: a post-snapshot overwrite
+        // hides that key, rather than reconstructing the older value.
+        let visible: BTreeMap<_, _> = seed
+            .iter()
+            .filter(|(k, _)| !later.contains_key(k))
+            .map(|(&k, &v)| (encode(k), vec![v]))
+            .collect();
+        let mut expected = visible.clone();
+        if !read_only {
+            for (&k, &v) in &pending {
+                if let Some(v) = v {
+                    txn.put(encode(k), vec![v]).unwrap();
+                    expected.insert(encode(k), vec![v]);
+                } else {
+                    txn.delete(encode(k)).unwrap();
+                    expected.remove(&encode(k));
+                }
+            }
+        }
+        for scan in 0..3 {
+            // Exclude put/delete journal reads: assert what the scan records.
+            txn.read_set.clear();
+            let selected = |key: &[u8]| match scan {
+                0 => key.starts_with(&[1]),
+                1 => key >= [0, 3].as_slice() && key < [1, 4].as_slice(),
+                _ => key >= [0, 5].as_slice(),
+            };
+            let actual: Vec<_> = match scan {
+                0 => txn.scan_prefix(&[1]).unwrap().collect(),
+                1 => txn.scan_range(&[0, 3], &[1, 4]).unwrap().collect(),
+                _ => txn.scan_from(&[0, 5]).unwrap().collect(),
+            };
+            let wanted: Vec<_> = expected
+                .iter()
+                .filter(|(k, _)| selected(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            assert_eq!(actual, wanted, "scan={scan}, read_only={read_only}");
+            let reads: HashMap<_, _> = if read_only {
+                HashMap::new()
+            } else {
+                visible
+                    .keys()
+                    .filter(|k| selected(k))
+                    .map(|k| (k.clone(), snapshot))
+                    .collect()
+            };
+            assert_eq!(txn.read_set, reads, "scan={scan}");
+        }
+    }
+
+    #[test]
+    fn scan_overlay_model_covers_bounds_versions_and_tombstones() {
+        for read_only in [false, true] {
+            check_scan_overlay_model(
+                (0..24).map(|k| (k, k + 10)).collect(),
+                vec![(4, 99), (10, 100), (23, 101)],
+                vec![
+                    (0, None),
+                    (3, None),
+                    (5, Some(42)),
+                    (9, None),
+                    (10, Some(7)),
+                    (24, Some(8)),
+                ],
+                read_only,
+            );
+            check_scan_overlay_model(vec![], vec![], vec![(8, Some(1)), (9, None)], read_only);
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn scan_overlay_matches_small_reference_model(
+            seed in proptest::collection::vec((0u8..24, 0u8..16), 0..16),
+            later in proptest::collection::vec((0u8..24, 0u8..16), 0..8),
+            pending in proptest::collection::vec((0u8..24, proptest::option::of(0u8..16)), 0..12),
+            read_only in proptest::bool::ANY,
+        ) {
+            check_scan_overlay_model(seed, later, pending, read_only);
+        }
     }
 
     #[test]
