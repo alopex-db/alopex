@@ -29,6 +29,15 @@ The new regression executes the real cleanup shell against tiny fixtures, checks
 the real upload globs, and verifies all six files' original bytes survive.
 No additional production Rust logic was introduced by conflict resolution.
 
+The subsequent acceptance inventory found that the selective Windows runner did
+not execute #770's before-image regressions. It now adds the existing borrowed
+journal (4), owned journal (3), and public no-scan journal (1) cases, requiring
+zero failures/ignored cases. The runner grows from 23 groups / 236 cases to
+26 groups / 244 cases. These tests already passed on macOS in the source-bound
+checks below; native Windows execution of the added groups remains pending.
+Fixtures use at most three keys; the existing property has 24 cases with at most
+16 operations. This routing change adds no new workload or production logic.
+
 ## Development verification
 
 | Check | Result |

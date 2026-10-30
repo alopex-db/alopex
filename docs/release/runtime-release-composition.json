@@ -1162,5 +1162,716 @@
     "Publication and postrelease verification",
     "main merge"
   ],
-  "next_action": "Check required #791 CI, then integrate/retarget composition chain in order; owner Codex"
+  "next_action": "Check required #791 CI, then integrate/retarget composition chain in order; owner Codex",
+  "followup_windows_journal_routing": {
+    "prior_groups": 23,
+    "prior_cases": 236,
+    "groups": 26,
+    "cases": 244,
+    "prior_commands_and_expectations_preserved": true,
+    "new_commands": {
+      "lsm-borrowed-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "lsm::journal_tests::"
+      ],
+      "lsm-owned-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "kv::any::journal_tests::"
+      ],
+      "lsm-public-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "lsm_journal_before_images"
+      ]
+    },
+    "new_required": {
+      "lsm-borrowed-journal": "4 passed; 0 failed; 0 ignored",
+      "lsm-owned-journal": "3 passed; 0 failed; 0 ignored",
+      "lsm-public-journal": "1 passed; 0 failed; 0 ignored"
+    },
+    "existing_macos_log_matches": {
+      "lsm-borrowed-journal": 4,
+      "lsm-owned-journal": 3,
+      "lsm-public-journal": 1
+    },
+    "windows_execution": "pending CI",
+    "new_native_build": "not run; existing exact-source macOS evidence reused",
+    "runner_sha256": "63b1bef71c4b612a09d50b7f1e20d7bf1df0584e9e85bdea5e26d09e36d87055"
+  },
+  "readiness_inventory": {
+    "observed_at": "2026-10-30T07:00:12.711110+00:00",
+    "canonical_tracker": "https://github.com/alopex-db/alopex/issues/690",
+    "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+    "composition": "52c2524e91dfdbd9965485ca0760c2986cfec72f",
+    "issue_scope": {
+      "accepted": [
+        696,
+        691,
+        692,
+        677,
+        678,
+        683
+      ],
+      "candidate_implemented_acceptance_pending": [
+        679,
+        720,
+        740,
+        742
+      ],
+      "composition_and_acceptance_pending": [
+        680,
+        681,
+        682,
+        684,
+        686,
+        688,
+        431,
+        693,
+        712,
+        748
+      ]
+    },
+    "milestone_non_pr_issue_count_excluding_tracker": 20,
+    "integrated_ancestry": {
+      "issues": {
+        "677": [
+          705
+        ],
+        "678": [
+          707
+        ],
+        "679": [
+          746
+        ],
+        "683": [
+          709
+        ],
+        "691": [
+          700
+        ],
+        "692": [
+          703
+        ],
+        "696": [
+          699
+        ],
+        "720": [
+          743
+        ],
+        "740": [
+          741,
+          739
+        ],
+        "742": [
+          744,
+          745
+        ]
+      },
+      "prs": {
+        "699": {
+          "head": "f6ee3ab45a5f0622bb72b7d0635838601992ece4",
+          "merge": "10987c6c683289316b9515ae19a22d3159ce75ff",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "700": {
+          "head": "3b631e3ecb8f80c91529ba923df9be5f91c023ac",
+          "merge": "fb3f5d9163dbb20311ed59053d4b966485d13ab2",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "703": {
+          "head": "21a8fd58b1f25c69242e7c6037aadd2024d3c08b",
+          "merge": "67d146dfcee597ac4b846c613b5a327b9d82689f",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "705": {
+          "head": "17c686778c08a71b9ceb2f324e6914488fb4451d",
+          "merge": "bd1834eefd4aadbafaab56f6ed3164fa1048c8bb",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "707": {
+          "head": "62d88373ef7332677872d7f3149c66b5b72a5d4f",
+          "merge": "fd7dd08c81bb52f8fdec74f78b0027844df1ef33",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "709": {
+          "head": "0b7c30d3770ee35cfa72d6071ecc9c5f5b28c8af",
+          "merge": "591399cc6088983f057245ddf13e0188f288b2bc",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "739": {
+          "head": "8c2f920b4b9ccb177228131be265f33d9864a986",
+          "merge": "a40e39cb3d833363c8683faee5701b267d3917dc",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "741": {
+          "head": "0316da7a94b7d28889b63fec8629e28ace62ef3b",
+          "merge": "8c2f920b4b9ccb177228131be265f33d9864a986",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "743": {
+          "head": "6a75984002bb42ee951b0ccb2a5aeb5141cc23d5",
+          "merge": "16a3e33be436b0880b97b4fcaf9ec8ab7dcea28b",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "744": {
+          "head": "e3991195d42d310b7818f5ac794739a9c477dbaa",
+          "merge": "b836829e955436620d652a58c775f7d62e5cd5f4",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "745": {
+          "head": "2fa7c6aa0f31da2106233a8b0afd5b0ecbbdefe2",
+          "merge": "5fe5cbc19dd8fa1bbebe3e7add3a708dda3c2a0f",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "746": {
+          "head": "8d6daa4e9f26a079ab7a95ba898652f3630f2c25",
+          "merge": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        }
+      },
+      "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+      "composition": "52c2524e91dfdbd9965485ca0760c2986cfec72f"
+    },
+    "open_prs": [
+      {
+        "number": 794,
+        "title": "fix(release): compose runtime contracts and publication evidence",
+        "head": "52c2524e91dfdbd9965485ca0760c2986cfec72f",
+        "base": "fix/v0.8.17-performance-composition",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 793,
+        "title": "fix(core): compose performance improvements with snapshot-safe scans",
+        "head": "8a77ba7a0e88732b0ed0d2da162c5948ae907359",
+        "base": "fix/v0.8.17-hnsw-composition",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 792,
+        "title": "release: compose HNSW fixes with Windows public API contracts",
+        "head": "d1d11cbf7f8614210a1bc57b84652f89abe176a4",
+        "base": "fix/v0.8.17-windows-hnsw-gates",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 791,
+        "title": "release: compose Windows overflow acceptance and HNSW CI guards",
+        "head": "73184555fc48c19ce4c04788c496e0b398398299",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 790,
+        "title": "perf(core): avoid redundant key copies in memory scans",
+        "head": "dcbd746fc6fad8ba095c9c7fbb8e5bc88a90181a",
+        "base": "perf/712-sqlite-composite-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 789,
+        "title": "perf(sql): diagnose SQLite composite with explicit constraint boundaries",
+        "head": "d7ccc4a21f97084d694cbd742286f3335f360b67",
+        "base": "perf/712-csv-framer",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 788,
+        "title": "perf(csv): frame bounded records from buffered slices",
+        "head": "37f0b0df8f5d6e6a0af26e3cafde3b7efe953ea9",
+        "base": "perf/712-csv-stream-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 787,
+        "title": "perf(csv): diagnose original full-consumption streaming cost",
+        "head": "128f33e056b6e7a8c521efce51d1d3d4071ab4c3",
+        "base": "perf/712-lazy-compare",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 786,
+        "title": "perf(sql): avoid formatting comparison errors on successful predicates",
+        "head": "29c71f430a12cc3cbc5a50a9d9a1c45ccd2da957",
+        "base": "perf/712-sql-stream-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 785,
+        "title": "perf(sql): diagnose original and Python-row stream consumption",
+        "head": "6304840c2d4660c299de9ca5b5d83cea8cb9131e",
+        "base": "perf/712-lazy-file-acceptance",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 784,
+        "title": "perf(dataframe): verify lazy CSV gains and numeric Parquet guards",
+        "head": "b17672e58defc8328301a678fcd389e1e6e0c5b1",
+        "base": "perf/712-concat-buffer",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 783,
+        "title": "perf(dataframe): reuse concat string storage across rows in a batch",
+        "head": "c9bb7c9682d879b5b8e5ae6bd615aa754d236f9b",
+        "base": "perf/712-dataframe-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 782,
+        "title": "perf(dataframe): separate phase diagnosis and preserve full-result acceptance",
+        "head": "1bba6031119c9a9fa509575e03638311d6cc8124",
+        "base": "perf/712-sstable-point",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 781,
+        "title": "perf(core): avoid full-block entry copies for SSTable point lookup",
+        "head": "e26304a0060bfea1ef6ac9c67eaa3434de19d0b6",
+        "base": "fix/712-transaction-tracking",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 780,
+        "title": "fix(python): reclaim expired transaction tracking with bounded work",
+        "head": "3ee2150d347d79a7151219035607c0514404000c",
+        "base": "perf/712-kv-read-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 779,
+        "title": "perf(kv): capture persisted read baseline and transaction retention (#712)",
+        "head": "e69b179ae32961703fef102a6538dcea61430471",
+        "base": "perf/712-remote-scalar-values",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 778,
+        "title": "perf(python): fast-path exact scalar SQL wire values (#712)",
+        "head": "3919d3f74678a2e9ad3eb467b5b1261a625bc6cb",
+        "base": "perf/712-lsm-range-build",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 777,
+        "title": "perf(lsm): bulk build visible active scan maps",
+        "head": "4abffca70a9ee5cb57046206663b65ddbaaca733",
+        "base": "perf/712-sql-query-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 776,
+        "title": "perf(sql): isolate public query profiles and identify range scan costs",
+        "head": "830e2c0fc409322c8f852ae7dbb371a5f496a1f7",
+        "base": "fix/712-delete-primary-key",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 775,
+        "title": "ci(release): bound public verification workspace and cleanup (#431)",
+        "head": "a4350a06919944a383bc5072e7a9053348df1a8a",
+        "base": "fix/431-publication-failure",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 774,
+        "title": "perf(sql): avoid table scans for primary-key DELETE (#712)",
+        "head": "67aa1497363bd488e728022c3c304c2170c7e490",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 772,
+        "title": "test(wal): measure bounded public Python KV/SQL commit costs",
+        "head": "151ed43691051d7b13a7cf2bdc569be5050d5299",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 771,
+        "title": "feat(storage): connect Windows public WAL overflow and bounded API contracts",
+        "head": "c49b722cd50852205d99dbf8498004db5c81cc79",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 770,
+        "title": "perf(transaction): avoid full SQL scans at LSM transaction begin",
+        "head": "77d2e110b963a3bdb1abdb443e0ad328ae52ec21",
+        "base": "perf/684-begin-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 769,
+        "title": "perf(transaction): \u7121\u64cd\u4f5cbegin\u306eLSM\u5168\u4ef6\u8d70\u67fb\u30b3\u30b9\u30c8\u3092\u5207\u308a\u5206\u3051",
+        "head": "340bee808ddee147182820c05a67a9ac1d52c684",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 768,
+        "title": "fix(release): \u516c\u958b\u5931\u6557\u6642\u3082\u5143\u306e\u691c\u8a3c\u7d50\u679c\u3092\u5909\u3048\u305a\u8a3c\u8de1\u3092\u4fdd\u6301",
+        "head": "c2d3367e32e299ea0508052ebcd3eba287cd68f3",
+        "base": "fix/431-report-pair",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 767,
+        "title": "fix(release): retain report pairs from the producing attempt (#431)",
+        "head": "fd3dec9fbc89639f2d4818de01017438664a094e",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 766,
+        "title": "feat(release): decouple Intel qualification and publication",
+        "head": "821d20c6e5d75741bc69c42760f94524e2c2c68a",
+        "base": "feat/686-intel-parser-supplement",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 765,
+        "title": "feat(release): verify pinned Intel parser supplements",
+        "head": "2baafa30ec7ee0640df4ddc14e2d68658d0ba019",
+        "base": "feat/686-parser-target-policy",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 764,
+        "title": "feat(release): separate required parser targets from Intel support (#686)",
+        "head": "d85b3b71d6101d5b563c832c197e80f64912713f",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 763,
+        "title": "fix(release): preserve Core latest after Python publication (#688)",
+        "head": "cdd753888f2135d946d3992305cdde21222c77f8",
+        "base": "feat/686-independent-intel-release",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 762,
+        "title": "feat(io): support VECTOR Parquet interchange (#693)",
+        "head": "b1ac2bff328ee6bb10b9fa16aa95aeed9de3c6b4",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 761,
+        "title": "docs(perf): record HNSW transaction remediation comparison",
+        "head": "91d6144950c12e42b57578e31895abef5712fb4a",
+        "base": "test/681-two-index-eviction",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 760,
+        "title": "test(vector): cover public transaction byte-budget eviction",
+        "head": "2085048699010852da9ccd1abbd9a80fef6d05fd",
+        "base": "perf/681-hnsw-statistics-deltas",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 759,
+        "title": "perf(vector): update HNSW statistics from changed slots",
+        "head": "b4e05a96dda6192fbfbb731779ef0bec988c87a4",
+        "base": "fix/681-savepoint-hnsw-retention",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 758,
+        "title": "fix(embedded): retain SQL HNSW graphs across savepoints",
+        "head": "7602e880ed8b45ee3c983a8b7d76153dccb1daf3",
+        "base": "fix/681-nonblocking-begin-cache",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 757,
+        "title": "fix(embedded): skip contended HNSW cache at transaction begin",
+        "head": "9c3f4629a7070ebe10f501512416aa1acd8f01af",
+        "base": "perf/681-hnsw-copy-on-write",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 756,
+        "title": "ci(core): keep HNSW scale diagnostics out of normal test lanes",
+        "head": "529867615d6098795f0426930e6e26625c8158a1",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 755,
+        "title": "perf(core): share HNSW snapshot pages and node payloads",
+        "head": "186ca4ffdc337a1eff04d7543858f590be8ab560",
+        "base": "perf/681-hnsw-checksum-deltas",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 754,
+        "title": "fix(embedded): distinguish HNSW capacity eviction and reset warning periods",
+        "head": "f5982443b483b0a55839e702d2d0068fc65fbbb0",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 753,
+        "title": "perf(core): update HNSW checksums and key mappings by delta",
+        "head": "62e9d018c26846bfc25851a73840abd744b4588b",
+        "base": "perf/681-hnsw-dirty-node-writes",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 752,
+        "title": "perf(core): persist changed HNSW nodes including reverse edges",
+        "head": "90301e297a1e55368505673d6f85bfe308ebe549",
+        "base": "perf/681-transaction-cache-publication",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 751,
+        "title": "perf(embedded): reuse unmodified HNSW graphs after explicit transactions",
+        "head": "6214c3ed8a439b9e670c72ecdaf2080234342736",
+        "base": "fix/748-memory-snapshots",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 750,
+        "title": "fix(core): preserve MemoryKV snapshots across updates and deletes (#748)",
+        "head": "d557d82f1b68970e5af3b10d3f46005b8c3988c7",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 749,
+        "title": "test(vector): add bounded manual HNSW transaction cache evidence (#681)",
+        "head": "ed48e081ee7647183c3c0b3249c6d0ede425a116",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 747,
+        "title": "fix(sql): enforce parser source contracts and verify bound kNN options",
+        "head": "f1bf9ba0ab26571e66b0ead0257b0ebfa7da3e03",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 724,
+        "title": "test(dataframe): \u901a\u5e38\u306ePolars\u64cd\u4f5c149\u30b1\u30fc\u30b9\u3068\u5fc5\u9808CI\u3092\u8ffd\u52a0\u3059\u308b",
+        "head": "e076969002ec10288ebe72e194ad52ab5ca2987c",
+        "base": "main",
+        "disposition": "v0.8.18 per #724/#722",
+        "in_candidate": false,
+        "in_composition": false
+      },
+      {
+        "number": 547,
+        "title": "ci(release): adopt immutable candidate flow for v0.9",
+        "head": "2f56d2c30678eafee66e5f8940fb412f6fc98d33",
+        "base": "release/v0.9.0",
+        "disposition": "v0.9 unrelated",
+        "in_candidate": false,
+        "in_composition": false
+      }
+    ],
+    "interpretation": "All 46 in-scope open PR heads are ancestors of the composition, not the current candidate. #724 targets v0.8.18 per its recorded user decision; #547 is unrelated v0.9. Six closed issue acceptances remain historical; final candidate and artifacts are unqualified. #682 has earlier stages already in candidate.",
+    "existing_evidence": [
+      {
+        "path": "/private/tmp/alopex-679/python-repro.log",
+        "sha256": "2742aeb0f506318a99320d0c226534b304ecbd4f5eba2782eedffd2161a03406"
+      },
+      {
+        "path": "/private/tmp/alopex-746-integration/development.json",
+        "sha256": "1bc36ad313088d4af29170ad25f5b9beb868cab5c0ede710dc6fb1b6189ce44a"
+      },
+      {
+        "path": "/private/tmp/alopex-742-ddl/public-preflight.json",
+        "sha256": "a97a589b4d42485651c8f4630f02135170944403f223f42c80f783ea51e5f56b"
+      },
+      {
+        "path": "/private/tmp/alopex-742-ddl/development.json",
+        "sha256": "297962573e0ada45b1def934234c4205c8033d0d820f06b7d5b6916cd90dbe6c"
+      }
+    ],
+    "next_action": "Verify #791 required CI, integrate/retarget the stack in order, then bind outstanding acceptance to the final candidate; Codex"
+  }
 }
