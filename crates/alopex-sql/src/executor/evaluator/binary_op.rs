@@ -639,6 +639,45 @@ fn type_mismatch<T>(expected: &str, left: &SqlValue, right: &SqlValue) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn compare_mixed_decimal_preserves_sub_float_precision(
+            offset in -32i64..=32,
+            fraction in 1i128..100,
+            negative in any::<bool>(),
+        ) {
+            // Every integral value is exactly representable as f64, but the
+            // nonzero fractional difference is lost if Decimal takes that path.
+            let integer = (1i64 << 54) + offset * 4;
+            let scaled_integer = i128::from(integer) * 100;
+            let coefficient = scaled_integer + if negative { -fraction } else { fraction };
+            let decimal = SqlValue::Decimal(DecimalValue::new(coefficient, 2));
+            let integral = SqlValue::BigInt(integer);
+            for (left, right, lhs, rhs) in [
+                (&decimal, &integral, coefficient, scaled_integer),
+                (&integral, &decimal, scaled_integer, coefficient),
+            ] {
+                // Independent exact scaled-integer reference for all operators.
+                for (kind, expected) in [
+                    (OrderingKind::Eq, lhs == rhs),
+                    (OrderingKind::Neq, lhs != rhs),
+                    (OrderingKind::Lt, lhs < rhs),
+                    (OrderingKind::Gt, lhs > rhs),
+                    (OrderingKind::Le, lhs <= rhs),
+                    (OrderingKind::Ge, lhs >= rhs),
+                ] {
+                    prop_assert_eq!(
+                        compare(left.clone(), right.clone(), kind).unwrap(),
+                        SqlValue::Boolean(expected)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn compare_preserves_numeric_and_non_numeric_orderings() {
