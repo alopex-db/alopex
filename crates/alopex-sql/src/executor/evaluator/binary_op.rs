@@ -555,20 +555,20 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
     if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
-        let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
-            EvaluationError::TypeMismatch {
+        let cmp = lhs.partial_cmp(&rhs).ok_or_else(|| {
+            ExecutorError::Evaluation(EvaluationError::TypeMismatch {
                 expected: "Comparable".into(),
                 actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
-            },
-        ))?;
+            })
+        })?;
         return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
-    let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
-        EvaluationError::TypeMismatch {
+    let cmp = left.partial_cmp(&right).ok_or_else(|| {
+        ExecutorError::Evaluation(EvaluationError::TypeMismatch {
             expected: "Comparable".into(),
             actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
-        },
-    ))?;
+        })
+    })?;
 
     Ok(SqlValue::Boolean(ordering_matches(cmp, kind)))
 }
