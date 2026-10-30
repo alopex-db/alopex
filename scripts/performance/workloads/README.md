@@ -31,3 +31,11 @@ consumer bodies against `sql_stream_profile.py` using their ASTs. The original
 lane counts fully consumed Python rows / Arrow batches with full-value checks
 before and after the case. A separate lane materializes Python rows on both
 sides and validates every timed result; it does not replace the original metric.
+
+`csv_streaming_v0816.py` preserves `_streaming` and `_write_csv` from the same
+corrected run-20261021 source as the SQL streaming reference. The native consumer
+bodies are checked by AST comparison. `csv_stream_profile.py` keeps plan/collect
+observations separate from complete 8,192-row-chunk consumption. Extra full
+collect/stream typed-value, NULL and order oracles run outside the original timers.
+The reconstructed 34,250-row CSV matches the original manifest SHA256
+`eec24557dcbdf71821b2e7afad1a7083dfb3256b71b57adf2e7ec387e1fd20ff`.
