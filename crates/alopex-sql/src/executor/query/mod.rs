@@ -241,7 +241,8 @@ pub(crate) fn selected_btree_indexes<C: Catalog + ?Sized>(
         memory: Option<&MemoryPolicy>,
     ) {
         if matches!(plan, LogicalPlan::Scan { .. }) {
-            indexes.push(selected);
+            let probe_id = indexes.len();
+            indexes.push(selected.map(|choice| choice.for_node(probe_id)));
             return;
         }
         // The executor disables indexed filtering when an outer row is present.
@@ -301,6 +302,7 @@ struct QueryExecutionContext {
     statement_subqueries:
         Option<std::rc::Rc<std::cell::RefCell<statement_subqueries::StatementSubqueries>>>,
     subquery_ids: HashMap<usize, usize>,
+    btree_probe_ids: HashMap<usize, usize>,
 }
 
 struct RecursiveCteExecution {
@@ -313,6 +315,17 @@ struct RecursiveCteExecution {
 }
 
 impl QueryExecutionContext {
+    fn with_btree_plan(mut self, plan: &LogicalPlan) -> Self {
+        if btree::tracing() {
+            self.btree_probe_ids = btree::scan_addresses(plan)
+                .into_iter()
+                .enumerate()
+                .map(|(id, address)| (address, id))
+                .collect();
+        }
+        self
+    }
+
     fn with_copy_security(mut self, copy_security: Option<CopySecurityConfig>) -> Self {
         self.copy_security = copy_security;
         self
@@ -443,7 +456,9 @@ pub(crate) fn execute_query_with_policy_and_copy_security<
         return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
     }
 
-    let context = QueryExecutionContext::default().with_copy_security(copy_security.cloned());
+    let context = QueryExecutionContext::default()
+        .with_copy_security(copy_security.cloned())
+        .with_btree_plan(&plan);
     let result = execute_query_result_with_context(txn, catalog, plan, None, memory, &context)?;
     Ok(ExecutionResult::Query(result))
 }
@@ -460,14 +475,8 @@ fn execute_query_result_with_outer_and_policy<
     outer: Option<&Row>,
     memory: Option<&MemoryPolicy>,
 ) -> Result<QueryResult> {
-    execute_query_result_with_context(
-        txn,
-        catalog,
-        plan,
-        outer,
-        memory,
-        &QueryExecutionContext::default(),
-    )
+    let context = QueryExecutionContext::default().with_btree_plan(&plan);
+    execute_query_result_with_context(txn, catalog, plan, outer, memory, &context)
 }
 
 fn execute_query_result_with_context<
@@ -566,7 +575,9 @@ pub(crate) fn execute_query_streaming_with_policy_and_copy_security<
     memory: Option<&MemoryPolicy>,
     copy_security: Option<&CopySecurityConfig>,
 ) -> Result<QueryRowIterator<'static>> {
-    let context = QueryExecutionContext::default().with_copy_security(copy_security.cloned());
+    let context = QueryExecutionContext::default()
+        .with_copy_security(copy_security.cloned())
+        .with_btree_plan(&plan);
     // KNN queries not yet supported for streaming - fall back would need different handling
     if knn::extract_knn_context(&plan).is_some() {
         // For KNN, we materialize and wrap in VecIterator
@@ -1091,7 +1102,11 @@ fn build_iterator_pipeline_with_outer<
             {
                 let schema = table_meta.columns.clone();
                 let outcome = execute_index_scan(txn, table_meta, &index, index_predicate, memory)?;
-                btree::record(table, &index.name, &predicate, &outcome);
+                let probe_id = context
+                    .btree_probe_ids
+                    .get(&(input.as_ref() as *const LogicalPlan as usize))
+                    .copied();
+                btree::record(table, &index.name, &predicate, &outcome, probe_id);
                 if let btree::IndexScanOutcome::Rows { rows, .. } = outcome {
                     let input_iter = iterator::VecIterator::new(rows, schema.clone());
                     let filter_iter = FilterIterator::new(input_iter, predicate);
