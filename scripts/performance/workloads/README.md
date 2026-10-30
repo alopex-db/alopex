@@ -19,3 +19,15 @@ boundary and typed/NULL/ordered oracle while adapting the current native API.
 CSV uses twelve expressions; numeric Parquet uses eleven. The known Parquet
 string failures remain excluded. Fixture generation uses the original writer
 with Polars 1.43.2 outside measurement; the same immutable files serve both builds.
+
+`sql_streaming_v0816.py` preserves the complete `_sql_streaming` function extracted
+from Alopex commit `d9ff8783b8d18a63d167204e55902ea6cd90dcd1` after applying the
+docs run-20261021 fairness patch (SHA256
+`9b2dde147fce3a1ce820c65fb91627595d75832820cce34526f7abb575abd68b`).
+The extracted function SHA256 is
+`30f7355ea08824ddcf726047fba7024b738c1866e7e8d0e29142464918eda56c`.
+It is a source reference, not a standalone runner. Tests compare the original
+consumer bodies against `sql_stream_profile.py` using their ASTs. The original
+lane counts fully consumed Python rows / Arrow batches with full-value checks
+before and after the case. A separate lane materializes Python rows on both
+sides and validates every timed result; it does not replace the original metric.
