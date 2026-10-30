@@ -126,6 +126,8 @@ def main():
                   native_sha256=hashlib.sha256(Path(alopex._alopex.__file__).read_bytes()).hexdigest(),
                   driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   operations_per_sample=min(args.rows, 1000) if args.operation == "range-scan" else 100,
+                  store_files=[dict(path=str(p.relative_to(args.work)), bytes=p.stat().st_size)
+                               for p in sorted(args.work.rglob("*")) if p.is_file()],
                   setup="one durable fixture commit, flush, close, reopen; warm-cache public reads"))
         profiler = cProfile.Profile() if args.profile else None
         if profiler:
