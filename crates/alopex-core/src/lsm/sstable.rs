@@ -1026,8 +1026,10 @@ impl SSTableReader {
             }
             if key <= block_meta.last_key.as_slice() {
                 let block = self.read_block_cached(buffer_pool, metrics, file_id, idx)?;
-                let entries = self.decode_block_entries(&block)?;
-                if let Some(found) = find_in_entries(&entries, key, read_timestamp) {
+                let (entry_count, payload) = self.decompress_block_entries(&block)?;
+                if let Some(found) =
+                    find_in_encoded_entries(&payload, entry_count, key, read_timestamp)?
+                {
                     return Ok(Some(found));
                 }
             }
@@ -1089,6 +1091,11 @@ impl SSTableReader {
     }
 
     fn decode_block_entries(&mut self, block: &[u8]) -> Result<Vec<SSTableEntry>> {
+        let (entry_count, payload) = self.decompress_block_entries(block)?;
+        decode_entries(&payload, entry_count)
+    }
+
+    fn decompress_block_entries(&mut self, block: &[u8]) -> Result<(usize, Vec<u8>)> {
         if block.len() < 4 + 4 + 4 {
             return Err(Error::InvalidFormat("SSTable block too small".into()));
         }
@@ -1101,7 +1108,7 @@ impl SSTableReader {
             .compressor
             .decompress(payload, uncompressed_len)
             .map_err(|e| Error::InvalidFormat(format!("SSTable decompression failed: {e:?}")))?;
-        decode_entries(&decompressed, entry_count)
+        Ok((entry_count, decompressed))
     }
 
     /// Scan keys with the given prefix, returning the latest visible version per key.
@@ -1335,10 +1342,30 @@ fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn decode_entries(bytes: &[u8], expected_count: usize) -> Result<Vec<SSTableEntry>> {
-    let mut cursor = 0usize;
     let mut out = Vec::with_capacity(expected_count);
+    visit_entries(bytes, expected_count, |key, value, timestamp, sequence| {
+        out.push(SSTableEntry {
+            key: key.to_vec(),
+            value: value.map(<[u8]>::to_vec),
+            timestamp,
+            sequence,
+        });
+    })?;
+    Ok(out)
+}
+
+/// Validate the entire decompressed block while borrowing its keys/values. Point
+/// lookups need to own only the selected entry; even after a match, malformed
+/// trailing entries and count mismatches must still be reported.
+fn visit_entries(
+    bytes: &[u8],
+    expected_count: usize,
+    mut visit: impl FnMut(&[u8], Option<&[u8]>, u64, u64),
+) -> Result<()> {
+    let mut cursor = 0usize;
+    let mut count = 0usize;
     while cursor < bytes.len() {
-        if bytes.len() < cursor + 1 + 8 + 8 + 4 + 4 {
+        if bytes.len() - cursor < 1 + 8 + 8 + 4 + 4 {
             return Err(Error::InvalidFormat("SSTable entry truncated".into()));
         }
         let entry_type = SSTableEntryType::try_from(bytes[cursor])?;
@@ -1367,46 +1394,59 @@ fn decode_entries(bytes: &[u8], expected_count: usize) -> Result<Vec<SSTableEntr
                 .expect("fixed slice length"),
         ) as usize;
         cursor += 4;
-        if bytes.len() < cursor + key_len + value_len {
+        let remaining = bytes.len() - cursor;
+        if key_len > remaining || value_len > remaining - key_len {
             return Err(Error::InvalidFormat("SSTable entry truncated (kv)".into()));
         }
-        let key = bytes[cursor..cursor + key_len].to_vec();
+        let key = &bytes[cursor..cursor + key_len];
         cursor += key_len;
         let value = match entry_type {
-            SSTableEntryType::Put => Some(bytes[cursor..cursor + value_len].to_vec()),
+            SSTableEntryType::Put => Some(&bytes[cursor..cursor + value_len]),
             SSTableEntryType::Delete => None,
         };
         cursor += value_len;
-        out.push(SSTableEntry {
-            key,
-            value,
-            timestamp,
-            sequence,
-        });
+        visit(key, value, timestamp, sequence);
+        count += 1;
     }
-    if out.len() != expected_count {
+    if count != expected_count {
         return Err(Error::InvalidFormat("SSTable entry count mismatch".into()));
     }
-    Ok(out)
+    Ok(())
 }
 
-fn find_in_entries(
-    entries: &[SSTableEntry],
+fn find_in_encoded_entries(
+    bytes: &[u8],
+    expected_count: usize,
     key: &[u8],
     read_timestamp: u64,
-) -> Option<SSTableEntry> {
-    for e in entries {
-        match e.key.as_slice().cmp(key) {
-            CmpOrdering::Less => continue,
-            CmpOrdering::Greater => break,
-            CmpOrdering::Equal => {
-                if e.timestamp <= read_timestamp {
-                    return Some(e.clone());
+) -> Result<Option<SSTableEntry>> {
+    let mut found = None;
+    let mut search_done = false;
+    visit_entries(
+        bytes,
+        expected_count,
+        |entry_key, value, timestamp, sequence| {
+            if search_done {
+                return;
+            }
+            match entry_key.cmp(key) {
+                CmpOrdering::Less => {}
+                CmpOrdering::Greater => search_done = true,
+                CmpOrdering::Equal => {
+                    if timestamp <= read_timestamp {
+                        found = Some(SSTableEntry {
+                            key: entry_key.to_vec(),
+                            value: value.map(<[u8]>::to_vec),
+                            timestamp,
+                            sequence,
+                        });
+                        search_done = true;
+                    }
                 }
             }
-        }
-    }
-    None
+        },
+    )?;
+    Ok(found)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

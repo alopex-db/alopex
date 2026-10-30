@@ -188,11 +188,7 @@ fn active_immutable_and_sstable_merge_at_the_reader_snapshot() {
         ],
     );
     let mut old = store.begin(TxnMode::ReadOnly).unwrap();
-    let frozen = std::mem::replace(
-        &mut *store.active_memtable.write().unwrap(),
-        MemTable::new(),
-    )
-    .freeze();
+    let frozen = std::mem::take(&mut *store.active_memtable.write().unwrap()).freeze();
     store
         .immutable_memtables
         .write()
