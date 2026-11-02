@@ -324,9 +324,37 @@ and unique key enforcement. Forced exit avoids destructor-driven convergence.
 Afterward rebuild the ordinary extension without `RUSTFLAGS`, import that exact
 copy in a fresh process and assert
 `not hasattr(alopex._alopex, '_arm_wal_test_fault')`. Preserve its separate hash.
-These checks qualify controlled process exit/error boundaries on non-Windows;
-they do not simulate power loss, partial OS writes or failing hardware fsync,
-and do not qualify a release wheel or the pending Windows overflow public API.
+The existing **Compatibility** workflow has an explicit manual
+`acceptance_suite=windows-overflow` selection. Dispatch it on the exact reviewed
+branch, without adding a workflow to main. It runs only the hosted Windows
+public overflow acceptance job; ordinary PR/push and scheduled selection is
+unchanged. The manual job builds a normal extension (15 small API cases and
+hook absence), runs the instrumented Rust24/Python24 cases, then checks the
+published 0.8.16 wheel/container and independently built registry-core/live-WAL
+clients. It retains source/tree/native identities and per-phase receipts.
+
+`windows_overflow_acceptance.py prepare` measures the isolated runner before
+toolchain/build work and declares at most 28 GB additional storage. All product
+builds use one target, two jobs, no incremental/debug symbols, and the existing
+storage watchdog. A measurement error, declared growth exhaustion, or 40 GB
+host usage stops work. The always-run cleanup removes target, owned packages,
+venvs, fixtures and parser binaries after saving compact receipts. The workflow
+uploads only JSON/JSONL/log/XML, never the built DLLs or test databases.
+
+The seven local guard tests need only the standard library:
+`python -m unittest discover -s scripts/compatibility -p test_windows_overflow_acceptance.py`.
+They reject nonmanual/self-hosted execution, missing/duplicate cases, hash
+mismatches, failure/skip receipts and a Rust summary without actual case names.
+They also select Git for Windows Bash explicitly (never the WSL launcher) and
+exercise removal of owned read-only Git pack files while preserving other I/O
+errors. They do not execute a native build or establish Windows acceptance.
+
+The harnesses support native Unix and Windows. Existing non-Windows results
+do not qualify Windows: run the same Rust24/Python24 cases against the exact
+Windows source/build and retain their identities separately. These controlled
+process exit/error checks do not simulate power loss, partial OS writes or
+failing hardware fsync, and do not qualify a release wheel. Windows package
+setup must also retain the package-local `native` DLL directory.
 
 ### Real OS spool write refusal and termination
 

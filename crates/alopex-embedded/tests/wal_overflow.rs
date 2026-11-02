@@ -50,19 +50,47 @@ fn invalid_or_unsupported_overflow_open_does_not_create_storage() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_public_opt_in_refuses_before_creating_any_database_files() {
+fn invalid_overflow_budget_preserves_existing_file() {
     let dir = tempfile::tempdir().unwrap();
-    let result = Database::open_with_options(&dir.path().join("absent.alopex"), options());
-    assert!(
-        matches!(result, Err(alopex_embedded::Error::Core(alopex_core::Error::Io(e)))
-        if e.kind() == std::io::ErrorKind::Unsupported)
+    let path = dir.path().join("existing.alopex");
+    std::fs::write(&path, b"old").unwrap();
+    let invalid = LsmOverflowConfig::new(
+        SpoolLimits::new(16384, 32768, 256).unwrap(),
+        OperationLimits::new(16384, 1024, 4096).unwrap(),
+        131072,
+        0,
+        32768,
     );
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    let opts = DatabaseOptions::new().with_wal_overflow(invalid, WalConfig::default());
+    assert!(matches!(
+        Database::open_with_options(&path, opts),
+        Err(alopex_embedded::Error::Core(
+            alopex_core::Error::InvalidFormat(_)
+        ))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
-#[cfg(not(windows))]
+#[test]
+fn public_overflow_creates_nested_ancestors_and_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing/child/記録.alopex");
+    let db = Database::open_with_options(&path, options()).unwrap();
+    let mut tx = db.begin(alopex_embedded::TxnMode::ReadWrite).unwrap();
+    tx.put(b"key", &[7; 65]).unwrap();
+    tx.commit().unwrap();
+    assert!(db.wal_overflow_stats().unwrap().unwrap().directory_bytes > 64);
+    db.close().unwrap();
+    drop(db);
+    let db = Database::open_with_options(&path, options()).unwrap();
+    let mut tx = db.begin(alopex_embedded::TxnMode::ReadOnly).unwrap();
+    assert_eq!(tx.get(b"key").unwrap(), Some(vec![7; 65]));
+    tx.rollback().unwrap();
+    db.close().unwrap();
+}
+
 #[test]
 fn public_sql_rows_and_unique_index_survive_overflow_commit_and_reopen() {
     use alopex_sql::{ExecutionResult, SqlValue};
@@ -99,7 +127,6 @@ fn public_sql_rows_and_unique_index_survive_overflow_commit_and_reopen() {
     assert_eq!(db.wal_overflow_stats().unwrap().unwrap().gc_failures, 0);
 }
 
-#[cfg(not(windows))]
 mod failure_acceptance {
     use super::*;
     use alopex_embedded::TxnMode;

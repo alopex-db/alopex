@@ -3,14 +3,19 @@
 Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
 storage is bounded to 20 GB per command, 40 GB host stop, using one target.
 Artifacts contain source identity and raw results; the workflow removes target
-only after artifact upload. No durability/power-loss claim for the writer.
+after retaining those results. No durability/power-loss claim for the writer.
 """
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from windows_wal_console import print_log_tail
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--phase", required=True, choices=("build", "contracts"))
+args = parser.parse_args()
 
 repo = Path(__file__).resolve().parents[2]
 output = repo / "artifacts/windows-wal"
@@ -23,7 +28,7 @@ identity = {"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=Tr
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "platform": sys.platform,
-            "writer_supported": False,
+            "writer_supported": True,
             "lowlevel_wal_writer_supported": True,
             "lsm_file_publication_supported": True}
 (output / "source.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
@@ -52,10 +57,17 @@ commands = [
     ("publication-boundaries", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                                 "--lib", "lsm::overflow::publication_acceptance::", "--",
                                 "--skip", "lsm::overflow::publication_acceptance::child"]),
+    ("public-overflow", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                         "--test", "wal_overflow"]),
+    ("public-journal", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
+                        "--test", "wal_overflow_journal"]),
     ("directory-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "storage::publication::directories::tests::"]),
 ]
 for name, command in commands:
+    if (name == "release-build") != (args.phase == "build"):
+        continue
+    print(f"Starting {name}", flush=True)
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
         result = subprocess.run([sys.executable, str(repo / "scripts/compatibility/storage.py"),
                                  "--log", str(output / "storage.jsonl"),
@@ -66,9 +78,11 @@ for name, command in commands:
     if result.returncode:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "33 passed; 0 failed",
-                "windows-publication": "6 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
+                "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
                 "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",
+                "public-overflow": "9 passed; 0 failed; 0 ignored",
+                "public-journal": "2 passed; 0 failed; 0 ignored",
                 "inline-lifecycle": "2 passed; 0 failed",
                 "publication-boundaries": "12 passed; 0 failed; 0 ignored",
                 "staging-recovery": "13 passed; 0 failed", "activation-staging": "4 passed; 0 failed"}

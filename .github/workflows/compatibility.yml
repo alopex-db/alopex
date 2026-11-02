@@ -2,6 +2,12 @@ name: Compatibility
 
 on:
   workflow_dispatch:
+    inputs:
+      acceptance_suite:
+        description: Manual compatibility suite
+        type: choice
+        default: full
+        options: [full, windows-overflow]
   schedule:
     - cron: '17 2 * * 1'
   push:
@@ -38,9 +44,66 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  windows-overflow-public:
+    name: Manual Windows public overflow acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'windows-overflow'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      ALOPEX_ACCEPTANCE_SUITE: windows-overflow
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_BUILD_JOBS: 2
+      PYTHONUTF8: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check manual runner selection and cleanup guards
+        run: python -m unittest discover -s scripts/compatibility -p test_windows_overflow_acceptance.py -v
+      - name: Record source, scope and measured host budget
+        run: python scripts/compatibility/windows_overflow_acceptance.py prepare
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build parser under storage watchdog
+        run: python scripts/compatibility/windows_overflow_acceptance.py parser
+      - name: Normal extension and 15 ordinary public API cases
+        timeout-minutes: 45
+        run: python scripts/compatibility/windows_overflow_acceptance.py normal
+      - name: Instrumented Rust and Python boundary cases (24 each)
+        timeout-minutes: 45
+        run: python scripts/compatibility/windows_overflow_acceptance.py instrumented
+      - name: Published old reader, container and live WAL compatibility
+        timeout-minutes: 25
+        run: python scripts/compatibility/windows_overflow_acceptance.py legacy
+      - name: Reconcile all source-bound acceptance receipts
+        run: python scripts/compatibility/windows_overflow_acceptance.py verify
+      - name: Remove owned binaries and fixtures, record final storage
+        if: always()
+        run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
+      - name: Upload compact Windows acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-overflow-public-${{ github.sha }}
+          path: |
+            artifacts/windows-overflow-public/**/*.json
+            artifacts/windows-overflow-public/**/*.jsonl
+            artifacts/windows-overflow-public/**/*.log
+            artifacts/windows-overflow-public/**/*.xml
+          if-no-files-found: error
+          retention-days: 14
+
   historical-parser:
     name: Historical parser artifact owner
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
     runs-on: ubuntu-latest
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
@@ -78,7 +141,7 @@ jobs:
 
   historical-contract:
     name: Historical contract (${{ matrix.gate }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
     needs: historical-parser
     runs-on: ubuntu-latest
     strategy:
@@ -140,7 +203,7 @@ jobs:
 
   current-windows-full:
     name: Full Windows current compatibility
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0

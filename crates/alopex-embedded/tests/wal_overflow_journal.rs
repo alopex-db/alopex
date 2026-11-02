@@ -1,6 +1,5 @@
 //! One row and one index entry exercise aggregate accounting of the real SQL
 //! journal. The public operation encoder determines fixture budgets; no load.
-#![cfg(not(windows))]
 use alopex_core::kv::memory::MemoryKV;
 use alopex_core::kv::{
     decode_range_change, journal_key, KVStore, KVTransaction, RangeChangeRecord,

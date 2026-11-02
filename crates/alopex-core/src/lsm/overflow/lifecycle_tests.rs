@@ -1,4 +1,4 @@
-//! Internal Windows pipeline qualification; public API guard stays enabled.
+//! Windows lifecycle contracts through the public overflow API.
 use super::*;
 
 fn config() -> LsmKVConfig {
@@ -50,11 +50,13 @@ fn value(store: &LsmKV, key: u8) -> Option<Value> {
 }
 
 fn open(path: &Path) -> LsmKV {
-    LsmKV::open_inner(path, config(), Some(limits())).unwrap().0
+    LsmKV::open_with_overflow(path, config(), limits())
+        .unwrap()
+        .0
 }
 
 #[test]
-fn internal_activation_checkpoint_and_reopen_preserve_one_record() {
+fn public_activation_checkpoint_and_reopen_preserve_one_record() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("new/parent/db.alopex.d");
     let store = open(&data);

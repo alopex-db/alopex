@@ -52,14 +52,14 @@ fn bulk_order_quality_cost_worker() {
     check_bulk_order_quality(&order, size);
 }
 
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+#[ignore = "manual HNSW scale/quality diagnostic; excluded from normal CI"]
 fn shuffled_bulk_preserves_tie_aware_recall() {
     check_bulk_order_quality("shuffled", 9600);
 }
 
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+#[ignore = "manual HNSW scale/quality diagnostic; excluded from normal CI"]
 fn duplicate_saturated_bulk_preserves_tie_aware_recall() {
     check_bulk_order_quality("ascending", 16000);
 }

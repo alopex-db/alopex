@@ -317,8 +317,8 @@ impl PyDatabaseOptions {
     }
 }
 
-/// Explicit local-disk overflow budgets. This never silently enables Windows
-/// writes without durable publication support.
+/// Explicit local-disk overflow budgets, using the native durable publication
+/// path on Unix and Windows.
 #[pyclass(name = "WalOverflowOptions", frozen, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyWalOverflowOptions {
@@ -371,10 +371,10 @@ impl PyWalOverflowOptions {
         })
     }
 
-    /// Whether this build supports durable overflow writes. Unsupported platforms
-    /// still reject opt-in at open, before touching a database.
+    /// Whether this native build implements overflow writes. Filesystem and
+    /// publication errors still propagate from open/commit.
     #[staticmethod]
     fn writes_supported() -> bool {
-        !cfg!(windows)
+        true
     }
 }

@@ -148,8 +148,8 @@ def main():
     args = parser.parse_args()
     if sys.flags.optimize:
         parser.error("assertions must be enabled; do not use Python -O")
-    if sys.platform == "win32" or not hasattr(_alopex, "_arm_wal_test_fault"):
-        parser.error("requires a non-Windows debug extension built with --cfg alopex_wal_test_hooks")
+    if not hasattr(_alopex, "_arm_wal_test_fault"):
+        parser.error("requires a debug extension built with --cfg alopex_wal_test_hooks")
     if args.child:
         path, surface, mode, stage = args.child
         child(Path(path), surface, mode, int(stage))
