@@ -126,11 +126,13 @@ class FinalJoinWorkflowTests(unittest.TestCase):
 
     def test_delivery_builds_pin_maturin_and_repair_macos_dylibs(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(text.count('maturin-version: "1.14.1"'), 4)
-        macos = text.split("  macos:", maxsplit=1)[1].split(
-            "  windows:", maxsplit=1
-        )[0]
-        self.assertIn("--auditwheel repair", macos)
+        from scripts.release import bounded_maturin
+
+        for kind in ("linux", "macos", "windows", "sdist"):
+            self.assertIn(f"bounded_maturin.py --kind {kind}", text)
+            env = bounded_maturin.action_environment(kind, "123-1")
+            self.assertEqual(env["INPUT_MATURIN-VERSION"], "1.14.1")
+        self.assertIn("--auditwheel repair", bounded_maturin.PROFILES["macos"][1])
 
     def test_sdist_stages_source_without_native_vendor_directories(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
