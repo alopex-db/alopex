@@ -1,7 +1,6 @@
-#![allow(
-    deprecated,
-    reason = "Malformed-file fixtures use the pinned codec-free Thrift schema"
-)]
+#[path = "../src/executor/bulk/parquet/wire_schema/mod.rs"]
+mod parquet_wire;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::fs::File;
@@ -21,7 +20,8 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
-use parquet_wire::thrift::{TCompactOutputProtocol, TSerializable};
+use parquet_wire::TSerializable;
+use thrift::protocol::TCompactOutputProtocol;
 
 const LIMIT: usize = 64 * 1024;
 const DECLARED_PAGE_BYTES: i32 = 1024 * 1024;

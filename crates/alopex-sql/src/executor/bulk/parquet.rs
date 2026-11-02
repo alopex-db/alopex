@@ -24,6 +24,7 @@ mod input;
 mod pages;
 mod preflight;
 mod schema;
+mod wire_schema;
 use preflight::{check_footer, check_pages};
 
 const MAX_READ_PARQUET_ROWS: u64 = 100_000;
