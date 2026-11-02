@@ -43,3 +43,5 @@ jobs:
             scripts.performance.test_release_hnsw_evidence
       - name: Verify v0.8.11 compatibility ledgers
         run: python scripts/validate_v0811_ledgers.py
+      - name: Verify manual profiling harness contracts without product workloads
+        run: python -B -m unittest discover -s scripts/performance/tests -p 'test_*_profile.py'

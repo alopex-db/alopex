@@ -303,6 +303,7 @@ dependencies = [
  "arrow",
  "arrow-csv",
  "parquet 60.1.0",
+ "proptest",
  "regex",
  "serde_json",
  "tempfile",

@@ -488,7 +488,7 @@ jobs:
         if: runner.os == 'Windows'
         run: python scripts/ci/windows-wal-contract.py --phase build
 
-      - name: Bounded Windows native WAL contracts
+      - name: Bounded Windows native WAL and LSM contracts
         timeout-minutes: 45
         if: runner.os == 'Windows'
         # Reuse this job's release target. Tiny WAL/LSM publication fixtures
@@ -496,7 +496,16 @@ jobs:
         run: |
           python scripts/ci/test_windows_wal_console.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/ci/windows-wal-contract.py --phase contracts
+          python scripts/ci/test_windows_wal_phases.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/ci/windows-wal-contract.py --phase wal-contracts
+
+      - name: Bounded Windows native HNSW contracts
+        timeout-minutes: 45
+        if: runner.os == 'Windows'
+        # Keep compilation and tiny HNSW tests in their own bounded phase.
+        # Run serially on the same host/target; no extra build or test copies.
+        run: python scripts/ci/windows-wal-contract.py --phase hnsw-contracts
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

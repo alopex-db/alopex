@@ -1,0 +1,640 @@
+{
+  "status": "development composition verified; exact PR/candidate CI and acceptance pending",
+  "source": {
+    "base": "d1d11cbf7f8614210a1bc57b84652f89abe176a4",
+    "stack": "dcbd746fc6fad8ba095c9c7fbb8e5bc88a90181a",
+    "head": "80cfd8a77dc1e674b0ca9955cb131df34b037f4d",
+    "tree": "1b8efadd0a656b148b6c87d4311ef76782f6581a",
+    "changed_files": 77,
+    "exact_stack_blobs": 75,
+    "exceptions": {
+      "memory.rs": "Resolve history-aware visibility while keeping delayed copies and borrowed key comparisons; change reference oracle to snapshot isolation including future deletes",
+      "lsm/mod.rs": "Identical normalized source patch, composed with existing Windows public overflow implementation"
+    },
+    "blobs": {
+      ".github/workflows/parity-harness.yml": "1d6289fb0bdb5ebe7d82c1e5b7066dc4f07f05e2",
+      "Cargo.lock": "0f870832a8c4b775e1de866995a5b06bcfd03f58",
+      "crates/alopex-core/src/kv/memory.rs": "54f117354338d3caab0600ed4b4fc0f1423e998c",
+      "crates/alopex-core/src/lsm/mod.rs": "1bf68f3f6d7b25b7e0f9739381c29e0ac415d197",
+      "crates/alopex-core/src/lsm/scan_tests.rs": "011cb8e9395350511aa921f1708d7ad3a467ee06",
+      "crates/alopex-core/src/lsm/sstable.rs": "b4b426b7a3e81240d2877ce92a0bd63db5e233b3",
+      "crates/alopex-dataframe/Cargo.toml": "48a8bbbb9e474ab10f56263c25efabcda7ac0e2d",
+      "crates/alopex-dataframe/src/io/streaming_csv.rs": "a374b91fe486b3edd82817ba000175f5097ea2ad",
+      "crates/alopex-dataframe/src/physical/expr_eval.rs": "492b25e5d1514f1ccf488425a187f418c5e223d6",
+      "crates/alopex-py/python/alopex/remote.py": "a1a1c5eee4990aa633f8fcd67405cc47c39968cd",
+      "crates/alopex-py/src/embedded/database.rs": "04a184389548e973f6f4e334b54f941d2c361b3c",
+      "crates/alopex-py/src/embedded/transaction.rs": "70395ca9700a0134594f554dd82bf88b8b90423d",
+      "crates/alopex-py/tests/test_remote_value_normalization.py": "9ec453af9bb08e674abc585ef5b7b26211cea189",
+      "crates/alopex-sql/src/executor/dml/delete.rs": "782dedd1cfc08f478ec24394e9a770b7bf8c2327",
+      "crates/alopex-sql/src/executor/evaluator/binary_op.rs": "147b77736a2db726a0d81f9c466e5a3121902bf6",
+      "crates/alopex-sql/tests/async_delete_primary_key.rs": "966ee4cf66bef6b55bb8e3de5f5be1398b5a88d3",
+      "crates/alopex-sql/tests/support/btree_read_counts.rs": "561861511ece4230adbf1ed6fe1b250cfe326931",
+      "docs/build-performance/v0.8.17/concat-string-buffer.json": "07baec65634fcdf9b5380ef57a330cfa877ee8c2",
+      "docs/build-performance/v0.8.17/concat-string-buffer.md": "04cd74cdfe88be1073602a449a58d55b3b141c16",
+      "docs/build-performance/v0.8.17/csv-buffered-framing.json": "3de9f4837b65cb866d5be5cb9b2cecc96c813cb0",
+      "docs/build-performance/v0.8.17/csv-buffered-framing.md": "7b89c43d4e95d27a7966e2742387c89498cec467",
+      "docs/build-performance/v0.8.17/csv-stream-baseline.json": "f3c82a3933231969b48fb3cd7e1b6417ae6631fd",
+      "docs/build-performance/v0.8.17/csv-stream-baseline.md": "93f28fab52dc530c7f6b8f52ec2c0f8a1b09eb04",
+      "docs/build-performance/v0.8.17/dataframe-phase-baseline.json": "208057378c829c95fc10aa10910a03a0e651d2cb",
+      "docs/build-performance/v0.8.17/dataframe-phase-baseline.md": "5ab3e2a204b9cb13b7ffa76d39d370535da5482d",
+      "docs/build-performance/v0.8.17/kv-read-baseline.json": "2b87a0f9385dcef80dbbb4c07eab5e139828e4e0",
+      "docs/build-performance/v0.8.17/kv-read-baseline.md": "092ec2182f33db12dab25a07b9625a9450fecd1b",
+      "docs/build-performance/v0.8.17/lazy-comparison-errors.json": "5985439be04672309c8a106ee84bc48071104a99",
+      "docs/build-performance/v0.8.17/lazy-comparison-errors.md": "109be29edebf71966f4f778b904a719f038cbf2e",
+      "docs/build-performance/v0.8.17/lazy-file-comparison.json": "7550b75ed80cb944a3fa22bc4dc9362f8814b08e",
+      "docs/build-performance/v0.8.17/lazy-file-comparison.md": "924ac71a376827e63e79085c6deb608ccb559037",
+      "docs/build-performance/v0.8.17/lsm-range-bulk-build.json": "421d375f6d389258ea56529973e993e5e9b74be5",
+      "docs/build-performance/v0.8.17/lsm-range-bulk-build.md": "344219fbe39b6505bc3e208c027abd4f582dd459",
+      "docs/build-performance/v0.8.17/memory-scan-copies.json": "439662a13740d76d88aaa727948f3f26829ddb87",
+      "docs/build-performance/v0.8.17/memory-scan-copies.md": "e0d48edd9100e1b859748932f044e68562a89d35",
+      "docs/build-performance/v0.8.17/remote-scalar-normalization.json": "e7c991ed63116e49ad083383ac780b6c8c53c3ae",
+      "docs/build-performance/v0.8.17/remote-scalar-normalization.md": "c629fc8cc0a188db2655b41f94fda1cb69f03dea",
+      "docs/build-performance/v0.8.17/sql-delete-primary-key.json": "341455e4063f5f86cb45acb7edb90cabd1d2e2d6",
+      "docs/build-performance/v0.8.17/sql-delete-primary-key.md": "80f7dc3ff65fb5b983afd8ee0825809e016ed45f",
+      "docs/build-performance/v0.8.17/sql-query-baseline.json": "0021ada7e6cb59d70355515c29c6abc52b3f747e",
+      "docs/build-performance/v0.8.17/sql-query-baseline.md": "08ef121ca66dee8b6567ce21bfc0a7f1b0d0479d",
+      "docs/build-performance/v0.8.17/sql-stream-baseline.json": "d65dca2434daa66ac0351a8820cd1bca84fea860",
+      "docs/build-performance/v0.8.17/sql-stream-baseline.md": "14f6973e468ef087632862a4a9f6b29c9295e52f",
+      "docs/build-performance/v0.8.17/sqlite-composite-baseline.json": "0be5e320faec317222110085da94a45b0e24bae7",
+      "docs/build-performance/v0.8.17/sqlite-composite-baseline.md": "a6be0b3da7389db3e75f5d3da31d85e67e8d9c6f",
+      "docs/build-performance/v0.8.17/sstable-point-lookup.json": "a258024b66edb4b7a729c9baf34d01171fcc061a",
+      "docs/build-performance/v0.8.17/sstable-point-lookup.md": "960e56472ff6a8a80bf80a75752df7dd52cb2274",
+      "docs/build-performance/v0.8.17/transaction-tracking.json": "7b69b59faa543fb2f3cfb4f928ccd8c7f94af973",
+      "docs/build-performance/v0.8.17/transaction-tracking.md": "2f98425fcb8d6d386932eaa3aade38127731e6e1",
+      "scripts/performance/csv_stream_profile.py": "d38f57a8a557ecf78307e3978244550ac24e8270",
+      "scripts/performance/dataframe_profile.py": "e810fc1acdbc817e8a866608938d5d49b2ab21d7",
+      "scripts/performance/kv_read_profile.py": "8c8375258bceebf8715bc7e12ed0fdf9d3678e5a",
+      "scripts/performance/lazy_file_profile.py": "6153b65bbcf8094e15c4c204479736bb63276b99",
+      "scripts/performance/run_csv_stream_profile.py": "c5759cb476dff7720dbce1bcafe14d98f036574c",
+      "scripts/performance/run_dataframe_profile.py": "738fb0c5348934dd40335c598b2261068ca77fa1",
+      "scripts/performance/run_kv_read_profile.py": "f289fc34a0cebdb6764116a54e06e063040e39cb",
+      "scripts/performance/run_lazy_file_profile.py": "0630f50aa01d2dcef6be1f1b1804f089322f4dea",
+      "scripts/performance/run_sql_delete_profile.py": "3abd0b7d31a6b402d102e38a380f0b46e6f93262",
+      "scripts/performance/run_sql_query_profile.py": "a11cd154b5548740a35ba262722ae399a23a3ebe",
+      "scripts/performance/run_sql_stream_profile.py": "21dc9f6c07a40fbc4f21708393aa6fa5ea092eaa",
+      "scripts/performance/run_sqlite_composite_profile.py": "5850afe37ce217860def9b511d003db08ead8837",
+      "scripts/performance/sql_query_profile.py": "740c988364454be214cada4544a1f9ec88be08d4",
+      "scripts/performance/sql_stream_profile.py": "8791b8b01515c906a06e31d8c949f5cbb2bf0481",
+      "scripts/performance/sqlite_composite_profile.py": "517cd2a620423068b2c89e9c189db053c8f097da",
+      "scripts/performance/tests/test_csv_stream_profile.py": "338440947e884faa41b2a538cb2c2dfccc3ec497",
+      "scripts/performance/tests/test_dataframe_profile.py": "86e54bf031c741bfb9d855d38f0fdb3a80fd5b05",
+      "scripts/performance/tests/test_kv_read_profile.py": "1a517172ebea085f0a6f2d495a1c8c4cedaeb101",
+      "scripts/performance/tests/test_lazy_file_profile.py": "a251ceacad9060b3ac955a86418b5bbe3e66dfe2",
+      "scripts/performance/tests/test_sql_query_profile.py": "9e8e39a3a06a8383369017f1b37e6c6f615668bd",
+      "scripts/performance/tests/test_sql_stream_profile.py": "24cd30b967566a5a8fca61a66ec005d2aaaccb80",
+      "scripts/performance/tests/test_sqlite_composite_profile.py": "f135546d387855ca1f2f18551b5b2f57113dd92a",
+      "scripts/performance/workloads/README.md": "449dc32962b9ab85db700013f26da29502627ebb",
+      "scripts/performance/workloads/csv_streaming_v0816.py": "e0c66969bcaa6794f1891534544b41c1aa64e75a",
+      "scripts/performance/workloads/dataframe_phases_v0816.py": "8097e5c17ac6964ef25be06a0b78f5160942bdb8",
+      "scripts/performance/workloads/polars_entrypoints_v0816.py": "21863d86b83f9854c21c910cf34487243d8d2b02",
+      "scripts/performance/workloads/sql_streaming_v0816.py": "2d8e640880ea66ae69a395c13fc7539be1de9d0f",
+      "scripts/performance/workloads/sqlite_composite_v0816.py": "77affb003cf6b9eee21622330c08014c09c218c0"
+    }
+  },
+  "plan": {
+    "unanswered": "Compose adopted #774-#790 performance changes with #792; reconcile old tuple-based memory scan optimization with version-history snapshot semantics and prove overlay/read-version behavior on the resulting source.",
+    "base": "d1d11cbf7f8614210a1bc57b84652f89abe176a4",
+    "sources": [
+      "67aa1497363bd488e728022c3c304c2170c7e490",
+      "dcbd746fc6fad8ba095c9c7fbb8e5bc88a90181a"
+    ],
+    "initial_host_bytes": 19219394560,
+    "peak_additional_bound_bytes": 3000000000,
+    "commands": [
+      "merge pinned source branches into fix/v0.8.17-performance-composition",
+      "focused core memory unit tests and memory_snapshot_overwrite integration",
+      "focused changed-line mutation after test success; shared target in place",
+      "focused core Clippy and fmt/diff checks",
+      "cargo test --offline --locked -p alopex-embedded --test hnsw_transaction_cache (5 existing two-row public snapshot cases)"
+    ],
+    "output": "/private/tmp/alopex-performance-composition",
+    "build_policy": "serialized, shared target, debug0/incremental0/jobs2, storage watchdog stop40GB; no performance/load tests",
+    "cleanup": "Preserve logs/source identities; remove owned core validation binaries and any parser archive/files after checks; keep existing shared dependencies. No new worktree.",
+    "cross_boundary_reason": "Confirm reconciled MemoryKV scans preserve the HNSW Database old-reader contract, rather than relying only on direct KV assertions"
+  },
+  "checks": {
+    "focused": {
+      "passed": 27,
+      "sha256": "29a601754169c22b634ebca392417977364d43391ff80a7e0283d28af2b9e3e0",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 47.52s",
+        "     Running unittests src/lib.rs (target/debug/deps/alopex_core-0ba0a637acb03ac4)",
+        "running 27 tests",
+        "test kv::memory::tests::read_only_reads_do_not_track_write_conflicts ... ok",
+        "test kv::memory::tests::memory_limit_error_does_not_break_reads ... ok",
+        "test kv::memory::tests::memory_stats_tracks_put_and_delete ... ok",
+        "test kv::memory::tests::scan_prefix_merges_snapshot_and_writes ... ok",
+        "test kv::memory::tests::scan_range_skips_newer_versions ... ok",
+        "test kv::memory::tests::reset_gate_old_reader_does_not_wait_on_new_writer ... ok",
+        "test kv::memory::tests::owned_memory_transaction_merges_incremental_cursor_and_commits_once ... ok",
+        "test kv::memory::tests::any_kv_memory_dispatches_to_owned_memory_session_without_borrowed_transaction ... ok",
+        "test kv::memory::tests::reset_gate_old_writer_does_not_wait_on_new_readers ... ok",
+        "test kv::memory::tests::owned_memory_transaction_exposes_journal_before_images ... ok",
+        "test kv::memory::tests::owned_prefix_cursor_skips_keys_before_its_prefix ... ok",
+        "test kv::memory::tests::scan_range_records_reads_for_conflict_detection ... ok",
+        "test kv::memory::tests::test_blind_write_conflict ... ok",
+        "test kv::memory::tests::scan_overlay_model_covers_bounds_versions_and_tombstones ... ok",
+        "test kv::memory::tests::compaction_skips_when_over_limit_and_logs_warning ... ok",
+        "test kv::memory::tests::scan_overlay_matches_small_reference_model ... ok",
+        "test kv::memory::tests::test_get_not_found ... ok",
+        "test kv::memory::tests::test_occ_conflict ... ok",
+        "test kv::memory::tests::test_put_and_get_transient ... ok",
+        "test kv::memory::tests::test_read_only_write_fails ... ok",
+        "test kv::memory::tests::test_txn_closed_error ... ok",
+        "test kv::memory::tests::flush_and_reopen_reads_from_sstable ... ok",
+        "test kv::memory::tests::corrupt_sstable_payload_checksum_is_discarded_and_wal_recovers ... ok",
+        "test kv::memory::tests::corrupt_sstable_header_is_discarded_and_wal_recovers ... ok",
+        "test kv::memory::tests::wal_recovers_committed_tombstone_on_reopen ... ok",
+        "test kv::memory::tests::wal_overlays_sstable_on_reopen ... ok",
+        "test kv::memory::tests::truncated_sstable_is_discarded_and_wal_recovers ... ok",
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 640 filtered out; finished in 0.06s"
+      ]
+    },
+    "snapshots": {
+      "passed": 20,
+      "sha256": "60111cbc08f1bcc1107e90ba2c25ff5942cfd8ff128e7cc2384a3ff4d9fb28b9",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 1.43s",
+        "     Running tests/memory_snapshot_overwrite.rs (target/debug/deps/memory_snapshot_overwrite-18c808d22507a147)",
+        "running 20 tests",
+        "test identical_reader_versions_remain_until_last_reader_ends ... ok",
+        "test capacity_includes_reclamation_index_key ... ok",
+        "test borrowed_get_preserves_overwritten_version ... ok",
+        "test owned_get_preserves_overwritten_version ... ok",
+        "test deleted_key_still_conflicts_with_borrowed_stale_writer ... ok",
+        "test borrowed_scan_preserves_deleted_version ... ok",
+        "test administrative_clear_rejects_staged_owned_writes ... ok",
+        "test owned_prefix_range_and_from_read_same_old_generation ... ok",
+        "test generations_are_retained_and_reclaimed_independently ... ok",
+        "test deleted_key_still_conflicts_with_owned_stale_writer ... ok",
+        "test borrowed_get_preserves_deleted_version ... ok",
+        "test compaction_preserves_old_versions_and_pending_writes_overlay_them ... ok",
+        "test closed_owned_cursor_does_not_pin_rolled_back_transaction ... ok",
+        "test owned_get_preserves_deleted_version ... ok",
+        "test administrative_clear_closes_old_borrowed_transactions_and_restarts_versions ... ok",
+        "test borrowed_scan_preserves_overwritten_version ... ok",
+        "test administrative_clear_closes_open_owned_cursor_without_waiting_for_it ... ok",
+        "test snapshot_capacity_failure_is_atomic_and_own_version_does_not_double_charge ... ok",
+        "test snapshots_match_small_reference_maps ... ok",
+        "test deleted_sstable_value_is_not_resurrected_before_or_after_reopen ... ok",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s"
+      ]
+    },
+    "hnsw-snapshots": {
+      "passed": 5,
+      "sha256": "c96b7f7391a3a24eeaa0ddf0a81af185fe48b8b719c31c66c52d634e6b3f6de9",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 1m 03s",
+        "     Running tests/hnsw_transaction_cache.rs (target/debug/deps/hnsw_transaction_cache-e1c5317508d861c0)",
+        "running 5 tests",
+        "test transaction_delete_rollback_preserves_old_and_new_readers ... ok",
+        "test conflicting_sql_writer_cannot_publish_its_graph ... ok",
+        "test transaction_truncate_rollback_preserves_cached_graph ... ok",
+        "test transaction_null_update_commit_preserves_old_snapshot ... ok",
+        "test transaction_truncate_commit_replaces_cached_graph ... ok",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ]
+    },
+    "restored-model": {
+      "passed": 2,
+      "sha256": "0173fb5f8407500e6b02898635cc99ec14b29e2f0139280249c230e494eb251f",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 50.63s",
+        "     Running unittests src/lib.rs (target/debug/deps/alopex_core-0ba0a637acb03ac4)",
+        "running 2 tests",
+        "test kv::memory::tests::scan_overlay_model_covers_bounds_versions_and_tombstones ... ok",
+        "test kv::memory::tests::scan_overlay_matches_small_reference_model ... ok",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 665 filtered out; finished in 0.00s"
+      ]
+    },
+    "clippy": {
+      "sha256": "51ba65a81b8b2cdf233bacb83f56dc6294e64bf18f25177e00b981e98eb695d5",
+      "selected_log": [
+        "    Finished `dev` profile [unoptimized] target(s) in 11.51s"
+      ]
+    },
+    "future-visibility": {
+      "sha256": "8a0f4b487057fab16758d1bd9224c61ae8eb4b143f44d67fb572870a8631b04d",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 47.65s",
+        "test kv::memory::tests::scan_overlay_model_covers_bounds_versions_and_tombstones ... FAILED",
+        "assertion `left == right` failed: scan=0",
+        "  left: {[1, 4]: 1, [1, 1]: 1, [1, 6]: 1, [1, 0]: 1, [1, 7]: 1, [1, 5]: 1, [1, 3]: 1}",
+        " right: {[1, 1]: 1, [1, 7]: 1, [1, 5]: 1, [1, 6]: 1, [1, 4]: 1, [1, 2]: 1, [1, 3]: 1, [1, 0]: 1}",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 666 filtered out; finished in 0.00s",
+        "error: test failed, to rerun pass `-p alopex-core --lib`"
+      ]
+    },
+    "wrong-read-version": {
+      "sha256": "b3f8a304ef413b9631198cb730adc2aa46fc570c39ebd746e91abae20b61d19f",
+      "selected_log": [
+        "    Finished `test` profile [optimized] target(s) in 47.93s",
+        "test kv::memory::tests::scan_overlay_model_covers_bounds_versions_and_tombstones ... FAILED",
+        "assertion `left == right` failed: scan=0",
+        "  left: {[1, 6]: 1, [1, 0]: 1, [1, 1]: 1, [1, 3]: 1, [1, 4]: 1, [1, 5]: 1, [1, 2]: 2, [1, 7]: 1}",
+        " right: {[1, 1]: 1, [1, 7]: 1, [1, 0]: 1, [1, 5]: 1, [1, 6]: 1, [1, 3]: 1, [1, 4]: 1, [1, 2]: 1}",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 666 filtered out; finished in 0.00s",
+        "error: test failed, to rerun pass `-p alopex-core --lib`"
+      ]
+    }
+  },
+  "unique_functional_tests": 52,
+  "restored_model_recheck": 2,
+  "mutation": {
+    "summary": {
+      "total_mutants": 8,
+      "missed": 0,
+      "caught": 3,
+      "timeout": 0,
+      "unviable": 5,
+      "success": 0,
+      "start_time": "2026-10-30T06:11:39.440558Z",
+      "end_time": "2026-10-30T06:12:59.762291Z",
+      "cargo_mutants_version": "27.1.0"
+    },
+    "records": [
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1886:9: replace MergedScanIter<'a>::advance_data with ()",
+        "summary": "Unviable",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1886_col_9.log",
+        "errors": [
+          "error: fields `data_iter` and `start_version` are never read",
+          "error: could not compile `alopex-core` (lib) due to 1 previous error"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1889:22: replace >= with < in MergedScanIter<'a>::advance_data",
+        "summary": "CaughtMutant",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1889_col_22.log",
+        "errors": [
+          "error: test failed, to rerun pass `-p alopex-core --lib`"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1911:9: replace MergedScanIter<'a>::advance_write with ()",
+        "summary": "Unviable",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1911_col_9.log",
+        "errors": [
+          "error: field `write_iter` is never read",
+          "error: could not compile `alopex-core` (lib) due to 1 previous error"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1914:22: replace >= with < in MergedScanIter<'a>::advance_write",
+        "summary": "CaughtMutant",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1914_col_22.log",
+        "errors": [
+          "error: test failed, to rerun pass `-p alopex-core --lib`"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1928:9: replace MergedScanIter<'a>::record_read with ()",
+        "summary": "Unviable",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1928_col_9.log",
+        "errors": [
+          "error: unused variable: `key`",
+          "error: unused variable: `version`",
+          "error: fields `track_reads` and `read_set` are never read",
+          "error: could not compile `alopex-core` (lib) due to 3 previous errors"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1939:9: replace <impl Iterator for MergedScanIter<'a>>::next -> Option<Self::Item> with None",
+        "summary": "Unviable",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1939_col_9.log",
+        "errors": [
+          "error: fields `track_reads` and `read_set` are never read",
+          "error: method `record_read` is never used",
+          "error: could not compile `alopex-core` (lib) due to 2 previous errors"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1939:9: replace <impl Iterator for MergedScanIter<'a>>::next -> Option<Self::Item> with Some(Default::default())",
+        "summary": "Unviable",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1939_col_9_001.log",
+        "errors": [
+          "error: fields `track_reads` and `read_set` are never read",
+          "error: method `record_read` is never used",
+          "error: could not compile `alopex-core` (lib) due to 2 previous errors"
+        ]
+      },
+      {
+        "name": "crates/alopex-core/src/kv/memory.rs:1944:23: replace == with != in <impl Iterator for MergedScanIter<'a>>::next",
+        "summary": "CaughtMutant",
+        "log_path": "log/crates__alopex-core__src__kv__memory.rs_line_1944_col_23.log",
+        "errors": [
+          "error: test failed, to rerun pass `-p alopex-core --lib`"
+        ]
+      }
+    ]
+  },
+  "manual_mutations": {
+    "records": [
+      {
+        "name": "future-visibility",
+        "replacement": "let Some(visible) = entry.at(self.start_version.saturating_add(1)) else {",
+        "returncode": 101,
+        "caught": true,
+        "log": "future-visibility.log"
+      },
+      {
+        "name": "wrong-read-version",
+        "replacement": "self.data_peek = Some((k.clone(), (value.clone(), entry.current.version)));",
+        "returncode": 101,
+        "caught": true,
+        "log": "wrong-read-version.log"
+      }
+    ],
+    "restored_sha256": "3da56ce6d4cd84282264016bf86c903c88e82f5778a83f6d1841f7bc86d6a6c6"
+  },
+  "coupling": {
+    "summary": {
+      "critical_issues": 0,
+      "external_couplings": 463,
+      "health_grade": "C",
+      "health_score": 0.5792682926829268,
+      "high_issues": 1,
+      "internal_couplings": 82,
+      "medium_issues": 4,
+      "total_couplings": 545,
+      "total_modules": 12
+    },
+    "cycles": [
+      [
+        "alopex-core::kv",
+        "alopex-core::kv::memory"
+      ],
+      [
+        "alopex-core::kv::any",
+        "alopex-core::kv::storage"
+      ]
+    ],
+    "memory_impact": [
+      {
+        "origin": "kv::memory",
+        "changed_items": [
+          "& 'a MemoryTxnManager::begin",
+          "& 'a MemoryTxnManager::commit",
+          "& 'a MemoryTxnManager::rollback",
+          "MemorySharedState",
+          "MemorySharedState::recompute_current_memory",
+          "MemorySnapshot",
+          "MemorySnapshot::drop",
+          "MemorySnapshot::is_current",
+          "MemorySnapshot::new",
+          "MemorySnapshot::release_locked",
+          "MemorySnapshots",
+          "MemorySnapshots::needs",
+          "MemorySnapshots::needs_deletion",
+          "MemoryTransaction",
+          "MemoryTransaction < 'a >::commit_self",
+          "MemoryTransaction < 'a >::delete",
+          "MemoryTransaction < 'a >::ensure_active",
+          "MemoryTransaction < 'a >::get",
+          "MemoryTransaction < 'a >::journal_pending_writes",
+          "MemoryTransaction < 'a >::new",
+          "MemoryTransaction < 'a >::put",
+          "MemoryTransaction < 'a >::record_journal_before_write",
+          "MemoryTransaction < 'a >::rollback_in_place",
+          "MemoryTransaction < 'a >::rollback_self",
+          "MemoryTransaction < 'a >::scan_from",
+          "MemoryTransaction < 'a >::scan_from_internal",
+          "MemoryTransaction < 'a >::scan_prefix",
+          "MemoryTransaction < 'a >::scan_prefix_internal",
+          "MemoryTransaction < 'a >::scan_range",
+          "MemoryTransaction < 'a >::scan_range_internal",
+          "MemoryTransaction < 'a >::visit_pending_write_keys",
+          "MemoryTxnManager::begin_internal",
+          "MemoryTxnManager::clear_all",
+          "MemoryTxnManager::commit_pending",
+          "MemoryTxnManager::compact_in_memory",
+          "MemoryTxnManager::flush",
+          "MemoryTxnManager::load_sstable",
+          "MemoryTxnManager::new_with_params",
+          "MemoryTxnManager::replay",
+          "MemoryTxnManager::snapshot",
+          "MemoryTxnManager::sstable_get",
+          "MemoryVersion",
+          "MergedScanIter",
+          "MergedScanIter < 'a >::advance_data",
+          "MergedScanIter < 'a >::advance_write",
+          "MergedScanIter < 'a >::new",
+          "MergedScanIter < 'a >::next",
+          "MergedScanIter < 'a >::record_read",
+          "OwnedMemoryCursor::data_candidate",
+          "OwnedMemoryCursor::next_entry",
+          "OwnedMemoryCursor::next_search_entry",
+          "OwnedMemoryCursor::record_read",
+          "OwnedMemoryTransaction::commit",
+          "OwnedMemoryTransaction::delete",
+          "OwnedMemoryTransaction::ensure_active",
+          "OwnedMemoryTransaction::ensure_writable",
+          "OwnedMemoryTransaction::get",
+          "OwnedMemoryTransaction::journal_pending_writes",
+          "OwnedMemoryTransaction::new",
+          "OwnedMemoryTransaction::open_cursor",
+          "OwnedMemoryTransaction::put",
+          "OwnedMemoryTransaction::record_journal_before_write",
+          "OwnedMemoryTransaction::rollback",
+          "OwnedMemoryTransaction::visit_pending_write_keys",
+          "OwnedMemoryTransactionState",
+          "OwnedSnapshotGate::acquire_reader",
+          "OwnedSnapshotGate::acquire_writer",
+          "OwnedSnapshotGate::reset",
+          "OwnedSnapshotGateState",
+          "OwnedSnapshotReader",
+          "OwnedSnapshotReader::drop",
+          "OwnedSnapshotWriter",
+          "OwnedSnapshotWriter::drop",
+          "VersionedValue",
+          "VersionedValue::at",
+          "VersionedValue::history_bytes",
+          "VersionedValue::memory_bytes",
+          "VersionedValue::new",
+          "check_scan_overlay_model",
+          "owned_memory_transaction_exposes_journal_before_images",
+          "read_only_reads_do_not_track_write_conflicts",
+          "reset_gate_old_reader_does_not_wait_on_new_writer",
+          "reset_gate_old_writer_does_not_wait_on_new_readers",
+          "scan_overlay_model_covers_bounds_versions_and_tombstones"
+        ],
+        "paths": [
+          {
+            "module": "kv",
+            "path": [
+              "kv::memory",
+              "kv"
+            ]
+          },
+          {
+            "module": "kv::any",
+            "path": [
+              "kv::memory",
+              "kv::any"
+            ]
+          },
+          {
+            "module": "kv::change_journal",
+            "path": [
+              "kv::memory",
+              "kv::change_journal"
+            ]
+          },
+          {
+            "module": "kv::owned",
+            "path": [
+              "kv::memory",
+              "kv::owned"
+            ]
+          },
+          {
+            "module": "kv::read_at",
+            "path": [
+              "kv::memory",
+              "kv::read_at"
+            ]
+          },
+          {
+            "module": "kv::storage",
+            "path": [
+              "kv::memory",
+              "kv::storage"
+            ]
+          },
+          {
+            "module": "kv::async_adapter",
+            "path": [
+              "kv::memory",
+              "kv",
+              "kv::async_adapter"
+            ]
+          },
+          {
+            "module": "kv::async_kv",
+            "path": [
+              "kv::memory",
+              "kv",
+              "kv::async_kv"
+            ]
+          },
+          {
+            "module": "kv::s3",
+            "path": [
+              "kv::memory",
+              "kv",
+              "kv::s3"
+            ]
+          }
+        ],
+        "truncated": false,
+        "test_candidates": 102
+      }
+    ],
+    "blind_spots": [
+      {
+        "area": "dynamic-connascence",
+        "description": "Dynamic connascence (Execution, Timing, Values, Identity) is a runtime property; static AST analysis cannot detect it. Order/timing/shared-state coupling will not appear here."
+      },
+      {
+        "area": "implicit-functional-coupling",
+        "description": "Duplicated business logic and connascence of meaning/algorithm with no explicit call or import are only partially covered: strong temporal co-change can reveal hidden coupling between files, but duplicated logic that does not co-change remains invisible."
+      },
+      {
+        "area": "distance-axes",
+        "description": "Distance is measured by code structure only. Organizational distance (Conway's Law / team boundaries) and runtime distance (sync vs async) are not modeled, so the balance verdict reflects only structural distance."
+      },
+      {
+        "area": "macro-and-cfg",
+        "description": "Coupling introduced by macro expansion, or behind inactive `cfg(...)`, is invisible to syn-based parsing. Generated code is not analyzed unless it exists as source."
+      }
+    ],
+    "coverage": [
+      "No design context: future plans, lifecycle units, business rules and runtime relationships are unknown.",
+      "Rust syntax and dependency reachability are observations; inferred integration strength is not proof of shared business meaning. Macros, inactive cfg selection and full Rust type resolution are not covered.",
+      "Runtime coverage is limited to supplied declarations/observations. Git co-change measures editing history, not runtime ordering.",
+      "0 source parse failure(s); 0 unresolved graph endpoint(s).",
+      "No CODEOWNERS file; ownership is known only where declared in the design context."
+    ],
+    "decision": "Retain existing KV trait/Memory implementation boundary and snapshot-state ownership; no new dependency introduced by conflict resolution. Broad main-relative edges include prior adopted work; the newly reconciled path is borrowed scan -> VersionedValue::at -> read-set tracking, tested with bounded history/overlay models. Future private snapshot/scan module extraction is optional follow-up, not part of this merge.",
+    "file_mode_failure": "Two attempts with file path and --changed-since ended with ENOENT after AST analysis; scoped kv directory report succeeded. Failed attempts are not validation passes."
+  },
+  "parser": {
+    "archive_sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d",
+    "libraries": {
+      "libalopex_sql_parser.dylib": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26",
+      "libalopex_sql_parser.a": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
+    },
+    "contract": "0.28.0",
+    "sidecars": "derived from verified BUILD_IDENTITY for explicit development override",
+    "initial_setup_failure": "archive contains identity and libraries, not installation sidecars; first setup stopped before build, corrected by deriving sidecars; no tests ran in failed setup"
+  },
+  "cleanup": {
+    "source": "80cfd8a77dc1e674b0ca9955cb131df34b037f4d",
+    "executables": [
+      {
+        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_core-0ba0a637acb03ac4",
+        "bytes": 10449472,
+        "sha256": "0f0d245545ad082d4467e91829d9c8cb584847577df97ea69cdd16bc809a5722"
+      },
+      {
+        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/hnsw_build_scale-32e715820bc66f3a",
+        "bytes": 690000,
+        "sha256": "e1a90b88fc0a7797bbe5e791d254e8e329ee4a7e935f28f2535286ce065439f6"
+      },
+      {
+        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/hnsw_transaction_cache-e1c5317508d861c0",
+        "bytes": 31252896,
+        "sha256": "8e0303b815ada325e1aa20d673d338f8d469b5c2beffc98072f3a749a1e0cda5"
+      },
+      {
+        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/memory_snapshot_overwrite-18c808d22507a147",
+        "bytes": 4209136,
+        "sha256": "eeffd7d8fbeb7d720c777fd9eb614f2b3ecf8a98b183d786dc4f1eb8c04b2632"
+      },
+      {
+        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/hnsw_build_scale",
+        "bytes": 690000,
+        "sha256": "e1a90b88fc0a7797bbe5e791d254e8e329ee4a7e935f28f2535286ce065439f6"
+      }
+    ],
+    "parser_and_archive": [
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/CONTRACT_VERSION",
+        "bytes": 7,
+        "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
+      },
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/BUILD_IDENTITY.json",
+        "bytes": 2800,
+        "sha256": "ac74d6d2daec3d6d92006479703b77b1639207dfceb3a3abd7cb83900c9fafd9"
+      },
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.dylib",
+        "bytes": 399944,
+        "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
+      },
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.a",
+        "bytes": 793984,
+        "sha256": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
+      },
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/SHA256SUMS",
+        "bytes": 182,
+        "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
+      },
+      {
+        "path": "/private/tmp/alopex-performance-composition/parser.tar.gz",
+        "bytes": 452776,
+        "sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d"
+      }
+    ],
+    "peak_observed_bytes": 19397812224,
+    "final_bytes": 19348492288,
+    "owned_processes": "All build/test/mutation sessions returned terminal exit status before cleanup; no manual performance workers started",
+    "retained": "Compact logs/source receipts and existing shared Cargo dependencies for active release work; pre-existing worktrees unchanged"
+  },
+  "Miri": "Unavailable in installed 1.96.0-aarch64-apple-darwin toolchain; existing unsafe guard bridge unchanged; no Miri claim",
+  "performance": "Not rerun. Historical single-change diagnostics retain original sources/conditions and adverse observations; they do not establish performance of this new composition.",
+  "next_action": "CI-check #791/#792, integrate in dependency order, then retarget this composition to the candidate and verify exact composed source before acceptance."
+}

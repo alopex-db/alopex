@@ -16,6 +16,8 @@ pub mod metrics;
 pub mod overflow;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod publication_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scan_tests;
 pub mod sstable;
 pub mod wal;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1741,15 +1743,16 @@ impl LsmKV {
         prefix: &[u8],
         read_timestamp: u64,
     ) -> BTreeMap<Key, crate::lsm::memtable::MemTableEntry> {
-        let mut out: BTreeMap<Key, crate::lsm::memtable::MemTableEntry> = BTreeMap::new();
-
         let active = self
             .active_memtable
             .read()
             .expect("lsm active_memtable lock poisoned");
-        for (k, e) in active.scan_prefix(prefix, read_timestamp) {
-            out.insert(k, e);
-        }
+        // MemTable returns sorted, unique visible user keys. Bulk construction
+        // avoids searching the growing tree again for every active entry.
+        let mut out: BTreeMap<Key, crate::lsm::memtable::MemTableEntry> = active
+            .scan_prefix(prefix, read_timestamp)
+            .into_iter()
+            .collect();
 
         let imm = self
             .immutable_memtables
@@ -1824,15 +1827,16 @@ impl LsmKV {
         end: &[u8],
         read_timestamp: u64,
     ) -> BTreeMap<Key, crate::lsm::memtable::MemTableEntry> {
-        let mut out: BTreeMap<Key, crate::lsm::memtable::MemTableEntry> = BTreeMap::new();
-
         let active = self
             .active_memtable
             .read()
             .expect("lsm active_memtable lock poisoned");
-        for (k, e) in active.scan_range(start, end, read_timestamp) {
-            out.insert(k, e);
-        }
+        // Preserve the same versions and merge priority while constructing the
+        // already ordered active range without repeated per-key tree searches.
+        let mut out: BTreeMap<Key, crate::lsm::memtable::MemTableEntry> = active
+            .scan_range(start, end, read_timestamp)
+            .into_iter()
+            .collect();
 
         let imm = self
             .immutable_memtables

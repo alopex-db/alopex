@@ -555,20 +555,20 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
     if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
-        let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
-            EvaluationError::TypeMismatch {
+        let cmp = lhs.partial_cmp(&rhs).ok_or_else(|| {
+            ExecutorError::Evaluation(EvaluationError::TypeMismatch {
                 expected: "Comparable".into(),
                 actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
-            },
-        ))?;
+            })
+        })?;
         return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
-    let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
-        EvaluationError::TypeMismatch {
+    let cmp = left.partial_cmp(&right).ok_or_else(|| {
+        ExecutorError::Evaluation(EvaluationError::TypeMismatch {
             expected: "Comparable".into(),
             actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
-        },
-    ))?;
+        })
+    })?;
 
     Ok(SqlValue::Boolean(ordering_matches(cmp, kind)))
 }
@@ -639,6 +639,167 @@ fn type_mismatch<T>(expected: &str, left: &SqlValue, right: &SqlValue) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn compare_mixed_decimal_preserves_sub_float_precision(
+            offset in -32i64..=32,
+            fraction in 1i128..100,
+            negative in any::<bool>(),
+        ) {
+            // Every integral value is exactly representable as f64, but the
+            // nonzero fractional difference is lost if Decimal takes that path.
+            let integer = (1i64 << 54) + offset * 4;
+            let scaled_integer = i128::from(integer) * 100;
+            let coefficient = scaled_integer + if negative { -fraction } else { fraction };
+            let decimal = SqlValue::Decimal(DecimalValue::new(coefficient, 2));
+            let integral = SqlValue::BigInt(integer);
+            for (left, right, lhs, rhs) in [
+                (&decimal, &integral, coefficient, scaled_integer),
+                (&integral, &decimal, scaled_integer, coefficient),
+            ] {
+                // Independent exact scaled-integer reference for all operators.
+                for (kind, expected) in [
+                    (OrderingKind::Eq, lhs == rhs),
+                    (OrderingKind::Neq, lhs != rhs),
+                    (OrderingKind::Lt, lhs < rhs),
+                    (OrderingKind::Gt, lhs > rhs),
+                    (OrderingKind::Le, lhs <= rhs),
+                    (OrderingKind::Ge, lhs >= rhs),
+                ] {
+                    prop_assert_eq!(
+                        compare(left.clone(), right.clone(), kind).unwrap(),
+                        SqlValue::Boolean(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compare_preserves_numeric_and_non_numeric_orderings() {
+        let kinds = [
+            OrderingKind::Eq,
+            OrderingKind::Neq,
+            OrderingKind::Lt,
+            OrderingKind::Gt,
+            OrderingKind::Le,
+            OrderingKind::Ge,
+        ];
+        for (lower, higher) in [
+            (SqlValue::Boolean(false), SqlValue::Boolean(true)),
+            (SqlValue::Text("a".into()), SqlValue::Text("b".into())),
+            (SqlValue::Blob(vec![0]), SqlValue::Blob(vec![1])),
+            (SqlValue::Float(1.0), SqlValue::Double(2.0)),
+            (SqlValue::Double(1.5), SqlValue::Integer(2)),
+            (
+                SqlValue::Integer(i32::MAX),
+                SqlValue::BigInt(i64::from(i32::MAX) + 1),
+            ),
+            (SqlValue::BigInt(1 << 53), SqlValue::BigInt((1 << 53) + 1)),
+            (
+                SqlValue::Double(f64::NEG_INFINITY),
+                SqlValue::Double(f64::INFINITY),
+            ),
+        ] {
+            for (left, right, expected) in [
+                (&lower, &higher, [false, true, true, false, true, false]),
+                (&higher, &lower, [false, true, false, true, false, true]),
+                (&lower, &lower, [true, false, false, false, true, true]),
+            ] {
+                for (kind, expected) in kinds.into_iter().zip(expected) {
+                    assert_eq!(
+                        compare(left.clone(), right.clone(), kind).unwrap(),
+                        SqlValue::Boolean(expected)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            compare(
+                SqlValue::Float(-0.0),
+                SqlValue::Double(0.0),
+                OrderingKind::Eq
+            )
+            .unwrap(),
+            SqlValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn compare_null_precedes_unordered_or_mismatched_operands() {
+        for other in [
+            SqlValue::Boolean(true),
+            SqlValue::Double(f64::NAN),
+            SqlValue::Null,
+        ] {
+            for kind in [
+                OrderingKind::Eq,
+                OrderingKind::Neq,
+                OrderingKind::Lt,
+                OrderingKind::Gt,
+                OrderingKind::Le,
+                OrderingKind::Ge,
+            ] {
+                assert_eq!(
+                    compare(SqlValue::Null, other.clone(), kind).unwrap(),
+                    SqlValue::Null
+                );
+                assert_eq!(
+                    compare(other.clone(), SqlValue::Null, kind).unwrap(),
+                    SqlValue::Null
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compare_preserves_unordered_and_mismatched_type_errors() {
+        for (left, right, actual) in [
+            (
+                SqlValue::Double(f64::NAN),
+                SqlValue::Integer(1),
+                r#""Double" vs "Integer""#,
+            ),
+            (
+                SqlValue::Integer(1),
+                SqlValue::Float(f32::NAN),
+                r#""Integer" vs "Float""#,
+            ),
+            (
+                SqlValue::Boolean(true),
+                SqlValue::Text("true".into()),
+                r#""Boolean" vs "Text""#,
+            ),
+            (
+                SqlValue::Vector(vec![1.0]),
+                SqlValue::Vector(vec![1.0]),
+                r#""Vector" vs "Vector""#,
+            ),
+        ] {
+            for kind in [
+                OrderingKind::Eq,
+                OrderingKind::Neq,
+                OrderingKind::Lt,
+                OrderingKind::Gt,
+                OrderingKind::Le,
+                OrderingKind::Ge,
+            ] {
+                let Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+                    expected,
+                    actual: observed,
+                })) = compare(left.clone(), right.clone(), kind)
+                else {
+                    panic!("expected a comparison type error");
+                };
+                assert_eq!(expected, "Comparable");
+                assert_eq!(observed, actual);
+            }
+        }
+    }
 
     #[test]
     fn add_null_propagates() {
