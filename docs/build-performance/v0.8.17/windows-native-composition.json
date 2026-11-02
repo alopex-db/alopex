@@ -1,0 +1,233 @@
+{
+  "source": {
+    "sha": "ad02a1b41a3d8cafbd2cb684dd97ebf26d625acd",
+    "tree": "ccae51fd061c80ce3d92649d1ff357062fda32bf",
+    "run_id": "41422265175",
+    "attempt": "1",
+    "platform": "win32",
+    "writer_supported": true,
+    "lowlevel_wal_writer_supported": true,
+    "lsm_file_publication_supported": true
+  },
+  "pr_head": "e2bf6d9f4b112560603a6f33850d407acf7d60bd",
+  "same_tree": true,
+  "groups": [
+    {
+      "group": "readonly-recovery",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "a9310501ed440e17dc2920208caeeffb877025c280c2eb699f9fa27860f9ecab",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "lowlevel-writer",
+      "passed": 33,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "9f426d87df1632189f3b36c877254e41cc201fbcbc7c0b9a558a0373e7ed767f",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "windows-publication",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "2bef96e0c4ce311ce54205ed6387faff2f4013ba4eb90788683289b78f640b4b",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "lsm-publication",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "0acae32e9f0ac67c0231ff08b37aa2852a86461c11af849417697217df81d6b8",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "container-fence",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "e4c573eb0e016bf954e3896ea51e2b91af6ed59e91aa77739222fbe1174f3fa3",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "staging-recovery",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "edd8855a47ec9ff653c63eb99582d4d45cec972a3ae943775aa499e16ac23da2",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "activation-staging",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "f0a1926ad2da618148a5059721cc5b21a103e1a9a404be000e0ea50b7e4178d4",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "overflow-garbage",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "b68762dba2d3f55d3fbca114a1c31bf58c587260d5321b520294906f439ab7bc",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "overflow-lifecycle",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "d2a3533b769e27dbd38aec7ef5395c7930a81a6410c45ed59fccad294aaf12fb",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "inline-lifecycle",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "15366f85684b564b02211caf5b6421bc0059461bd2d8400e5ae04969dc986166",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "publication-boundaries",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "a5494919083ad49b343d1104cf2143a0793dab294af6b952f8d2ac51cfa2b74c",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "public-overflow",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "8fdf2213952d748b150f1951b829d193f02d58cbb3c31f460ea1511891d94e80",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "public-journal",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "74c5b34a9d5da8fa8024ed58905e4a05a137434517a2ec8b181c613062213cab",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "lsm-borrowed-journal",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "45c0aee5d752234aa1090f0cb6ea39048c9ec9fd7bdf511533c8d1c2f928595f",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "lsm-owned-journal",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "a88fba63bf7b252f6b58379a984c6273d4e57a7ff195c20d348654c953f806c2",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "lsm-public-journal",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "182e88978bd4c41c1506f31059cd51a7ce43c7b208594d97a16cae2a1dc2fed2",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "directory-publication",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "00d876f5901b1568f0515fbb74df38f9850c3444dddf53638115956e42812093",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "memory-snapshots",
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "715c134d5171eca782b28fec91795161bcd6243f2f348455270db420f6476b89",
+      "phase": "wal_lsm"
+    },
+    {
+      "group": "hnsw-transaction-snapshots",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "abd12d67948ecf7f0c3fd9c153dc1c90579089e7f96fa014055a9436e5a2f512",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-cold-publication",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "c47bf46b91112cad681ca88a0ad5aaf874212bb6c3ad052d0bb3988e9892abb2",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-statistics",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "9ebbd0e8fb2301cf685c3b917c048fb90a8a3616d7ed3817c519f102f5767f3a",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-two-index-eviction",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "1a2f9c7e67203f28a5ad349173c479173f8a62a5ef223d12b75b444ce1ac26e9",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-savepoint-cache",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "94a61a2cbc7836ecf531058df0389faef3445ff3429fa42500c87dd4ad5f2571",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-begin-cache",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "41f31b8a51efb2f7e5cda5358d6bf612757d959fb07732914c55fcda0a524f0b",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-copy-on-write",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "8009abcc407d8656561e9a2f13a8a3dd3d54627cd2293bfd60ae2b30c280ec4b",
+      "phase": "hnsw"
+    },
+    {
+      "group": "hnsw-dirty-writes",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "sha256": "af71c95cbd06cfff9b5d9937dbe4ecde1da977ca2304bb4abd658c2166afc605",
+      "phase": "hnsw"
+    }
+  ],
+  "passed": 244,
+  "wal_lsm": 162,
+  "hnsw": 82,
+  "storage_sample_count": 272,
+  "storage_peak_bytes": 4499861696,
+  "cleanup_bytes": 1031026792,
+  "artifact_id": 13135325344,
+  "artifact_zip_sha256": "0a989400228ac63b5befb6bd9fe5382eb812fe757b4c8977109fcd677cd538c3",
+  "parser_note": "Initial local release-build text assertion did not strip Cargo ANSI color; corrected receipt parser, raw logs unchanged"
+}

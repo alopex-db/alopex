@@ -4,18 +4,20 @@ Status: #682 provides the standalone codecs, low-level WAL v3 APIs and explicit
 native `LsmKV::open_with_overflow` integration. Default `open_with_config` keeps
 WAL v2 and the v0.1 container writer. The explicit public Windows path now uses
 the existing write-through file/directory publication and recovery pipeline.
-Native Windows public-API qualification is still pending; the historical
-internal-only results below do not establish that qualification. This is not
-release acceptance for #682.
+The [Windows acceptance record](windows-overflow-acceptance.md) identifies the
+completed public-API error/process-exit and independent legacy-reader checks,
+and the subsequent composed native CI result. Each result retains its own
+source identity. Final-candidate, release-package and device power-loss
+qualification remain separate; this is not release acceptance for #682.
 
 The public-path change also selects the small Database/SQL/Python overflow,
 budget and cancellation cases on Windows. LSM lifecycle, inline recovery and
 publication-boundary tests enter through `open_with_overflow` on both platforms.
 Invalid budgets must still fail before creating ancestors or touching an
 existing file. Ordinary builds contain no failure-injection controls; the
-manual instrumented Database/SQL/Python harnesses are now Windows-capable,
-but their Windows results and independent legacy-reader checks remain required
-before this change is accepted. No load/performance test is added to ordinary CI.
+manual instrumented Database/SQL/Python harnesses passed on the Windows source
+recorded there. Their controlled failures do not simulate loss of device or
+kernel caches. No load/performance test is added to ordinary CI.
 
 ## Commit boundary
 
@@ -271,8 +273,10 @@ already-exceeded recovery budget.
 
 The following implementation notes record staged qualification through #739.
 References below to a gated public API describe those earlier source revisions.
-The current public-path change and its outstanding qualification are stated at
-the start of this document; earlier internal results are not substituted for it.
+The current public-path status and its source-bound evidence are stated at the
+start of this document. Platform-refusal statements and test counts in these
+historical stages describe their original revisions, not the current public API;
+earlier internal results are not substituted for public-API acceptance.
 
 Windows LSM writes are still rejected before I/O, including the public Database
 and Python opt-in. `WalOverflowOptions.writes_supported()` reports this explicitly.
@@ -496,16 +500,18 @@ file bytes. Receipts bind binary, client, lockfile and data-file hashes. This
 native LSM scenario is separate from the Python closed-container check and is
 not a claim about failure in the middle of publication or power-loss recovery.
 
-Public Windows overflow remains unsupported. These results do not make a
-synchronous commit interruptible. Process termination at publication boundaries,
-power loss and public Windows acceptance remain distinct work.
+These initial checks predate Windows public support. The subsequent
+[Windows manual result](windows-overflow-acceptance.md#native-windows-manual-result)
+records public errors/process exits and independent old-reader checks. Neither
+set of results makes a synchronous commit interruptible or establishes power-loss
+durability.
 The API tests do not certify a cancellation token for synchronous commit or
 replace the format-level short-write, CRC and fsync-failure tests. None of these
 functional cases is a load or performance test.
 
 ## Public LSM persistence-boundary acceptance
 
-On supported non-Windows platforms, twelve small independent cases in
+Initially on non-Windows platforms, twelve small independent cases in
 `lsm::overflow::publication_acceptance` call public `LsmKV` open, begin, put,
 commit and scan APIs. Each starts with one committed key and stages two more
 keys, including one 65-byte value, against a 64-byte ring payload. `EveryWrite`
@@ -533,8 +539,12 @@ ignored child entry is invoked explicitly by each parent case and is not an
 unexecuted acceptance scenario. Each child has a 30-second deadline. There are
 no volume, timing or performance assertions, and no timing-based fault races.
 
-This qualifies the public native LSM layer, not the embedded Database/SQL/Python
-layers or Windows public overflow. An error injected next to a sync call is
+These cases cover the public native LSM layer. They now run through the public
+Windows entrypoint as part of the composed native suite recorded in
+[Windows acceptance](windows-overflow-acceptance.md#composed-native-ci-result).
+The separate manual suite supplies Database/SQL/Python boundary evidence; a
+passing LSM case alone does not establish those API contracts.
+An error injected next to a sync call is
 not an actual filesystem short write or fsync failure. Process exit does not
 simulate lost kernel caches or power failure. Those failure modes and lower-level
 codec corruption tests retain separate acceptance evidence.
