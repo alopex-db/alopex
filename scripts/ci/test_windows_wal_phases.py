@@ -60,11 +60,11 @@ class WindowsPhaseTests(unittest.TestCase):
             if calls:
                 self.assertTrue((root / "artifacts/windows-wal/source.json").is_file())
                 for name, _ in calls:
-                    self.assertEqual((root / f"artifacts/windows-wal/{name}.log").read_text(), output)
+                    self.assertEqual((root / f"artifacts/windows-wal/{name}.log").read_text(encoding="utf-8"), output)
         return calls, error
 
     def test_phases_cover_every_command_once_with_shared_storage_guard(self):
-        assignment = next(node for node in ast.parse(SCRIPT.read_text()).body
+        assignment = next(node for node in ast.parse(SCRIPT.read_text(encoding="utf-8")).body
                           if isinstance(node, ast.Assign)
                           and any(isinstance(t, ast.Name) and t.id == "commands" for t in node.targets))
         original = ast.literal_eval(assignment.value)
@@ -105,7 +105,7 @@ class WindowsPhaseTests(unittest.TestCase):
         self.assertIn("isolated GitHub-hosted Windows runner", error)
 
     def test_workflow_runs_both_contract_phases_serially_before_cleanup(self):
-        build = WORKFLOW.read_text().split("\n  build:", 1)[1].split("\n  v08-release-gate:", 1)[0]
+        build = WORKFLOW.read_text(encoding="utf-8").split("\n  build:", 1)[1].split("\n  v08-release-gate:", 1)[0]
         phases = re.findall(r"windows-wal-contract.py --phase ([a-z-]+)", build)
         self.assertEqual(phases, ["build", "wal-contracts", "hnsw-contracts"])
         for phase in phases:
