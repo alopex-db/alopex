@@ -122,7 +122,7 @@ class PythonReleaseTests(unittest.TestCase):
         bounded = run.call_args.args[0]
         self.assertTrue(bounded[1].endswith("release_storage.py"))
         self.assertEqual(bounded[bounded.index("--") + 1], "node")
-        self.assertIn("dist/index.js", bounded[-1])
+        self.assertEqual(Path(bounded[-1]), self.workspace / ".maturin-action" / "dist" / "index.js")
         receipt = (self.workspace / "artifacts/python-release/maturin.json").read_text()
         self.assertEqual(json.loads(receipt)["build_exit"], 17)
         self.assertNotIn("test-secret", receipt)
