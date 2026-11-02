@@ -2,7 +2,8 @@
 
 Hosted Windows only; not a self-hosted/WSL inventory substitute. Additional
 storage is bounded to 20 GB per command, 40 GB host stop, using one target.
-Build and contract phases share one target but have separate workflow deadlines.
+Build, WAL/LSM, and HNSW phases share one target but have separate workflow
+deadlines. Test-binary compilation counts against its owning phase's deadline.
 Artifacts contain source identity and raw results; the workflow removes target
 after retaining those results. No durability/power-loss claim for the writer.
 """
@@ -15,7 +16,8 @@ import sys
 from windows_wal_console import print_log_tail
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--phase", required=True, choices=("build", "contracts"))
+parser.add_argument("--phase", required=True,
+                    choices=("build", "wal-contracts", "hnsw-contracts"))
 args = parser.parse_args()
 
 repo = Path(__file__).resolve().parents[2]
@@ -84,7 +86,9 @@ commands = [
                            "--lib", "vector::hnsw::tests::dirty_write_tests"]),
 ]
 for name, command in commands:
-    if (name == "release-build") != (args.phase == "build"):
+    phase = ("build" if name == "release-build" else
+             "hnsw-contracts" if name.startswith("hnsw-") else "wal-contracts")
+    if phase != args.phase:
         continue
     print(f"Starting {name}", flush=True)
     with (output / (name + ".log")).open("w", encoding="utf-8") as log:
