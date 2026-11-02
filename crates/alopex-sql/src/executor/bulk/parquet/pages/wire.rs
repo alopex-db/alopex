@@ -2,8 +2,10 @@
 //! Callers validate the entire header and its allocation budget before decoding it.
 #![allow(
     deprecated,
-    reason = "Only the pinned, codec-free wire schema uses deprecated types"
+    reason = "Legacy Parquet BIT_PACKED encodings remain readable"
 )]
+
+use super::super::wire_schema as parquet_wire;
 
 use parquet::basic::{Encoding, Type};
 use parquet::column::page::PageMetadata;

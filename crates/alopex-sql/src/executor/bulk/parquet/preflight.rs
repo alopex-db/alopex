@@ -1,7 +1,5 @@
-#![allow(
-    deprecated,
-    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
-)]
+use super::wire_schema as parquet_wire;
+
 #[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
