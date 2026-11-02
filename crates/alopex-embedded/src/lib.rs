@@ -17,6 +17,9 @@ mod sql_api;
 mod sql_session;
 mod txn_manager;
 
+#[cfg(test)]
+mod hnsw_begin_tests;
+
 pub use crate::catalog::{CachedTableInfo, Catalog};
 pub use crate::catalog_api::{
     CatalogInfo, CatalogManifestCatalog, CatalogManifestColumn, CatalogManifestCompression,
@@ -78,6 +81,9 @@ use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+// Internal cache snapshot paired with a backend transaction's read point.
+type HnswCacheSnapshot = (u64, Vec<(String, HnswIndex)>);
 
 const DEFAULT_HNSW_CACHE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 const HNSW_CACHE_MAX_ENTRIES: usize = 128;
@@ -675,7 +681,28 @@ impl Database {
         result
     }
 
-    pub(crate) fn hnsw_cache_snapshot(&self) -> (u64, Vec<(String, HnswIndex)>) {
+    // Pair a backend snapshot with a cache snapshot only while commits are excluded.
+    // Under contention, the backend snapshot alone is sufficient for correctness.
+    // Capture the epoch BEFORE begin: a commit during begin must prevent later
+    // publication of graphs loaded from that older transaction.
+    fn begin_with_hnsw_cache<T>(
+        &self,
+        begin: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, HnswCacheSnapshot)> {
+        match self.hnsw_cache_gate.try_read() {
+            Ok(_gate) => {
+                let transaction = begin()?;
+                Ok((transaction, self.hnsw_cache_snapshot()))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let epoch = self.hnsw_cache_epoch.load(Ordering::Acquire);
+                Ok((begin()?, (epoch, Vec::new())))
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("hnsw cache gate lock poisoned"),
+        }
+    }
+
+    pub(crate) fn hnsw_cache_snapshot(&self) -> HnswCacheSnapshot {
         let epoch = self.hnsw_cache_epoch.load(Ordering::Acquire);
         let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
         let entries = cache
@@ -819,6 +846,31 @@ impl Database {
         }
         update();
         Ok(value)
+    }
+
+    // A backend unable to enumerate its entire write set cannot prove read-only use.
+    fn reusable_hnsw_loads(
+        entries: &HashMap<String, alopex_sql::storage::HnswTxnEntry>,
+        visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
+    ) -> Vec<(String, HnswIndex)> {
+        let mut has_writes = false;
+        if !visit(&mut |_| has_writes = true) || has_writes {
+            return Vec::new();
+        }
+        entries
+            .iter()
+            .filter_map(|(name, entry)| {
+                entry
+                    .clone_unmodified_load()
+                    .map(|index| (name.clone(), index))
+            })
+            .collect()
+    }
+
+    // Called under the commit write gate; successful commit advances this epoch once.
+    fn hnsw_publication_epoch_after_commit(&self, begin_epoch: u64) -> Option<u64> {
+        (self.hnsw_cache_epoch.load(Ordering::Acquire) == begin_epoch)
+            .then_some(begin_epoch.wrapping_add(1))
     }
 
     // Called under the commit write gate, using the final backend write set.
@@ -1290,15 +1342,9 @@ impl Database {
 
     /// Begins a new transaction.
     pub fn begin(&self, mode: TxnMode) -> Result<Transaction<'_>> {
-        let (mut txn, cached, observer) = {
-            let _gate = self
-                .hnsw_cache_gate
-                .read()
-                .expect("hnsw cache gate lock poisoned");
-            let txn = self.store.begin(mode).map_err(Error::Core)?;
-            let (_, cached) = self.hnsw_cache_snapshot();
-            (txn, cached, self.hnsw_cache_observer())
-        };
+        let (mut txn, (epoch, cached)) =
+            self.begin_with_hnsw_cache(|| self.store.begin(mode).map_err(Error::Core))?;
+        let observer = self.hnsw_cache_observer();
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == RangeChangeJournalCapability::Supported
@@ -1320,6 +1366,7 @@ impl Database {
                 .map(|(name, index)| (name, alopex_sql::storage::HnswTxnEntry::cached_read(index)))
                 .collect(),
             sql_hnsw_observer: observer,
+            sql_hnsw_epoch: epoch,
             overlay: alopex_sql::catalog::CatalogOverlay::new(),
             vector_cache_updates: HashMap::new(),
             vector_cache_deletes: Vec::new(),
@@ -1345,6 +1392,7 @@ pub struct Transaction<'a> {
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
     pub(crate) sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
     pub(crate) sql_hnsw_observer: Arc<dyn alopex_sql::storage::HnswCacheObserver>,
+    sql_hnsw_epoch: u64,
     overlay: alopex_sql::catalog::CatalogOverlay,
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
@@ -1929,7 +1977,10 @@ impl<'a> Transaction<'a> {
         let overlay = std::mem::take(&mut self.overlay);
         let catalog_deleted = overlay.has_deletions();
         let catalog_modified = self.catalog_modified;
-        self.db.commit_with_hnsw_cache_changes(
+        let reusable = Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
+            txn.visit_pending_write_keys(visitor)
+        });
+        let publication_epoch = self.db.commit_with_hnsw_cache_changes(
             || {
                 // ponytail: deletions clear all graphs; track affected names if DDL cost matters.
                 let changed = if catalog_deleted {
@@ -1938,8 +1989,11 @@ impl<'a> Transaction<'a> {
                     self.db
                         .hnsw_cache_changes(|visitor| txn.visit_pending_write_keys(visitor))
                 };
+                let epoch = self
+                    .db
+                    .hnsw_publication_epoch_after_commit(self.sql_hnsw_epoch);
                 txn.commit_self()
-                    .map(|()| ((), changed))
+                    .map(|()| (epoch, changed))
                     .map_err(Error::Core)
             },
             || {
@@ -1954,6 +2008,9 @@ impl<'a> Transaction<'a> {
                 }
             },
         )?;
+        if let Some(epoch) = publication_epoch {
+            self.db.hnsw_cache_insert_if_current(epoch, reusable);
+        }
         // Invalidate table info cache only if DDL operations were performed.
         if catalog_modified {
             self.db.invalidate_table_info_cache();
@@ -1964,7 +2021,12 @@ impl<'a> Transaction<'a> {
     /// トランザクションを消費せずにロールバックする（失敗時の再試行を可能にする）。
     pub fn rollback_in_place(&mut self) -> Result<()> {
         let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+        let reusable = Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
+            txn.visit_pending_write_keys(visitor)
+        });
         txn.rollback_in_place().map_err(Error::Core)?;
+        self.db
+            .hnsw_cache_insert_if_current(self.sql_hnsw_epoch, reusable);
         for (index, state) in self.hnsw_indices.values_mut() {
             let _ = index.rollback(state);
         }
@@ -1978,12 +2040,18 @@ impl<'a> Transaction<'a> {
     /// Rolls back the transaction, discarding all changes.
     pub fn rollback(mut self) -> Result<()> {
         if let Some(txn) = self.inner.take() {
+            let reusable = Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
+                txn.visit_pending_write_keys(visitor)
+            });
             for (index, state) in self.hnsw_indices.values_mut() {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
             self.sql_hnsw.clear();
-            txn.rollback_self().map_err(Error::Core)
+            txn.rollback_self().map_err(Error::Core)?;
+            self.db
+                .hnsw_cache_insert_if_current(self.sql_hnsw_epoch, reusable);
+            Ok(())
         } else {
             Err(Error::TxnCompleted)
         }

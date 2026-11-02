@@ -79,15 +79,9 @@ impl Database {
         self: Arc<Self>,
         mode: TxnMode,
     ) -> Result<OwnedEmbeddedTransaction> {
-        let (session, cached, observer) = {
-            let _gate = self
-                .hnsw_cache_gate
-                .read()
-                .expect("hnsw cache gate lock poisoned");
-            let session = self.begin_owned_transaction(mode)?;
-            let (_, cached) = self.hnsw_cache_snapshot();
-            (session, cached, self.hnsw_cache_observer())
-        };
+        let (session, (epoch, cached)) =
+            self.begin_with_hnsw_cache(|| self.begin_owned_transaction(mode))?;
+        let observer = self.hnsw_cache_observer();
         let journal = if mode == TxnMode::ReadWrite
             && self.store.range_change_journal_capability()
                 == alopex_core::kv::RangeChangeJournalCapability::Supported
@@ -119,6 +113,7 @@ impl Database {
                 .map(|(name, index)| (name, alopex_sql::storage::HnswTxnEntry::cached_read(index)))
                 .collect(),
             sql_hnsw_observer: observer,
+            sql_hnsw_epoch: epoch,
             vector_cache_invalidated: false,
             vector_index: None,
             vector_index_dirty: false,
@@ -142,6 +137,7 @@ pub struct OwnedEmbeddedTransaction {
     pub(crate) hnsw_indices: HashMap<String, (HnswIndex, HnswTransactionState)>,
     pub(crate) sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
     pub(crate) sql_hnsw_observer: Arc<dyn alopex_sql::storage::HnswCacheObserver>,
+    sql_hnsw_epoch: u64,
     pub(crate) vector_cache_invalidated: bool,
     pub(crate) vector_index: Option<VectorKeyIndex>,
     pub(crate) vector_index_dirty: bool,
@@ -158,6 +154,7 @@ struct OwnedEmbeddedSavepoint {
     vector_index: Option<VectorKeyIndex>,
     vector_index_dirty: bool,
     hnsw_index_names: HashSet<String>,
+    sql_hnsw: HashMap<String, alopex_sql::storage::HnswTxnEntry>,
 }
 
 impl OwnedEmbeddedTransaction {
@@ -359,6 +356,8 @@ impl OwnedEmbeddedTransaction {
             self.failed = true;
             return Err(error);
         }
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         let core_id = self.session.create_savepoint().map_err(Error::Core)?;
         self.savepoints.push(OwnedEmbeddedSavepoint {
             name: name.to_owned(),
@@ -369,6 +368,11 @@ impl OwnedEmbeddedTransaction {
             vector_index: self.vector_index.clone(),
             vector_index_dirty: self.vector_index_dirty,
             hnsw_index_names: self.hnsw_indices.keys().cloned().collect(),
+            sql_hnsw: self
+                .sql_hnsw
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry.fork_for_savepoint()))
+                .collect(),
         });
         Ok(())
     }
@@ -391,6 +395,15 @@ impl OwnedEmbeddedTransaction {
         // Core already discarded descendants, even if restoring the graph fails.
         self.savepoints.truncate(position + 1);
         self.rollback_hnsw_to_savepoint(&hnsw_index_names)?;
+        // Restore only after core/direct graph recovery succeeded. Fork again:
+        // the target savepoint remains available for repeated rollback.
+        self.sql_hnsw = self.savepoints[position]
+            .sql_hnsw
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.fork_for_savepoint()))
+            .collect();
+        self.db
+            .trim_sql_hnsw(&mut self.sql_hnsw, self.sql_hnsw_observer.as_ref());
         self.failed = false;
         Ok(())
     }
@@ -544,17 +557,26 @@ impl OwnedEmbeddedTransaction {
         let overlay = std::mem::take(&mut self.overlay);
         let catalog_deleted = overlay.has_deletions();
         let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
-        self.db.commit_with_hnsw_cache_changes(
+        let (epoch, reusable) = self.db.commit_with_hnsw_cache_changes(
             || {
                 self.session
                     .commit_with_observer(|transaction| {
-                        if catalog_deleted {
-                            return None;
-                        }
-                        self.db.hnsw_cache_changes(|visitor| {
+                        let changed = if catalog_deleted {
+                            None
+                        } else {
+                            self.db.hnsw_cache_changes(|visitor| {
+                                transaction.visit_pending_write_keys(visitor)
+                            })
+                        };
+                        let reusable = Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
                             transaction.visit_pending_write_keys(visitor)
-                        })
+                        });
+                        let epoch = self
+                            .db
+                            .hnsw_publication_epoch_after_commit(self.sql_hnsw_epoch);
+                        ((epoch, reusable), changed)
                     })
+                    .map(|(_, observation)| observation)
                     .map_err(Error::Core)
             },
             || {
@@ -580,6 +602,10 @@ impl OwnedEmbeddedTransaction {
                 }
             },
         )?;
+        if let Some(epoch) = epoch {
+            self.db.hnsw_cache_insert_if_current(epoch, reusable);
+        }
+        self.savepoints.clear();
         if self.catalog_modified {
             self.db.invalidate_table_info_cache();
         }
@@ -596,12 +622,22 @@ impl OwnedEmbeddedTransaction {
 
     /// Roll back the owned transaction once.
     pub fn rollback(&mut self) -> Result<()> {
-        self.session.rollback().map_err(Error::Core)?;
+        let (_, reusable) = self
+            .session
+            .rollback_with_observer(|transaction| {
+                Database::reusable_hnsw_loads(&self.sql_hnsw, |visitor| {
+                    transaction.visit_pending_write_keys(visitor)
+                })
+            })
+            .map_err(Error::Core)?;
+        self.db
+            .hnsw_cache_insert_if_current(self.sql_hnsw_epoch, reusable);
         for (index, state) in self.hnsw_indices.values_mut() {
             let _ = index.rollback(state);
         }
         self.hnsw_indices.clear();
         self.sql_hnsw.clear();
+        self.savepoints.clear();
         self.overlay = CatalogOverlay::default();
         Ok(())
     }
@@ -615,6 +651,35 @@ mod tests {
     use alopex_core::TxnMode;
     use alopex_core::{HnswConfig, Metric};
     use std::sync::Arc;
+
+    fn terminal_releases_saved_graphs(commit: bool) {
+        let database = Arc::new(Database::new());
+        database
+            .create_hnsw_index("saved", HnswConfig::default().with_dimension(2))
+            .unwrap();
+        let mut transaction = database
+            .begin_owned_embedded_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        transaction.create_savepoint("s").unwrap();
+        assert!(transaction.savepoints[0].sql_hnsw.contains_key("saved"));
+        if commit {
+            transaction.commit().unwrap();
+        } else {
+            transaction.rollback().unwrap();
+        }
+        assert!(transaction.savepoints.is_empty());
+        assert!(transaction.rollback_to_savepoint("s").is_err());
+    }
+
+    #[test]
+    fn savepoint_terminal_commit_releases_graphs() {
+        terminal_releases_saved_graphs(true);
+    }
+
+    #[test]
+    fn savepoint_terminal_rollback_releases_graphs() {
+        terminal_releases_saved_graphs(false);
+    }
 
     #[test]
     fn savepoint_restores_hnsw_graph_after_nested_staging() {

@@ -1,6 +1,8 @@
 //! HNSW インデックスの永続化レイヤー。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use super::cow::{KeyMap, PagedVec};
 
 use crc32fast::hash;
 
@@ -9,6 +11,16 @@ use super::types::{HnswMetadata, HnswNode, HnswNodeData};
 use crate::kv::KVTransaction;
 use crate::vector::simd::select_kernel;
 use crate::{Error, Result};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    static SERIALIZED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn take_serialized_node_count() -> usize {
+    SERIALIZED_NODES.with(|count| count.replace(0))
+}
 
 /// HNSW フォーマットバージョン（v0.3 初版）。
 #[allow(dead_code)]
@@ -91,7 +103,7 @@ impl HnswStorage {
         &self,
         txn: &mut T,
         graph: &HnswGraph,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         // 既存データを全削除してからフル書き込みする。
         self.purge_nodes(txn)?;
         self.purge_key_indices(txn)?;
@@ -131,57 +143,77 @@ impl HnswStorage {
 
         let final_meta_bytes =
             bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        txn.put(self.meta_key(), final_meta_bytes)?;
+        txn.put(self.meta_key(), final_meta_bytes.clone())?;
 
-        Ok(())
+        Ok(final_meta_bytes)
     }
 
-    /// 変更分のみ保存しつつ、チェックサムは全ノードで再計算する。
+    /// Save changed slots and adjust the format-v1 checksum from their before-images.
     pub(crate) fn save_incremental<'a, T: KVTransaction<'a>>(
         &self,
         txn: &mut T,
         graph: &HnswGraph,
+        baseline: Option<&HnswGraph>,
         modified_nodes: &[u32],
         inserted_nodes: &[u32],
-        deleted_key_indices: &[Vec<u8>],
-    ) -> Result<()> {
-        // 更新/追加ノードのみ書き込み。
-        for &node_id in modified_nodes.iter().chain(inserted_nodes.iter()) {
-            if let Some(node) = graph.nodes.get(node_id as usize).and_then(|n| n.as_ref()) {
-                let node_data = Self::node_to_data(node);
-                let node_bytes = bincode::serialize(&node_data)
+    ) -> Result<Vec<u8>> {
+        // A flushed write may have been rolled back, or this index may be saved
+        // into another store. Only use deltas against the exact known header.
+        let stored_metadata = txn.get(&self.meta_key())?;
+        if graph.persisted_metadata.is_none() || stored_metadata != graph.persisted_metadata {
+            return self.save(txn, graph);
+        }
+        let changed: HashSet<u32> = modified_nodes
+            .iter()
+            .chain(inserted_nodes.iter())
+            .chain(graph.dirty_nodes.iter())
+            .copied()
+            .collect();
+        // A snapshot containing earlier unsaved changes is not a persisted
+        // before-image. Direct (non-staged) mutations also use the full fallback.
+        if !changed.is_empty()
+            && !baseline.is_some_and(|before| {
+                before.dirty_nodes.is_empty()
+                    && before.persisted_metadata == graph.persisted_metadata
+            })
+        {
+            return self.save(txn, graph);
+        }
+        let mut previous: HnswMetadata =
+            bincode::deserialize(stored_metadata.as_deref().expect("matched known header"))
+                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        let previous_checksum = previous.checksum;
+        previous.checksum = 0;
+        let previous_header =
+            bincode::serialize(&previous).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        let mut all_node_checksums = previous_checksum.wrapping_sub(hash(&previous_header));
+
+        for &node_id in &changed {
+            let old_node = baseline
+                .and_then(|before| before.nodes.get(node_id as usize).and_then(Option::as_ref));
+            if let Some(old_node) = old_node {
+                let old_bytes = bincode::serialize(&Self::node_to_data(old_node))
                     .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                all_node_checksums = all_node_checksums.wrapping_sub(hash(&old_bytes));
+                // A removed key may have been reinserted into another slot in
+                // the same batch; that current mapping must not be deleted.
+                if !graph.key_to_node.contains_key(&old_node.key) {
+                    txn.delete(self.key_index_key(&old_node.key))?;
+                }
+            }
+            if let Some(node) = graph.nodes.get(node_id as usize).and_then(Option::as_ref) {
+                let node_bytes = bincode::serialize(&Self::node_to_data(node))
+                    .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                all_node_checksums = all_node_checksums.wrapping_add(hash(&node_bytes));
                 txn.put(self.node_key(node_id), node_bytes)?;
                 txn.put(
                     self.key_index_key(&node.key),
                     node_id.to_le_bytes().to_vec(),
                 )?;
+            } else {
+                txn.delete(self.node_key(node_id))?;
             }
         }
-
-        // 旧キーインデックスを削除。
-        for old_key in deleted_key_indices {
-            txn.delete(self.key_index_key(old_key))?;
-        }
-
-        // 存在しないノードIDのデータは削除して、空きリストと整合させる。
-        for (node_id, node_opt) in graph.nodes.iter().enumerate() {
-            if node_opt.is_none() {
-                txn.delete(self.node_key(node_id as u32))?;
-            }
-        }
-
-        // 現在のグラフ状態に基づきチェックサムを再計算。
-        let mut all_node_checksums: u32 = 0;
-        for node in graph.nodes.iter().flatten() {
-            let node_data = Self::node_to_data(node);
-            let node_bytes =
-                bincode::serialize(&node_data).map_err(|e| Error::InvalidFormat(e.to_string()))?;
-            all_node_checksums = hash(&node_bytes).wrapping_add(all_node_checksums);
-        }
-
-        // 期待されるキーインデックスだけを残し、余剰を削除する。
-        self.sync_key_indices(txn, graph)?;
 
         let mut metadata = HnswMetadata {
             version: HNSW_FORMAT_VERSION,
@@ -200,9 +232,9 @@ impl HnswStorage {
 
         let final_meta_bytes =
             bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        txn.put(self.meta_key(), final_meta_bytes)?;
+        txn.put(self.meta_key(), final_meta_bytes.clone())?;
 
-        Ok(())
+        Ok(final_meta_bytes)
     }
 
     /// Read only the header; graph checksum validation remains with full loading.
@@ -251,9 +283,9 @@ impl HnswStorage {
         }
 
         let mut all_node_checksums: u32 = 0;
-        let mut nodes = Vec::with_capacity(metadata.next_node_id as usize);
-        let mut key_to_node = HashMap::new();
-        let mut free_list = Vec::new();
+        let mut nodes = PagedVec::default();
+        let mut key_to_node = KeyMap::default();
+        let mut free_list = PagedVec::default();
 
         for (node_id, bytes) in node_bytes.into_iter().enumerate() {
             if let Some(node_bytes) = bytes {
@@ -263,14 +295,17 @@ impl HnswStorage {
 
                 key_to_node.insert(node_data.key.clone(), node_id as u32);
                 let norm = super::vector_norm(&node_data.vector);
-                nodes.push(Some(HnswNode {
-                    key: node_data.key,
-                    vector: node_data.vector,
-                    norm,
-                    metadata: node_data.metadata,
-                    neighbors: node_data.neighbors,
-                    deleted: node_data.deleted,
-                }));
+                nodes.push(Some(
+                    HnswNode {
+                        key: node_data.key,
+                        vector: node_data.vector,
+                        norm,
+                        metadata: node_data.metadata,
+                        neighbors: node_data.neighbors,
+                        deleted: node_data.deleted,
+                    }
+                    .into(),
+                ));
             } else {
                 nodes.push(None);
                 free_list.push(node_id as u32);
@@ -293,8 +328,13 @@ impl HnswStorage {
             });
         }
 
+        let persisted_metadata =
+            Some(bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?);
         Ok(HnswGraph {
             nodes,
+            dirty_nodes: HashSet::new(),
+            statistics: super::stats::GraphStatistics::default(),
+            persisted_metadata,
             key_to_node,
             entry_point: metadata.entry_point,
             max_level: metadata.max_level,
@@ -359,6 +399,8 @@ impl HnswStorage {
     }
 
     fn node_to_data(node: &HnswNode) -> HnswNodeData {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        SERIALIZED_NODES.with(|count| count.set(count.get() + 1));
         HnswNodeData {
             key: node.key.clone(),
             vector: node.vector.clone(),
@@ -384,37 +426,6 @@ impl HnswStorage {
         for key in keys {
             txn.delete(key)?;
         }
-        Ok(())
-    }
-
-    fn sync_key_indices<'a, T: KVTransaction<'a>>(
-        &self,
-        txn: &mut T,
-        graph: &HnswGraph,
-    ) -> Result<()> {
-        let expected: HashSet<Vec<u8>> = graph.key_to_node.keys().cloned().collect();
-
-        let prefix = self.key_index_prefix();
-        let stored_keys: Vec<_> = txn.scan_prefix(&prefix)?.map(|(k, _)| k).collect();
-        for key in stored_keys {
-            // KVS に保存されているキー部分だけを取り出す。
-            if let Some(actual_key) = key.strip_prefix(prefix.as_slice()) {
-                if !expected.contains(actual_key) {
-                    txn.delete(key)?;
-                }
-            } else {
-                txn.delete(key)?;
-            }
-        }
-
-        // 期待セットにないものを削除した上で、必要なキーを再度確実に書き込む。
-        for (&node_id, key_bytes) in graph.key_to_node.iter().map(|(k, v)| (v, k)) {
-            txn.put(
-                self.key_index_key(key_bytes),
-                node_id.to_le_bytes().to_vec(),
-            )?;
-        }
-
         Ok(())
     }
 }

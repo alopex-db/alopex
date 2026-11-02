@@ -1,6 +1,8 @@
 //! Hierarchical Navigable Small World (HNSW) vector index module.
 
+mod cow;
 mod graph;
+mod stats;
 mod storage;
 mod types;
 
@@ -126,7 +128,7 @@ impl HnswIndex {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
         let node_id = graph.upsert(key, vector, metadata)?;
-        self.stats_cache = Self::compute_stats(&graph);
+        self.stats_cache = graph.refresh_statistics();
 
         if let Some(callback) = &self.on_insert {
             let insert_stats = self.build_insert_stats(&graph, node_id);
@@ -167,7 +169,7 @@ impl HnswIndex {
         if all_new {
             graph.prune_overfull_neighbors();
         }
-        self.stats_cache = Self::compute_stats(&graph);
+        self.stats_cache = graph.refresh_statistics();
         Ok(())
     }
 
@@ -218,15 +220,18 @@ impl HnswIndex {
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
         let deleted = graph.delete(key)?;
         if deleted {
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         Ok(deleted)
     }
 
     /// グラフを保存する（フル保存）。
     pub fn save<'a, T: KVTransaction<'a>>(&self, txn: &mut T) -> Result<()> {
-        let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        self.storage.save(txn, &graph)
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        let metadata = self.storage.save(txn, &graph)?;
+        graph.persisted_metadata = Some(metadata);
+        graph.dirty_nodes.clear();
+        Ok(())
     }
 
     #[cfg(feature = "async")]
@@ -266,7 +271,7 @@ impl HnswIndex {
         {
             let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
             *graph = working_graph;
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         self.compacting.store(false, Ordering::Release);
         self.compact_condvar.notify_all();
@@ -289,9 +294,9 @@ impl HnswIndex {
         let existed = graph.find_node_id(key).is_some();
         let node_id = graph.upsert(key, vector, metadata)?;
         if existed {
-            state.record_upsert(node_id, false, None);
+            state.record_upsert(node_id, false);
         } else {
-            state.record_upsert(node_id, true, None);
+            state.record_upsert(node_id, true);
         }
         Ok(())
     }
@@ -328,7 +333,7 @@ impl HnswIndex {
             } else {
                 graph.upsert(key, vector, metadata)?
             };
-            state.record_upsert(node_id, !existed, None);
+            state.record_upsert(node_id, !existed);
             if all_new && (position + 1) % BULK_PRUNE_INTERVAL == 0 {
                 graph.prune_overfull_neighbors();
             }
@@ -350,7 +355,7 @@ impl HnswIndex {
         let deleted = graph.delete(key)?;
         if deleted {
             state.record_delete(node_id);
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         Ok(deleted)
     }
@@ -361,19 +366,20 @@ impl HnswIndex {
         txn: &mut T,
         state: &mut HnswTransactionState,
     ) -> Result<()> {
-        let (modified, inserted, deleted_keys, requires_full_save) = state.prepare_for_commit();
-        let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        // Insertion and reconnection can mutate neighbor lists outside the
-        // transaction's directly addressed nodes. Persist every live slot in
-        // that case, but do not purge the index before rewriting it.
-        let modified = if requires_full_save || !inserted.is_empty() {
-            (0..graph.nodes.len() as u32).collect()
-        } else {
-            modified
-        };
-        self.storage
-            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
-        self.stats_cache = Self::compute_stats(&graph);
+        let (modified, inserted) = state.prepare_for_commit();
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        // Graph mutation tracks reverse-edge changes as well as addressed nodes.
+        // Keep dirty slots on failure so retry never loses a partially saved change.
+        let metadata = self.storage.save_incremental(
+            txn,
+            &graph,
+            state.snapshot.as_ref(),
+            &modified,
+            &inserted,
+        )?;
+        graph.persisted_metadata = Some(metadata);
+        graph.dirty_nodes.clear();
+        self.stats_cache = graph.refresh_statistics();
         state.clear();
         Ok(())
     }
@@ -383,7 +389,7 @@ impl HnswIndex {
         if let Some(snapshot) = state.snapshot.take() {
             let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
             *graph = snapshot;
-            self.stats_cache = Self::compute_stats(&graph);
+            self.stats_cache = graph.refresh_statistics();
         }
         state.clear();
         Ok(())
@@ -410,8 +416,8 @@ impl HnswIndex {
         Self::from_parts(name, storage, graph)
     }
 
-    pub(crate) fn from_parts(name: &str, storage: HnswStorage, graph: HnswGraph) -> Self {
-        let stats_cache = Self::compute_stats(&graph);
+    pub(crate) fn from_parts(name: &str, storage: HnswStorage, mut graph: HnswGraph) -> Self {
+        let stats_cache = graph.refresh_statistics();
         Self {
             name: name.to_string(),
             graph: Arc::new(RwLock::new(graph)),
@@ -445,7 +451,8 @@ impl HnswIndex {
         Ok(())
     }
 
-    fn compute_stats(graph: &HnswGraph) -> HnswStats {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn compute_stats_full(graph: &HnswGraph) -> HnswStats {
         let mut level_distribution = vec![0u64; graph.max_level + 1];
         let mut total_edges = 0u64;
         let mut active_nodes = 0u64;
@@ -478,6 +485,7 @@ impl HnswIndex {
         }
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn estimate_memory_bytes(graph: &HnswGraph) -> u64 {
         let mut total_bytes: u64 = 0;
 
@@ -524,14 +532,12 @@ impl HnswIndex {
 }
 
 /// トランザクション内の HNSW 変更を追跡する。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HnswTransactionState {
     snapshot: Option<HnswGraph>,
     modified_nodes: HashSet<u32>,
     inserted_nodes: HashSet<u32>,
     deleted_nodes: HashSet<u32>,
-    deleted_key_indices: Vec<Vec<u8>>,
-    requires_full_save: bool,
 }
 
 impl HnswTransactionState {
@@ -541,16 +547,11 @@ impl HnswTransactionState {
         }
     }
 
-    fn record_upsert(&mut self, node_id: u32, is_new: bool, old_key: Option<Vec<u8>>) {
+    fn record_upsert(&mut self, node_id: u32, is_new: bool) {
         if is_new {
             self.inserted_nodes.insert(node_id);
         } else {
             self.modified_nodes.insert(node_id);
-            // Reconnecting an existing node can rewrite every neighbor list.
-            self.requires_full_save = true;
-        }
-        if let Some(key) = old_key {
-            self.deleted_key_indices.push(key);
         }
     }
 
@@ -559,15 +560,14 @@ impl HnswTransactionState {
         self.modified_nodes.insert(node_id);
     }
 
-    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>, bool) {
+    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>) {
         let modified: Vec<u32> = self
             .modified_nodes
             .difference(&self.inserted_nodes)
             .copied()
             .collect();
         let inserted: Vec<u32> = self.inserted_nodes.iter().copied().collect();
-        let deleted_keys = self.deleted_key_indices.clone();
-        (modified, inserted, deleted_keys, self.requires_full_save)
+        (modified, inserted)
     }
 
     fn clear(&mut self) {
@@ -575,8 +575,6 @@ impl HnswTransactionState {
         self.modified_nodes.clear();
         self.inserted_nodes.clear();
         self.deleted_nodes.clear();
-        self.deleted_key_indices.clear();
-        self.requires_full_save = false;
     }
 }
 
