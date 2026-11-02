@@ -1,7 +1,3 @@
-#![allow(
-    deprecated,
-    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
-)]
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -124,6 +120,7 @@ impl Read for PositionedRead {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wire_schema as parquet_wire;
     use std::io::{Read, Write};
 
     use parquet::file::reader::{ChunkReader, Length};
@@ -140,8 +137,8 @@ mod tests {
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
         use parquet::file::writer::SerializedFileWriter;
         use parquet::schema::types;
+        use parquet_wire::TSerializable;
         use parquet_wire::format::PageHeader;
-        use parquet_wire::thrift::TSerializable;
         use thrift::protocol::TCompactInputProtocol;
 
         for statistics in [EnabledStatistics::None, EnabledStatistics::Page] {
