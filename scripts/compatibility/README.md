@@ -582,3 +582,19 @@ the same six rounds for all four modes (48 tiny cases total), verifies the
 embedded source/feature identities, and reports the candidate/previous overflow
 commit ratio as well as the baseline ratios. This provides a contemporaneous
 control when changed production code requires a new measurement.
+
+### Public Python KV/SQL commit cost (manual macOS/Linux)
+
+`public_api_cost.py` compares two explicitly identified ordinary extension
+packages with the same public overflow settings, prior1+pending2 and 16/2048-byte
+values. It separates schema/index preparation, staging, commit and reopen, and
+verifies every writer through two fresh reader processes. It rejects CI and
+Python `-O`; its four tiny standard-library tests do not import the product or
+run a performance case. Use `--smoke` first, then a distinct output directory
+for one warmup and five measured cases per cell. Preserve every sample and
+failure, observe the per-host storage budget, and remove packages/fixtures after
+saving source/native hashes and compact results.
+
+See the [source-bound report, exact build identity and reproduction steps](../../docs/build-performance/v0.8.17/wal-overflow-public-api-cost.md).
+This is a separate public API experiment; do not pool it with Linux Rust-direct
+KV results, or call it general latency/throughput or release-wheel qualification.

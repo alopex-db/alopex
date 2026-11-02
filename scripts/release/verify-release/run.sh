@@ -110,12 +110,14 @@ verify_release_join() {
         log_fail "release join candidate is not a regular file: ${candidate}"
         return 2
     fi
-    python3 - "${candidate}" "${ALOPEX_VERSION}" <<'PY'
+    python3 - "${candidate}" "${ALOPEX_VERSION}" "${REPO_ROOT}" <<'PY'
 import json
 import re
 import sys
 
-candidate_path, version = sys.argv[1:]
+candidate_path, version, repo_root = sys.argv[1:]
+sys.path.insert(0, repo_root)
+from scripts.release.primary_distributions import validate as validate_distributions
 expected_tag = f"v{version}"
 sha40 = re.compile(r"^[0-9a-fA-F]{40}$")
 sha64 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -189,6 +191,10 @@ if not isinstance(distributions, list) or not distributions or any(
     for item in distributions
 ):
     fail("Python wheel/sdist publication set is incomplete")
+try:
+    validate_distributions([item.get("name", "") for item in distributions], version)
+except ValueError as error:
+    fail(str(error))
 
 parser = data.get("parser")
 if not isinstance(parser, dict):
@@ -199,8 +205,13 @@ for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")
 assets = parser.get("assets")
-if not isinstance(assets, list) or {a.get("target") for a in assets if isinstance(a, dict)} != targets:
-    fail("parser assets do not cover exactly the four release targets")
+required = targets - {"x86_64-apple-darwin"} if tuple(map(int, version.split("."))) >= (0, 8, 17) else targets
+actual_targets = [a.get("target") for a in assets if isinstance(a, dict)] if isinstance(assets, list) else []
+if (not isinstance(assets, list) or len(actual_targets) != len(assets)
+        or any(not isinstance(target, str) for target in actual_targets)
+        or len(actual_targets) != len(set(actual_targets))
+        or not required.issubset(actual_targets) or not set(actual_targets).issubset(targets)):
+    fail("parser assets do not cover the required release targets exactly once")
 for asset in assets:
     if not isinstance(asset, dict):
         fail("parser asset record is invalid")

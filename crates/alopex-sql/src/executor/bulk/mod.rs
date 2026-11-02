@@ -47,6 +47,7 @@ use crate::storage::{SqlTxn, SqlValue, StorageError};
 mod csv;
 mod input_file;
 mod parquet;
+mod vector_parquet;
 
 use input_file::open_input_file;
 #[cfg(all(test, unix))]
@@ -443,6 +444,9 @@ fn parquet_batch_from_columns(
     let fields = columns
         .iter()
         .map(|(name, data_type)| {
+            if let ResolvedType::Vector { dimension, metric } = data_type {
+                return Ok(vector_parquet::field(name, *dimension, *metric));
+            }
             Ok(ArrowField::new(
                 *name,
                 match data_type {
@@ -467,6 +471,9 @@ fn parquet_batch_from_columns(
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     for (index, (_, data_type)) in columns.iter().enumerate() {
         match data_type {
+            ResolvedType::Vector { dimension, .. } => {
+                arrays.push(vector_parquet::array(rows, index, *dimension)?);
+            }
             ResolvedType::Integer => {
                 let mut builder = Int32Builder::new();
                 for row in rows {
@@ -1707,6 +1714,9 @@ fn parse_error(trimmed: &str, ty: &ResolvedType, err: impl std::fmt::Display) ->
 
 fn is_type_compatible(file_type: &ResolvedType, table_type: &ResolvedType) -> bool {
     match (file_type, table_type) {
+        (ResolvedType::Array(element), ResolvedType::Vector { .. }) => {
+            matches!(element.as_ref(), ResolvedType::Float | ResolvedType::Double)
+        }
         (
             ResolvedType::Vector {
                 dimension: f_dim,

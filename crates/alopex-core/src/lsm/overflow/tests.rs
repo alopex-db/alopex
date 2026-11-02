@@ -639,6 +639,13 @@ fn assert_two_entry_limit(options: LsmOverflowConfig) {
         Err(Error::WalCapacityExceeded { .. })
     ));
     assert_eq!(tx.get(&vec![2]).unwrap(), None);
+    assert_eq!(
+        tx.journal_pending_writes(),
+        Some(vec![
+            (vec![0], None, Some(vec![1])),
+            (vec![1], None, Some(vec![2]))
+        ])
+    );
     assert_eq!(store.wal_checkpoint_stats().used_bytes, 0);
     tx.rollback_in_place().unwrap();
     tx.put(vec![2], vec![3]).unwrap();
@@ -656,6 +663,13 @@ fn assert_two_entry_limit(options: LsmOverflowConfig) {
         Err(Error::WalCapacityExceeded { .. })
     ));
     assert_eq!(tx.get(&vec![2]).unwrap(), Some(vec![3]));
+    assert_eq!(
+        tx.journal_pending_writes(),
+        Some(vec![
+            (vec![0], None, Some(vec![1])),
+            (vec![1], None, Some(vec![2]))
+        ])
+    );
     tx.commit().unwrap();
 }
 
@@ -664,6 +678,66 @@ fn aggregate_payload_is_checked_before_retention() {
     let mut options = limits();
     options.operations = OperationLimits::new(54, 8, 64).unwrap();
     assert_two_entry_limit(options);
+}
+
+#[test]
+fn journal_read_failure_does_not_consume_overflow_capacity() {
+    use crate::kv::OwnedKVStore;
+    for owned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = limits();
+        options.operations = OperationLimits::new(54, 8, 64).unwrap();
+        let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+        write(&store, &[(0, Some(vec![7]))]).unwrap();
+        store.flush().unwrap();
+        let file = fs::read_dir(&store.sst_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let bytes = fs::read(&file).unwrap();
+        fs::remove_file(&file).unwrap();
+        if owned {
+            let store = Arc::new(crate::kv::AnyKV::Lsm(Box::new(store)));
+            let mut tx = store
+                .clone()
+                .begin_owned_kv_transaction(TxnMode::ReadWrite)
+                .unwrap();
+            assert!(tx.put(vec![0], vec![9]).is_err());
+            assert!(tx.delete(vec![0]).is_err());
+            assert_eq!(tx.journal_pending_writes(), Some(vec![]));
+            fs::write(&file, bytes).unwrap();
+            tx.put(vec![1], vec![1]).unwrap();
+            tx.put(vec![2], vec![2]).unwrap();
+            assert!(matches!(
+                tx.put(vec![3], vec![3]),
+                Err(Error::WalCapacityExceeded { .. })
+            ));
+            tx.commit().unwrap();
+        } else {
+            let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+            assert!(tx.put(vec![0], vec![9]).is_err());
+            assert!(tx.delete(vec![0]).is_err());
+            assert_eq!(tx.write_usage.encoded, 0);
+            assert_eq!(tx.write_usage.replay, 0);
+            assert_eq!(tx.journal_pending_writes(), Some(vec![]));
+            fs::write(&file, bytes).unwrap();
+            tx.put(vec![1], vec![1]).unwrap();
+            tx.put(vec![2], vec![2]).unwrap();
+            assert!(matches!(
+                tx.put(vec![3], vec![3]),
+                Err(Error::WalCapacityExceeded { .. })
+            ));
+            tx.commit_self().unwrap();
+            drop(store);
+        }
+        let (store, _) = LsmKV::open_with_overflow(dir.path(), config(), options).unwrap();
+        assert_eq!(value(&store, 0), Some(vec![7]));
+        assert_eq!(value(&store, 1), Some(vec![1]));
+        assert_eq!(value(&store, 2), Some(vec![2]));
+        assert_eq!(value(&store, 3), None);
+    }
 }
 
 #[test]
@@ -725,6 +799,13 @@ fn overwrite_delete_and_savepoint_restore_capacity_without_double_charging() {
     tx.put(vec![2], vec![5]).unwrap();
     tx.release_savepoint(first).unwrap();
     assert!(tx.delete(vec![3]).is_err());
+    assert_eq!(
+        tx.journal_pending_writes(),
+        Some(vec![
+            (vec![0], Some(vec![4, 5]), Some(vec![1])),
+            (vec![2], None, Some(vec![5]))
+        ])
+    );
     tx.commit().unwrap();
 }
 

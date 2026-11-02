@@ -25,6 +25,21 @@ Plan nodes contain operator and relation names, but never expression values,
 SQL literals, or prepared bind values. Applications must not treat EXPLAIN as
 an echo or logging surface for submitted SQL.
 
+Query-local kNN options support typed positional bindings with parser
+contract **0.28.0**: `WITH (ef_search = ?, enable_hnsw = ?)`. `ef_search`
+accepts integers from 1 through 1,000,000; `enable_hnsw` accepts BOOLEAN.
+Invalid bindings report the option, parameter position and received value.
+Each execution, including each row of `execute_many`, uses its own bindings.
+`enable_hnsw=false` selects `ExactKnnScan`; `true` requires a usable HNSW
+index. ANALYZE reports the effective `ef_search` and `nodes_visited` for the
+executed search. The effective width is capped by the live row count, so a
+larger binding need not change those counters on a small table. These are
+execution observations, not latency or recall guarantees.
+
+`bind_sql_parameters` renders these options as SQL literals for text
+transports; the resulting SQL can be parsed and executed again. EXPLAIN
+continues to omit the submitted bind values from its plan tree.
+
 B-tree access is adaptive: candidate materialization is bounded by 1,024 row
 IDs and 8 MiB, or a smaller execution memory policy. Plain EXPLAIN appends
 `adaptive=true`, the effective `max_candidates` and `max_bytes`, and

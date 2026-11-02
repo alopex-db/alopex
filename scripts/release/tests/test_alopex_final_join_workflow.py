@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import unittest
+import re
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -10,9 +11,14 @@ WORKFLOW = ROOT / ".github/workflows/alopex-py-release.yml"
 
 
 class FinalJoinWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def job(text, name):
+        remainder = text.split(f"  {name}:\n", maxsplit=1)[1]
+        return re.split(r"^  [a-z][a-z0-9_-]*:\n", remainder, maxsplit=1, flags=re.M)[0]
+
     def test_final_join_is_required_after_public_surfaces(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  final-release-join:", maxsplit=1)[1]
+        block = self.job(text, "final-release-join")
         self.assertIn("needs: [publish-pypi, github-release]", block)
         self.assertIn("contents: read", block)
         self.assertIn("actions: read", block)
@@ -32,7 +38,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
 
     def test_join_does_not_use_unbound_latest_run_or_rebuild(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  final-release-join:", maxsplit=1)[1]
+        block = self.job(text, "final-release-join")
         self.assertNotIn("--branch main --limit 1", block)
         self.assertNotIn("cargo publish", block)
         self.assertNotIn("maturin build", block)
@@ -75,7 +81,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
 
     def test_join_records_independent_core_and_python_identities(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        block = text.split("  final-release-join:", maxsplit=1)[1]
+        block = self.job(text, "final-release-join")
         self.assertIn('"core_tag": {"name": f"v{version}", "peeled_sha": core_sha}', block)
         self.assertIn('"python_tag": {"name": f"alopex-py-v{version}", "peeled_sha": python_sha}', block)
         self.assertIn('"python_descends_from_core": True', block)
@@ -90,8 +96,9 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("verify-public-release:", text)
 
-    def test_every_wheel_target_retargets_parser_pins_from_release_manifest(self) -> None:
+    def test_primary_wheel_targets_retarget_parser_pins_from_release_manifest(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        text = "\n".join(self.job(text, name) for name in ("linux", "macos", "windows"))
         self.assertEqual(text.count("ref: ${{ github.sha }}"), 3)
         self.assertEqual(text.count("path: .release-tools"), 3)
         self.assertEqual(

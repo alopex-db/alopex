@@ -153,6 +153,7 @@ struct OwnedLsmTransactionState {
     start_timestamp: u64,
     read_set: HashSet<Key>,
     write_set: BTreeMap<Key, Option<Value>>,
+    journal_before: BTreeMap<Key, Option<Value>>,
     write_usage: WriteSetUsage,
     next_savepoint_id: u64,
     savepoints: Vec<(u64, BTreeMap<Key, Option<Value>>, WriteSetUsage)>,
@@ -173,6 +174,7 @@ impl OwnedLsmTransaction {
                 start_timestamp,
                 read_set: HashSet::new(),
                 write_set: BTreeMap::new(),
+                journal_before: BTreeMap::new(),
                 write_usage: WriteSetUsage::default(),
                 next_savepoint_id: 1,
                 savepoints: Vec::new(),
@@ -198,6 +200,21 @@ impl OwnedLsmTransaction {
     fn ensure_active(state: &OwnedLsmTransactionState) -> Result<()> {
         if state.state != TxnState::Active {
             return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+
+    fn capture_journal_before(
+        &self,
+        state: &mut OwnedLsmTransactionState,
+        key: &Key,
+    ) -> Result<()> {
+        if !state.journal_before.contains_key(key) {
+            let before = self
+                .lsm()?
+                .owned_visible_at(key, state.start_timestamp)?
+                .and_then(|entry| entry.value);
+            state.journal_before.insert(key.clone(), before);
         }
         Ok(())
     }
@@ -278,13 +295,15 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
-        state.write_usage = Self::lsm_from(&self.store)?.validate_overflow_write(
+        let usage = Self::lsm_from(&self.store)?.validate_overflow_write(
             state.write_usage,
             &key,
             Some(&value),
             state.write_set.get(&key),
         )?;
+        self.capture_journal_before(&mut state, &key)?;
         state.write_set.insert(key, Some(value));
+        state.write_usage = usage;
         Ok(())
     }
 
@@ -300,13 +319,15 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         if state.cursor_open {
             return Err(Error::TxnClosed);
         }
-        state.write_usage = Self::lsm_from(&self.store)?.validate_overflow_write(
+        let usage = Self::lsm_from(&self.store)?.validate_overflow_write(
             state.write_usage,
             &key,
             None,
             state.write_set.get(&key),
         )?;
+        self.capture_journal_before(&mut state, &key)?;
         state.write_set.insert(key, None);
+        state.write_usage = usage;
         Ok(())
     }
 
@@ -349,6 +370,14 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
             })?;
         state.write_set = state.savepoints[position].1.clone();
         state.write_usage = state.savepoints[position].2;
+        // Savepoints contain write sets, not duplicate before-image buffers.
+        // Keep originals only for keys whose writes survive the rollback.
+        let OwnedLsmTransactionState {
+            write_set,
+            journal_before,
+            ..
+        } = &mut *state;
+        journal_before.retain(|key, _| write_set.contains_key(key));
         state.savepoints.truncate(position + 1);
         Ok(())
     }
@@ -384,6 +413,30 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
 
     fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
         self.open_cursor(OwnedLsmScanBounds::from(start.to_vec()))
+    }
+
+    fn journal_pending_writes(&self) -> Option<Vec<JournalPendingWrite>> {
+        let state = self
+            .state
+            .lock()
+            .expect("owned LSM transaction mutex poisoned");
+        Some(
+            state
+                .write_set
+                .iter()
+                .map(|(key, after)| {
+                    (
+                        key.clone(),
+                        state
+                            .journal_before
+                            .get(key)
+                            .expect("buffered LSM write has a before-image")
+                            .clone(),
+                        after.clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
@@ -433,6 +486,7 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         }
         state.read_set.clear();
         state.write_set.clear();
+        state.journal_before.clear();
         state.write_usage = WriteSetUsage::default();
         state.state = TxnState::RolledBack;
         Ok(())
@@ -1118,3 +1172,7 @@ mod tests {
         assert!(error.to_string().contains("search scan budget exceeded"));
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "lsm_journal_tests.rs"]
+mod journal_tests;

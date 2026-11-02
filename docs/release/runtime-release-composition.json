@@ -1,0 +1,1877 @@
+{
+  "schema": "alopex-runtime-release-composition-v1",
+  "owner_issue": 690,
+  "base": "8a77ba7a0e88732b0ed0d2da162c5948ae907359",
+  "source_composition": {
+    "product_head": "5a29eb71dcfe4adecd0ab3ec138239c59cb90ae5",
+    "product_tree": "42492114021991618ca949549a6853135c75a923",
+    "sources": [
+      {
+        "pr": 747,
+        "head": "f1bf9ba0ab26571e66b0ead0257b0ebfa7da3e03",
+        "branch": "fix/680-knn-contract-evidence",
+        "title": "fix(sql): enforce parser source contracts and verify bound kNN options"
+      },
+      {
+        "pr": 754,
+        "head": "f5982443b483b0a55839e702d2d0068fc65fbbb0",
+        "branch": "fix/681-cache-observations",
+        "title": "fix(embedded): distinguish HNSW capacity eviction and reset warning periods"
+      },
+      {
+        "pr": 762,
+        "head": "b1ac2bff328ee6bb10b9fa16aa95aeed9de3c6b4",
+        "branch": "feat/693-vector-parquet",
+        "title": "feat(io): support VECTOR Parquet interchange (#693)"
+      },
+      {
+        "pr": 770,
+        "head": "77d2e110b963a3bdb1abdb443e0ad328ae52ec21",
+        "branch": "fix/684-lsm-before-images",
+        "title": "perf(transaction): avoid full SQL scans at LSM transaction begin"
+      },
+      {
+        "pr": 772,
+        "head": "151ed43691051d7b13a7cf2bdc569be5050d5299",
+        "branch": "perf/682-public-api-cost",
+        "title": "test(wal): measure bounded public Python KV/SQL commit costs"
+      },
+      {
+        "pr": 763,
+        "head": "cdd753888f2135d946d3992305cdde21222c77f8",
+        "branch": "fix/688-core-latest",
+        "title": "fix(release): preserve Core latest after Python publication (#688)"
+      },
+      {
+        "pr": 775,
+        "head": "a4350a06919944a383bc5072e7a9053348df1a8a",
+        "branch": "ci/431-public-verification-budget",
+        "title": "ci(release): bound public verification workspace and cleanup (#431)"
+      }
+    ],
+    "all_sources_ancestors": true,
+    "files": [
+      {
+        "path": ".github/workflows/alopex-py-release.yml",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "a446435ba96038e601d375f6713831ba3e60f463"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "owners": [
+          747
+        ],
+        "matches_source": [],
+        "blob": "e20ca8ec9f525f9ed390d1258c9f0484182e86ad",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": ".github/workflows/public-release-verification.yml",
+        "owners": [
+          763,
+          775
+        ],
+        "matches_source": [],
+        "blob": "3be9a41e3b82f87ec327b9a31d306cff9dbf9b7c",
+        "resolution": "workflow artifact union with regression and two caught negative controls"
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "417d929a3fdda659fa70a663ec808aa201725b3f"
+      },
+      {
+        "path": "crates/alopex-core/src/kv/any.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "caadfeec88f36689dbda1db3033be8d671b9f6ce"
+      },
+      {
+        "path": "crates/alopex-core/src/kv/lsm_journal_tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "f25e9bc6c2338d92d32989b3553f0f7748e5edf0"
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/journal_tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ab6990764768b80a30898ee8de8eaee71e8fcc32"
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/mod.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [],
+        "blob": "8fc5a627e3a7a4d1b5c4528ab9168f3e8f49fb89",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-core/src/lsm/overflow/tests.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "cc4696b7d352d834fad69b6a3cd63f7996c21d6a"
+      },
+      {
+        "path": "crates/alopex-embedded/examples/begin_profile.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "a1c6e9121bbb9b5fbb34b6f823a5a414cc43d26f"
+      },
+      {
+        "path": "crates/alopex-embedded/examples/begin_resources.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "f73ebbfbac7337f1d773fbdff1cab65a59019693"
+      },
+      {
+        "path": "crates/alopex-embedded/src/hnsw_cache.rs",
+        "owners": [
+          754
+        ],
+        "matches_source": [
+          754
+        ],
+        "blob": "8a2a55215d5f41b12775ea4563ce17d4ffd2363c"
+      },
+      {
+        "path": "crates/alopex-embedded/src/lib.rs",
+        "owners": [
+          754
+        ],
+        "matches_source": [],
+        "blob": "20f01290b6ff1eb01c0e16f41e8dce7686f55c90",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-embedded/tests/knn_bound_options.rs",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "c60514bbd673f452d89815d4da7cb767bf183851"
+      },
+      {
+        "path": "crates/alopex-embedded/tests/lsm_journal_before_images.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ec3414618fa6c33f290a1c85af886f8be00f3912"
+      },
+      {
+        "path": "crates/alopex-embedded/tests/vector_parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "d2e99880429606bf5324c3aaa9c617a1b91eed5c"
+      },
+      {
+        "path": "crates/alopex-py/tests/test_lsm_journal.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "607408f8ce5cd9c118db06e0ca99a48fa7299f98"
+      },
+      {
+        "path": "crates/alopex-py/tests/test_vector_parquet.py",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "848349df08ee0b4537b52c8901cf4aac2e2febc0"
+      },
+      {
+        "path": "crates/alopex-sql/build.rs",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "4c7a92a579984b512981556483caf4bc24fe082d"
+      },
+      {
+        "path": "crates/alopex-sql/build_support.rs",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "16c65db43eb6baef41ede2b637ac1a56864ec38e"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/mod.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "afc411a1a88e922c3fc51aa5bc0a227be63786f9"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "4b88e904890d0977772edb81838ee4bd2c366107"
+      },
+      {
+        "path": "crates/alopex-sql/src/executor/bulk/vector_parquet.rs",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "5710ac726c81a97875f3421d83081b8a602f54da"
+      },
+      {
+        "path": "crates/alopex-sql/src/planner/mod.rs",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "1671e225fd662ab66066802ce39ab3b7f4aa6929"
+      },
+      {
+        "path": "crates/alopex-sql/src/storage/bridge.rs",
+        "owners": [
+          770
+        ],
+        "matches_source": [],
+        "blob": "2422e7869e52964adfe8ace656561624f504a819",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "crates/alopex-sql/tests/fixtures/parser_wire_provenance.md",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "af9cd83039eaa0f7ada2ad39906ed5a9873b8c06"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-baseline.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "1029c5fb9676076052f01935f2d69eebba8b631f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-hnsw-resources.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "acda35a566a61dafcfa47a33172cb42eb397f861"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-lsm-fix.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "9d8e8875d6b45eb5c54e6ccf995083e711ef2522"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-native-resources.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "66d89bb9ad384ad58b4351298802b31dc07b2d72"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-begin-python-comparison.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "66abacbfa8c6232835e7d4c086c76764c4cc441f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/transaction-first-write-comparison.md",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "5bf22b986cc38c10ae33942ab84bb08a089a4381"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/wal-overflow-public-api-cost.json",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "3bcd751e14b41a9d1e04fc25dc6c1c3cccfd975f"
+      },
+      {
+        "path": "docs/build-performance/v0.8.17/wal-overflow-public-api-cost.md",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "26e65ce79659edd3dff6d449e07e8aecaa1e14f3"
+      },
+      {
+        "path": "docs/columnar-export.md",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "1f01f87440b4bb4d39b9f8966828cafc3a97cc0d"
+      },
+      {
+        "path": "docs/hnsw-cache-observations.md",
+        "owners": [
+          754
+        ],
+        "matches_source": [
+          754
+        ],
+        "blob": "419b5185188e437051ecb07f66f1e971b8f5e36f"
+      },
+      {
+        "path": "docs/release-pipeline-responsibilities.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [],
+        "blob": "c878e28d04804339e7b6acaa909759b2e12a08ab",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "docs/release/core-latest.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "cdfcc83e361a22d9dd841c67d58f6be5f34ae1f0"
+      },
+      {
+        "path": "docs/release/optional-intel-parser.md",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "f33b459557edb090a83ec06db59f17396e5d9b03"
+      },
+      {
+        "path": "docs/release/report-publication.md",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "fe25c3d841a9de4ab37ded8abfd023ef6c8813da"
+      },
+      {
+        "path": "docs/sql-explain.md",
+        "owners": [
+          747
+        ],
+        "matches_source": [],
+        "blob": "eb83514c34710d06e65be30f636cd4f44d10bd77",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "docs/vector-parquet.md",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "4984c9a1bb60eab4f064812078da52edfcb2bc78"
+      },
+      {
+        "path": "scripts/ci/check_parser_wire_contract.py",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "8bfa7b3a38bc9cfdd730a5a302803ee50e24e187"
+      },
+      {
+        "path": "scripts/ci/test_parser_source_contract.py",
+        "owners": [
+          747
+        ],
+        "matches_source": [
+          747
+        ],
+        "blob": "30acc2c8284e089caec5f28461944a7b00acd3b7"
+      },
+      {
+        "path": "scripts/compatibility/README.md",
+        "owners": [
+          772
+        ],
+        "matches_source": [],
+        "blob": "9cacb1d25c5545f98cd82b56c1afcb684015a92e",
+        "normalized_source_patch_equal": true
+      },
+      {
+        "path": "scripts/compatibility/public_api_cost.py",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "bf25c9bfb3ccdbd1bbbd2a2e859a12174e231760"
+      },
+      {
+        "path": "scripts/compatibility/test_public_api_cost.py",
+        "owners": [
+          772
+        ],
+        "matches_source": [
+          772
+        ],
+        "blob": "700b2ec7d7c3886cc7847db0d7019aa8b523a118"
+      },
+      {
+        "path": "scripts/compatibility/vector_parquet_legacy.py",
+        "owners": [
+          762
+        ],
+        "matches_source": [
+          762
+        ],
+        "blob": "fc778197c1607681a129106d7bd8bade73568849"
+      },
+      {
+        "path": "scripts/performance/begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "6bcb0810926530906404a6719acb969e6b084528"
+      },
+      {
+        "path": "scripts/performance/begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "ba29a73288681b9fa92951166adfa121d9aef288"
+      },
+      {
+        "path": "scripts/performance/first_write_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "e89b4d11aa6517e053fd31c193e6268819f430ff"
+      },
+      {
+        "path": "scripts/performance/run_begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "bdcd5862d12ce6b45052918cc1f7ab8026ec39dc"
+      },
+      {
+        "path": "scripts/performance/run_begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "c56a993337b3a5a8afb3fefe90aa73dee5a8d0b2"
+      },
+      {
+        "path": "scripts/performance/run_first_write_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "9c59921b047d2af3a804092ae22fa8312c9a0deb"
+      },
+      {
+        "path": "scripts/performance/run_native_begin_resources.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "fa52dee714ed27565ed2aed66bb58a39f941ad94"
+      },
+      {
+        "path": "scripts/performance/tests/test_begin_acceptance.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "3a5d37c4ae13431ab499c7d0a4ed02573bd81e50"
+      },
+      {
+        "path": "scripts/performance/tests/test_begin_profile.py",
+        "owners": [
+          770
+        ],
+        "matches_source": [
+          770
+        ],
+        "blob": "644c30d9bb4de08d5809b64bcd53e32e5ee936e8"
+      },
+      {
+        "path": "scripts/release/intel_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "086527024325e3cbaeabeb1b49ef8366cdbedf80"
+      },
+      {
+        "path": "scripts/release/parser_asset_manifest.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "f396efeffade61d07b900614ca85cda65e7868ed"
+      },
+      {
+        "path": "scripts/release/parser_supplement.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "e5a3789971c374894d1d1612fafb9189c25d8249"
+      },
+      {
+        "path": "scripts/release/primary_distributions.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "dafa772347d8f153dc4b9157e89c459cdacea5e1"
+      },
+      {
+        "path": "scripts/release/publication_failure.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "988f328e4c25b4e57623c1755038917cf41bf82b"
+      },
+      {
+        "path": "scripts/release/publication_record.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "79f348e0022231e5d7d8d540e1631729168004be"
+      },
+      {
+        "path": "scripts/release/report_pair.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "a654c8c05262db232b7c5c3d9dc7962a153355f2"
+      },
+      {
+        "path": "scripts/release/retarget_python_parser_source.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "27f091def4a33e4dbfdced644d9749de9e824cc0"
+      },
+      {
+        "path": "scripts/release/tests/test_alopex_final_join_workflow.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "eca4be8f3f9e36a754fff9694da69b5a835779fc"
+      },
+      {
+        "path": "scripts/release/tests/test_intel_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "fd61e01521f8901251c4f68735abb002b7493feb"
+      },
+      {
+        "path": "scripts/release/tests/test_latest_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "6159420179ff88e8339ca24855386d85bda1bb19"
+      },
+      {
+        "path": "scripts/release/tests/test_parser_asset_manifest.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "881c7981846c126f9bb2fb759e0128148e8b2d2a"
+      },
+      {
+        "path": "scripts/release/tests/test_parser_supplement.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "b2bf954a42a90de8a35a96643f24da32ad09a2d1"
+      },
+      {
+        "path": "scripts/release/tests/test_public_release_workflow.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "8da8ffafa396726617ce4e98a7089b5fbdf56ab4"
+      },
+      {
+        "path": "scripts/release/tests/test_public_verification_cleanup.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [],
+        "blob": "939581230b93bfc574f1d4097b76f88d1ad35a63",
+        "normalized_source_patch_equal": false
+      },
+      {
+        "path": "scripts/release/tests/test_publication_failure.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "5a107f5352c10ffbda0adccf03875a943b0b10c2"
+      },
+      {
+        "path": "scripts/release/tests/test_release_contract.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "a9bdde2cef7b97ae2e646fceff4afc47ed530c53"
+      },
+      {
+        "path": "scripts/release/tests/test_report_pair.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "e54de68501418eb0d2eb544d17565d34cf23b4a9"
+      },
+      {
+        "path": "scripts/release/tests/test_report_publish_shell.py",
+        "owners": [
+          775
+        ],
+        "matches_source": [
+          775
+        ],
+        "blob": "c86d5a8527a311e4139ec01d9fa4b2d35af3c4c0"
+      },
+      {
+        "path": "scripts/release/tests/test_retarget_python_parser_source.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "d78800d6162a8a910bd1c02bd7f558c5ce119693"
+      },
+      {
+        "path": "scripts/release/tests/test_verify_release_join.sh",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "0adc74d02cac15588132483082b91554be1e9d58"
+      },
+      {
+        "path": "scripts/release/verify-release/run.sh",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "45964eea16fdf32a102e19a4cbd416970f29dbcf"
+      },
+      {
+        "path": "scripts/release/verify_latest_release.py",
+        "owners": [
+          763
+        ],
+        "matches_source": [
+          763
+        ],
+        "blob": "fc5c90e4d712a7a32e5f9740d5fc190e51c70a5c"
+      }
+    ]
+  },
+  "merge_steps": [
+    {
+      "pr": 747,
+      "status": 0,
+      "head": "e72d01410a50762be1999f89f37d99e5d65eff91"
+    },
+    {
+      "pr": 754,
+      "status": 0,
+      "head": "9e7b8307dce606a1db9c3cfc8090a82096b03216"
+    },
+    {
+      "pr": 762,
+      "status": 0,
+      "head": "1d13ff8211e9c9474b3164c7d914cbd2ba113aaf"
+    },
+    {
+      "pr": 770,
+      "status": 0,
+      "head": "11d7117ae583f75df1158c708081f2520076a504"
+    },
+    {
+      "pr": 772,
+      "status": 0,
+      "head": "93351663ef17d854cd85b5c31891032e675cb764"
+    },
+    {
+      "pr": 763,
+      "status": 0,
+      "head": "429f349910f5527ced34b6f8bbc8574ebd639c7c"
+    },
+    {
+      "pr": 775,
+      "status": 1,
+      "head": "429f349910f5527ced34b6f8bbc8574ebd639c7c",
+      "resolution": {
+        "head": "5a29eb71dcfe4adecd0ab3ec138239c59cb90ae5",
+        "path": ".github/workflows/public-release-verification.yml",
+        "behavior": "union latest identity and failure/storage artifact paths, with tiny cleanup/upload regression"
+      }
+    }
+  ],
+  "native_checks": [
+    {
+      "name": "core-journal",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "journal_"
+      ],
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "core-aggregate",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "aggregate_"
+      ],
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "core-capacity",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "overwrite_delete_and_savepoint_restore_capacity"
+      ],
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-journal",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "lsm_journal_before_images",
+        "--test",
+        "wal_overflow_journal"
+      ],
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-cache",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--lib",
+        "hnsw_cache"
+      ],
+      "passed": 30,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "embedded-public",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "hnsw_cold_publication",
+        "--test",
+        "hnsw_savepoint_cache",
+        "--test",
+        "hnsw_transaction_cache",
+        "--test",
+        "hnsw_two_index_eviction",
+        "--test",
+        "knn_bound_options",
+        "--test",
+        "vector_parquet"
+      ],
+      "passed": 55,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "sql-bulk",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "alopex-sql",
+        "--lib",
+        "executor::bulk::"
+      ],
+      "passed": 52,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "release_python": {
+    "total": 203,
+    "passed": 201,
+    "skipped": 2,
+    "skip_reasons": [
+      "native Windows path aliases",
+      "native x86_64 Linux Docker parser build"
+    ]
+  },
+  "parser_contracts": {
+    "passed": 17
+  },
+  "negative_controls": {
+    "results": [
+      {
+        "control": "omit-latest",
+        "exit": 1,
+        "result": "caught"
+      },
+      {
+        "control": "omit-storage",
+        "exit": 1,
+        "result": "caught"
+      }
+    ],
+    "restored_sha256": "b62e9e3f04e15363c65498925f184efb16e3b8889d98f1a1107f69b4b6491953",
+    "restored_exit": 0
+  },
+  "other_checks": {
+    "change_scope": "passed",
+    "release_join": "passed",
+    "release_reporting": "passed",
+    "fmt": "passed",
+    "diff_check": "passed",
+    "changed_workflow_yaml_parse": 4,
+    "actionlint": "unavailable"
+  },
+  "storage": {
+    "initial_bytes": 19349020672,
+    "peak_bytes": 19628228608,
+    "after_cleanup_bytes": 19351900160,
+    "declared_additional_bytes": 3000000000,
+    "stop_bytes": 40000000000,
+    "hard_limit_bytes": 50000000000
+  },
+  "cleanup": {
+    "native_executables": [
+      {
+        "path": "target/debug/deps/alopex_core-0ba0a637acb03ac4",
+        "size": 10525216,
+        "sha256": "fee0c9dec2d4d6290120b10cf8839f9aad7e3bc597b6148dedbfa1d1a375f3a2"
+      },
+      {
+        "path": "target/debug/deps/alopex_embedded-e552725521824c1e",
+        "size": 33773616,
+        "sha256": "8d0ff5860dcf35f4e64d822f1333ef6cc448cee1ae490d108039e65a7c9eb6ff"
+      },
+      {
+        "path": "target/debug/deps/alopex_sql-6c5ab597ba6f744b",
+        "size": 33245760,
+        "sha256": "c896b7a5dc2ff26ce49e671a708f242704bf5d0fdd85c5d47dc3491e26e08958"
+      },
+      {
+        "path": "target/debug/deps/hnsw_cold_publication-117cd860248cbfd4",
+        "size": 31361968,
+        "sha256": "0776643d89df21455d766b7fd2238c7e7cebcde4fd49e539041c8855f18c0c9b"
+      },
+      {
+        "path": "target/debug/deps/hnsw_savepoint_cache-10686190f74d84a4",
+        "size": 31390512,
+        "sha256": "bfc71494b63bfc083008ab16e01bcbc29da98b447917c1888dc03ceaafa6c853"
+      },
+      {
+        "path": "target/debug/deps/hnsw_transaction_cache-e1c5317508d861c0",
+        "size": 31303104,
+        "sha256": "4221525a999adc2d014ad9157dfe5be57a848ecf5a5fe2cd6da1e0430dfa9b1f"
+      },
+      {
+        "path": "target/debug/deps/hnsw_two_index_eviction-3406a34218ff4713",
+        "size": 31359696,
+        "sha256": "7c744e2d94d88d97b7789b21866b375ce178cda702bf994a3f2ca90710c94930"
+      },
+      {
+        "path": "target/debug/deps/knn_bound_options-6c805b0980458421",
+        "size": 31562160,
+        "sha256": "2ec25d2a8da57da0a06ccc05c10a2cc278ddb23fb3ff6d61bfd1bd5495873e48"
+      },
+      {
+        "path": "target/debug/deps/lsm_journal_before_images-33a92ce9433b24c9",
+        "size": 4579632,
+        "sha256": "87b7276402fcd92e007e3a8ff2e75d6c831d207cad8906cb3c169dedec380543"
+      },
+      {
+        "path": "target/debug/deps/vector_parquet-116a961e9e1f6daf",
+        "size": 31103712,
+        "sha256": "fca5e656fe5c52e820c2710865b6e8ad83eb075ba713bea3eccc1627ed0fa040"
+      },
+      {
+        "path": "target/debug/deps/wal_overflow_journal-107d8f5e4d0c9828",
+        "size": 2700928,
+        "sha256": "7e7876ff340b1d72b614b3408c5278d2f010787e64316a5892d05217a9cd86d9"
+      }
+    ],
+    "parser_archive_removed": true,
+    "parser_extracted_removed": true,
+    "retained": "Compact logs and shared Cargo dependencies for active v0.8.17 release work; owner Codex"
+  },
+  "parser": {
+    "release": "v0.8.16",
+    "contract": "0.28.0",
+    "target": "aarch64-apple-darwin",
+    "archive_sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d",
+    "development_override": true,
+    "release_qualification": false
+  },
+  "logs": {
+    "change-scope.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cleanup-restored.log": "97b2f5a9d8feeedf564629023bd23afe8368f887dac126643c706d8bc935d90e",
+    "core-aggregate.log": "5e8da12d0c057845ce26767707513b41aca03918e1fa36559fa0f59b114163ec",
+    "core-capacity.log": "e21622de17f9b47e56d51e6d6b6c0d322d3b4ac2c8726b4a24a9600899f91481",
+    "core-journal.log": "6d301a9534fd95091a7afeb7efde3a4feb5d440629cb373494f801ff9c66cff7",
+    "embedded-cache.log": "cca741d2e8ce1f5d5d05f2f1e56b960658f74d7b5eb685c4c3b099ddfff5e5d6",
+    "embedded-journal.log": "f854ac789baf22c35d1bcf9c8fc374a3e7025459e68af158de48da3d45ff55cf",
+    "embedded-public.log": "b19e87b2748e81976a6db0f5cf0f0901c3de2dde2760c39fa72789e4128d47c6",
+    "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "merge-747.log": "e1296dd408b76a2f2382a768c8a1a5cb19ec43edb651f1d2bcddf2f6412eb0c8",
+    "merge-754.log": "64881f4f641c13bd164ccc710a7f0ace5b85456ddee40e1dcaf9b8063b405b97",
+    "merge-762.log": "94938341dbfd7d48b85cf4b8a1bedaccb513c6fc83f6c3ec38bae36cacd5227d",
+    "merge-763.log": "26207f5fe3e7b1587ee0af573914b748b20e23c2871b3b55b1281a2039d13b9f",
+    "merge-770.log": "a04a1da1e2d745757ebecf02b507624b4ea414280aeb1f0385fd3fdd9b2a01fb",
+    "merge-772.log": "f32c9f5ef7fb34e49a083b6a066dbb52220d5d4541028aa2f808273c52e95358",
+    "merge-775.log": "2159fdca8d06e6af3b00f9af5455d1bf5340f2cc333e4e6cdb91be271cf825e0",
+    "omit-latest.log": "476b98f7c649e150ce858ed45408504f76bea16868fadc967bc97ea8a0517814",
+    "omit-storage.log": "88df75100b85dcca352557d8965945cab3096fb8c7f5690e0409830c0fcd486f",
+    "parser-contracts.log": "af4d98b93bbd8c583e7b7fbe07b18459c84502946a6add8ffa3111103fdbec75",
+    "release-join.log": "f0b2a820fa658bf27775f5abd083980fb7980a5babde1f04f65c37b2b425692c",
+    "release-reporting.log": "e1bb5a14a8aae03dc10854e1ca09f5775aa29ebaf207417b89944fc292500f80",
+    "release-tests.log": "1b5574c1734219704f99be5e6f8e469d8280a90d8b022c41c39466a7aa7dc7c8",
+    "sql-bulk.log": "4cd1319091b7dc611afba651ae0dd26d4f9b82b06a7349516b6ae2b46f635901",
+    "workflow-yaml.log": "37b7b2d680835702e55b3a6a38379aa82db4cb5728ea7efc7602ade0010eadd8"
+  },
+  "integration": "Draft stack on #793; not candidate acceptance",
+  "remaining": [
+    "Required CI and candidate integration",
+    "Frozen-candidate functional and performance acceptance",
+    "RC/package qualification",
+    "Publication and postrelease verification",
+    "main merge"
+  ],
+  "next_action": "Check required #791 CI, then integrate/retarget composition chain in order; owner Codex",
+  "followup_windows_journal_routing": {
+    "prior_groups": 23,
+    "prior_cases": 236,
+    "groups": 26,
+    "cases": 244,
+    "prior_commands_and_expectations_preserved": true,
+    "new_commands": {
+      "lsm-borrowed-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "lsm::journal_tests::"
+      ],
+      "lsm-owned-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-core",
+        "--lib",
+        "kv::any::journal_tests::"
+      ],
+      "lsm-public-journal": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "-p",
+        "alopex-embedded",
+        "--test",
+        "lsm_journal_before_images"
+      ]
+    },
+    "new_required": {
+      "lsm-borrowed-journal": "4 passed; 0 failed; 0 ignored",
+      "lsm-owned-journal": "3 passed; 0 failed; 0 ignored",
+      "lsm-public-journal": "1 passed; 0 failed; 0 ignored"
+    },
+    "existing_macos_log_matches": {
+      "lsm-borrowed-journal": 4,
+      "lsm-owned-journal": 3,
+      "lsm-public-journal": 1
+    },
+    "windows_execution": "pending CI",
+    "new_native_build": "not run; existing exact-source macOS evidence reused",
+    "runner_sha256": "63b1bef71c4b612a09d50b7f1e20d7bf1df0584e9e85bdea5e26d09e36d87055"
+  },
+  "readiness_inventory": {
+    "observed_at": "2026-10-30T07:00:12.711110+00:00",
+    "canonical_tracker": "https://github.com/alopex-db/alopex/issues/690",
+    "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+    "composition": "52c2524e91dfdbd9965485ca0760c2986cfec72f",
+    "issue_scope": {
+      "accepted": [
+        696,
+        691,
+        692,
+        677,
+        678,
+        683
+      ],
+      "candidate_implemented_acceptance_pending": [
+        679,
+        720,
+        740,
+        742
+      ],
+      "composition_and_acceptance_pending": [
+        680,
+        681,
+        682,
+        684,
+        686,
+        688,
+        431,
+        693,
+        712,
+        748
+      ]
+    },
+    "milestone_non_pr_issue_count_excluding_tracker": 20,
+    "integrated_ancestry": {
+      "issues": {
+        "677": [
+          705
+        ],
+        "678": [
+          707
+        ],
+        "679": [
+          746
+        ],
+        "683": [
+          709
+        ],
+        "691": [
+          700
+        ],
+        "692": [
+          703
+        ],
+        "696": [
+          699
+        ],
+        "720": [
+          743
+        ],
+        "740": [
+          741,
+          739
+        ],
+        "742": [
+          744,
+          745
+        ]
+      },
+      "prs": {
+        "699": {
+          "head": "f6ee3ab45a5f0622bb72b7d0635838601992ece4",
+          "merge": "10987c6c683289316b9515ae19a22d3159ce75ff",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "700": {
+          "head": "3b631e3ecb8f80c91529ba923df9be5f91c023ac",
+          "merge": "fb3f5d9163dbb20311ed59053d4b966485d13ab2",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "703": {
+          "head": "21a8fd58b1f25c69242e7c6037aadd2024d3c08b",
+          "merge": "67d146dfcee597ac4b846c613b5a327b9d82689f",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "705": {
+          "head": "17c686778c08a71b9ceb2f324e6914488fb4451d",
+          "merge": "bd1834eefd4aadbafaab56f6ed3164fa1048c8bb",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "707": {
+          "head": "62d88373ef7332677872d7f3149c66b5b72a5d4f",
+          "merge": "fd7dd08c81bb52f8fdec74f78b0027844df1ef33",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "709": {
+          "head": "0b7c30d3770ee35cfa72d6071ecc9c5f5b28c8af",
+          "merge": "591399cc6088983f057245ddf13e0188f288b2bc",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "739": {
+          "head": "8c2f920b4b9ccb177228131be265f33d9864a986",
+          "merge": "a40e39cb3d833363c8683faee5701b267d3917dc",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "741": {
+          "head": "0316da7a94b7d28889b63fec8629e28ace62ef3b",
+          "merge": "8c2f920b4b9ccb177228131be265f33d9864a986",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "743": {
+          "head": "6a75984002bb42ee951b0ccb2a5aeb5141cc23d5",
+          "merge": "16a3e33be436b0880b97b4fcaf9ec8ab7dcea28b",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "744": {
+          "head": "e3991195d42d310b7818f5ac794739a9c477dbaa",
+          "merge": "b836829e955436620d652a58c775f7d62e5cd5f4",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "745": {
+          "head": "2fa7c6aa0f31da2106233a8b0afd5b0ecbbdefe2",
+          "merge": "5fe5cbc19dd8fa1bbebe3e7add3a708dda3c2a0f",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        },
+        "746": {
+          "head": "8d6daa4e9f26a079ab7a95ba898652f3630f2c25",
+          "merge": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
+          "merged": true,
+          "candidate_includes_head": true,
+          "candidate_includes_merge": true
+        }
+      },
+      "candidate": "efa97d586706c2e48cca49313e042f826de19f19",
+      "composition": "52c2524e91dfdbd9965485ca0760c2986cfec72f"
+    },
+    "open_prs": [
+      {
+        "number": 794,
+        "title": "fix(release): compose runtime contracts and publication evidence",
+        "head": "52c2524e91dfdbd9965485ca0760c2986cfec72f",
+        "base": "fix/v0.8.17-performance-composition",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 793,
+        "title": "fix(core): compose performance improvements with snapshot-safe scans",
+        "head": "8a77ba7a0e88732b0ed0d2da162c5948ae907359",
+        "base": "fix/v0.8.17-hnsw-composition",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 792,
+        "title": "release: compose HNSW fixes with Windows public API contracts",
+        "head": "d1d11cbf7f8614210a1bc57b84652f89abe176a4",
+        "base": "fix/v0.8.17-windows-hnsw-gates",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 791,
+        "title": "release: compose Windows overflow acceptance and HNSW CI guards",
+        "head": "73184555fc48c19ce4c04788c496e0b398398299",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 790,
+        "title": "perf(core): avoid redundant key copies in memory scans",
+        "head": "dcbd746fc6fad8ba095c9c7fbb8e5bc88a90181a",
+        "base": "perf/712-sqlite-composite-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 789,
+        "title": "perf(sql): diagnose SQLite composite with explicit constraint boundaries",
+        "head": "d7ccc4a21f97084d694cbd742286f3335f360b67",
+        "base": "perf/712-csv-framer",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 788,
+        "title": "perf(csv): frame bounded records from buffered slices",
+        "head": "37f0b0df8f5d6e6a0af26e3cafde3b7efe953ea9",
+        "base": "perf/712-csv-stream-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 787,
+        "title": "perf(csv): diagnose original full-consumption streaming cost",
+        "head": "128f33e056b6e7a8c521efce51d1d3d4071ab4c3",
+        "base": "perf/712-lazy-compare",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 786,
+        "title": "perf(sql): avoid formatting comparison errors on successful predicates",
+        "head": "29c71f430a12cc3cbc5a50a9d9a1c45ccd2da957",
+        "base": "perf/712-sql-stream-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 785,
+        "title": "perf(sql): diagnose original and Python-row stream consumption",
+        "head": "6304840c2d4660c299de9ca5b5d83cea8cb9131e",
+        "base": "perf/712-lazy-file-acceptance",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 784,
+        "title": "perf(dataframe): verify lazy CSV gains and numeric Parquet guards",
+        "head": "b17672e58defc8328301a678fcd389e1e6e0c5b1",
+        "base": "perf/712-concat-buffer",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 783,
+        "title": "perf(dataframe): reuse concat string storage across rows in a batch",
+        "head": "c9bb7c9682d879b5b8e5ae6bd615aa754d236f9b",
+        "base": "perf/712-dataframe-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 782,
+        "title": "perf(dataframe): separate phase diagnosis and preserve full-result acceptance",
+        "head": "1bba6031119c9a9fa509575e03638311d6cc8124",
+        "base": "perf/712-sstable-point",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 781,
+        "title": "perf(core): avoid full-block entry copies for SSTable point lookup",
+        "head": "e26304a0060bfea1ef6ac9c67eaa3434de19d0b6",
+        "base": "fix/712-transaction-tracking",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 780,
+        "title": "fix(python): reclaim expired transaction tracking with bounded work",
+        "head": "3ee2150d347d79a7151219035607c0514404000c",
+        "base": "perf/712-kv-read-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 779,
+        "title": "perf(kv): capture persisted read baseline and transaction retention (#712)",
+        "head": "e69b179ae32961703fef102a6538dcea61430471",
+        "base": "perf/712-remote-scalar-values",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 778,
+        "title": "perf(python): fast-path exact scalar SQL wire values (#712)",
+        "head": "3919d3f74678a2e9ad3eb467b5b1261a625bc6cb",
+        "base": "perf/712-lsm-range-build",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 777,
+        "title": "perf(lsm): bulk build visible active scan maps",
+        "head": "4abffca70a9ee5cb57046206663b65ddbaaca733",
+        "base": "perf/712-sql-query-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 776,
+        "title": "perf(sql): isolate public query profiles and identify range scan costs",
+        "head": "830e2c0fc409322c8f852ae7dbb371a5f496a1f7",
+        "base": "fix/712-delete-primary-key",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 775,
+        "title": "ci(release): bound public verification workspace and cleanup (#431)",
+        "head": "a4350a06919944a383bc5072e7a9053348df1a8a",
+        "base": "fix/431-publication-failure",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 774,
+        "title": "perf(sql): avoid table scans for primary-key DELETE (#712)",
+        "head": "67aa1497363bd488e728022c3c304c2170c7e490",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 772,
+        "title": "test(wal): measure bounded public Python KV/SQL commit costs",
+        "head": "151ed43691051d7b13a7cf2bdc569be5050d5299",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 771,
+        "title": "feat(storage): connect Windows public WAL overflow and bounded API contracts",
+        "head": "c49b722cd50852205d99dbf8498004db5c81cc79",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 770,
+        "title": "perf(transaction): avoid full SQL scans at LSM transaction begin",
+        "head": "77d2e110b963a3bdb1abdb443e0ad328ae52ec21",
+        "base": "perf/684-begin-profile",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 769,
+        "title": "perf(transaction): \u7121\u64cd\u4f5cbegin\u306eLSM\u5168\u4ef6\u8d70\u67fb\u30b3\u30b9\u30c8\u3092\u5207\u308a\u5206\u3051",
+        "head": "340bee808ddee147182820c05a67a9ac1d52c684",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 768,
+        "title": "fix(release): \u516c\u958b\u5931\u6557\u6642\u3082\u5143\u306e\u691c\u8a3c\u7d50\u679c\u3092\u5909\u3048\u305a\u8a3c\u8de1\u3092\u4fdd\u6301",
+        "head": "c2d3367e32e299ea0508052ebcd3eba287cd68f3",
+        "base": "fix/431-report-pair",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 767,
+        "title": "fix(release): retain report pairs from the producing attempt (#431)",
+        "head": "fd3dec9fbc89639f2d4818de01017438664a094e",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 766,
+        "title": "feat(release): decouple Intel qualification and publication",
+        "head": "821d20c6e5d75741bc69c42760f94524e2c2c68a",
+        "base": "feat/686-intel-parser-supplement",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 765,
+        "title": "feat(release): verify pinned Intel parser supplements",
+        "head": "2baafa30ec7ee0640df4ddc14e2d68658d0ba019",
+        "base": "feat/686-parser-target-policy",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 764,
+        "title": "feat(release): separate required parser targets from Intel support (#686)",
+        "head": "d85b3b71d6101d5b563c832c197e80f64912713f",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 763,
+        "title": "fix(release): preserve Core latest after Python publication (#688)",
+        "head": "cdd753888f2135d946d3992305cdde21222c77f8",
+        "base": "feat/686-independent-intel-release",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 762,
+        "title": "feat(io): support VECTOR Parquet interchange (#693)",
+        "head": "b1ac2bff328ee6bb10b9fa16aa95aeed9de3c6b4",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 761,
+        "title": "docs(perf): record HNSW transaction remediation comparison",
+        "head": "91d6144950c12e42b57578e31895abef5712fb4a",
+        "base": "test/681-two-index-eviction",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 760,
+        "title": "test(vector): cover public transaction byte-budget eviction",
+        "head": "2085048699010852da9ccd1abbd9a80fef6d05fd",
+        "base": "perf/681-hnsw-statistics-deltas",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 759,
+        "title": "perf(vector): update HNSW statistics from changed slots",
+        "head": "b4e05a96dda6192fbfbb731779ef0bec988c87a4",
+        "base": "fix/681-savepoint-hnsw-retention",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 758,
+        "title": "fix(embedded): retain SQL HNSW graphs across savepoints",
+        "head": "7602e880ed8b45ee3c983a8b7d76153dccb1daf3",
+        "base": "fix/681-nonblocking-begin-cache",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 757,
+        "title": "fix(embedded): skip contended HNSW cache at transaction begin",
+        "head": "9c3f4629a7070ebe10f501512416aa1acd8f01af",
+        "base": "perf/681-hnsw-copy-on-write",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 756,
+        "title": "ci(core): keep HNSW scale diagnostics out of normal test lanes",
+        "head": "529867615d6098795f0426930e6e26625c8158a1",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 755,
+        "title": "perf(core): share HNSW snapshot pages and node payloads",
+        "head": "186ca4ffdc337a1eff04d7543858f590be8ab560",
+        "base": "perf/681-hnsw-checksum-deltas",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 754,
+        "title": "fix(embedded): distinguish HNSW capacity eviction and reset warning periods",
+        "head": "f5982443b483b0a55839e702d2d0068fc65fbbb0",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 753,
+        "title": "perf(core): update HNSW checksums and key mappings by delta",
+        "head": "62e9d018c26846bfc25851a73840abd744b4588b",
+        "base": "perf/681-hnsw-dirty-node-writes",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 752,
+        "title": "perf(core): persist changed HNSW nodes including reverse edges",
+        "head": "90301e297a1e55368505673d6f85bfe308ebe549",
+        "base": "perf/681-transaction-cache-publication",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 751,
+        "title": "perf(embedded): reuse unmodified HNSW graphs after explicit transactions",
+        "head": "6214c3ed8a439b9e670c72ecdaf2080234342736",
+        "base": "fix/748-memory-snapshots",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 750,
+        "title": "fix(core): preserve MemoryKV snapshots across updates and deletes (#748)",
+        "head": "d557d82f1b68970e5af3b10d3f46005b8c3988c7",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 749,
+        "title": "test(vector): add bounded manual HNSW transaction cache evidence (#681)",
+        "head": "ed48e081ee7647183c3c0b3249c6d0ede425a116",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 747,
+        "title": "fix(sql): enforce parser source contracts and verify bound kNN options",
+        "head": "f1bf9ba0ab26571e66b0ead0257b0ebfa7da3e03",
+        "base": "integration/v0.8.17-candidate",
+        "object_available": true,
+        "disposition": "include via #791\u2013#794",
+        "in_candidate": false,
+        "in_composition": true
+      },
+      {
+        "number": 724,
+        "title": "test(dataframe): \u901a\u5e38\u306ePolars\u64cd\u4f5c149\u30b1\u30fc\u30b9\u3068\u5fc5\u9808CI\u3092\u8ffd\u52a0\u3059\u308b",
+        "head": "e076969002ec10288ebe72e194ad52ab5ca2987c",
+        "base": "main",
+        "disposition": "v0.8.18 per #724/#722",
+        "in_candidate": false,
+        "in_composition": false
+      },
+      {
+        "number": 547,
+        "title": "ci(release): adopt immutable candidate flow for v0.9",
+        "head": "2f56d2c30678eafee66e5f8940fb412f6fc98d33",
+        "base": "release/v0.9.0",
+        "disposition": "v0.9 unrelated",
+        "in_candidate": false,
+        "in_composition": false
+      }
+    ],
+    "interpretation": "All 46 in-scope open PR heads are ancestors of the composition, not the current candidate. #724 targets v0.8.18 per its recorded user decision; #547 is unrelated v0.9. Six closed issue acceptances remain historical; final candidate and artifacts are unqualified. #682 has earlier stages already in candidate.",
+    "existing_evidence": [
+      {
+        "path": "/private/tmp/alopex-679/python-repro.log",
+        "sha256": "2742aeb0f506318a99320d0c226534b304ecbd4f5eba2782eedffd2161a03406"
+      },
+      {
+        "path": "/private/tmp/alopex-746-integration/development.json",
+        "sha256": "1bc36ad313088d4af29170ad25f5b9beb868cab5c0ede710dc6fb1b6189ce44a"
+      },
+      {
+        "path": "/private/tmp/alopex-742-ddl/public-preflight.json",
+        "sha256": "a97a589b4d42485651c8f4630f02135170944403f223f42c80f783ea51e5f56b"
+      },
+      {
+        "path": "/private/tmp/alopex-742-ddl/development.json",
+        "sha256": "297962573e0ada45b1def934234c4205c8033d0d820f06b7d5b6916cd90dbe6c"
+      }
+    ],
+    "next_action": "Verify #791 required CI, integrate/retarget the stack in order, then bind outstanding acceptance to the final candidate; Codex"
+  }
+}

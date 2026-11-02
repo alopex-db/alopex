@@ -40,7 +40,9 @@ def _validated_manifest(source: Path) -> tuple[bytes, str]:
     if not isinstance(assets, list):
         raise ValueError("parser manifest assets must be a list")
     targets = [asset.get("target") for asset in assets if isinstance(asset, dict)]
-    if len(targets) != len(EXPECTED_TARGETS) or set(targets) != EXPECTED_TARGETS:
+    required = EXPECTED_TARGETS - {"x86_64-apple-darwin"} if tuple(map(int, version.split("."))) >= (0, 8, 17) else EXPECTED_TARGETS
+    if (len(targets) != len(assets) or len(targets) != len(set(targets))
+            or not required.issubset(targets) or not set(targets).issubset(EXPECTED_TARGETS)):
         raise ValueError("parser manifest target matrix is incomplete or duplicated")
     for asset in assets:
         library = asset.get("library")

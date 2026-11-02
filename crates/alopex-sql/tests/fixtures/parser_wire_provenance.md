@@ -1,6 +1,6 @@
 # Parser wire fixtures
 
-Codex captured both fixtures from `alopex_parse_sql` in a normally built macOS
+Codex captured the 0.26 and 0.27 fixtures from `alopex_parse_sql` in a normally built macOS
 arm64 parser, not from Rust serialization. Each row records its SQL, raw
 MessagePack hex and payload SHA-256. The Rust and Nim tests compare decoded
 wire maps, so key order is not an added compatibility requirement.
@@ -19,7 +19,23 @@ paths, SOURCE_DATE_EPOCH=0 and TZ=UTC. The source-tree digest follows the
 release parser-asset producer's canonical input inventory.
 
 The 0.26 fixture is immutable historical output, including the missing JOIN
-natural flag. The 0.27 fixture fixes the current public wire shape. Future
+natural flag. The 0.27 fixture records the subsequent public wire shape. Future
 semantic wire changes require a new versioned fixture and contract decision;
 the old file must not be relabeled. The separate continuous-aggregate golden
 retains its historical staged-byte contract.
+
+The current contract is **0.28.0**. `parser_wire_v028.json`, introduced in
+commit `6f20d54e0cc4476a927804f07dadd27eef085ed8` (#675), includes query-local
+`KnnOption.value` as an `Expr`, including positional parameters for
+`ef_search` and `enable_hnsw`. Index-creation options remain strings.
+Each case includes its SQL, MessagePack payload and payload SHA-256.
+That fixture does not record its producer library SHA-256; the historical
+library hashes above must not be reused as its producer identity. Release
+parser assets are identified separately by their release manifest and
+runtime exported-contract check. See [the wire contract](../../../../docs/ffi-ast-contract.md).
+
+CI treats changes to `parser.nim` and `lexer.nim`, as well as the AST and
+wire adapter files, as requiring a contract version increase. The source
+version, Rust consumer requirement and parser-asset manifest requirement
+must agree. Changing only tests, documentation or this guard does not
+change the wire contract.

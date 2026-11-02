@@ -45,6 +45,11 @@ TARGET_STATIC_LIBRARIES = {
     "aarch64-apple-darwin": "libalopex_sql_parser.a",
     "x86_64-pc-windows-msvc": "alopex_sql_parser.lib",
 }
+PRIMARY_TARGETS = {
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+}
 
 MODULE_SPEC = importlib.util.spec_from_file_location(
     "alopex_parser_asset_manifest", MANIFEST_TOOL
@@ -882,6 +887,56 @@ print(matches[0])
         )
         self.assertIn("target matrix", result.stderr.lower())
         self.assertFalse(manifest.exists())
+
+    def test_primary_targets_assemble_verify_and_envelope_without_intel(self) -> None:
+        records = [self.pack(target=target)[0] for target in PRIMARY_TARGETS]
+        manifest = self.root / "primary.json"
+        arguments = ["assemble-manifest"]
+        for record in records:
+            arguments.extend(("--record", str(record)))
+        arguments.extend(("--asset-dir", str(self.output), "--output", str(manifest)))
+        self.run_cli(*arguments)
+        before = manifest.read_bytes()
+        self.run_cli("verify-manifest", "--manifest", str(manifest),
+                     "--asset-dir", str(self.output))
+        envelope = self.root / "envelope.json"
+        self.run_cli("release-envelope", "--manifest", str(manifest),
+                     "--asset-dir", str(self.output),
+                     "--tag", f"v{MANIFEST.REQUIRED_ALOPEX_VERSION}",
+                     "--tag-sha", "a" * 40, "--output", str(envelope))
+        payload = json.loads(envelope.read_text())
+        self.assertEqual({a["target"] for a in payload["assets"]}, PRIMARY_TARGETS)
+        self.assertEqual(payload["manifest"]["sha256"], hashlib.sha256(before).hexdigest())
+        self.assertEqual(manifest.read_bytes(), before)
+        # Missing any primary target remains a release error.
+        original = json.loads(before)
+        for target in PRIMARY_TARGETS:
+            altered = json.loads(before)
+            altered["assets"] = [a for a in original["assets"] if a["target"] != target]
+            with self.subTest(target=target), self.assertRaisesRegex(
+                MANIFEST.ParserAssetError, "required target"
+            ):
+                MANIFEST.validate_manifest_shape(altered)
+
+    def test_primary_manifest_rejects_duplicate_unsorted_and_unsupported_targets(self) -> None:
+        records = [self.pack(target=target)[0] for target in PRIMARY_TARGETS]
+        manifest = self.root / "primary.json"
+        arguments = ["assemble-manifest"]
+        for record in records:
+            arguments.extend(("--record", str(record)))
+        self.run_cli(*arguments, "--asset-dir", str(self.output), "--output", str(manifest))
+        for mode in ["duplicate", "unsorted", "unsupported"]:
+            payload = json.loads(manifest.read_text())
+            if mode == "duplicate":
+                payload["assets"].append(payload["assets"][0])
+            elif mode == "unsorted":
+                payload["assets"].reverse()
+            else:
+                extra = dict(payload["assets"][0])
+                extra["target"] = "zz-unsupported-target"
+                payload["assets"].append(extra)
+            with self.subTest(mode=mode), self.assertRaises(MANIFEST.ParserAssetError):
+                MANIFEST.validate_manifest_shape(payload)
 
     def test_release_envelope_is_canonical_and_binds_tag(self) -> None:
         records = [

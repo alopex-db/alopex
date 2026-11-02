@@ -176,8 +176,8 @@ class ReleaseContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("Flatten parser artifact payloads", release)
-        self.assertIn('test "${#parser_records[@]}" -eq 4', release)
-        self.assertIn('test "${#parser_archives[@]}" -eq 4', release)
+        self.assertIn('test "${#parser_records[@]}" -eq 3', release)
+        self.assertIn('test "${#parser_archives[@]}" -eq 3', release)
         self.assertIn('destination="artifacts/$(basename "$asset")"', release)
         self.assertIn('test ! -e "$destination"', release)
 

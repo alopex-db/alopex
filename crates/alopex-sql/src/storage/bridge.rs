@@ -70,7 +70,7 @@ impl LocalRangeChangeJournal {
     ) -> CoreResult<Self> {
         Ok(Self {
             scope,
-            // MemoryKV exposes write-local before-images, so a journal need
+            // Local MemoryKV/LSM backends expose write-local before-images, so a journal need
             // not scan every SQL row merely to begin a transaction. Backends
             // without that capability retain the snapshot implementation.
             before: if transaction.journal_pending_writes().is_some() {

@@ -23,8 +23,13 @@ on:
         required: false
         default: ""
         type: string
+      intel_artifact_run_id:
+        description: "For Intel publication retry: reuse a successful Intel qualification run without rebuilding"
+        required: false
+        default: ""
+        type: string
       mode:
-        description: "qualification builds artifacts; promotion publishes qualified artifacts"
+        description: "qualification: primary RC; promotion: primary delivery; intel: independent stable Intel delivery"
         required: true
         default: "promotion"
         type: string
@@ -187,11 +192,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # x86_64 macOS wheels must run on an Intel runner because the Nim SQL
-          # parser shared library is built natively before linking.
-          - os: macos-15-intel
-            target: x86_64
-            target_triple: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64
             target_triple: aarch64-apple-darwin
@@ -484,6 +484,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -497,6 +500,8 @@ jobs:
           find dist -name "*.whl" -exec cp {} wheels/ \;
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
           test -n "${{ inputs.core_tag }}"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          python3 scripts/release/primary_distributions.py --version "$version" --directory wheels
           gh release upload --repo "${GITHUB_REPOSITORY}" "${{ inputs.core_tag }}" wheels/* --clobber
 
   publish-pypi:
@@ -554,6 +559,7 @@ jobs:
         with:
           tag_name: ${{ inputs.source_ref || github.ref_name }}
           files: wheels/*
+          make_latest: "false"
 
   final-release-join:
     name: final-release-join
@@ -706,3 +712,211 @@ jobs:
           (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
           PY
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
+
+      - name: Verify Core remains latest after Python publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release/verify_latest_release.py \
+            --repository "${GITHUB_REPOSITORY}" --version "${VERSION}" \
+            --output join-assets/latest-release.json
+
+      - name: Record final public release identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-release-identities-${{ github.run_id }}-${{ github.run_attempt }}
+          path: join-assets/*.json
+          if-no-files-found: error
+
+  intel-qualify:
+    name: Qualify optional Intel artifacts
+    if: ${{ inputs.mode == 'intel' && inputs.intel_artifact_run_id == '' }}
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CORE_TAG: ${{ inputs.core_tag }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.core_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify frozen Core and immutable Intel source
+        env:
+          CORE_TAG: ${{ inputs.core_tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          python scripts/release/intel_release.py prepare --tag "$CORE_TAG" \
+            --source-sha "$SOURCE_SHA" --context intel-context
+          python scripts/compatibility/storage.py --log intel-storage.jsonl
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          targets: x86_64-apple-darwin
+      - uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build and bind supplemental parser
+        run: |
+          set -euo pipefail
+          python scripts/compatibility/storage.py --log intel-storage.jsonl --additional-bytes 2000000000 -- \
+            bash scripts/build-nim-parser.sh --backend host --target x86_64-apple-darwin --archive-dir intel-parser
+          pin="$(python scripts/release/intel_release.py stage --context intel-context \
+            --parser-dir intel-parser --bundle intel-dist --native "$PWD/intel-native")"
+          python scripts/release/retarget_python_parser_source.py \
+            --manifest "intel-context/parser-vendor-manifest-${CORE_TAG}.json" \
+            --vendor-dir crates/alopex-sql/nim-sql-parser/vendor --build-support crates/alopex-sql/build_support.rs
+          printf 'NIM_SQL_PARSER_LIB_DIR=%s\nALOPEX_NIM_PARSER_SUPPLEMENT_SHA256=%s\n' \
+            "$PWD/intel-native" "$pin" >> "$GITHUB_ENV"
+      - name: Execute native parser contract
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee intel-dist/parser-smoke.log
+          import ctypes, os
+          from pathlib import Path
+          library = ctypes.CDLL(str(Path(os.environ['NIM_SQL_PARSER_LIB_DIR']) / 'libalopex_sql_parser.dylib'))
+          library.alopex_parser_version.restype = ctypes.c_char_p
+          assert library.alopex_parser_version() == b'0.28.0'
+          print('Intel parser native contract 0.28.0: passed')
+          PY
+      - name: Build and execute Intel CLI through strict resolver
+        run: |
+          set -euo pipefail
+          test "${ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD:-0}" != 1
+          python scripts/compatibility/storage.py --log intel-storage.jsonl --additional-bytes 25000000000 -- \
+            cargo build --locked --release --target x86_64-apple-darwin -p alopex-cli
+          strip target/x86_64-apple-darwin/release/alopex
+          cp target/x86_64-apple-darwin/release/alopex intel-dist/alopex-macos-x86_64
+          intel-dist/alopex-macos-x86_64 --version | tee intel-dist/cli-smoke.log
+          grep -F "${CORE_TAG}" intel-dist/cli-smoke.log || \
+            grep -F "${CORE_TAG}" <(sed 's/alopex /alopex v/' intel-dist/cli-smoke.log)
+      - name: Build and qualify Intel wheel from same parser bytes
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --only-binary=:all: maturin==1.14.1 numpy==2.2.1
+          python scripts/compatibility/storage.py --log intel-storage.jsonl --additional-bytes 10000000000 -- \
+            maturin build -m crates/alopex-py/Cargo.toml --release --locked --target x86_64-apple-darwin --out intel-wheels
+          library_sha="$(shasum -a 256 intel-native/libalopex_sql_parser.dylib | cut -d ' ' -f 1)"
+          for wheel in intel-wheels/*.whl; do
+            python scripts/release/verify_wheel_contents.py "$wheel" \
+              --expected-library-path alopex/native/libalopex_sql_parser.dylib \
+              --expected-library-sha256 "$library_sha" --expected-contract-version 0.28.0
+            python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
+          done
+          python -m venv intel-wheel-venv
+          intel-wheel-venv/bin/python -m pip install --no-cache-dir --only-binary=:all: numpy==2.2.1
+          intel-wheel-venv/bin/python -m pip install --no-index --no-deps intel-wheels/*.whl
+          intel-wheel-venv/bin/python scripts/release/verify_python_vector_api.py | tee intel-dist/wheel-smoke.log
+          cp intel-wheels/*.whl intel-dist/
+      - name: Verify published crate consumer on Intel
+        env:
+          CORE_TAG: ${{ inputs.core_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p intel-consumer/src
+          version="${CORE_TAG#v}"
+          cat > intel-consumer/Cargo.toml <<EOF
+          [package]
+          name = "intel-consumer"
+          version = "0.0.0"
+          edition = "2021"
+          [workspace]
+          [dependencies]
+          alopex-sql = "=${version}"
+          alopex-core = "=${version}"
+          EOF
+          cat > intel-consumer/src/main.rs <<'RS'
+          fn main() {
+              use alopex_sql::{AlopexDialect, Parser, parser_contract_version};
+              assert_eq!(parser_contract_version(), "0.28.0");
+              assert_eq!(Parser::parse_sql(&AlopexDialect, "SELECT 1").unwrap().len(), 1);
+              assert!(Parser::parse_sql(&AlopexDialect, "SELECT FROM").is_err());
+              println!("Published crate + pinned Intel supplement: passed");
+          }
+          RS
+          cargo generate-lockfile --manifest-path intel-consumer/Cargo.toml
+          python scripts/compatibility/storage.py --log intel-storage.jsonl --additional-bytes 10000000000 -- \
+            cargo run --locked --release --target x86_64-apple-darwin --manifest-path intel-consumer/Cargo.toml | tee intel-dist/crate-smoke.log
+      - name: Seal native qualification evidence
+        run: |
+          python scripts/release/intel_release.py seal --context intel-context \
+            --bundle intel-dist --run-id "$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: optional-intel-qualified
+          path: intel-dist/*
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain bounded storage evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: optional-intel-storage
+          path: intel-storage.jsonl
+          retention-days: 90
+      - name: Clean regenerable Intel outputs
+        if: ${{ always() }}
+        run: |
+          rm -rf target intel-native intel-parser intel-wheels intel-wheel-venv intel-consumer
+          python scripts/compatibility/storage.py --log intel-storage-after.jsonl
+
+  intel-publish:
+    name: Publish verified optional Intel artifacts
+    needs: [intel-qualify]
+    if: ${{ always() && inputs.mode == 'intel' && (needs.intel-qualify.result == 'success' || (needs.intel-qualify.result == 'skipped' && inputs.intel_artifact_run_id != '')) }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    concurrency:
+      group: optional-intel-publish-${{ inputs.core_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QUALIFICATION_RUN_ID: ${{ inputs.intel_artifact_run_id || github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.core_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: optional-intel-qualified
+          path: intel-dist
+          run-id: ${{ inputs.intel_artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Reverify immutable Core bytes and qualification run
+        env:
+          CORE_TAG: ${{ inputs.core_tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python scripts/release/intel_release.py prepare --tag "$CORE_TAG" \
+            --source-sha "$SOURCE_SHA" --context intel-context
+      - name: Reject conflicting publication and select missing wheel
+        id: publication
+        run: |
+          python scripts/release/intel_release.py plan --context intel-context \
+            --bundle intel-dist --upload intel-upload --run-id "$QUALIFICATION_RUN_ID" >> "$GITHUB_OUTPUT"
+      - name: Publish only the missing qualified Intel wheel
+        if: ${{ steps.publication.outputs.publish == 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: intel-upload/
+          skip-existing: false
+      - name: Verify PyPI identity and add only missing GitHub assets
+        run: |
+          python scripts/release/intel_release.py publish --context intel-context \
+            --bundle intel-dist --run-id "$QUALIFICATION_RUN_ID"

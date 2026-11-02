@@ -9,6 +9,8 @@ pub mod buffer_pool;
 pub mod checkpoint;
 pub mod container;
 pub mod free_space;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod journal_tests;
 mod lock;
 pub mod memtable;
 pub mod metrics;
@@ -62,7 +64,7 @@ pub enum ThreadMode {
     SingleThread,
 }
 
-/// Logical bytes of the live write set. Savepoint copies and allocator overhead
+/// Logical bytes of the live WAL write set. Before-images, savepoint copies and allocator overhead
 /// are separate; the payload count excludes the single 16-byte stream header.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WriteSetUsage {
@@ -2064,6 +2066,8 @@ pub struct LsmTransaction<'a> {
     read_set: HashSet<Vec<u8>>,
     /// 書き込みセット（`None` は tombstone）。
     write_set: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Snapshot values for keys actually mutated, captured before their first write.
+    journal_before: BTreeMap<Key, Option<Value>>,
     write_usage: WriteSetUsage,
     /// KV ストア参照。
     store: &'a LsmKV,
@@ -2077,15 +2081,30 @@ impl<'a> LsmTransaction<'a> {
             mode,
             read_set: HashSet::new(),
             write_set: BTreeMap::new(),
+            journal_before: BTreeMap::new(),
             write_usage: WriteSetUsage::default(),
             store,
         }
+    }
+
+    fn capture_journal_before(&mut self, key: &Key) -> Result<()> {
+        if !self.journal_before.contains_key(key) {
+            // Unlike the legacy infallible get path, a journal must not turn a
+            // damaged persisted value into an absent before-image.
+            let before = self
+                .store
+                .owned_visible_at(key, self.start_ts)?
+                .and_then(|entry| entry.value);
+            self.journal_before.insert(key.clone(), before);
+        }
+        Ok(())
     }
 
     /// トランザクションを消費せずにロールバックする。
     pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
         self.read_set.clear();
         self.write_set.clear();
+        self.journal_before.clear();
         self.write_usage = WriteSetUsage::default();
         Ok(())
     }
@@ -2222,13 +2241,15 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
-        self.write_usage = self.store.validate_overflow_write(
+        let usage = self.store.validate_overflow_write(
             self.write_usage,
             &key,
             Some(&value),
             self.write_set.get(&key),
         )?;
+        self.capture_journal_before(&key)?;
         self.write_set.insert(key, Some(value));
+        self.write_usage = usage;
         Ok(())
     }
 
@@ -2236,13 +2257,15 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnReadOnly);
         }
-        self.write_usage = self.store.validate_overflow_write(
+        let usage = self.store.validate_overflow_write(
             self.write_usage,
             &key,
             None,
             self.write_set.get(&key),
         )?;
+        self.capture_journal_before(&key)?;
         self.write_set.insert(key, None);
+        self.write_usage = usage;
         Ok(())
     }
 
@@ -2351,6 +2374,24 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         prepared.collect(|| self.next_search_entry(&mut state), request, cancellation)
     }
 
+    fn journal_pending_writes(&self) -> Option<Vec<crate::kv::JournalPendingWrite>> {
+        Some(
+            self.write_set
+                .iter()
+                .map(|(key, after)| {
+                    (
+                        key.clone(),
+                        self.journal_before
+                            .get(key)
+                            .expect("buffered LSM write has a before-image")
+                            .clone(),
+                        after.clone(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     fn visit_pending_write_keys(&self, visitor: &mut dyn FnMut(&[u8])) -> bool {
         for key in self.write_set.keys() {
             visitor(key);
@@ -2371,6 +2412,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
 
     fn rollback_self(mut self) -> Result<()> {
         self.write_set.clear();
+        self.journal_before.clear();
         self.write_usage = WriteSetUsage::default();
         Ok(())
     }
