@@ -1,7 +1,5 @@
-#![allow(
-    deprecated,
-    reason = "Pinned codec-free Parquet wire types preserve bounded Thrift validation during the Arrow 60 migration"
-)]
+use super::super::wire_schema as parquet_wire;
+
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -20,8 +18,8 @@ use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ColumnChunkMetaData;
 use parquet::file::page_index::offset_index::PageLocation;
+use parquet_wire::TSerializable;
 use parquet_wire::format::{PageHeader, PageType};
-use parquet_wire::thrift::TSerializable;
 use thrift::protocol::TCompactInputProtocol;
 
 use super::super::preflight;
