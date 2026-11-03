@@ -61,4 +61,17 @@ git -C "${TEMP_ROOT}/repo" tag -d v0.8.4 >/dev/null
 git -C "${TEMP_ROOT}/repo" push origin "${TARGET}:refs/tags/v0.8.4" >/dev/null
 assert_fail run_safe_tag v0.8.4 "${TARGET}"
 
+# An unobservable origin is unknown, not proof that a tag name is unused.
+# Use a missing local path so this regression needs neither network nor secrets.
+git -C "${TEMP_ROOT}/repo" remote set-url origin "${TEMP_ROOT}/missing-origin.git"
+assert_fail run_safe_tag v0.8.17-rc.1 "${TARGET}"
+grep -q 'cannot verify tag availability on origin' "${TEMP_ROOT}/out"
+if grep -q 'create the tag only' "${TEMP_ROOT}/out"; then
+    echo "failed remote verification must not recommend tag creation" >&2
+    exit 1
+fi
+test -z "$(git -C "${TEMP_ROOT}/repo" tag --list v0.8.17-rc.1)"
+git -C "${TEMP_ROOT}/repo" remote set-url origin "${TEMP_ROOT}/origin.git"
+assert_success run_safe_tag v0.8.17-rc.1 "${TARGET}"
+
 echo "safe-tag checks passed"
