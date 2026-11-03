@@ -80,3 +80,23 @@ auth_mode = { type = "none" }
 - `GET /metrics` - Prometheus metrics
 
 For a full configuration guide and API reference, see `docs/server-guide.md`.
+
+## Functional tests and manual load measurements
+
+`stream_deadline` checks the HTTP timeout response with one constant query and
+a virtual clock. HTTP SQL unit tests separately check producer cancellation,
+channel closure and cleanup. These functional checks run in ordinary CI.
+
+The two `load_test` cases are always ignored, including with `lane_ci` and
+`--all-features`. They measure 1,000 concurrent health requests or a slow consumer
+over 2,000 rows; throughput and real-time scheduling are not CI acceptance gates.
+Run them only as a manual experiment with an owning issue, source identity,
+measured per-host storage, a time/memory budget and an output cleanup plan:
+
+```bash
+cargo test -p alopex-server --test load_test load_test_concurrent_requests -- --ignored --exact
+cargo test -p alopex-server --test load_test load_test_backpressure_with_slow_client -- --ignored --exact
+```
+
+Run one case at a time, outside CI, without competing builds or measurements.
+Retain failures and raw observations; they do not qualify a release on their own.
