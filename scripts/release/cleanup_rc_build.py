@@ -8,7 +8,7 @@ import shutil
 
 
 def cleanup(workspace: Path, temporary: Path, target: Path, kind: str) -> None:
-    if kind not in {"core", "crates"}:
+    if kind not in {"core", "crates", "python"}:
         raise ValueError("unknown RC build kind")
     # A malformed target must never turn cleanup into deletion of source or a
     # shared host cache. Workflows declare one target directory for this host.
@@ -17,13 +17,16 @@ def cleanup(workspace: Path, temporary: Path, target: Path, kind: str) -> None:
     owned = [target]
     if kind == "core":
         owned.append(workspace / "artifacts/parser/native-smoke")
-    else:
+    elif kind == "crates":
         owned.extend(temporary / name for name in (
             "alopex-release-source", "alopex-release-parser-assets",
         ))
         # Qualified crate bytes and publish metadata remain available even if
         # a remote upload failed. Only the disposable local index is removed.
         owned.append(temporary / "alopex-crate-assets/.candidate-index")
+    else:
+        owned.extend(workspace / name for name in (".core-parser-assets", ".release-tools", ".maturin-action"))
+        owned.extend(temporary / name for name in ("alopex-wheel-api-smoke", "alopex-wheel-clean-venv"))
     # Check all parent components before removing anything. Do not follow an
     # attacker-controlled symlink to outputs outside the isolated job roots.
     for path in owned:
@@ -44,7 +47,7 @@ def cleanup(workspace: Path, temporary: Path, target: Path, kind: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kind", choices=("core", "crates"), required=True)
+    parser.add_argument("--kind", choices=("core", "crates", "python"), required=True)
     args = parser.parse_args()
     if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
         raise SystemExit("RC cleanup requires an isolated GitHub-hosted runner")

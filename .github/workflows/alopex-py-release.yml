@@ -40,9 +40,17 @@ defaults:
 
 env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PIP_NO_CACHE_DIR: '1'
 
 jobs:
   linux:
+    timeout-minutes: 90
     name: linux (${{ matrix.target }})
     if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
@@ -60,6 +68,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inventory Python qualification host
+        run: python scripts/release/release_storage.py --docker --log artifacts/python-release/before.jsonl
+      - name: Checkout pinned maturin action
+        uses: actions/checkout@v4
+        with:
+          repository: PyO3/maturin-action
+          ref: e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+          path: .maturin-action
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Resolve source release version
         shell: bash
         run: |
@@ -76,6 +99,8 @@ jobs:
           TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
           set -euo pipefail
+          python scripts/release/release_storage.py --docker --log artifacts/python-release/staging.jsonl \
+            --additional-bytes 2000000000 -- bash -euo pipefail <<'BOUNDED_PARSER_STAGE'
           rm -rf .core-parser-assets
           mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
@@ -123,6 +148,7 @@ jobs:
           (package_native / 'CONTRACT_VERSION').write_bytes(b'0.28.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+          BOUNDED_PARSER_STAGE
       - name: Checkout release parser tool
         uses: actions/checkout@v4
         with:
@@ -137,21 +163,10 @@ jobs:
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          maturin-version: "1.14.1"
-          command: build
-          manylinux: auto
-          args: -m crates/alopex-py/Cargo.toml --release --out dist
-          target: ${{ matrix.target }}
-          # `before-script-linux` は maturin-action 公式入力 (action.yml で確認済み):
-          #   "Script to run before maturin command on Linux."
-          # manylinux: auto では maturin-action が manylinux コンテナ内でビルドするため、
-          # このスクリプトも同コンテナ内 (AlmaLinux ベース) で cargo build 前に実行される。
-          before-script-linux: |
-            set -euxo pipefail
-            REPO_ROOT="$PWD"
-            cd "${REPO_ROOT}"
+        timeout-minutes: 60
+        env:
+          INPUT_TOKEN: ${{ github.token }}
+        run: python scripts/release/bounded_maturin.py --kind linux
       - name: Inspect Linux wheel contents
         shell: bash
         run: |
@@ -170,21 +185,39 @@ jobs:
             --expected-library-sha256 "$library_sha" --expected-contract-version 0.28.0
           done
       - name: Exercise Linux wheel vector and streaming APIs
-        shell: bash
         run: |
-          set -euo pipefail
-          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
-          python -m venv "${smoke_venv}"
-          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
-          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
-          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
+          python scripts/release/release_storage.py --docker --log artifacts/python-release/smoke.jsonl \
+            --additional-bytes 2000000000 -- \
+            python scripts/release/verify_python_rc.py --kind linux
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist/*
+      - name: Reclaim owned manylinux container after interruption
+        id: manylinux_cleanup
+        if: always()
+        run: python scripts/release/bounded_maturin.py --kind linux --cleanup
+
+      - name: Clean regenerable Python qualification outputs
+        if: always() && steps.manylinux_cleanup.outcome == 'success'
+        run: python scripts/release/cleanup_rc_build.py --kind python
+
+      - name: Measure Python qualification host after cleanup
+        if: always()
+        run: python scripts/release/release_storage.py --docker --log artifacts/python-release/after.jsonl
+
+      - name: Retain Python qualification storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-rc-storage-linux
+          path: artifacts/python-release/
+          if-no-files-found: error
+
 
   macos:
+    timeout-minutes: 90
     name: macos (${{ matrix.target }})
     if: ${{ inputs.mode == 'qualification' }}
     runs-on: ${{ matrix.os }}
@@ -200,6 +233,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inventory Python qualification host
+        run: python scripts/release/release_storage.py --log artifacts/python-release/before.jsonl
+      - name: Checkout pinned maturin action
+        uses: actions/checkout@v4
+        with:
+          repository: PyO3/maturin-action
+          ref: e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+          path: .maturin-action
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Resolve source release version
         shell: bash
         run: |
@@ -216,6 +264,8 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target_triple }}
         run: |
           set -euo pipefail
+          python scripts/release/release_storage.py --log artifacts/python-release/staging.jsonl \
+            --additional-bytes 2000000000 -- bash -euo pipefail <<'BOUNDED_PARSER_STAGE'
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
             if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
@@ -262,6 +312,7 @@ jobs:
           (package_native / 'CONTRACT_VERSION').write_bytes(b'0.28.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+          BOUNDED_PARSER_STAGE
       - name: Checkout release parser tool
         uses: actions/checkout@v4
         with:
@@ -276,12 +327,10 @@ jobs:
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          maturin-version: "1.14.1"
-          command: build
-          args: -m crates/alopex-py/Cargo.toml --release --auditwheel repair --out dist
-          target: ${{ matrix.target }}
+        timeout-minutes: 60
+        env:
+          INPUT_TOKEN: ${{ github.token }}
+        run: python scripts/release/bounded_maturin.py --kind macos
       - name: Inspect macOS wheel contents
         shell: bash
         run: |
@@ -301,22 +350,34 @@ jobs:
             python scripts/release/verify_macos_wheel_linkedit.py "$wheel"
           done
       - name: Exercise macOS wheel vector and streaming APIs
-        shell: bash
         run: |
-          set -euo pipefail
-          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
-          python -m venv "${smoke_venv}"
-          "${smoke_venv}/bin/python" -m pip install pytest numpy==2.2.1
-          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
-          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
-          "${smoke_venv}/bin/python" -m pytest -q crates/alopex-py/tests/test_sql.py
+          python scripts/release/release_storage.py --log artifacts/python-release/smoke.jsonl \
+            --additional-bytes 2000000000 -- \
+            python scripts/release/verify_python_rc.py --kind macos
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist/*
+      - name: Clean regenerable Python qualification outputs
+        if: always()
+        run: python scripts/release/cleanup_rc_build.py --kind python
+
+      - name: Measure Python qualification host after cleanup
+        if: always()
+        run: python scripts/release/release_storage.py --log artifacts/python-release/after.jsonl
+
+      - name: Retain Python qualification storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-rc-storage-macos
+          path: artifacts/python-release/
+          if-no-files-found: error
+
 
   windows:
+    timeout-minutes: 90
     name: windows (x86_64)
     if: ${{ inputs.mode == 'qualification' }}
     runs-on: windows-latest
@@ -325,6 +386,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inventory Python qualification host
+        run: python scripts/release/release_storage.py --log artifacts/python-release/before.jsonl
+      - name: Checkout pinned maturin action
+        uses: actions/checkout@v4
+        with:
+          repository: PyO3/maturin-action
+          ref: e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+          path: .maturin-action
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Resolve source release version
         shell: bash
         run: |
@@ -340,6 +416,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          python scripts/release/release_storage.py --log artifacts/python-release/staging.jsonl \
+            --additional-bytes 2000000000 -- bash -euo pipefail <<'BOUNDED_PARSER_STAGE'
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
             if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
@@ -385,6 +463,7 @@ jobs:
           Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.28.0\n')
           Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+          BOUNDED_PARSER_STAGE
       - name: Checkout release parser tool
         uses: actions/checkout@v4
         with:
@@ -399,11 +478,10 @@ jobs:
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          maturin-version: "1.14.1"
-          command: build
-          args: -m crates/alopex-py/Cargo.toml --release --out dist
+        timeout-minutes: 60
+        env:
+          INPUT_TOKEN: ${{ github.token }}
+        run: python scripts/release/bounded_maturin.py --kind windows
       - name: Inspect Windows wheel contents
         shell: bash
         run: |
@@ -422,28 +500,34 @@ jobs:
             --expected-library-sha256 "$library_sha" --expected-contract-version 0.28.0 \
             --expected-loader-path alopex/native/alopex_sql_parser.dll
       - name: Exercise Windows wheel APIs without external DLL overrides
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $venv = Join-Path $env:RUNNER_TEMP "alopex-wheel-clean-venv"
-          if (Test-Path $venv) { Remove-Item -Recurse -Force $venv }
-          python -m venv $venv
-          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
-          & "$venv\Scripts\python.exe" -m pip install numpy==2.2.1
-          & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
-          Push-Location $env:RUNNER_TEMP
-          try {
-            & "$venv\Scripts\python.exe" "$env:GITHUB_WORKSPACE\scripts\release\verify_python_vector_api.py"
-          } finally {
-            Pop-Location
-          }
+          python scripts/release/release_storage.py --log artifacts/python-release/smoke.jsonl \
+            --additional-bytes 2000000000 -- \
+            python scripts/release/verify_python_rc.py --kind windows
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x86_64
           path: dist/*
+      - name: Clean regenerable Python qualification outputs
+        if: always()
+        run: python scripts/release/cleanup_rc_build.py --kind python
+
+      - name: Measure Python qualification host after cleanup
+        if: always()
+        run: python scripts/release/release_storage.py --log artifacts/python-release/after.jsonl
+
+      - name: Retain Python qualification storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-rc-storage-windows
+          path: artifacts/python-release/
+          if-no-files-found: error
+
 
   sdist:
+    timeout-minutes: 30
     name: sdist
     if: ${{ inputs.mode == 'qualification' }}
     runs-on: ubuntu-latest
@@ -452,17 +536,31 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inventory Python qualification host
+        run: python scripts/release/release_storage.py --log artifacts/python-release/before.jsonl
+      - name: Checkout pinned maturin action
+        uses: actions/checkout@v4
+        with:
+          repository: PyO3/maturin-action
+          ref: e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+          path: .maturin-action
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Remove native parser vendor files from sdist staging
         run: |
           set -euo pipefail
           find crates/alopex-sql/nim-sql-parser/vendor \
             -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          maturin-version: "1.14.1"
-          command: sdist
-          args: -m crates/alopex-py/Cargo.toml --out dist
+        timeout-minutes: 20
+        env:
+          INPUT_TOKEN: ${{ github.token }}
+        run: python scripts/release/bounded_maturin.py --kind sdist
       - name: Inspect sdist contents
         shell: bash
         run: |
@@ -475,6 +573,22 @@ jobs:
         with:
           name: sdist
           path: dist/*
+      - name: Clean regenerable Python qualification outputs
+        if: always()
+        run: python scripts/release/cleanup_rc_build.py --kind python
+
+      - name: Measure Python qualification host after cleanup
+        if: always()
+        run: python scripts/release/release_storage.py --log artifacts/python-release/after.jsonl
+
+      - name: Retain Python qualification storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-rc-storage-sdist
+          path: artifacts/python-release/
+          if-no-files-found: error
+
 
   candidate-release:
     name: Attach qualified Python artifacts

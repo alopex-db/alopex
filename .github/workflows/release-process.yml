@@ -71,6 +71,8 @@ jobs:
       - name: Verify native parser archive and cleanup behavior
         shell: bash
         run: python -m unittest scripts.release.tests.test_parser_asset_manifest
+      - name: Verify bounded Python release orchestration
+        run: python -m unittest scripts.release.tests.test_python_rc_storage
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build real native parser assets
