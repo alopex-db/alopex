@@ -369,6 +369,10 @@ jobs:
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
+        env:
+          # The action renames from os.tmpdir() into ~/.cargo/bin. Keep
+          # extraction beside the destination when /tmp is a separate mount.
+          TMPDIR: ${{ env.CARGO_HOME }}/bin
         with:
           version: v0.15.0
 
