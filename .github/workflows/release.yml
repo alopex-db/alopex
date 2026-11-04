@@ -21,6 +21,12 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
   # A tag push uses github.ref_name/github.sha. A manual run names its tag.
   RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
   RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}
@@ -80,6 +86,7 @@ jobs:
 
   build-release:
     name: Build Release (${{ matrix.target }})
+    timeout-minutes: 90
     needs: [ci-gate]
     if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
     runs-on: ${{ matrix.os }}
@@ -114,20 +121,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-
       - name: Setup Python for archive verification
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Verify RC host storage before compilation
+        run: python scripts/compatibility/storage.py --log artifacts/rc-storage/before.jsonl
 
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library
         shell: bash
         run: |
-          bash scripts/build-nim-parser.sh --backend host \
-            --target "${{ matrix.target }}" --archive-dir artifacts/parser
+          python scripts/compatibility/storage.py --log artifacts/rc-storage/parser.jsonl \
+            --additional-bytes 2000000000 -- bash scripts/build-nim-parser.sh --backend host \
+              --target "${{ matrix.target }}" --archive-dir artifacts/parser
       - name: Verify parser target record
         shell: bash
         run: |
@@ -164,10 +173,15 @@ jobs:
           print(f"native smoke passed: {record['target']} parser {version}")
           PY
       - name: Build
+        timeout-minutes: 45
+        shell: bash
         env:
           ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
           NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
-        run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
+        run: |
+          python scripts/compatibility/storage.py --log artifacts/rc-storage/cli.jsonl \
+            --additional-bytes 20000000000 -- \
+            cargo build --locked --release --target ${{ matrix.target }} -p alopex-cli
 
       - name: Strip binary (Linux and macOS)
         if: matrix.os != 'windows-latest'
@@ -187,6 +201,22 @@ jobs:
             artifacts/${{ matrix.asset_name }}
             artifacts/parser/*.json
             artifacts/parser/*.tar.gz
+
+      - name: Clean regenerable RC build outputs
+        if: always()
+        run: python scripts/release/cleanup_rc_build.py --kind core
+
+      - name: Measure RC host storage after cleanup
+        if: always()
+        run: python scripts/compatibility/storage.py --log artifacts/rc-storage/after.jsonl
+
+      - name: Retain RC storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-storage-${{ matrix.target }}
+          path: artifacts/rc-storage/
+          if-no-files-found: error
 
   create-release:
     name: Create RC GitHub Release
@@ -270,6 +300,7 @@ jobs:
 
   package-crates:
     name: Package qualified crate archives
+    timeout-minutes: 90
     needs: [ci-gate, create-release]
     if: ${{ needs.ci-gate.outputs.kind == 'rc' }}
     runs-on: ubuntu-latest
@@ -281,12 +312,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
       - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify crate qualification host storage
+        run: python scripts/compatibility/storage.py --log artifacts/rc-storage/before.jsonl
       - name: Create exact source staging with candidate parser assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          python scripts/compatibility/storage.py --log artifacts/rc-storage/staging.jsonl \
+            --additional-bytes 2000000000 -- bash -euo pipefail <<'BOUNDED_STAGING'
           version="${RELEASE_TAG_NAME#v}"
           version="${version%-rc.*}"
           git fetch --force --tags origin
@@ -352,12 +390,14 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/alopex-crate-assets"
           echo "RELEASE_STAGE=${stage}" >> "$GITHUB_ENV"
           echo "CRATE_ASSETS=${RUNNER_TEMP}/alopex-crate-assets" >> "$GITHUB_ENV"
+          BOUNDED_STAGING
       - name: Build and smoke staged parser through strict default path
+        timeout-minutes: 60
         shell: bash
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/alopex-release-strict-target
         run: |
           set -euo pipefail
+          python scripts/compatibility/storage.py --log artifacts/rc-storage/strict.jsonl \
+            --additional-bytes 20000000000 -- bash -euo pipefail <<'BOUNDED_STRICT'
           unset ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD NIM_SQL_PARSER_LIB_DIR
           cd "${RELEASE_STAGE}"
           cargo build --locked --release -p alopex-sql
@@ -366,18 +406,47 @@ jobs:
             exposes_the_nim_wire_contract_version -- --exact
           cargo test --locked --release -p alopex-sql --test nim_bridge_test \
             distinct_on_crosses_the_nim_messagepack_boundary -- --exact
+          BOUNDED_STRICT
       - name: Package and bind every published crate once
         shell: bash
         run: |
           set -euo pipefail
-          python "${RELEASE_STAGE}/scripts/release/package_candidate_crates.py" \
-            --manifest "${RELEASE_STAGE}/Cargo.toml" --output "${CRATE_ASSETS}" \
-            --target-dir "${RUNNER_TEMP}/alopex-release-package-target"
+          python scripts/compatibility/storage.py --log artifacts/rc-storage/crates.jsonl \
+            --additional-bytes 2000000000 -- \
+            python "${RELEASE_STAGE}/scripts/release/package_candidate_crates.py" \
+              --manifest "${RELEASE_STAGE}/Cargo.toml" --output "${CRATE_ASSETS}" \
+              --target-dir "${CARGO_TARGET_DIR}"
       - name: Attach qualified crate archives
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: gh release upload "${RELEASE_TAG_NAME}" "${CRATE_ASSETS}"/* --clobber
+
+      - name: Retain qualified crate archives before cleanup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-crate-archives
+          path: |
+            ${{ runner.temp }}/alopex-crate-assets/*.crate
+            ${{ runner.temp }}/alopex-crate-assets/*-publish-metadata.json
+          if-no-files-found: warn
+
+      - name: Clean regenerable crate qualification outputs
+        if: always()
+        run: python scripts/release/cleanup_rc_build.py --kind crates
+
+      - name: Measure crate host storage after cleanup
+        if: always()
+        run: python scripts/compatibility/storage.py --log artifacts/rc-storage/after.jsonl
+
+      - name: Retain crate storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-storage-crates
+          path: artifacts/rc-storage/
+          if-no-files-found: error
 
   qualify-python:
     name: Qualify Python candidate artifacts
