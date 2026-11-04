@@ -226,6 +226,7 @@ jobs:
       - name: Verify public Core latest identity
         id: latest_identity
         env:
+          VERSION: ${{ steps.release.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
