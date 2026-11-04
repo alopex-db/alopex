@@ -1,10 +1,13 @@
 # Windows public overflow: implementation and acceptance
 
-#682, candidate base `e4d5f59e67b93d8e3f4a491dc725cb96a47639f8`.
+#682. The initial implementation used candidate base
+`e4d5f59e67b93d8e3f4a491dc725cb96a47639f8`; later composition is recorded separately
+below.
 
-**Status: implementation, macOS development checks and the Windows manual public
-acceptance suite passed; ordinary CI and candidate integration remain pending.**
-This does not close #682.
+**Status as of 2026-11-02: the Windows manual public-API suite and the subsequent
+244-case composed native suite passed on their respective sources.** The public
+implementation is included in candidate `830b8e0d`, but the remaining composition
+and final-candidate acceptance are pending. This does not close #682.
 
 The public LSM, Database, SQL and Python opt-in now reaches the existing Windows
 publication pipeline. Budget validation still precedes filesystem effects.
@@ -32,7 +35,7 @@ comments/documentation; no Rust executable behavior changed after these builds.
 | Inline/reference recovery | macOS 2 passed, 0 failed/ignored |
 | Public Python KV/SQL/cancellation/budgets/reopen | macOS 15 passed, 0 failed/skipped |
 | Normal extension isolation | private fault hook absent in a fresh process |
-| Windows ordinary native contracts | 134 selected; execution pending |
+| Windows ordinary native contracts | Initially 134 selected; subsequent 244-case composition passed as recorded below |
 | Windows ordinary Python overflow cases | 15 passed, 0 failed/skipped in the manual suite's normal extension |
 | Windows instrumented Database/SQL boundaries | Rust24 and Python24 passed; Python cases each verified two reopen cycles |
 | Independent published old reader | Published 0.8.16 container and live-WAL activation/refusal/bytes-preserved/reopen passed |
@@ -145,7 +148,34 @@ product, tests, runners or workflow bytes, so it does not require repeating this
 manual execution. Its ordinary CI and final candidate composition still need
 separate confirmation.
 
-Next: verify ordinary CI and the composed candidate before integration. The broader #682
-performance comparison and device-failure/power-loss qualification remain
-separate from these controlled process-exit tests. Release-package qualification,
-publication, post-release checks and main integration remain tracked by #690.
+## Composed native CI result
+
+[Run 41422265175, Windows job 125200938730](https://github.com/alopex-db/alopex/actions/runs/41422265175/job/125200938730)
+passed all 26 selected groups: 162 WAL/LSM cases and 82 HNSW cases, with zero
+failures or ignored cases. The tested merge source is
+`ad02a1b41a3d8cafbd2cb684dd97ebf26d625acd`, tree
+`ccae51fd061c80ce3d92649d1ff357062fda32bf`, identical to the tree of #795 head
+`e2bf6d9f4b112560603a6f33850d407acf7d60bd`. The WAL/LSM selection includes the
+public LSM persistence-boundary cases and the eight added before-image journal
+cases. This suite does not replace the separately instrumented public-API run.
+
+The [compact reconciliation](build-performance/v0.8.17/windows-native-composition.json)
+retains each group's count and log hash. Artifact `13135325344` preserves the
+source identity, individual logs and storage receipts. Its ZIP SHA-256 is
+`0a989400228ac63b5befb6bd9fe5382eb812fe757b4c8977109fcd677cd538c3`.
+Independent reconciliation matched every selected command to its successful
+test result. The 272 storage samples peaked at 4,499,861,696 allocated bytes;
+cleanup ended at 1,031,026,792 bytes.
+
+The older candidate `830b8e0d` run `41415643363` hit the combined-step 45-minute
+deadline while compiling the HNSW begin-cache binary. Its 203 completed cases
+passed; the remaining 33 were not completed. That failure remains recorded.
+The composition above separates release build, WAL/LSM and HNSW phases without
+removing cases. Its success does not relabel the older candidate CI as passing
+or establish that every other job on #795 has passed.
+
+Next: integrate the composition in dependency order after required PR checks,
+then verify the resulting candidate. The broader #682 performance comparison
+and device-failure/power-loss qualification remain separate from controlled
+process exits and injected errors. Release-package qualification, publication,
+post-release checks and main integration remain tracked by #690.
