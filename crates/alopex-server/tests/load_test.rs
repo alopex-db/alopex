@@ -1,3 +1,6 @@
+//! Manual load measurements; `lane_ci` and `--all-features` do not enable them.
+//! Timeout behavior is covered by `stream_deadline` and HTTP SQL unit tests.
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -106,7 +109,7 @@ fn parse_metric(metrics: &str, name: &str) -> Option<f64> {
     None
 }
 
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[ignore = "manual load test; requires an owning issue and per-host resource budget"]
 #[tokio::test]
 async fn load_test_concurrent_requests() {
     let (state, _temp) = build_state(Duration::from_secs(5)).await;
@@ -145,7 +148,7 @@ async fn load_test_concurrent_requests() {
     );
 }
 
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[ignore = "manual load test; requires an owning issue and per-host resource budget"]
 #[tokio::test]
 async fn load_test_backpressure_with_slow_client() {
     let (state, _temp) = build_state(Duration::from_secs(5)).await;
@@ -179,66 +182,4 @@ async fn load_test_backpressure_with_slow_client() {
     let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-}
-
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
-#[tokio::test]
-async fn load_test_timeout_cancels_stream() {
-    let temp = tempdir().expect("tempdir");
-    {
-        let config = ServerConfig {
-            data_dir: temp.path().to_path_buf(),
-            auth_mode: AuthMode::None,
-            query_timeout: Duration::from_secs(5),
-            audit_log_enabled: false,
-            ..ServerConfig::default()
-        };
-        let server = Server::new(config).expect("server");
-        let router = http::router(server.state.clone());
-
-        seed_items(&router, LOAD_TEST_ROWS).await;
-    }
-
-    let config = ServerConfig {
-        data_dir: temp.path().to_path_buf(),
-        auth_mode: AuthMode::None,
-        query_timeout: Duration::from_millis(1),
-        audit_log_enabled: false,
-        ..ServerConfig::default()
-    };
-    let server = Server::new(config).expect("server");
-    let router = http::router(server.state.clone());
-
-    let (status, body) = send_json(
-        router,
-        "/sql",
-        json!({
-            "sql": "SELECT id FROM items ORDER BY id;",
-            "streaming": true
-        }),
-    )
-    .await;
-    assert!(status == StatusCode::OK || status == StatusCode::REQUEST_TIMEOUT);
-    let text = String::from_utf8(body.clone()).expect("utf8");
-    let mut saw_timeout = false;
-    if status == StatusCode::OK {
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let item: Value = serde_json::from_str(line).expect("json");
-            if let Some(error) = item.get("error") {
-                if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
-                    saw_timeout = true;
-                    break;
-                }
-            }
-        }
-    } else {
-        let payload: Value = serde_json::from_slice(&body).expect("json");
-        let Some(error) = payload.get("error") else {
-            panic!("timeout response must include error");
-        };
-        if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
-            saw_timeout = true;
-        }
-    }
-    assert!(saw_timeout);
 }
