@@ -208,6 +208,15 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("v0.8.14", scenario)
         self.assertIn("version('alopex')", scenario)
 
+    def test_latest_identity_receives_the_resolved_release_version(self) -> None:
+        step = self.text.split(
+            "      - name: Verify public Core latest identity\n", 1
+        )[1].split("      - name: Finalize verification report\n", 1)[0]
+        environment = step.split("        env:\n", 1)[1].split("        shell:", 1)[0]
+        self.assertIn("VERSION: ${{ steps.release.outputs.version }}", environment)
+        self.assertIn('--version "${VERSION}"', step)
+        self.assertIn('--results "${REPORT_ROOT}/v${VERSION}.json"', step)
+
     def test_stable_delivery_only_imports_exact_sha_benchmark_evidence(self) -> None:
         benchmark = self.text.split("  publish-vector-benchmark:\n", 1)[1].split(
             "  publish-publication-failure-report:\n", 1
