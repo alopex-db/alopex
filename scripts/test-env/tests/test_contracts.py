@@ -145,6 +145,41 @@ class Collection(Fixture):
     def test_collection_preserves_timeout_and_original_data(self):
         self.copy_failure("TIMEOUT")
 
+    def partial_startup(self, failed):
+        from unittest.mock import Mock
+        from envctl import collect
+        run = self.run_record()
+        run.record["resources"][0]["name"] = "alopex-test-test"
+        run.save()
+        if failed:
+            atomic_json(run.root / "failure.json", {"error_code": "INTERRUPTED"})
+        docker, budget = Mock(), Mock()
+        docker.prefix = ["docker"]
+        docker.inspect.side_effect = self.inspect
+        # docker cp succeeds but the interrupted supervisor produced no report.
+        action = lambda: collect({"private_output": str(self.root), "limits": {"case_seconds": 1}},
+                                 docker, budget, run.run_id)
+        if failed:
+            action()
+            run.load().verify_collection()
+            result = read_json(run.root / "collected/result.json")
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["controller_error"], "INTERRUPTED")
+            self.assertEqual(result["error_code"], "INCOMPLETE")
+            self.assertEqual(result["cases"], [])
+        else:
+            with self.assertRaises(Failure) as caught:
+                action()
+            self.assertEqual(caught.exception.code, "COLLECT")
+            self.assertEqual(run.load().record["phase"], "stopped")
+        docker.remove.assert_not_called()
+
+    def test_empty_startup_results_remain_collectable_after_recorded_interrupt(self):
+        self.partial_startup(True)
+
+    def test_missing_report_without_recorded_failure_is_not_fabricated(self):
+        self.partial_startup(False)
+
     def test_copy_failure_preserves_run_for_retry(self):
         run = self.run_record()
         with self.assertRaises(OSError):

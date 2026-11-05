@@ -334,6 +334,14 @@ def collect(profile, docker, budget, run_id):
             require((run.root / "failure.json").exists(), "COLLECT")
             atomic_json(destination / "result.json", {"cases": [], "status": "failed",
                                                       "error_code": "INCOMPLETE"})
+        if not (destination / "result.json").exists():
+            # Startup can create the result directory, then be interrupted
+            # before the supervisor writes its first report. A successful cp
+            # of that empty/partial directory is still recoverable only when
+            # the controller has already recorded a failed execution.
+            require((run.root / "failure.json").exists(), "COLLECT")
+            atomic_json(destination / "result.json", {"cases": [], "status": "failed",
+                                                      "error_code": "INCOMPLETE"})
         for name in ("failure.json", "exit.json", "container.log", "stage.log", "collect-copy-error.json",
                      "cleanup-errors.json"):
             if (run.root / name).exists():
