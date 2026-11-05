@@ -238,9 +238,12 @@ def execute(profile, docker, budget, cases, *, probe=False, expected_cases=None)
         require(live["State"]["ExitCode"] == 0 and not live["State"]["OOMKilled"], "CASE")
     except BaseException as error:
         primary = error
-        atomic_json(run.root / "failure.json", {"error_code": getattr(error, "code", "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "INTERNAL"),
-                                                "detail": repr(error),
-                                                "cleanup_errors": getattr(error, "cleanup_errors", [])})
+        try:
+            atomic_json(run.root / "failure.json", {"error_code": getattr(error, "code", "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "INTERNAL"),
+                                                    "detail": error.detail if isinstance(error, Failure) else repr(error),
+                                                    "cleanup_errors": getattr(error, "cleanup_errors", [])})
+        except BaseException as diagnostic_error:
+            record_cleanup_error(error, "persist_failure", diagnostic_error)
         raise
     finally:
         stopped = True
@@ -462,11 +465,16 @@ def main(argv=None):
         if isinstance(error, KeyboardInterrupt):
             code = "INTERRUPTED"
         if output is not None:
-            atomic_json(output / "last-error.json", {
-                "error_code": code,
-                "detail": error.detail if isinstance(error, Failure) else repr(error),
-                "cleanup_errors": getattr(error, "cleanup_errors", []),
-            })
+            try:
+                atomic_json(output / "last-error.json", {
+                    "error_code": code,
+                    "detail": error.detail if isinstance(error, Failure) else repr(error),
+                    "cleanup_errors": getattr(error, "cleanup_errors", []),
+                })
+            except BaseException:
+                # A private diagnostic sink can itself fail. Never replace the
+                # original status or leak its path/exception via a traceback.
+                pass
         print(json.dumps({"status": "failed", "error_code": code}))
         return ERRORS[code]
     finally:

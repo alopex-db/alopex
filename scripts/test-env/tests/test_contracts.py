@@ -613,6 +613,25 @@ class Privacy(Fixture):
         self.assertNotIn("synthetic", stream.getvalue())
         self.assertEqual(json.loads(stream.getvalue())["error_code"], "INPUT")
 
+    def test_private_log_failure_preserves_status_without_traceback_or_private_text(self):
+        import contextlib
+        import envctl
+        from unittest.mock import Mock
+        profile = {"private_output": str(self.root), "run_id": "privacy", "storage": {}}
+        budget = Mock()
+        budget.before.side_effect = Failure("MEASUREMENT", "synthetic-private-counter")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(envctl, "load_profile", return_value=profile), \
+             patch.object(envctl, "host_lock", return_value=contextlib.nullcontext()), \
+             patch.object(envctl, "Docker"), patch.object(envctl, "Budget", return_value=budget), \
+             patch.object(envctl, "atomic_json", side_effect=OSError("synthetic-private-log-path")), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = envctl.main(["doctor", "--profile", "synthetic-profile"])
+        self.assertEqual(code, 78)
+        self.assertEqual(json.loads(stdout.getvalue()), {"status": "failed", "error_code": "MEASUREMENT"})
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("synthetic", stdout.getvalue())
+
     def test_host_lock_prevents_two_profiles_from_building(self):
         with host_lock(self.root / "lock"):
             with self.assertRaises(Failure):

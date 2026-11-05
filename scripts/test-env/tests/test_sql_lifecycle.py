@@ -100,7 +100,7 @@ class SQLLifecycle(unittest.TestCase):
         self.assertEqual(original.cleanup_errors[0]['detail'], 'stop failed')
         self.assertFalse((run.root / 'bundle').exists())
 
-    def test_run_preserves_original_failure_and_records_each_stop_failure(self):
+    def run_failure(self, diagnostic_failure=False):
         profile = {'private_output': str(self.root), 'run_id': 'run-failure', 'assets': 'unused',
                    'platform': 'linux/test', 'limits': {'run_seconds': 1}}
         docker, budget = Mock(), Mock()
@@ -112,20 +112,35 @@ class SQLLifecycle(unittest.TestCase):
         budget.run.side_effect = original
         def stage(p, d, b, run, *args):
             run.resource('container', 'stage', 'stage-id')
+        def record(path, value):
+            if diagnostic_failure and path.name == 'failure.json':
+                raise OSError('synthetic-private-log-path')
+            atomic_json(path, value)
         with patch.object(envctl, 'verified_image', return_value='sha256:' + 'a' * 64), \
              patch.object(envctl, 'verify_assets', return_value={'files': [{'role': 'harness', 'sha256': 'b' * 64}]}), \
              patch.object(envctl, 'digest', return_value='c' * 64), \
              patch.object(envctl, 'source_identity', return_value={}), \
-             patch.object(envctl, 'stage', side_effect=stage):
+             patch.object(envctl, 'stage', side_effect=stage), \
+             patch.object(envctl, 'atomic_json', side_effect=record):
             with self.assertRaises(Failure) as caught:
                 envctl.execute(profile, docker, budget, ['E01'])
         self.assertIs(caught.exception, original)
         run = Run(self.root, profile['run_id']).load()
         self.assertEqual(run.record['phase'], 'running')
-        self.assertEqual(read_json(run.root / 'failure.json')['error_code'], 'MEASUREMENT')
+        if diagnostic_failure:
+            self.assertFalse((run.root / 'failure.json').exists())
+            self.assertEqual(original.cleanup_errors[0]['operation'], 'persist_failure')
+        else:
+            self.assertEqual(read_json(run.root / 'failure.json')['error_code'], 'MEASUREMENT')
         errors = read_json(run.root / 'cleanup-errors.json')
         self.assertEqual(len(errors), 2)
         self.assertTrue(all(row['error_code'] == 'CLEANUP' for row in errors))
+
+    def test_run_preserves_original_failure_and_records_each_stop_failure(self):
+        self.run_failure()
+
+    def test_diagnostic_write_failure_also_preserves_the_original_error(self):
+        self.run_failure(diagnostic_failure=True)
 
 
 if __name__ == "__main__":
