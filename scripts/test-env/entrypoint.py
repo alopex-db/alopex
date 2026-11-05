@@ -17,6 +17,8 @@ import zipfile
 from common import (Failure, atomic_json, contained, digest, private_dir, read_json,
                     require, verify_assets, elf_signature)
 from verify_environment import files, io_probe, privileges, resource_limits
+from verify_capacity import active_faults
+from permissions import private_tree
 
 WORK, INPUT = Path("/work"), Path("/input")
 PG = Path("/usr/lib/postgresql/16/bin")
@@ -175,6 +177,11 @@ def prepare(assets, request):
     modules = list(harness.rglob("sql_resources.py"))
     require(len(modules) == 1, "IDENTITY")
     env["ALOPEX_TEST_RESOURCE_MODULE"] = str(modules[0])
+    # Archive and wheel modes are inputs, not the execution access policy.
+    # Configure them before loading any supplied harness code or client module.
+    layout = {"venv": private_tree(venv, configure=True, external_targets=[sys.executable]),
+              "harness": private_tree(harness, configure=True)}
+    atomic_json(WORK / "results/prepared-permissions.json", layout)
     return python, env
 
 
@@ -193,6 +200,9 @@ def sql_case(case, request, assets, python, env):
                 server = postgres(directory, request, state_directory=state)
             else:
                 server, ports = alopex(directory, request, assets, env, state_directory=state)
+            if engine == "postgresql":
+                from verify_environment import ownership
+                ownership(state / "socket/.s.PGSQL.5432", os.getuid(), os.getgid(), 0o700)
             config = {"case": case, "engine": engine, "server_pid": server.child.pid,
                       "pids": request["limits"]["pids"], "cpu": request["cpu"]["client"],
                       "socket": str(state / "socket"),
@@ -214,6 +224,9 @@ def sql_case(case, request, assets, python, env):
                         error = stop_error
         if error:
             raise error
+        atomic_json(directory / "generated-permissions.json", {
+            "database": private_tree(state), "results": private_tree(directory),
+        })
     return results
 
 
@@ -280,7 +293,8 @@ def main():
             elif case == "E04":
                 row["evidence"] = files(WORK)
             elif case == "E06":
-                row["evidence"] = {"kernel": resource_limits(request), "contracts": contract_case(case)}
+                row["evidence"] = {"kernel": resource_limits(request), "watchdog": active_faults(WORK),
+                                   "contracts": contract_case(case)}
             elif case in ("E03", "E07", "F02", "P01"):
                 row["evidence"] = contract_case(case)
             elif case in ("E05", "S01", "S02", "S03"):
@@ -295,7 +309,7 @@ def main():
             row["status"] = "passed"
         except BaseException as error:
             row["error_code"] = getattr(error, "code", "CASE")
-            row["detail"] = repr(error)
+            row["detail"] = error.detail if isinstance(error, Failure) else repr(error)
         report["cases"].append(row)
         atomic_json(result_dir / "result.json", report)
         if row["status"] != "passed":

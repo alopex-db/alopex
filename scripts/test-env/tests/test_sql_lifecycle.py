@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -14,6 +15,8 @@ from lifecycle import Run
 
 class SQLLifecycle(unittest.TestCase):
     def setUp(self):
+        previous = os.umask(0o077)
+        self.addCleanup(os.umask, previous)
         self.temp = tempfile.TemporaryDirectory(prefix="alopex-sql-lifecycle-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -39,6 +42,7 @@ class SQLLifecycle(unittest.TestCase):
 
         request = {"pids": 4, "cpu": {"client": [0]}, "limits": {"pids": 4, "case_seconds": 1}}
         with patch.object(entrypoint, "WORK", self.root), \
+             patch("verify_environment.ownership"), \
              patch.object(entrypoint, "postgres", side_effect=server), \
              patch.object(entrypoint, "alopex", side_effect=lambda *a, **k: (server(*a, **k), {"http": 1})), \
              patch.object(entrypoint, "command", side_effect=worker):

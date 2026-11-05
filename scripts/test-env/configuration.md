@@ -75,6 +75,11 @@ nosuid/nodev/noexec. HOME, TMPDIR and caches use the private work volume.
 The probe reads every input file, executes a tiny work-volume script, and
 verifies that another unprivileged UID with no supplementary groups cannot
 read the private fixture. A failed sudo invocation cannot pass that denial test.
+Extracted harness and venv trees are configured before use: directories and
+executables 0700, ordinary files 0600. Venv links may stay within that tree or
+bind its bin entry to the image's Python interpreter. SQL cases audit generated
+DB and result trees after normal shutdown without rewriting their modes; the
+PostgreSQL socket is checked while running. Metadata receipts remain private.
 
 The main container uses only two named volumes. Staging temporarily mounts the
 input volume writable in a separately labelled helper, without host bind mounts.
@@ -143,6 +148,12 @@ The runtime uses cgroup v2. E06 reads `memory.max`, `memory.swap.max`,
 `pids.max` and `cpuset.cpus.effective`, rejects unlimited or mismatched values,
 and checks both the supervisor affinity and separately started server/client
 affinity probes. These checks allocate no memory pressure and exhaust no PIDs.
+E06 also runs two independent active-watchdog probes on the work volume. One
+publishes a complete, fsynced 16 KiB fixture into a directory with a deliberately
+small monitoring threshold. The other removes its empty accounting root after
+the child starts. They require CAPACITY/MEASUREMENT respectively, wait for the
+terminated child, verify retained data and remove their tiny fixtures. This
+tests monitoring failure handling rather than exhausting physical storage.
 Filesystem roots in the storage inventory must cover the workspace, linked
 worktrees, task caches, Docker storage (including VM disk allocation), logs and
 collection output. Count each physical host separately. The controller checks
