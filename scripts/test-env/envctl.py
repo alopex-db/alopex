@@ -35,7 +35,7 @@ def source_identity():
     pending = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain", "--", "scripts/test-env"], text=True)
     require(not pending.strip(), "PREREQUISITE")
     commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-    files = [*HERE.glob("*.py"), *HERE.glob("tests/*.py"), HERE / "Dockerfile",
+    files = [*HERE.glob("*.py"), *HERE.glob("*.sh"), *HERE.glob("tests/*.py"), HERE / "Dockerfile",
              HERE / ".dockerignore", HERE / "requirements.lock"]
     content = {str(path.relative_to(HERE)): digest(path) for path in sorted(files)}
     return {"controller_commit": commit,
@@ -335,12 +335,14 @@ def acceptance(profile, docker, budget, cases):
 
 def main(argv=None):
     parser = PrivateParser(description=__doc__)
-    parser.add_argument("command", choices=("doctor", "fetch", "build", "accept", "run",
+    parser.add_argument("command", choices=("doctor", "resolve-lock", "fetch", "build", "accept", "run",
                                            "collect", "export-public", "clean"))
     parser.add_argument("--profile", required=True)
     parser.add_argument("--phase", choices=("preflight", "runtime"), default="preflight")
     parser.add_argument("--case")
-    parser.add_argument("--probe", action="store_true")
+    kind = parser.add_mutually_exclusive_group()
+    kind.add_argument("--probe", action="store_true")
+    kind.add_argument("--resolution", action="store_true")
     args = parser.parse_args(argv)
     output = None
     guard = contextlib.ExitStack()
@@ -350,7 +352,8 @@ def main(argv=None):
         output = private_dir(p["private_output"])
         docker, budget = Docker(p), Budget(p["storage"])
         command = args.command
-        run_id = p["run_id"] + ("-probe" if args.probe else "")
+        require(not args.resolution or command in ("collect", "clean"))
+        run_id = p["run_id"] + ("-resolve" if args.resolution else "-probe" if args.probe else "")
         if command == "doctor":
             if args.phase == "preflight":
                 for operation in ("fetch", "build", "runtime", "accept", "collect"):
@@ -362,6 +365,9 @@ def main(argv=None):
                 image_lock(p)
             else:
                 execute(p, docker, budget, ["E01", "E02", "E04"], probe=True)
+        elif command == "resolve-lock":
+            from resolve_image import resolve
+            resolve(p, docker, budget)
         elif command == "fetch":
             fetch(p, docker, budget)
         elif command == "build":

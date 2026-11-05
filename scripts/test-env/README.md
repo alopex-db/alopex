@@ -32,8 +32,33 @@ Use Ubuntu 24.04 packages, Python 3.12/venv/pip, PostgreSQL 16.14 server/client,
 sudo, CA certificates, procps, util-linux and iproute2. Include psycopg 3.2.10 and
 the selected Alopex wheel's Python dependencies. PostgreSQL package provenance
 must come from PGDG. Build verifies the installed package versions and rejects
-missing dependencies offline. The platform mapping is currently unresolved;
-image construction and live acceptance are pending, not covered by unit tests.
+missing dependencies offline.
+
+Copy the checked-in image lock to a private file and set `image_lock` to that
+copy. Resolve its platform entry once before the first preflight:
+
+```sh
+python3 scripts/test-env/envctl.py resolve-lock --profile "$RUN_PROFILE"
+```
+
+This acquisition step starts a disposable container from the pinned base, reads
+its installed package inventory, and resolves the dependency closure using
+authenticated Ubuntu/PGDG APT indexes. It does not install packages into the VM.
+The resolver pins PostgreSQL server, client and libpq together. It uses a fresh
+archive cache so already downloaded packages cannot disappear from the closure.
+Package SHA256 values come from the signed indexes, including when APT's URI
+listing uses MD5. Exact pure-Python wheels are selected from `requirements.lock`
+using PyPI metadata. The resulting lock records every dependency's URL, size and
+SHA256; subsequent `fetch` and `build` use that lock without re-resolving it.
+
+The resolver uses the profile's `fetch` capacity allowance and execution timeout.
+Include the base image, APT indexes, container writable layer, logs and copied
+metadata in that allowance, and the copied metadata in the `collect` allowance.
+It retains compact resolution evidence and removes its container after verified
+collection. After an interrupted or failed resolution, use `collect --resolution`
+then `clean --resolution`; use a new run ID for another resolution. Keep the lock
+with the evidence. Re-resolution is an explicit dependency update, not a step to
+repeat for every build.
 
 `assets.json` identifies the products independently of the image. Its file list
 uses bundle-relative paths and SHA256/size for each server, wheel, shared library,

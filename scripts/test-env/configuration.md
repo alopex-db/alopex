@@ -40,6 +40,8 @@ Host identity, connection details and filesystem roots stay out of public output
 | Source | Destination | Rule / configuration |
 | --- | --- | --- |
 | Fetch CLI | HTTPS URLs and redirects in the resolved lock | Exact hashes/sizes; redirect hosts must be allowlisted; system CA validation |
+| Lock resolver | Ubuntu archive/security/ports mirrors and PGDG archive, HTTPS 443; runtime bridge DNS | Disposable pinned-base container, no host mounts/socket/ports; standard seccomp/LSM, bounded memory/PIDs/time/storage. APT redirects disabled; signature/TLS validation required. |
+| Lock resolver CLI | `www.postgresql.org`, `pypi.org`, HTTPS 443; system DNS | SHA256-pinned public PGDG key, exact wheel-version metadata; system CA trust. No credentials passed into the helper. |
 | Docker pull | Registry/auth/CDN endpoints for the locked base | Existing Docker context credentials; record dependency destinations with the lock |
 | Build | None | Pre-fetched base and packages, `--network=none`, `--pull=false` |
 | Runtime and staging | None externally | `--network=none`, no port publication or host networking |
@@ -100,18 +102,25 @@ the result to both collection manifests. Unit-contract cases are labelled
 `contract_regression`; live environment acceptance requires the live probes and
 all six SQL cells as well.
 
-## Qualification still required
+## Image lock and qualification
 
-The initial image lock fixes the base index but has no resolved platform entry.
-`doctor` and `build` reject it with PREREQUISITE until the dependency closure has
-been resolved and its URLs, package versions, sizes and hashes recorded. This
-prevents an unverified image from being presented as accepted.
+`resolve-lock` fills the selected platform entry in a private copy of the initial
+image lock. The pinned base supplies Ubuntu's archive signing keys; the PGDG
+public key is additionally pinned by SHA256. APT rejects partial index-update
+failures, unsigned repositories and package removals. It resolves against the
+base inventory without changing the VM's package state. The host validates
+each URI against its signed-index package name, filename, size, version and
+SHA256, then freezes the complete installed inventory and dependency file list.
+APT's printed MD5 is never used as the lock digest. Resolution runs are owned,
+stopped, collected and deleted through the same lifecycle as acceptance runs.
 
 Live image construction, LSM/namespace checks, I/O probes and SQL cells must be
 recorded against the eventual image and input identities. Local unit tests do
 not establish these results.
 
 References: [Docker volumes](https://docs.docker.com/engine/storage/volumes/),
+[PGDG repository configuration](https://wiki.postgresql.org/wiki/Apt),
+[APT archive authentication](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html),
 [Docker resource controls](https://docs.docker.com/engine/containers/resource_constraints/),
 [Docker seccomp](https://docs.docker.com/engine/security/seccomp/),
 [PostgreSQL initdb](https://www.postgresql.org/docs/16/app-initdb.html),
