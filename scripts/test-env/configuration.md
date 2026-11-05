@@ -67,6 +67,15 @@ only native execution may supply release-performance qualification.
 | Private host profiles/results | invoking user; directories 0700/files 0600 | `common.py` | P01, permission regressions |
 | Process counters | observer reads same-UID server tree; PID/start ticks/executable identities | `observe.py` | E02, E07 and SQL backend membership |
 
+E04 checks input/tool/work ownership and modes, the root-owned setuid sudo
+binary and sudoers, and effective mount flags from `proc/self/mountinfo`.
+Input is read-only and executable; work is writable and executable; the mount
+containing sudo permits setuid and execution. `/dev/shm` is writable tmpfs with
+nosuid/nodev/noexec. HOME, TMPDIR and caches use the private work volume.
+The probe reads every input file, executes a tiny work-volume script, and
+verifies that another unprivileged UID with no supplementary groups cannot
+read the private fixture. A failed sudo invocation cannot pass that denial test.
+
 The main container uses only two named volumes. Staging temporarily mounts the
 input volume writable in a separately labelled helper, without host bind mounts.
 Both helpers and the main container have explicit memory/PID bounds and no
@@ -130,6 +139,10 @@ belong to functional acceptance, not performance comparisons.
 
 CPU sets, memory/swap, PID and time limits come from the private profile. Docker
 limits and affinity are checked against actual container/process settings.
+The runtime uses cgroup v2. E06 reads `memory.max`, `memory.swap.max`,
+`pids.max` and `cpuset.cpus.effective`, rejects unlimited or mismatched values,
+and checks both the supervisor affinity and separately started server/client
+affinity probes. These checks allocate no memory pressure and exhaust no PIDs.
 Filesystem roots in the storage inventory must cover the workspace, linked
 worktrees, task caches, Docker storage (including VM disk allocation), logs and
 collection output. Count each physical host separately. The controller checks
@@ -185,3 +198,5 @@ References: [Docker volumes](https://docs.docker.com/engine/storage/volumes/),
 [PostgreSQL initdb](https://www.postgresql.org/docs/16/app-initdb.html),
 [PostgreSQL authentication](https://www.postgresql.org/docs/16/auth-pg-hba-conf.html),
 [Linux process I/O](https://man7.org/linux/man-pages/man5/proc_pid_io.5.html).
+Mount flags follow [proc_pid_mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html);
+kernel limit files follow [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).

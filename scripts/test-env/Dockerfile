@@ -25,7 +25,8 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
 COPY *.py image-manifest.json /tool/
 COPY tests/ /tool/tests/
 COPY wheelhouse/ /tool/wheelhouse/
-RUN chmod -R go-w /tool \
+RUN find /tool -type d -exec chmod 0755 {} + \
+    && find /tool -type f -exec chmod 0644 {} + \
     && python3 /tool/image_verify.py
 
 USER alopex

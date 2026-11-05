@@ -16,7 +16,7 @@ import zipfile
 
 from common import (Failure, atomic_json, contained, digest, private_dir, read_json,
                     require, verify_assets, elf_signature)
-from verify_environment import files, io_probe, privileges
+from verify_environment import files, io_probe, privileges, resource_limits
 
 WORK, INPUT = Path("/work"), Path("/input")
 PG = Path("/usr/lib/postgresql/16/bin")
@@ -279,7 +279,9 @@ def main():
                 row["evidence"] = io_probe(WORK, request["limits"]["case_seconds"])
             elif case == "E04":
                 row["evidence"] = files(WORK)
-            elif case in ("E03", "E06", "E07", "F02", "P01"):
+            elif case == "E06":
+                row["evidence"] = {"kernel": resource_limits(request), "contracts": contract_case(case)}
+            elif case in ("E03", "E07", "F02", "P01"):
                 row["evidence"] = contract_case(case)
             elif case in ("E05", "S01", "S02", "S03"):
                 if python is None:
