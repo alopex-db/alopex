@@ -64,6 +64,7 @@ class Docker:
         p, limits = self.profile, self.profile["limits"]
         cpus = sorted(set(p["cpu"]["server"] + p["cpu"]["client"]))
         args = ["create", "--name", "alopex-test-" + run_id, "--init", "--pull=never",
+                "--hostname=alopex-test", "--add-host=alopex-test:127.0.0.1",
                 "--platform", p["platform"], "--network=none", "--ipc=private",
                 "--cap-drop=ALL", "--user", "alopex", "--label", OWNER,
                 "--label", "org.alopex.test-env.run=" + run_id,
@@ -109,6 +110,8 @@ class Docker:
         require(normalize(host["CapAdd"]) == set(CAPABILITIES), "POLICY")
         require(normalize(host["CapDrop"]) == {"ALL"}, "POLICY")
         require(config["User"] == "alopex", "POLICY")
+        require(config["Hostname"] == "alopex-test" and
+                host.get("ExtraHosts") == ["alopex-test:127.0.0.1"], "POLICY")
         security = host.get("SecurityOpt") or []
         require(not any(value.startswith("no-new-privileges") for value in security), "POLICY")
         supplied = next((value.split("=", 1)[1] for value in security if value.startswith("seccomp=")), None)

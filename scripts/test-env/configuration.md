@@ -43,6 +43,7 @@ Host identity, connection details and filesystem roots stay out of public output
 | Docker pull | Registry/auth/CDN endpoints for the locked base | Existing Docker context credentials; record dependency destinations with the lock |
 | Build | None | Pre-fetched base and packages, `--network=none`, `--pull=false` |
 | Runtime and staging | None externally | `--network=none`, no port publication or host networking |
+| Sudo hostname lookup | Container loopback | Fixed container alias `alopex-test` in `/etc/hosts`; no DNS lookup for the container's own name |
 | SQL client | Alopex IPv4 loopback HTTP; supervisor also checks gRPC/admin listeners | Container-local ports 8080/9090/8081; auth type none; no TLS |
 | PostgreSQL bootstrap | Unix socket, postgres DB, alopex role | `local postgres alopex peer` followed by reject rules |
 | PostgreSQL acceptance | Unix socket, acceptance DB, alopex role | Replace HBA with `local acceptance alopex peer`, reject the rest, restart |
