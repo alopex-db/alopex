@@ -559,6 +559,22 @@ class Accounting(unittest.TestCase):
         with patch.object(meter, "snapshot", return_value=after), self.assertRaises(Failure):
             meter.end()
 
+    def test_missing_postgresql_backend_cannot_pass_a_complete_snapshot(self):
+        from observe import Observation
+        server = {1: self.row(), 3: dict(self.row(), pid=3)}
+        meter = Observation(1, 4, required_backend=3)
+        with patch('observe.Path.read_text', return_value='100'), \
+             patch('observe.os.getpid', return_value=2), \
+             patch('observe.process', return_value=dict(self.row(), pid=2)), \
+             patch('observe.tree', return_value=server):
+            self.assertEqual(set(meter.snapshot()['server']), {1, 3})
+            # The postmaster remains observable, but losing the connection's
+            # backend must invalidate the cell even with stable PID allocation.
+            del server[3]
+            with self.assertRaises(Failure) as caught:
+                meter.snapshot()
+            self.assertEqual(caught.exception.code, 'MEASUREMENT')
+
     def test_remote_sql_dictionary_rows_keep_values_and_nulls(self):
         from verify_sql import rows
         self.assertEqual(rows([{"id": 1, "value": "one"}, {"id": 2, "value": None}]),

@@ -69,9 +69,22 @@ only native execution may supply release-performance qualification.
 
 E04 checks input/tool/work ownership and modes, the root-owned setuid sudo
 binary and sudoers, and effective mount flags from `proc/self/mountinfo`.
-Input is read-only and executable; work is writable and executable; the mount
-containing sudo permits setuid and execution. `/dev/shm` is writable tmpfs with
-nosuid/nodev/noexec. HOME, TMPDIR and caches use the private work volume.
+Mount requirements apply to the container paths below, independently of the
+VM's backing-directory names. `suid`/`dev` mean the absence of `nosuid`/`nodev`.
+
+| Area | Read/write and execution | Setuid and devices | Configuration / check |
+| --- | --- | --- | --- |
+| Input volume | Read-only, exec | Setuid and device access are not used; either suid/nosuid and dev/nodev are acceptable. Only regular files/directories with the modes above are staged. | `Docker.arguments`: `readonly,volume-nocopy`; E04 records mount flags and rejects writes even through sudo. |
+| Work volume, including HOME, TMPDIR, cache, venv, DB and results | Read-write, exec for venv and work scripts | No setuid files or device nodes; either suid/nosuid and dev/nodev are acceptable. Generated-tree inspection rejects special files other than private sockets. | `Docker.arguments`: `volume-nocopy`; E04 plus generated-permission receipts. |
+| Root image layer, including sudo, shared libraries, `/tmp` and `/run` | Runtime writable layer, exec; libraries require read access and executable mappings | suid required for sudo. Runtime standard devices only; no device passthrough. | Dockerfile, `Docker.arguments`; E01 sudo, E04 root mount, `validate_container` rejects `Devices`. Application temporary files use TMPDIR on work. |
+| Private shared memory | Read-write tmpfs, noexec | nosuid, nodev | `--ipc=private`; E04 requires tmpfs and all four flags on `/dev/shm`. SQL startup verifies DB shared-memory use. |
+| Staging helper input/work volumes | Read-write during ownership setup and asset copy | Same named-volume defaults; no device access or setuid execution needed | `envctl.stage`, root helper with the same six-capability bound; runtime input is subsequently mounted read-only. |
+
+No additional tmpfs or host bind mount is created. Named-volume defaults in the
+qualified run were suid/dev; these flags grant no extra device attachment or
+MKNOD capability. The accepted optional nosuid/nodev restrictions above do not
+apply to the root layer, where sudo needs setuid. Docker mount records and
+`proc/self/mountinfo` are retained privately, including filesystem type.
 The probe reads every input file, executes a tiny work-volume script, and
 verifies that another unprivileged UID with no supplementary groups cannot
 read the private fixture. A failed sudo invocation cannot pass that denial test.
@@ -107,20 +120,62 @@ required syscall/access rules, its applied identity, and successful/denied probe
 results in private evidence. Seccomp mode alone is not policy qualification.
 Host identity, connection details and filesystem roots stay out of public output.
 
+The qualified Docker 29.5.2 runtime uses Moby profiles `seccomp/v0.2.3`, SHA256
+`536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74`, and the
+runtime-generated `docker-default` AppArmor profile in enforce mode. The seccomp
+default is ERRNO; its permitted file, mapping, UID/GID, signal and wait calls
+cover sudo, DB access, observation and child reaping. SYS_ADMIN, SYS_PTRACE and
+MKNOD are absent from the capability bound. E01 checks the applied profile and
+privileges; E04 checks read-only input and other-user denial; F01/F02 check
+signal/wait and recovery. A profile identity or digest mismatch fails POLICY.
+
+Process observation requires `CONFIG_TASK_IO_ACCOUNTING` support and readable
+`io`, `stat`, `status`, `exe` and `task/*/children` for the same-UID DB tree in the
+private PID namespace. The io/exe access checks use PTRACE_MODE_READ_FSCREDS:
+matching credentials, a dumpable target and LSM permission are required without
+SYS_PTRACE. DBs and observers run as alopex, with no setuid transition in the DB
+tree; sudo is used separately. E02 verifies another live process's actual I/O
+on the DB volume, and all SQL cells verify the real DB tree. Missing counters,
+hidden proc entries or denied reads fail the prerequisite/measurement; no
+proc remount, dumpability override or LSM relaxation is performed.
+
 ## Network and database authentication
 
 | Source | Destination | Rule / configuration |
 | --- | --- | --- |
-| Fetch CLI | HTTPS URLs and redirects in the resolved lock | Exact hashes/sizes; redirect hosts must be allowlisted; system CA validation |
-| Lock resolver | Ubuntu archive/security/ports mirrors and PGDG archive, HTTPS 443; runtime bridge DNS | Disposable pinned-base container, no host mounts/socket/ports; standard seccomp/LSM, bounded memory/PIDs/time/storage. APT redirects disabled; signature/TLS validation required. |
+| Fetch CLI | `archive.ubuntu.com`, `security.ubuntu.com`, `ports.ubuntu.com`, `apt-archive.postgresql.org`, `files.pythonhosted.org`; HTTPS TCP 443 | Use only the selected lock entry's `allowed_hosts` and exact file URLs; exact hashes/sizes; redirect hosts must be allowlisted; system CA validation. |
+| Lock resolver | `archive.ubuntu.com`, `security.ubuntu.com` or `ports.ubuntu.com` from the pinned base's sources; `apt-archive.postgresql.org`; HTTPS TCP 443 | Disposable pinned-base container, no host mounts/socket/ports; standard seccomp/LSM, bounded memory/PIDs/time/storage. APT redirects disabled; signature/TLS validation required. |
 | Lock resolver CLI | `www.postgresql.org`, `pypi.org`, HTTPS 443; system DNS | SHA256-pinned public PGDG key, exact wheel-version metadata; system CA trust. No credentials passed into the helper. |
-| Docker pull | Registry/auth/CDN endpoints for the locked base | Existing Docker context credentials; record dependency destinations with the lock |
+| Docker pull | `registry-1.docker.io`, `auth.docker.io`, `production.cloudfront.docker.com`; HTTPS TCP 443 | Public locked Ubuntu base, anonymous pull token; dedicated Docker configuration, daemon CA trust. Record actual blob redirect host with the base digest. |
+| Operation CLI | Private Docker context Unix socket | Invoking user must be able to connect and create/build/inspect/stop/copy/remove owned resources; `Docker.prerequisites` rejects non-Unix endpoints. No TCP API or socket passed into containers. |
 | Build | None | Pre-fetched base and packages, `--network=none`, `--pull=false` |
 | Runtime and staging | None externally | `--network=none`, no port publication or host networking |
 | Sudo hostname lookup | Container loopback | Fixed container alias `alopex-test` in `/etc/hosts`; no DNS lookup for the container's own name |
 | SQL client | Alopex IPv4 loopback HTTP; supervisor also checks gRPC/admin listeners | Container-local ports 8080/9090/8081; auth type none; no TLS |
 | PostgreSQL bootstrap | Unix socket, postgres DB, alopex role | `local postgres alopex peer` followed by reject rules |
 | PostgreSQL acceptance | Unix socket, acceptance DB, alopex role | Replace HBA with `local acceptance alopex peer`, reject the rest, restart |
+
+The resolved dependency lock selects only the hosts needed by its platform;
+the table is the supported source set, not an instruction to contact every
+host. The qualified base's blob request returned HTTP 307 to the listed CDN;
+only its hostname and artifact digests are retained, never signed redirect URLs
+or bearer tokens. External services are unreachable during build or acceptance: offline
+installation and E05 run with network none.
+
+| Access setting | Applied value / location | Verification |
+| --- | --- | --- |
+| CLI DNS | Operating-system resolver for the HTTPS destinations above | Successful lock/fetch with TLS verification; retain resolver configuration privately. |
+| Resolver-container DNS | Runtime-provided `/etc/resolv.conf` on the default bridge; UDP/TCP 53 to its configured resolver | APT index retrieval succeeds; no `--dns` override or published port. Resolver addresses are private parameters. |
+| Runtime DNS | No external route with network none; own hostname resolves through `/etc/hosts` | Docker inspection, E05 failed external connection, successful local listeners. |
+| CLI CA and proxy | Python default CA trust and `urllib.request.getproxies()`; direct access when no proxy is configured | PGDG key hash, signed APT indexes and download hashes. No TLS-verification bypass. Keep proxy URLs and credentials private. |
+| Resolver CA and proxy | Copy public certificates from `ssl.create_default_context()` into its temporary CA bundle; APT `Acquire::https::CaInfo` uses it. No proxy credentials or proxy environment passed into the helper. | `resolve_image.py`, `resolve_image.sh`; successful authenticated indexes. |
+| Docker pull CA and proxy | Daemon trust/proxy configuration, separate from Python CLI settings | Successful pinned-base pull. Dedicated Docker CLI config has no automatic container proxy settings. |
+| Acceptance credentials | No cloud/registry/proxy credentials; Alopex loopback has no auth/TLS, PostgreSQL uses peer | Request/asset schema and environment construction; E05 accepts only the intended PostgreSQL DB/role and rejects TCP. |
+
+Direct outbound HTTPS is required for the disposable APT resolver. If the
+network requires an authenticated proxy, its configuration is an unresolved
+acquisition prerequisite; credentials must not be silently added to image
+layers, build arguments or acceptance containers.
 
 For public-registry acquisition with no credentials, use a dedicated Docker CLI
 configuration with `auths: {"https://index.docker.io/v1/": {}}` and no credential
@@ -213,5 +268,11 @@ References: [Docker volumes](https://docs.docker.com/engine/storage/volumes/),
 [PostgreSQL initdb](https://www.postgresql.org/docs/16/app-initdb.html),
 [PostgreSQL authentication](https://www.postgresql.org/docs/16/auth-pg-hba-conf.html),
 [Linux process I/O](https://man7.org/linux/man-pages/man5/proc_pid_io.5.html).
+Access checks follow [ptrace permissions](https://man7.org/linux/man-pages/man2/ptrace.2.html).
+Acquisition destinations and trust use [Docker registry endpoints](https://docs.docker.com/desktop/enterprise/allow-list/),
+[daemon proxies](https://docs.docker.com/engine/daemon/proxy/) and
+[container DNS](https://docs.docker.com/engine/network/).
+Policy provenance: [Moby seccomp v0.2.3](https://github.com/moby/profiles/blob/seccomp/v0.2.3/seccomp/default.json),
+[Docker AppArmor](https://docs.docker.com/engine/security/apparmor/).
 Mount flags follow [proc_pid_mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html);
 kernel limit files follow [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).
