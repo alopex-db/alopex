@@ -1,4 +1,4 @@
-name: Construct native test VM image
+name: Build native comparison assets
 on:
   workflow_dispatch:
     inputs:
@@ -6,15 +6,19 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
+      build_config:
+        description: Public source identities, tool versions and operation bounds
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: alopex-v0817-native-construction
+  group: alopex-v0817-native-build
   cancel-in-progress: false
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 25
+    timeout-minutes: 210
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -78,38 +82,18 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Construct isolated image and verify minimal native probes
+      - name: Build source-bound server and wheel serially
         env:
           RUNNER_KIND: ${{ runner.environment }}
-          NATIVE_IMAGE_INPUTS: ${{ secrets.ALOPEX_NATIVE_IMAGE_INPUTS }}
+          PUBLIC_BUILD_CONFIG: ${{ inputs.build_config }}
         shell: bash
-        run: |
-          python3 - <<'PYCODE'
-          import json, os, pathlib, subprocess
-          try:
-              assert os.environ.get('RUNNER_KIND') == 'github-hosted'
-              env = dict(os.environ, OPERATOR_HOME=os.environ['HOME'], OPERATOR_UID=str(os.getuid()), OPERATOR_GID=str(os.getgid()))
-              names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
-              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_image.py']
-              result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=1380)
-              for line in result.stdout.splitlines():
-                  value = json.loads(line)
-                  assert set(value) <= {'status','error_code'}
-                  assert value.get('status') in ('passed','failed')
-                  assert value.get('error_code') in (None,'VM_SCOPE','CONSTRUCTION')
-                  print(json.dumps(value,sort_keys=True))
-              raise SystemExit(result.returncode)
-          except SystemExit: raise
-          except BaseException:
-              print('{"status":"failed","error_code":"CONSTRUCTION"}')
-              raise SystemExit(1)
-          PYCODE
-      - name: Preserve image and encrypted evidence
+        run: python3 -B scripts/ops/hosted_native_assets.py
+      - name: Preserve software assets and encrypted build evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-test-environment
-          path: native-export/
+          name: native-product-assets
+          path: native-assets-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
