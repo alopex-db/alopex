@@ -1,0 +1,5 @@
+{
+  "schema": "alopex.test-env-image/v1",
+  "base": "ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+  "platforms": {}
+}

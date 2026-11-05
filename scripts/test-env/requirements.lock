@@ -1,0 +1,4 @@
+# Exact Python package selection. Download hashes belong to the platform entry
+# in image.lock.json and are verified before offline installation.
+psycopg==3.2.10
+typing_extensions==4.15.0

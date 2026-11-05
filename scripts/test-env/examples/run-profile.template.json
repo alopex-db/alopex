@@ -1,0 +1,18 @@
+{
+  "schema": "alopex.test-env-profile/v1",
+  "run_id": null,
+  "docker_context": null,
+  "platform": null,
+  "execution_mode": "native",
+  "image_lock": null,
+  "assets": null,
+  "private_output": null,
+  "cache": null,
+  "cpu": {"server": [], "client": []},
+  "limits": {"memory_bytes": null, "swap_bytes": 0, "pids": null, "case_seconds": null, "run_seconds": null, "stop_seconds": null},
+  "storage": {
+    "roots": [], "runtime_storage_roots": [], "stop_bytes": null, "reserve_bytes": null, "poll_seconds": null,
+    "planned_bytes": {"fetch": null, "build": null, "runtime": null, "accept": null, "collect": null}
+  },
+  "security": {"lsm_kind": null, "lsm_profile": null, "seccomp_profile": null, "seccomp_sha256": null}
+}
