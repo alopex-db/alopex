@@ -26,6 +26,53 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temp.name)
 
 
+class ImageInventory(unittest.TestCase):
+    def verify(self, inventory):
+        import runpy
+        with patch("pathlib.Path.read_text", return_value=json.dumps({"packages": {"base": "1"}})), \
+             patch("subprocess.check_output", side_effect=[inventory, "postgres (PostgreSQL) 16.14"]), \
+             patch.object(sys, "version_info", (3, 12, 0)):
+            runpy.run_path(str(Path(__file__).resolve().parents[1] / "image_verify.py"))
+
+    def test_exact_inventory_is_accepted(self):
+        self.verify("base\t1\n")
+
+    def test_unlocked_package_is_rejected(self):
+        with self.assertRaises(Failure):
+            self.verify("base\t1\nextra\t1\n")
+
+    def test_wrong_version_is_rejected(self):
+        with self.assertRaises(Failure):
+            self.verify("base\t2\n")
+
+
+class ImageBuild(Fixture):
+    def test_successful_build_retains_controller_identity_after_copying_dependencies(self):
+        from unittest.mock import Mock
+        import envctl
+        cache = self.root / "cache"
+        (cache / "deps").mkdir(parents=True)
+        package = cache / "deps/tiny.deb"
+        package.write_bytes(b"fixture")
+        lock = self.root / "lock.json"
+        lock.write_text("{}")
+        profile = {"cache": str(cache), "image_lock": str(lock),
+                   "platform": "linux/test", "limits": {"run_seconds": 1}}
+        source = {"controller_commit": "a" * 40, "controller_digest": "b" * 64}
+        variant = {"files": [{"path": "deps/tiny.deb", "size": 7,
+                              "sha256": digest(package)}]}
+        docker, budget = Mock(), Mock()
+        docker.prefix = ["docker"]
+        budget.run.side_effect = lambda *args, **kwargs: (cache / "image.id").write_text("sha256:" + "c" * 64)
+        with patch.object(envctl, "image_lock", return_value=({"base": "locked"}, variant)), \
+             patch.object(envctl, "source_identity", return_value=source):
+            envctl.build(profile, docker, budget)
+        result = read_json(cache / "image.json")
+        self.assertEqual(result["controller_commit"], source["controller_commit"])
+        self.assertEqual(result["controller_digest"], source["controller_digest"])
+        self.assertFalse((cache / "context").exists())
+
+
 class Collection(Fixture):
     def run_record(self):
         run = Run(self.root, "test").create({})

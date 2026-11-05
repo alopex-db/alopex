@@ -115,12 +115,12 @@ def build(profile, docker, budget):
         shutil.copytree(HERE / "tests", context / "tests", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copyfile(HERE / "Dockerfile", context / "Dockerfile")
         for item in variant["files"]:
-            source = contained(cache, item["path"])
-            require(source.is_file() and source.stat().st_size == item["size"] and
-                    digest(source) == item["sha256"], "IDENTITY")
+            source_file = contained(cache, item["path"])
+            require(source_file.is_file() and source_file.stat().st_size == item["size"] and
+                    digest(source_file) == item["sha256"], "IDENTITY")
             target = contained(context, item["path"])
             private_dir(target.parent)
-            shutil.copyfile(source, target)
+            shutil.copyfile(source_file, target)
         atomic_json(context / "image-manifest.json", variant)
         budget.run([*docker.prefix, "build", "--network=none", "--pull=false",
                     "--platform", profile["platform"], "--build-arg", "BASE=" + lock["base"],
