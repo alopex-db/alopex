@@ -67,7 +67,7 @@ print(json.dumps(result, sort_keys=True))
 '''
 
 
-def construct(repo, work, export, inputs, recipient):
+def construct(repo, work, export, inputs, recipient, operation=None):
     sys.path.insert(0, str(repo / "scripts/test-env"))
     from capacity import Budget, allocated_bytes
     from common import atomic_json, digest, private_dir, require
@@ -84,6 +84,7 @@ def construct(repo, work, export, inputs, recipient):
     mount = work.parent / (work.name + "-mount")
     require(not mount.exists(), "STATE")
     private_dir(mount)
+    private_dir(Path.home() / ".cache/alopex-test-env")
     roots = [repo.parent, work, export]
     # No checkout, caches or artifacts from another job are reused. Include
     # the provider's action cache and both users' possible tool caches anyway.
@@ -126,7 +127,7 @@ def construct(repo, work, export, inputs, recipient):
     profile = {"schema": "alopex.test-env-profile/v1", "run_id": "native-image-probe",
                "docker_context": context, "platform": inputs["platform"], "execution_mode": "native",
                "image_lock": str(lock), "assets": str(work / "not-yet-constructed-assets.json"),
-               "private_output": str(work / "results"), "cache": str(work / "cache"),
+               "private_output": str(mount / "results" if operation is not None else work / "results"), "cache": str(work / "cache"),
                "cpu": {"server": [cpus[0]], "client": [cpus[1]]},
                "limits": inputs["limits"], "storage": storage,
                "security": {"lsm_kind": "apparmor", "lsm_profile": "docker-default",
@@ -158,6 +159,8 @@ def construct(repo, work, export, inputs, recipient):
         bounded(["mount", "-o", "loop", str(disk), str(mount)])
         mounted = True
         private_dir(mount / "tmp")
+        if operation is not None:
+            private_dir(mount / "results")
         daemon_log = (work / "daemon.log").open("wb")
         (work / "daemon.log").chmod(0o600)
         daemon = subprocess.Popen(["dockerd", "--config-file", str(work / "daemon.json")],
@@ -181,10 +184,19 @@ def construct(repo, work, export, inputs, recipient):
         docker = Docker(profile)
         docker.prerequisites()
         controller = [sys.executable, str(repo / "scripts/test-env/envctl.py")]
-        for command, phase in ((["doctor", "--phase", "preflight"], "runtime"),
-                               (["fetch"], "fetch"), (["build"], "build")):
-            bounded(controller + command + ["--profile", str(work / "profile.json")],
-                    phase, bounds["operation_seconds"], command[0])
+        if "image_archive" in inputs:
+            archive = repo / inputs["image_archive"]
+            require(archive.resolve().is_relative_to(repo) and archive.is_file(), "IDENTITY")
+            require(digest(archive) == inputs["image_archive_sha256"], "IDENTITY")
+            bounded([*docker.prefix, "load", "--input", str(archive)], "build", 300, "load-image")
+            atomic_json(work / "cache/image.json", inputs["image_record"])
+            from envctl import verified_image
+            verified_image(profile, docker)
+        else:
+            for command, phase in ((["doctor", "--phase", "preflight"], "runtime"),
+                                   (["fetch"], "fetch"), (["build"], "build")):
+                bounded(controller + command + ["--profile", str(work / "profile.json")],
+                        phase, bounds["operation_seconds"], command[0])
         image = json.loads((work / "cache/image.json").read_text())
         run = Run(profile["private_output"], profile["run_id"]).create(image)
         budget.before("runtime")
@@ -209,6 +221,8 @@ def construct(repo, work, export, inputs, recipient):
                       controller_digest=image["controller_digest"], status="passed",
                       checks={"isolated_container": True, "guest_sudo": True,
                               "work_volume_process_io": True, "kernel_limits": True})
+        if operation is not None:
+            operation(profile, docker, budget, work, export, public)
     except BaseException as error:
         failure = error
         atomic_json(work / "failure.json", {"error": repr(error)})
@@ -233,7 +247,27 @@ def construct(repo, work, export, inputs, recipient):
                 run.clean(docker.inspect, docker.remove)
             except BaseException as error:
                 cleanup_errors.append(repr(error))
-        if failure is None and not cleanup_errors:
+        if operation is not None and docker is not None:
+            try:
+                for kind in ("container", "volume"):
+                    options = ["--all"] if kind == "container" else []
+                    remaining = docker.call(kind, "ls", *options, "--quiet", "--filter", "label=org.alopex.test-env.owner=envctl")
+                    if remaining:
+                        cleanup_errors.append("owned resources remain: " + kind)
+            except BaseException as error:
+                cleanup_errors.append(repr(error))
+        if operation is not None and mounted and (mount / "results").exists():
+            try:
+                members = list((mount / "results").rglob("*"))
+                require(all(stat.S_ISREG(path.lstat().st_mode) or stat.S_ISDIR(path.lstat().st_mode)
+                            for path in members), "POLICY")
+                require(sum(path.stat().st_size for path in members) * 2 < bounds["collect_bytes"], "CAPACITY")
+                budget.before("collect")
+                shutil.copytree(mount / "results", work / "results", dirs_exist_ok=True)
+                budget.check()
+            except BaseException as error:
+                cleanup_errors.append(repr(error))
+        if failure is None and not cleanup_errors and "image_archive" not in inputs:
             try:
                 image_id = public["image_digest"]
                 size = int(docker.call("image", "inspect", "sha256:" + image_id, "--format", "{{.Size}}"))
@@ -272,7 +306,7 @@ def construct(repo, work, export, inputs, recipient):
             atomic_json(work / "cleanup-errors.json", cleanup_errors)
         public["status"] = "passed" if failure is None and not cleanup_errors else "failed"
         public["owned_resources_cleaned"] = not mounted and not cleanup_errors
-        public["full_acceptance"] = False
+        public.setdefault("full_acceptance", False)
         public["performance_qualification"] = False
         atomic_json(work / "storage-after.json", {"allocated_bytes": allocated_bytes(roots)})
         # Keep detailed settings and logs confidential even in a public repo.
