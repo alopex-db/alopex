@@ -27,8 +27,14 @@ def allocated_bytes(roots):
             require(hasattr(info, "st_blocks"), "MEASUREMENT")
             total += info.st_blocks * 512
             if stat.S_ISLNK(info.st_mode):
-                # Explicitly inventory targets; never hide usage behind a link.
-                pending.append(path.resolve(strict=True))
+                # The link's own allocation was counted above. A dangling
+                # target occupies no storage; permission errors still fail.
+                target = path.resolve(strict=False)
+                try:
+                    target.lstat()
+                except FileNotFoundError:
+                    continue
+                pending.append(target)
             elif stat.S_ISDIR(info.st_mode):
                 pending.extend(path.iterdir())
     return total
@@ -46,7 +52,7 @@ class Budget:
             require(type(value) is int and value >= 0, "MEASUREMENT")
             return value
         except (OSError, ValueError) as error:
-            raise Failure("MEASUREMENT", repr(error)) from error
+            raise Failure("MEASUREMENT", str(error)) from error
 
     def before(self, operation):
         value = self.used()

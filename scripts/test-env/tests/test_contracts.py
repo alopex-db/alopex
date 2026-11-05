@@ -186,6 +186,22 @@ class Capacity(Fixture):
         os.link(source, self.root / "linked")
         self.assertEqual(allocated_bytes([self.root]), allocated_bytes([self.root, source]))
 
+    def test_dangling_link_counts_link_allocation_without_inventing_target_bytes(self):
+        link = self.root / "dangling"
+        link.symlink_to(self.root / "absent")
+        expected = (self.root.lstat().st_blocks + link.lstat().st_blocks) * 512
+        self.assertEqual(allocated_bytes([self.root]), expected)
+
+    def test_external_symlink_target_is_counted_once(self):
+        directory = self.root / "tracked"
+        directory.mkdir()
+        target = self.root / "payload"
+        target.write_bytes(b"x" * 4096)
+        link = directory / "alias"
+        link.symlink_to(target)
+        expected = sum(p.lstat().st_blocks * 512 for p in (directory, target, link))
+        self.assertEqual(allocated_bytes([directory, target]), expected)
+
     def test_missing_root_is_not_zero(self):
         with self.assertRaises(Failure):
             allocated_bytes([self.root / "absent"])

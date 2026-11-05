@@ -404,7 +404,10 @@ def main(argv=None):
         if isinstance(error, KeyboardInterrupt):
             code = "INTERRUPTED"
         if output is not None:
-            atomic_json(output / "last-error.json", {"error_code": code, "detail": repr(error)})
+            atomic_json(output / "last-error.json", {
+                "error_code": code,
+                "detail": error.detail if isinstance(error, Failure) else repr(error),
+            })
         print(json.dumps({"status": "failed", "error_code": code}))
         return ERRORS[code]
     finally:
