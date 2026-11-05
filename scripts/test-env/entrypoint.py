@@ -246,6 +246,10 @@ def failure_case(request):
 def main():
     os.umask(0o077)
     require(os.getuid() != 0, "POLICY")
+    # Environment/contract cases run before SQL preparation as well. Create
+    # their private HOME/TMPDIR/cache before Python can fall back to /tmp.
+    for name in ("home", "tmp", "cache", "results"):
+        private_dir(WORK / name)
     request = read_json(INPUT / "request.json")
     manifest = read_json(INPUT / "assets.json")
     assets = verify_assets(INPUT / "assets.json", manifest["platform"])
