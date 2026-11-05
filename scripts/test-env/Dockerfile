@@ -10,10 +10,13 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && chmod 0755 /usr/sbin/policy-rc.d \
     && mkdir -p /etc/postgresql-common \
     && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
-    && apt-get --no-download --no-install-recommends -y \
+    && mkdir -p /tmp/offline-apt-lists/partial \
+    && apt-get --no-install-recommends -y \
+       -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=- \
+       -o Dir::State::lists=/tmp/offline-apt-lists \
        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
        install /deps/*.deb \
-    && rm -rf /deps \
+    && rm -rf /deps /tmp/offline-apt-lists /var/cache/apt/archives/*.deb \
     && useradd --create-home --shell /bin/bash alopex \
     && printf 'alopex ALL=(root) NOPASSWD: ALL\n' > /etc/sudoers.d/alopex \
     && chmod 0440 /etc/sudoers.d/alopex \

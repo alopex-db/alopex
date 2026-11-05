@@ -55,7 +55,8 @@ registries require a separately supplied credential configuration outside the
 container.
 
 Offline package installation uses APT's local-file dependency ordering with
-`--no-download`; `--network=none` also applies to the build. This satisfies
+empty source and index directories; `--network=none` also applies to the build.
+APT may copy local package files into its archive cache. This satisfies
 Pre-Depends before unpacking packages, which a single `dpkg -i` glob cannot
 guarantee. Pin libpq to the same PostgreSQL version as the server and client.
 
