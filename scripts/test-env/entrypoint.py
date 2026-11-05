@@ -28,7 +28,9 @@ def command(argv, log, seconds, env=None):
     with Path(log).open("ab") as stream:
         child = subprocess.Popen(argv, stdout=stream, stderr=stream, env=env, start_new_session=True)
         try:
-            require(child.wait(timeout=seconds) == 0, "CASE")
+            code = child.wait(timeout=seconds)
+            if code != 0:
+                raise Failure("CASE", f"child_exit={code}")
         except BaseException:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGTERM)
@@ -246,23 +248,29 @@ def contract_case(case):
 def failure_case(request):
     directory = private_dir(WORK / "results/faults")
     # Each failure is expected, bounded, and reaped before the next starts.
-    for name, code in (("worker", "raise SystemExit(7)"),
-                       ("timeout", "import time; time.sleep(30)")):
+    for name, code, seconds in (("worker", "raise SystemExit(7)", request["limits"]["case_seconds"]),
+                               ("timeout", "import time; time.sleep(30)", 1)):
         try:
-            command([sys.executable, "-c", code], directory / (name + ".log"), 1)
-        except (Failure, subprocess.TimeoutExpired):
-            pass
+            command([sys.executable, "-c", code], directory / (name + ".log"), seconds)
+        except Failure as error:
+            require(name == "worker" and error.code == "CASE" and error.detail == "child_exit=7", "CASE")
+        except subprocess.TimeoutExpired:
+            require(name == "timeout", "CASE")
         else:
             raise Failure("CASE")
-    child = subprocess.Popen([str(PG / "postgres"), "-D", str(directory / "absent")],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        require(child.wait(timeout=request["limits"]["case_seconds"]) != 0, "CASE")
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait()
-    return {"worker_failure": True, "timeout": True, "db_start_failure": True}
+    log = directory / "db-start.log"
+    with log.open("wb") as stream:
+        child = subprocess.Popen([str(PG / "postgres"), "-D", str(directory / "absent")],
+                                 stdout=stream, stderr=stream)
+        try:
+            require(child.wait(timeout=request["limits"]["case_seconds"]) != 0, "CASE")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+    require("could not access directory" in log.read_text() and "No such file or directory" in log.read_text(), "CASE")
+    return {"worker_failure": True, "worker_exit_code": 7, "timeout": True,
+            "db_start_failure": True, "db_start_reason": "missing_data_directory", "children_reaped": True}
 
 
 def main():

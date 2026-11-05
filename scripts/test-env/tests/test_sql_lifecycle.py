@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -66,6 +67,18 @@ class SQLLifecycle(unittest.TestCase):
             server.stop()
         argv = command.call_args.args[0]
         self.assertEqual(argv[argv.index("-D") + 1], str(data))
+
+    def test_failure_acceptance_rejects_unexpected_failure_categories(self):
+        scenarios = [[subprocess.TimeoutExpired('worker', 1)],
+                     [Failure('CASE', 'child_exit=8')],
+                     [Failure('CASE', 'child_exit=7'), Failure('CASE', 'child_exit=1')]]
+        for errors in scenarios:
+            with self.subTest(errors=errors), patch.object(entrypoint, 'WORK', self.root), \
+                 patch.object(entrypoint, 'command', side_effect=errors), \
+                 patch.object(entrypoint.subprocess, 'Popen') as launch:
+                with self.assertRaises(Failure):
+                    entrypoint.failure_case({'limits': {'case_seconds': 1}})
+                launch.assert_not_called()
 
     def test_stage_stop_failure_does_not_replace_copy_failure(self):
         run = Run(self.root, 'stage-failure').create({})
