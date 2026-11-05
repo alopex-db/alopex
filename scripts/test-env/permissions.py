@@ -37,3 +37,16 @@ def private_tree(root, *, configure=False, external_targets=()):
                        mode=oct(mode))
         rows.append(row)
     return rows
+
+
+def generated_work(work, interpreter):
+    """Audit every generated scope, including temporary files and base logs."""
+    work = Path(work)
+    info = work.lstat()
+    require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700 and
+            info.st_uid == os.getuid() and info.st_gid == os.getgid(), "POLICY")
+    names = {path.name for path in work.iterdir()}
+    require({"home", "tmp", "cache", "results"} <= names <=
+            {"home", "tmp", "cache", "results", "venv", "harness", "databases"}, "POLICY")
+    return {name: private_tree(work / name, external_targets=[interpreter] if name == "venv" else [])
+            for name in sorted(names)}

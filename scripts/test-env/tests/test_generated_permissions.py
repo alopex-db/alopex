@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import Failure
-from permissions import private_tree
+from permissions import generated_work, private_tree
 from verify_capacity import active_faults, FIXTURE_BYTES
 
 
@@ -61,6 +61,21 @@ class PrivateTrees(unittest.TestCase):
             self.assertEqual(private_tree(self.root)[-1]["kind"], "socket")
             with self.assertRaises(Failure):
                 private_tree(self.root, configure=True)
+
+    def test_complete_audit_includes_temporary_files_and_rejects_undeclared_outputs(self):
+        for name in ('home', 'tmp', 'cache', 'results'):
+            (self.root / name).mkdir(mode=0o700)
+        generated_work(self.root, sys.executable)
+        temporary = self.root / 'tmp/leftover'
+        temporary.write_bytes(b'x')
+        temporary.chmod(0o644)
+        with self.assertRaises(Failure):
+            generated_work(self.root, sys.executable)
+        temporary.chmod(0o600)
+        generated_work(self.root, sys.executable)
+        (self.root / 'undeclared').mkdir(mode=0o700)
+        with self.assertRaises(Failure):
+            generated_work(self.root, sys.executable)
 
 
 @unittest.skipUnless(os.name == "posix", "requires Unix process groups and allocated-byte metadata")

@@ -18,7 +18,7 @@ from common import (Failure, atomic_json, contained, digest, private_dir, read_j
                     require, verify_assets, elf_signature)
 from verify_environment import files, io_probe, privileges, resource_limits
 from verify_capacity import active_faults
-from permissions import private_tree
+from permissions import generated_work, private_tree
 
 WORK, INPUT = Path("/work"), Path("/input")
 PG = Path("/usr/lib/postgresql/16/bin")
@@ -321,6 +321,14 @@ def main():
     except Exception as error:
         passed = False
         report["input_error"] = repr(error)
+    if passed:
+        try:
+            atomic_json(result_dir / "work-permissions.json", generated_work(WORK, sys.executable))
+            private_tree(result_dir)  # Include the newly written receipt itself.
+        except Exception as error:
+            passed = False
+            report["filesystem_error"] = error.detail if isinstance(error, Failure) else repr(error)
+            report["cases"][-1].update(status="failed", error_code=getattr(error, "code", "POLICY"))
     report["status"] = "passed" if passed else "failed"
     atomic_json(result_dir / "result.json", report)
     return 0 if passed else 1
