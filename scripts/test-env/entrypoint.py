@@ -39,8 +39,9 @@ def command(argv, log, seconds, env=None):
 
 
 class Server:
-    def __init__(self, argv, directory, request, *, postgres=False, env=None):
+    def __init__(self, argv, directory, request, *, postgres=False, env=None, data_directory=None):
         self.directory, self.request, self.postgres = directory, request, postgres
+        self.data_directory = data_directory if data_directory is not None else directory / "data"
         self.log = (directory / "server.log").open("ab")
         self.child = subprocess.Popen(argv, stdout=self.log, stderr=self.log,
                                       env=env, start_new_session=True,
@@ -61,7 +62,7 @@ class Server:
         try:
             require(self.child.poll() is None, "CASE")
             if self.postgres:
-                command([str(PG / "pg_ctl"), "-D", str(self.directory / "data"), "-m", "fast",
+                command([str(PG / "pg_ctl"), "-D", str(self.data_directory), "-m", "fast",
                          "-w", "-t", str(seconds), "stop"], self.directory / "stop.log", seconds + 1)
             else:
                 self.child.send_signal(signal.SIGTERM)
@@ -81,8 +82,9 @@ def pg_ready(directory):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3).returncode == 0
 
 
-def postgres(directory, request):
-    data, sock = directory / "data", private_dir(directory / "socket")
+def postgres(directory, request, *, state_directory=None):
+    state = state_directory if state_directory is not None else directory
+    data, sock = state / "data", private_dir(state / "socket")
     seconds = request["limits"]["case_seconds"]
     command([str(PG / "initdb"), "-D", str(data), "--username=alopex", "--auth-local=peer",
              "--auth-host=reject", "--no-locale", "--encoding=UTF8"], directory / "initdb.log", seconds)
@@ -94,9 +96,10 @@ def postgres(directory, request):
     hba = data / "pg_hba.conf"
     reject = "local all all reject\nhost all all all reject\n"
     hba.write_text("local postgres alopex peer\n" + reject)
-    server = Server([str(PG / "postgres"), "-D", str(data)], directory, request, postgres=True)
+    server = Server([str(PG / "postgres"), "-D", str(data)], directory, request,
+                    postgres=True, data_directory=data)
     try:
-        server.ready(lambda: pg_ready(directory))
+        server.ready(lambda: pg_ready(state))
         command([str(PG / "psql"), "-h", str(sock), "-U", "alopex", "-d", "postgres",
                  "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE acceptance OWNER alopex"],
                 directory / "bootstrap.log", seconds)
@@ -106,9 +109,10 @@ def postgres(directory, request):
     finally:
         server.stop()
     hba.write_text("local acceptance alopex peer\n" + reject)
-    server = Server([str(PG / "postgres"), "-D", str(data)], directory, request, postgres=True)
+    server = Server([str(PG / "postgres"), "-D", str(data)], directory, request,
+                    postgres=True, data_directory=data)
     try:
-        server.ready(lambda: pg_ready(directory))
+        server.ready(lambda: pg_ready(state))
     except BaseException:
         server.stop()
         raise
@@ -123,7 +127,8 @@ def open_tcp(port):
         return False
 
 
-def alopex(directory, request, assets, env):
+def alopex(directory, request, assets, env, *, state_directory=None):
+    state = state_directory if state_directory is not None else directory
     server_entry = next(item for item in assets["files"] if item["role"] == "server")
     # These are container-local service ports, not host resource identifiers.
     ports = request.get("ports", {"http": 8080, "grpc": 9090, "admin": 8081})
@@ -132,7 +137,7 @@ def alopex(directory, request, assets, env):
         f'http_bind = "127.0.0.1:{ports["http"]}"',
         f'grpc_bind = "127.0.0.1:{ports["grpc"]}"',
         f'admin_bind = "127.0.0.1:{ports["admin"]}"',
-        f'data_dir = "{directory / "data"}"',
+        f'data_dir = "{state / "data"}"',
         'copy_allowed_dirs = []', 'auth_mode = { type = "none" }',
     ]) + "\n")
     server = Server([str(contained(INPUT, server_entry["path"])), "--config", str(config)],
@@ -177,16 +182,20 @@ def sql_case(case, request, assets, python, env):
     results = []
     for engine in ("postgresql", "alopex"):
         directory = private_dir(WORK / "results" / (engine + "-" + case))
+        # Keep sparse/preallocated DB files on the original work volume.
+        # Result collection copies only diagnostics and observations, not WAL
+        # capacity or database pages expanded by the Docker archive stream.
+        state = private_dir(WORK / "databases" / (engine + "-" + case))
         server, ports = None, None
         error = None
         try:
             if engine == "postgresql":
-                server = postgres(directory, request)
+                server = postgres(directory, request, state_directory=state)
             else:
-                server, ports = alopex(directory, request, assets, env)
+                server, ports = alopex(directory, request, assets, env, state_directory=state)
             config = {"case": case, "engine": engine, "server_pid": server.child.pid,
                       "pids": request["limits"]["pids"], "cpu": request["cpu"]["client"],
-                      "socket": str(directory / "socket"),
+                      "socket": str(state / "socket"),
                       "url": f'http://127.0.0.1:{ports["http"]}' if ports else None,
                       "result": str(directory / "worker.json")}
             atomic_json(directory / "worker-config.json", config)

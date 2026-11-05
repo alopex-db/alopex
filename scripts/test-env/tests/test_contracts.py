@@ -117,6 +117,34 @@ class Collection(Fixture):
             run.clean(self.inspect, calls.append)
         self.assertEqual(calls, [])
 
+    def copy_failure(self, code):
+        from unittest.mock import Mock
+        from envctl import collect
+        run = self.run_record()
+        run.record["resources"][0]["name"] = "alopex-test-test"
+        run.save()
+        docker, budget = Mock(), Mock()
+        docker.prefix = ["docker"]
+        docker.inspect.side_effect = self.inspect
+        budget.run.side_effect = Failure(code, "original diagnostic")
+        with self.assertRaises(Failure) as caught:
+            collect({"private_output": str(self.root), "limits": {"case_seconds": 1}},
+                    docker, budget, run.run_id)
+        self.assertEqual(caught.exception.code, code)
+        self.assertEqual(caught.exception.detail, "original diagnostic")
+        self.assertEqual(read_json(run.root / "collect-copy-error.json")["error_code"], code)
+        self.assertEqual(run.load().record["phase"], "stopped")
+        docker.remove.assert_not_called()
+
+    def test_collection_preserves_measurement_failure_and_original_data(self):
+        self.copy_failure("MEASUREMENT")
+
+    def test_collection_preserves_capacity_failure_and_original_data(self):
+        self.copy_failure("CAPACITY")
+
+    def test_collection_preserves_timeout_and_original_data(self):
+        self.copy_failure("TIMEOUT")
+
     def test_copy_failure_preserves_run_for_retry(self):
         run = self.run_record()
         with self.assertRaises(OSError):
@@ -460,6 +488,23 @@ class Accounting(unittest.TestCase):
         from verify_sql import rows
         self.assertEqual(rows([{"id": 1, "value": "one"}, {"id": 2, "value": None}]),
                          [(1, "one"), (2, None)])
+
+    def test_harness_result_retains_process_rss_and_byte_counters(self):
+        from unittest.mock import Mock
+        from observe import Observation
+        harness = Mock()
+        harness.end.return_value = {"status": "observed"}
+        meter = Observation(1, 4, harness=harness)
+        meter.harness_before = None
+        meter.before = {"allocation": "100", "server": {1: self.row()}, "client": {2: self.row()}}
+        after = {"allocation": "100", "server": {1: self.row()},
+                 "client": {2: dict(self.row(), rss_bytes=8192, read_bytes=4096)}}
+        with patch.object(meter, "snapshot", return_value=after):
+            result = meter.end()
+        self.assertEqual(result["client"][0]["rss_after_bytes"], 8192)
+        self.assertEqual(result["client"][0]["read_bytes"], 4096)
+        self.assertEqual(result["server"][0]["rss_before_bytes"], 4096)
+        self.assertEqual(result["qualified_harness"], {"status": "observed"})
 
 
 class Privacy(Fixture):

@@ -96,7 +96,8 @@ class Observation:
         server = delta(self.before["server"], after["server"], ticks)
         client = delta(self.before["client"], after["client"], ticks)
         if qualified is not None:
-            return {"qualified_harness": qualified, "coverage": "stable_pid_namespace_allocation",
+            return {"qualified_harness": qualified, "server": server, "client": client,
+                    "coverage": "stable_pid_namespace_allocation",
                     "server_identities": [{"pid": row["pid"], "start_ticks": row["start_ticks"],
                                            "exe_sha256": row["exe_sha256"]} for row in server]}
         return {"server": server, "client": client, "scope": "stable_process_tree_boundary_observations"}

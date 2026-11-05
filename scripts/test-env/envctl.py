@@ -278,12 +278,20 @@ def collect(profile, docker, budget, run_id):
                 budget.run([*docker.prefix, "cp", container["id"] + ":/work/results/.", str(destination)],
                            timeout=profile["limits"]["case_seconds"], log=log)
             except Failure as error:
+                # Capacity, measurement and timeout failures must retain their
+                # original category; only a missing result directory has the
+                # special recovery path below.
+                atomic_json(run.root / "collect-copy-error.json", {
+                    "error_code": error.code, "detail": error.detail,
+                })
+                if error.code != "COMMAND":
+                    raise
                 with log.open("rb") as stream:
                     stream.seek(offset)
                     message = stream.read(65536).decode("utf-8", errors="replace")
                 missing = "Could not find the file /work/results" in message
-                require(error.code == "COMMAND" and missing and
-                        (run.root / "failure.json").exists(), "COLLECT")
+                if not (missing and (run.root / "failure.json").exists()):
+                    raise Failure("COLLECT", message) from error
                 atomic_json(destination / "result.json", {"status": "failed", "cases": [],
                                                           "error_code": "INCOMPLETE"})
         else:
@@ -291,7 +299,7 @@ def collect(profile, docker, budget, run_id):
             require((run.root / "failure.json").exists(), "COLLECT")
             atomic_json(destination / "result.json", {"cases": [], "status": "failed",
                                                       "error_code": "INCOMPLETE"})
-        for name in ("failure.json", "exit.json", "container.log", "stage.log"):
+        for name in ("failure.json", "exit.json", "container.log", "stage.log", "collect-copy-error.json"):
             if (run.root / name).exists():
                 shutil.copyfile(run.root / name, destination / name)
         if (run.root / "failure.json").exists():

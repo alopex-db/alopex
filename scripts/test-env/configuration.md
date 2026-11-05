@@ -71,6 +71,10 @@ The main container uses only two named volumes. Staging temporarily mounts the
 input volume writable in a separately labelled helper, without host bind mounts.
 Both helpers and the main container have explicit memory/PID bounds and no
 external network. Data is retained after failure until collection is verified.
+DB data, WAL and sockets live under `/work/databases`; logs, configuration and
+observations live under `/work/results`. Collection copies the latter. Sparse
+or preallocated DB files remain on the owned work volume until verified result
+collection permits its deletion, avoiding expansion of WAL capacity in a copy.
 
 ## Privilege and isolation settings
 
