@@ -232,7 +232,13 @@ def verify_assets(manifest_path, platform):
                 key = "server_sha256" if item["role"] == "server" else "python_wheel_sha256"
                 require(receipt[key] == item["sha256"], "IDENTITY")
             elif item["role"] == "library":
-                require(receipt.get("runtime_libraries", {}).get(item["path"]) == item["sha256"], "IDENTITY")
+                expected = receipt.get("runtime_libraries", {}).get(item["path"])
+                # Existing performance receipts bind the parser separately.
+                # Preserve the receipt and recognize only that named library;
+                # unrelated libraries still require their own explicit binding.
+                if expected is None and Path(item["path"]).name == "libalopex_sql_parser.so":
+                    expected = receipt.get("parser_sha256")
+                require(expected == item["sha256"], "IDENTITY")
     else:
         require(receipt.get("source_commit") == manifest["source_commit"], "IDENTITY")
         require(receipt.get("platform") == platform, "IDENTITY")

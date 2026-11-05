@@ -26,6 +26,26 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temp.name)
 
 
+class ExecutionMode(unittest.TestCase):
+    def check(self, mode, selected, daemon):
+        profile = {"docker_context": "test", "platform": selected, "execution_mode": mode}
+        docker = Docker(profile)
+        with patch.object(docker, "call", side_effect=[
+                json.dumps([{"Endpoints": {"docker": {"Host": "unix:///test.sock"}}}]), daemon]):
+            docker.prerequisites()
+
+    def test_native_container_must_match_daemon(self):
+        with self.assertRaises(Failure):
+            self.check("native", "linux/target-a", "linux/target-b")
+        self.check("native", "linux/target-a", "linux/target-a")
+
+    def test_full_system_emulation_can_have_matching_guest_and_container(self):
+        self.check("emulated", "linux/target-a", "linux/target-a")
+
+    def test_container_emulation_can_differ_from_daemon(self):
+        self.check("emulated", "linux/target-a", "linux/target-b")
+
+
 class ImageInventory(unittest.TestCase):
     def verify(self, inventory):
         import runpy
@@ -336,6 +356,44 @@ class Assets(Fixture):
         self.bundle()
         with self.assertRaises(Failure):
             verify_assets(self.root / "assets.json", "linux/different")
+
+    def performance_bundle(self, name="libalopex_sql_parser.so", expected=None, explicit=None):
+        manifest = self.bundle()
+        path = self.root / name
+        path.write_bytes(b"tiny parser")
+        manifest["files"].append({"role": "library", "path": name,
+                                  "size": path.stat().st_size, "sha256": digest(path)})
+        receipt = {"schema": "alopex.performance-build/v1", "source": {"commit": "a" * 40},
+                   "server_sha256": digest(self.root / "server"),
+                   "python_wheel_sha256": digest(self.root / "client.whl"),
+                   "parser_sha256": expected or digest(path)}
+        if explicit is not None:
+            receipt["runtime_libraries"] = {name: explicit}
+        atomic_json(self.root / "receipt.json", receipt)
+        item = next(item for item in manifest["files"] if item["role"] == "receipt")
+        item.update(size=(self.root / "receipt.json").stat().st_size, sha256=digest(self.root / "receipt.json"))
+        atomic_json(self.root / "assets.json", manifest)
+
+    def test_original_parser_receipt_is_accepted_without_rewriting(self):
+        self.performance_bundle()
+        before = (self.root / "receipt.json").read_bytes()
+        verify_assets(self.root / "assets.json", "linux/fixture")
+        self.assertEqual((self.root / "receipt.json").read_bytes(), before)
+
+    def test_parser_receipt_does_not_authorize_different_bytes(self):
+        self.performance_bundle(expected="d" * 64)
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
+
+    def test_parser_receipt_does_not_authorize_an_unrelated_library(self):
+        self.performance_bundle(name="another.so")
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
+
+    def test_parser_field_cannot_override_explicit_library_binding(self):
+        self.performance_bundle(explicit="d" * 64)
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
 
     def test_input_symlink_escape_is_rejected(self):
         self.bundle()

@@ -14,6 +14,11 @@ execution parameters. Keep that file mode 0600. The template has null values on
 purpose: a profile is rejected until all required values are supplied. Local
 machine values are never committed.
 
+Set `execution_mode` to `emulated` when either the VM or the container emulates
+the product architecture. Matching Docker daemon and container architectures do
+not establish native VM execution. Preserve the VM's execution configuration in
+private evidence; emulated runs qualify functional cases only.
+
 Run the controller on the physical execution host, using a local Unix-socket
 Docker context. The private `storage.runtime_storage_roots` must identify the
 daemon's backing storage or its VM disk directory and be covered by the measured
@@ -66,7 +71,10 @@ build receipt and fixed harness archive. The original build receipt is retained.
 Supported receipts are `alopex.performance-build/v1` and receipts with
 `source_commit`, `platform`, and an `artifacts` path-to-hash map. Shared libraries
 must also be identified by the receipt (`runtime_libraries` in performance
-receipts). Do not edit old receipts to make an unmatched artifact pass.
+receipts). Existing performance receipts may bind `libalopex_sql_parser.so`
+through their `parser_sha256` field. That field cannot authorize another library
+or override a conflicting explicit library binding. Do not edit old receipts to
+make an unmatched artifact pass.
 
 ## Operation
 

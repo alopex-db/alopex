@@ -45,7 +45,11 @@ class Docker:
         require(context["Endpoints"]["docker"]["Host"].startswith("unix://"), "PREREQUISITE")
         native = self.call("version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
         selected = "/".join(self.profile["platform"].split("/")[:2])
-        require((self.profile["execution_mode"] == "native") == (selected == native), "IDENTITY")
+        # A full-system emulator runs a matching guest daemon/container pair.
+        # Their agreement cannot prove that the enclosing VM executes natively.
+        # An emulated declaration is conservative; a native declaration still
+        # requires the container architecture to match the daemon.
+        require(self.profile["execution_mode"] == "emulated" or selected == native, "IDENTITY")
 
     def policy(self):
         security = self.profile["security"]
