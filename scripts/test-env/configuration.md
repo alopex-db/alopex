@@ -1,5 +1,59 @@
 # SQL test environment configuration
 
+## Dedicated VM construction
+
+Choose the guest architecture from the source-bound server/wheel ABI and supply
+it as a private VM parameter. Record the runtime versions, guest image identity
+and effective configuration alongside the execution profile. The tested
+provisioning tools are Colima 0.10.3 and Lima 2.2.1. A QEMU backend also requires
+QEMU and Lima's matching additional guest-agent package.
+
+| Setting | Required value / parameter | Verification |
+| --- | --- | --- |
+| Runtime state, Docker CLI configuration, download cache | Separate private directories, owner-only access; `COLIMA_HOME`, `DOCKER_CONFIG`, `XDG_CACHE_HOME` | Directory modes 0700, configuration files 0600; include all in host storage inventory |
+| VM backend and architecture | `VM_TYPE`, `VM_ARCH`; match the product ABI | Effective Lima `vmType`/`arch`, guest executable ELF signature against server/parser |
+| VM CPU, memory, data/root disk sizes | `VM_CPUS`, `VM_MEMORY_GIB`, `VM_DATA_DISK_GIB`, `VM_ROOT_DISK_GIB` | Effective VM configuration; include allocated disk bytes in host budget |
+| Host filesystem shares | None; `--mount=none` | Effective Lima `mounts` is empty |
+| Agent forwarding and global SSH configuration | Disabled | `ssh.forwardAgent=false`; `--ssh-config=false` |
+| Application port forwarding and reachable guest address | Disabled | Ignore application port ranges; only private management Unix sockets may be forwarded |
+| Guest networking | User-mode outbound networking for acquisition | No bridged interface or published application port; acceptance containers use `network=none` |
+| Nested virtualization, binfmt and Rosetta | Disabled | Effective VM configuration and provision script |
+| Docker context activation | Disabled | Existing active context remains unchanged |
+| Guest sudo and process I/O | Guest-local sudo succeeds; `/proc/self/io` is readable | `sudo -n id -u` returns 0; E02 additionally proves accounting on the DB volume |
+| Guest security | Enforcing standard LSM and runtime seccomp | Guest policy state, Docker security options and E01 |
+
+Use new private directories and a new VM profile. Keep runtime paths short
+enough for Unix-domain management sockets. Set the variables below from the
+private VM configuration, measure the host's complete working storage, and
+record a bounded creation allowance and cleanup plan before starting. Include
+new emulator installations, package downloads and VM disks in that inventory.
+
+```sh
+export COLIMA_HOME DOCKER_CONFIG XDG_CACHE_HOME
+umask 077
+mkdir -m 700 "$COLIMA_HOME" "$DOCKER_CONFIG" "$XDG_CACHE_HOME"
+# Anonymous public-registry acquisition; do not reuse global credentials.
+(set -C; printf '%s\n' '{"auths":{"https://index.docker.io/v1/":{}}}' > "$DOCKER_CONFIG/config.json")
+colima start "$VM_PROFILE" \
+  --runtime=docker --vm-type="$VM_TYPE" --arch="$VM_ARCH" \
+  --cpus="$VM_CPUS" --memory="$VM_MEMORY_GIB" \
+  --disk="$VM_DATA_DISK_GIB" --root-disk="$VM_ROOT_DISK_GIB" \
+  --template=false --mount=none --ssh-agent=false --ssh-config=false \
+  --activate=false --port-forwarder=none --network-address=false \
+  --nested-virtualization=false --binfmt=false --vz-rosetta=false
+colima ssh --profile "$VM_PROFILE" -- sudo -n id -u
+colima ssh --profile "$VM_PROFILE" -- test -r /proc/self/io
+docker --context "colima-$VM_PROFILE" info --format '{{json .SecurityOptions}}'
+```
+
+Check every effective boundary above before creating acquisition or acceptance
+containers. Set the execution profile's Docker context to the new context and
+its runtime-storage roots to the VM's backing-storage directory. Keep the VM
+disk, acquisition cache and container volumes within the same physical-host
+budget. Stop an idle validation VM before starting another on the same host.
+Select `execution_mode=emulated` if the enclosing VM emulates the product ABI;
+only native execution may supply release-performance qualification.
+
 ## Ownership and filesystem operations
 
 | Target | Owner and access | Applied by | Verification |
@@ -27,8 +81,8 @@ bounding capability masks, seccomp mode, and the actual LSM label.
 
 The private profile selects an existing seccomp file by digest and an existing
 enforcing AppArmor profile or full SELinux context. For SELinux, the context is
-translated into Docker's user/role/type/level options. No CLI command changes a
-VM policy, installs an LSM policy, grants host privileges, or starts a VM.
+translated into Docker's user/role/type/level options. The VM and container use
+their standard protection policies throughout construction and acceptance.
 
 Before image qualification, record the selected runtime policy version, the
 required syscall/access rules, its applied identity, and successful/denied probe
@@ -119,6 +173,7 @@ recorded against the eventual image and input identities. Local unit tests do
 not establish these results.
 
 References: [Docker volumes](https://docs.docker.com/engine/storage/volumes/),
+[Lima VM execution modes](https://lima-vm.io/docs/config/multi-arch/),
 [PGDG repository configuration](https://wiki.postgresql.org/wiki/Apt),
 [APT archive authentication](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html),
 [Docker resource controls](https://docs.docker.com/engine/containers/resource_constraints/),

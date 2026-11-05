@@ -2,10 +2,10 @@
 
 Issue: https://github.com/alopex-db/alopex/issues/804
 
-This controller operates an existing Docker context with build-time networking
-disabled and runtime networking isolated. It does not provision or reconfigure
-the host, VM, daemon or security profiles. Read `configuration.md` before preparing
-the image lock or an execution profile.
+Create a dedicated Linux VM using the parameterized procedure in
+`configuration.md`, then operate its Docker context with this controller.
+Image construction is offline and acceptance containers have no external
+network. Keep VM parameters, execution profiles and detailed evidence private.
 
 ## Inputs
 
