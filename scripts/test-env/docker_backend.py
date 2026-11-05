@@ -72,6 +72,7 @@ class Docker:
                 "--memory-swap", str(limits["memory_bytes"] + limits["swap_bytes"]),
                 "--pids-limit", str(limits["pids"]), "--cpuset-cpus", ",".join(map(str, cpus)),
                 "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
+                "--log-opt", "compress=false",
                 "--mount", f"type=volume,src={input_volume},dst=/input,readonly,volume-nocopy",
                 "--mount", f"type=volume,src={work_volume},dst=/work,volume-nocopy"]
         for capability in CAPABILITIES:
