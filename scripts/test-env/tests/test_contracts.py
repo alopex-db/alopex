@@ -1,0 +1,383 @@
+import copy
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import (Failure, atomic_json, digest, inspect_archive, public_result, read_json,
+                    host_lock, verify_assets, elf_signature)
+from capacity import Budget, allocated_bytes
+from lifecycle import Run
+from observe import delta
+from docker_backend import Docker
+
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="alopex-test-env-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+
+class Collection(Fixture):
+    def run_record(self):
+        run = Run(self.root, "test").create({})
+        self.token = run.record["ownership_token"]
+        run.resource("container", "owned", "original")
+        run.transition("running")
+        run.transition("stopped")
+        return run
+
+    def copier(self, destination):
+        atomic_json(destination / "result.json", {"status": "failed", "cases": []})
+
+    def inspect(self, item):
+        return {"id": "original", "labels": {"org.alopex.test-env.run": "test",
+                 "org.alopex.test-env.owner": "envctl",
+                 "org.alopex.test-env.token": self.token}, "running": False}
+
+    def test_uncollected_run_cannot_be_deleted(self):
+        run = self.run_record()
+        calls = []
+        with self.assertRaises(Failure):
+            run.clean(self.inspect, calls.append)
+        self.assertEqual(calls, [])
+
+    def test_copy_failure_preserves_run_for_retry(self):
+        run = self.run_record()
+        with self.assertRaises(OSError):
+            run.collect(lambda destination: (_ for _ in ()).throw(OSError("copy failed")))
+        self.assertEqual(Run(self.root, "test").load().record["phase"], "stopped")
+        run.collect(self.copier)
+        self.assertEqual(run.record["phase"], "collected")
+
+    def test_tampered_collection_prevents_deletion(self):
+        run = self.run_record()
+        run.collect(self.copier)
+        (run.root / "collected/result.json").write_text("changed")
+        calls = []
+        with self.assertRaises(Failure):
+            run.clean(self.inspect, calls.append)
+        self.assertEqual(calls, [])
+
+    def test_reused_name_is_not_deleted(self):
+        run = self.run_record()
+        run.collect(self.copier)
+        with self.assertRaises(Failure):
+            run.clean(lambda item: dict(self.inspect(item), id="replacement"), self.fail)
+
+    def test_foreign_run_is_not_deleted(self):
+        run = self.run_record()
+        run.collect(self.copier)
+        with self.assertRaises(Failure):
+            run.clean(lambda item: {"id": "original", "labels": {}, "running": False}, self.fail)
+
+    def test_running_container_is_not_deleted(self):
+        run = self.run_record()
+        run.collect(self.copier)
+        with self.assertRaises(Failure):
+            run.clean(lambda item: dict(self.inspect(item), running=True), self.fail)
+
+    def test_cleanup_is_idempotent_and_collect_does_not_recopy(self):
+        run = self.run_record()
+        run.collect(self.copier)
+        run.collect(lambda path: self.fail("must not recopy"))
+        calls = []
+        run.clean(self.inspect, calls.append)
+        run.clean(lambda item: self.fail("already cleaned"), calls.append)
+        self.assertEqual(len(calls), 1)
+
+    def test_symlink_from_container_is_rejected(self):
+        run = self.run_record()
+        def copy(destination):
+            (destination / "result.json").symlink_to(self.root / "test/run.json")
+        with self.assertRaises(Failure):
+            run.collect(copy)
+        self.assertEqual(run.record["phase"], "stopped")
+
+    def test_interrupted_create_is_recovered_by_persisted_token(self):
+        from envctl import recover
+        from unittest.mock import Mock
+        run = Run(self.root, "test").create({})
+        self.token = run.record["ownership_token"]
+        run.intent("container", "owned")
+        docker = Mock()
+        docker.inspect.side_effect = self.inspect
+        recover(run, docker)
+        self.assertEqual(run.record["resources"][0]["id"], "original")
+        self.assertEqual(run.record["phase"], "stopped")
+        docker.stop.assert_called_once_with("original")
+
+    def test_interrupted_create_does_not_adopt_a_foreign_token(self):
+        from envctl import recover
+        from unittest.mock import Mock
+        run = Run(self.root, "test").create({})
+        self.token = "another-run-token"
+        run.intent("container", "owned")
+        docker = Mock()
+        docker.inspect.side_effect = self.inspect
+        with self.assertRaises(Failure):
+            recover(run, docker)
+        docker.stop.assert_not_called()
+
+
+class Capacity(Fixture):
+    def config(self):
+        return {"roots": [str(self.root)], "stop_bytes": 100,
+                "reserve_bytes": 10, "planned_bytes": {"build": 20}, "poll_seconds": 1}
+
+    def test_overlapping_roots_and_hardlinks_are_not_double_counted(self):
+        source = self.root / "file"
+        source.write_bytes(b"x" * 4096)
+        os.link(source, self.root / "linked")
+        self.assertEqual(allocated_bytes([self.root]), allocated_bytes([self.root, source]))
+
+    def test_missing_root_is_not_zero(self):
+        with self.assertRaises(Failure):
+            allocated_bytes([self.root / "absent"])
+
+    def test_measurement_error_is_not_zero(self):
+        with self.assertRaises(Failure) as caught:
+            Budget(self.config(), lambda roots: (_ for _ in ()).throw(PermissionError())).before("build")
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_preflight_reserves_planned_and_cleanup_capacity(self):
+        with self.assertRaises(Failure):
+            Budget(self.config(), lambda roots: 70).before("build")
+
+    def test_growth_above_plan_stops(self):
+        values = iter([10, 31])
+        budget = Budget(self.config(), lambda roots: next(values))
+        budget.before("build")
+        with self.assertRaises(Failure):
+            budget.check()
+
+    def test_failed_preflight_never_launches_a_process(self):
+        budget = Budget(self.config(), lambda roots: 95)
+        with patch("capacity.subprocess.Popen") as launch:
+            with self.assertRaises(Failure):
+                budget.before("build")
+                budget.run(["unused"], timeout=1, log=self.root / "unused")
+            launch.assert_not_called()
+
+    def test_runtime_measurement_error_cancels_owned_operation(self):
+        budget = Budget(self.config(), lambda roots: 10)
+        budget.before("build")
+        with patch.object(budget, "check", side_effect=[10, Failure("MEASUREMENT")]), \
+             patch("capacity.subprocess.Popen") as launch, \
+             patch("capacity.os.killpg") as kill:
+            import subprocess
+            child = launch.return_value
+            child.poll.return_value = None
+            child.wait.side_effect = [subprocess.TimeoutExpired("owned", 1), 0]
+            child.pid = 1
+            cancelled = []
+            with self.assertRaises(Failure):
+                budget.run(["owned"], timeout=2, log=self.root / "log", cancel=lambda: cancelled.append(True))
+            self.assertEqual(cancelled, [True])
+            kill.assert_called_once()
+
+
+class Archives(Fixture):
+    def test_parent_escape_is_rejected(self):
+        path = self.root / "bundle.zip"
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("../escape", "x")
+        with self.assertRaises(Failure):
+            inspect_archive(path, 100)
+
+    def test_symlink_is_rejected(self):
+        path = self.root / "bundle.tar"
+        with tarfile.open(path, "w") as archive:
+            item = tarfile.TarInfo("link")
+            item.type = tarfile.SYMTYPE
+            item.linkname = "outside"
+            archive.addfile(item)
+        with self.assertRaises(Failure):
+            inspect_archive(path, 100)
+
+    def test_duplicate_archive_entries_are_rejected(self):
+        path = self.root / "bundle.tar"
+        with tarfile.open(path, "w") as archive:
+            for _ in range(2):
+                item = tarfile.TarInfo("same")
+                item.size = 1
+                archive.addfile(item, io.BytesIO(b"x"))
+        with self.assertRaises(Failure):
+            inspect_archive(path, 100)
+
+    def test_expansion_bound_is_checked_before_extracting(self):
+        path = self.root / "bundle.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("data", "x" * 100)
+        with self.assertRaises(Failure):
+            inspect_archive(path, 99)
+        self.assertEqual(inspect_archive(path, 100), 100)
+
+
+class Assets(Fixture):
+    def bundle(self):
+        (self.root / "server").write_bytes(b"tiny synthetic server")
+        with zipfile.ZipFile(self.root / "client.whl", "w") as archive:
+            archive.writestr("client.py", "pass\n")
+        with tarfile.open(self.root / "harness.tar", "w") as archive:
+            item = tarfile.TarInfo("sql_resources.py")
+            item.size = 5
+            archive.addfile(item, io.BytesIO(b"pass\n"))
+        receipt = {"source_commit": "a" * 40, "platform": "linux/fixture",
+                   "artifacts": {"server": digest(self.root / "server"),
+                                 "client.whl": digest(self.root / "client.whl")}}
+        atomic_json(self.root / "receipt.json", receipt)
+        files = []
+        for role, name in (("server", "server"), ("wheel", "client.whl"),
+                           ("receipt", "receipt.json"), ("harness", "harness.tar")):
+            path = self.root / name
+            files.append({"role": role, "path": name, "size": path.stat().st_size, "sha256": digest(path)})
+        manifest = {"schema": "alopex.test-env-assets/v1", "platform": "linux/fixture",
+                    "source_commit": "a" * 40, "harness_commit": "b" * 40,
+                    "expanded_limit_bytes": 1024, "files": files}
+        atomic_json(self.root / "assets.json", manifest)
+        return manifest
+
+    def test_verified_bundle_retains_original_receipt(self):
+        self.bundle()
+        before = (self.root / "receipt.json").read_bytes()
+        verify_assets(self.root / "assets.json", "linux/fixture")
+        self.assertEqual((self.root / "receipt.json").read_bytes(), before)
+
+    def test_modified_server_is_rejected_before_execution(self):
+        self.bundle()
+        (self.root / "server").write_bytes(b"different")
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
+
+    def test_matching_hash_does_not_hide_wrong_receipt_identity(self):
+        manifest = self.bundle()
+        receipt = read_json(self.root / "receipt.json")
+        receipt["source_commit"] = "c" * 40
+        atomic_json(self.root / "receipt.json", receipt)
+        entry = next(item for item in manifest["files"] if item["role"] == "receipt")
+        entry.update(size=(self.root / "receipt.json").stat().st_size, sha256=digest(self.root / "receipt.json"))
+        atomic_json(self.root / "assets.json", manifest)
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
+
+    def test_platform_mismatch_is_rejected(self):
+        self.bundle()
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/different")
+
+    def test_input_symlink_escape_is_rejected(self):
+        self.bundle()
+        (self.root / "server").unlink()
+        (self.root / "server").symlink_to(self.root / "receipt.json")
+        with self.assertRaises(Failure):
+            verify_assets(self.root / "assets.json", "linux/fixture")
+
+    def test_execution_format_signature_uses_artifact_bytes(self):
+        path = self.root / "binary"
+        header = bytearray(20)
+        header[:4] = b"\x7fELF"
+        header[4:6] = bytes((2, 1))
+        header[16:20] = bytes((2, 0, 17, 0))
+        path.write_bytes(header)
+        self.assertEqual(elf_signature(path), (2, 1, 17))
+        header[18] = 18
+        path.write_bytes(header)
+        self.assertNotEqual(elf_signature(path), (2, 1, 17))
+        path.write_bytes(b"not an ELF executable")
+        with self.assertRaises(Failure):
+            elf_signature(path)
+
+
+class Accounting(unittest.TestCase):
+    def row(self):
+        return {"pid": 1, "start_ticks": 10, "exe_sha256": "a" * 64, "threads": [1],
+                "children": [], "rss_bytes": 4096, "user_ticks": 2, "system_ticks": 3,
+                "reaped_user_ticks": 0, "reaped_system_ticks": 0,
+                "read_bytes": 0, "write_bytes": 4096, "cancelled_write_bytes": 0}
+
+    def test_stable_process_cpu_io_delta_and_rss_are_separate(self):
+        before = self.row()
+        after = dict(before, write_bytes=8192, user_ticks=4)
+        actual = delta({1: before}, {1: after}, 100)[0]
+        self.assertEqual(actual["write_bytes"], 4096)
+        self.assertEqual(actual["cpu_seconds"], 0.02)
+        self.assertNotIn("peak_rss", actual)
+
+    def test_child_exit_and_reap_cannot_be_double_counted(self):
+        before = {1: self.row()}
+        for changed in (dict(self.row(), reaped_user_ticks=1), dict(self.row(), start_ticks=20),
+                        dict(self.row(), children=[2]), dict(self.row(), threads=[1, 2])):
+            with self.subTest(changed=changed), self.assertRaises(Failure):
+                delta(before, {1: changed}, 100)
+        with self.assertRaises(Failure):
+            delta(before, {}, 100)
+
+    def test_missing_counters_are_not_zero_filled(self):
+        after = self.row()
+        del after["write_bytes"]
+        with self.assertRaises(KeyError):
+            delta({1: self.row()}, {1: after}, 100)
+
+    def test_child_that_exits_between_snapshots_invalidates_the_interval(self):
+        from observe import Observation
+        meter = Observation(1, 4)
+        meter.before = {"allocation": "100", "server": {1: self.row()}, "client": {2: self.row()}}
+        after = dict(meter.before, allocation="101")
+        with patch.object(meter, "snapshot", return_value=after), self.assertRaises(Failure):
+            meter.end()
+
+    def test_remote_sql_dictionary_rows_keep_values_and_nulls(self):
+        from verify_sql import rows
+        self.assertEqual(rows([{"id": 1, "value": "one"}, {"id": 2, "value": None}]),
+                         [(1, "one"), (2, None)])
+
+
+class Privacy(Fixture):
+    def test_export_drops_free_form_diagnostics(self):
+        secret = "synthetic-host /private/synthetic/path total-memory=987654321"
+        actual = public_result({"image_digest": "a" * 64, "detail": secret,
+            "cases": [{"id": "E01", "status": "failed", "error_code": "POLICY", "exception": secret}]})
+        self.assertNotIn(secret, json.dumps(actual))
+        self.assertNotIn("exception", actual["cases"][0])
+
+    def test_error_code_cannot_smuggle_free_text(self):
+        with self.assertRaises(Failure):
+            public_result({"cases": [{"id": "E01", "status": "failed", "error_code": "secret"}]})
+
+    def test_atomic_result_permissions(self):
+        path = self.root / "private/result.json"
+        atomic_json(path, {"ok": True})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_empty_results_cannot_export_a_success(self):
+        self.assertEqual(public_result({"status": "passed", "cases": []})["status"], "failed")
+
+    def test_unknown_cli_argument_does_not_print_its_value(self):
+        import contextlib
+        from envctl import main
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream), self.assertRaises(SystemExit) as caught:
+            main(["doctor", "--profile", "synthetic-private-path", "--secret-synthetic-value"])
+        self.assertEqual(caught.exception.code, 64)
+        self.assertNotIn("synthetic", stream.getvalue())
+        self.assertEqual(json.loads(stream.getvalue())["error_code"], "INPUT")
+
+    def test_host_lock_prevents_two_profiles_from_building(self):
+        with host_lock(self.root / "lock"):
+            with self.assertRaises(Failure):
+                with host_lock(self.root / "lock"):
+                    self.fail("must not acquire twice")
+
+
+if __name__ == "__main__":
+    unittest.main()

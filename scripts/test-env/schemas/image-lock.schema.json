@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema",
+    "base",
+    "platforms"
+  ],
+  "properties": {
+    "schema": {
+      "const": "alopex.test-env-image/v1"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "@sha256:[a-f0-9]{64}$"
+    },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "files",
+          "packages",
+          "allowed_hosts"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "url",
+                "size",
+                "sha256"
+              ]
+            }
+          },
+          "packages": {
+            "type": "object",
+            "minProperties": 1
+          },
+          "allowed_hosts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

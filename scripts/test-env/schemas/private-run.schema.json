@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema",
+    "run_id",
+    "phase",
+    "resources",
+    "identities",
+    "ownership_token"
+  ],
+  "properties": {
+    "schema": {
+      "const": "alopex.test-env-run/v1"
+    },
+    "phase": {
+      "enum": [
+        "preparing",
+        "running",
+        "stopped",
+        "collected",
+        "deleted"
+      ]
+    },
+    "resources": {
+      "type": "array"
+    },
+    "identities": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!*.py
+!tests/
+!tests/*.py
+!deps/
+!deps/*.deb
+!wheelhouse/
+!wheelhouse/*.whl
+!image-manifest.json

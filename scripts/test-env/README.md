@@ -1,0 +1,82 @@
+# SQL test containers
+
+Issue: https://github.com/alopex-db/alopex/issues/804
+
+This controller operates an existing Docker context with build-time networking
+disabled and runtime networking isolated. It does not provision or reconfigure
+the host, VM, daemon or security profiles. Read `configuration.md` before preparing
+the image lock or an execution profile.
+
+## Inputs
+
+Copy `examples/run-profile.template.json` into a private directory and fill the
+execution parameters. Keep that file mode 0600. The template has null values on
+purpose: a profile is rejected until all required values are supplied. Local
+machine values are never committed.
+
+Run the controller on the physical execution host, using a local Unix-socket
+Docker context. The private `storage.runtime_storage_roots` must identify the
+daemon's backing storage or its VM disk directory and be covered by the measured
+roots. A Docker context on another physical host is rejected; its budget cannot
+be established by inspecting the controller host's files.
+
+`image.lock.json` contains the OCI base index and a `platforms` mapping. Each
+platform entry contains:
+
+- `packages`: complete installed Debian package names mapped to exact versions;
+- `allowed_hosts`: HTTPS download and redirect hostnames;
+- `files`: `{path, url, size, sha256}` records for `deps/*.deb` and
+  `wheelhouse/*.whl`, including transitive dependencies.
+
+Use Ubuntu 24.04 packages, Python 3.12/venv/pip, PostgreSQL 16.14 server/client,
+sudo, CA certificates, procps, util-linux and iproute2. Include psycopg 3.2.10 and
+the selected Alopex wheel's Python dependencies. PostgreSQL package provenance
+must come from PGDG. Build verifies the installed package versions and rejects
+missing dependencies offline. The platform mapping is currently unresolved;
+image construction and live acceptance are pending, not covered by unit tests.
+
+`assets.json` identifies the products independently of the image. Its file list
+uses bundle-relative paths and SHA256/size for each server, wheel, shared library,
+build receipt and fixed harness archive. The original build receipt is retained.
+Supported receipts are `alopex.performance-build/v1` and receipts with
+`source_commit`, `platform`, and an `artifacts` path-to-hash map. Shared libraries
+must also be identified by the receipt (`runtime_libraries` in performance
+receipts). Do not edit old receipts to make an unmatched artifact pass.
+
+## Operation
+
+From the repository root, with `RUN_PROFILE` pointing to the private profile:
+
+```sh
+python3 scripts/test-env/envctl.py doctor --phase preflight --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py fetch --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py build --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py doctor --phase runtime --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py collect --probe --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py clean --probe --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py accept --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py collect --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py export-public --profile "$RUN_PROFILE"
+python3 scripts/test-env/envctl.py clean --profile "$RUN_PROFILE"
+```
+
+`accept` collects successful runs to compare a fresh repeat for R01. Explicit
+`collect` is idempotent. After failure, run `collect` before `clean`; an unverified
+collection cannot be deleted. Each new acceptance invocation needs a new run ID.
+For a single case use `run --case E02`. A single R01 invocation includes the
+required environment and SQL cases. `clean` also handles a recorded repeat run.
+
+Console output contains only fixed status/error codes. Detailed diagnostics and
+raw Docker output remain in the private output directory. Share only the explicit
+`public.json` export. A nonzero result, missing case, failed copy or skipped
+prerequisite is not accepted.
+
+## Bounded developer verification
+
+```sh
+python3 -B -m unittest discover -s scripts/test-env/tests -v
+```
+
+These tests use temporary tiny fixtures and mocked process/resource failures.
+They neither build images nor run load/performance tests. The normal CI workflow
+runs this command only. Live acceptance is an explicit separate operation.

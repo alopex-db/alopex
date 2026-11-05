@@ -1,0 +1,24 @@
+name: Test environment contracts
+
+on:
+  pull_request:
+    paths:
+      - scripts/test-env/**
+      - .github/workflows/test-env.yml
+  push:
+    branches: [integration/v0.8.17-candidate, main]
+    paths:
+      - scripts/test-env/**
+      - .github/workflows/test-env.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tiny controller and observer regressions
+        run: python3 -B -m unittest discover -s scripts/test-env/tests -v
