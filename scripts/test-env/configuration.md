@@ -47,6 +47,18 @@ Host identity, connection details and filesystem roots stay out of public output
 | PostgreSQL bootstrap | Unix socket, postgres DB, alopex role | `local postgres alopex peer` followed by reject rules |
 | PostgreSQL acceptance | Unix socket, acceptance DB, alopex role | Replace HBA with `local acceptance alopex peer`, reject the rest, restart |
 
+For public-registry acquisition with no credentials, use a dedicated Docker CLI
+configuration with `auths: {"https://index.docker.io/v1/": {}}` and no credential
+store or helper. This prevents the CLI from automatically discovering an OS
+credential helper. Keep existing Docker configuration unchanged. Private
+registries require a separately supplied credential configuration outside the
+container.
+
+Offline package installation uses APT's local-file dependency ordering with
+`--no-download`; `--network=none` also applies to the build. This satisfies
+Pre-Depends before unpacking packages, which a single `dpkg -i` glob cannot
+guarantee. Pin libpq to the same PostgreSQL version as the server and client.
+
 PostgreSQL has `listen_addresses=''`, `fsync=on`, and
 `synchronous_commit=on`. The tiny qualification fixtures disable autovacuum and
 parallel query workers to keep the observed process set stable. These settings
