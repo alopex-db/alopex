@@ -295,6 +295,46 @@ class Capacity(Fixture):
             self.assertEqual(cancelled, [True])
             kill.assert_called_once()
 
+    def test_cancel_failure_preserves_original_measurement_error_and_reaps_command(self):
+        budget = Budget(self.config(), lambda roots: 10)
+        budget.before("build")
+        original = Failure("MEASUREMENT", "counter unavailable")
+        with patch.object(budget, "check", side_effect=[10, original]), \
+             patch("capacity.subprocess.Popen") as launch, \
+             patch("capacity.os.killpg") as kill:
+            import subprocess
+            child = launch.return_value
+            child.poll.return_value = None
+            child.wait.side_effect = [subprocess.TimeoutExpired("owned", 1), 0]
+            child.pid = 1
+            def cancel():
+                raise Failure("CLEANUP", "daemon stop failed")
+            with self.assertRaises(Failure) as caught:
+                budget.run(["owned"], timeout=2, log=self.root / "log", cancel=cancel)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(original.detail, "counter unavailable")
+            self.assertEqual(original.cleanup_errors[0]["operation"], "cancel_owned_operation")
+            self.assertEqual(original.cleanup_errors[0]["error_code"], "CLEANUP")
+            kill.assert_called_once()
+            self.assertEqual(child.wait.call_count, 2)
+
+    def test_reap_failure_also_preserves_timeout(self):
+        budget = Budget(self.config(), lambda roots: 10)
+        budget.before("build")
+        original = Failure("TIMEOUT")
+        with patch.object(budget, "check", side_effect=[10, original]), \
+             patch("capacity.subprocess.Popen") as launch, \
+             patch("capacity.os.killpg", side_effect=PermissionError()):
+            import subprocess
+            child = launch.return_value
+            child.poll.return_value = None
+            child.wait.side_effect = subprocess.TimeoutExpired("owned", 1)
+            child.pid = 1
+            with self.assertRaises(Failure) as caught:
+                budget.run(["owned"], timeout=2, log=self.root / "log")
+            self.assertIs(caught.exception, original)
+            self.assertEqual(original.cleanup_errors[0]["operation"], "reap_command")
+
 
 class Archives(Fixture):
     def test_parent_escape_is_rejected(self):

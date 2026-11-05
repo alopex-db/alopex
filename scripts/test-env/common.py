@@ -35,6 +35,14 @@ def require(condition, code="INPUT"):
         raise Failure(code)
 
 
+def record_cleanup_error(primary, operation, error):
+    """Keep secondary cleanup failures attached to the original private diagnostic."""
+    rows = list(getattr(primary, "cleanup_errors", []))
+    rows.append({"operation": operation, "error_code": getattr(error, "code", "CLEANUP"),
+                 "detail": error.detail if isinstance(error, Failure) else repr(error)})
+    primary.cleanup_errors = rows
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as stream:

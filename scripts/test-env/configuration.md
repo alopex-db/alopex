@@ -168,6 +168,10 @@ a failed prerequisite; it is not repaired by substituting another filesystem.
 Collection verifies a manifest of copied file hashes before changing state.
 Cleanup revalidates that manifest, resource identities, ownership labels and
 stopped state. A failed copy or changed resource retains the originals.
+The original failure retains its error code when cancellation or reaping also
+fails. Secondary failures are recorded separately in private diagnostics and
+`cleanup-errors.json`; they remain part of the collected evidence. An incomplete
+stop keeps the run recoverable rather than marking it stopped or deleted.
 R01 creates another container and named volumes, validates both runs, and binds
 the result to both collection manifests. Unit-contract cases are labelled
 `contract_regression`; live environment acceptance requires the live probes and

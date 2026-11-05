@@ -8,7 +8,7 @@ import stat
 import subprocess
 import time
 
-from common import Failure, require
+from common import Failure, record_cleanup_error, require
 
 
 def allocated_bytes(roots):
@@ -87,11 +87,13 @@ class Budget:
                         self.check()
                 self.check()
                 require(child.returncode == 0, "COMMAND")
-            except BaseException:
+            except BaseException as primary:
                 try:
                     if cancel is not None:
                         cancel()
-                finally:
+                except BaseException as error:
+                    record_cleanup_error(primary, "cancel_owned_operation", error)
+                try:
                     if child.poll() is None:
                         os.killpg(child.pid, signal.SIGTERM)
                         try:
@@ -99,4 +101,6 @@ class Budget:
                         except subprocess.TimeoutExpired:
                             os.killpg(child.pid, signal.SIGKILL)
                             child.wait()
+                except BaseException as error:
+                    record_cleanup_error(primary, "reap_command", error)
                 raise

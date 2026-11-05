@@ -17,7 +17,8 @@ import hashlib
 
 from capacity import Budget
 from common import (ERRORS, Failure, atomic_json, contained, digest, load_profile,
-                    private_dir, public_result, read_json, require, sha256, verify_assets, host_lock)
+                    private_dir, public_result, read_json, require, sha256, verify_assets, host_lock,
+                    record_cleanup_error)
 from docker_backend import Docker, OWNER
 from lifecycle import Run
 
@@ -178,6 +179,7 @@ def stage(profile, docker, budget, run, image, inputs, work, cases):
     run.intent("container", helper)
     identity = docker.call(*command)
     run.resource("container", helper, identity)
+    primary = None
     try:
         budget.run([*docker.prefix, "cp", str(bundle) + "/.", helper + ":/input"],
                    timeout=profile["limits"]["case_seconds"], log=run.root / "stage.log",
@@ -187,9 +189,23 @@ def stage(profile, docker, budget, run, image, inputs, work, cases):
                    cancel=lambda: docker.stop(helper))
         state = json.loads(docker.call("container", "inspect", helper))[0]["State"]
         require(state["ExitCode"] == 0 and not state["OOMKilled"], "CASE")
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        docker.stop(helper)
-        shutil.rmtree(bundle)
+        cleanup_failure = None
+        for operation, action in (("stop_stage", lambda: docker.stop(helper)),
+                                  ("remove_stage_copy", lambda: shutil.rmtree(bundle))):
+            try:
+                action()
+            except BaseException as error:
+                if primary is not None:
+                    record_cleanup_error(primary, operation, error)
+                else:
+                    cleanup_failure = cleanup_failure or Failure("CLEANUP")
+                    record_cleanup_error(cleanup_failure, operation, error)
+        if cleanup_failure is not None:
+            raise cleanup_failure
 
 
 def execute(profile, docker, budget, cases, *, probe=False, expected_cases=None):
@@ -204,6 +220,7 @@ def execute(profile, docker, budget, cases, *, probe=False, expected_cases=None)
     run.record["expected_cases"] = list(expected_cases if expected_cases is not None else cases)
     run.save()
     name = "alopex-test-" + run_id
+    primary = None
     try:
         inputs = docker.create_volume(run, "input")
         work = docker.create_volume(run, "work")
@@ -220,11 +237,14 @@ def execute(profile, docker, budget, cases, *, probe=False, expected_cases=None)
         atomic_json(run.root / "exit.json", live["State"])
         require(live["State"]["ExitCode"] == 0 and not live["State"]["OOMKilled"], "CASE")
     except BaseException as error:
-        atomic_json(run.root / "failure.json", {"error_code": getattr(error, "code", "INTERRUPTED"),
-                                                "detail": repr(error)})
+        primary = error
+        atomic_json(run.root / "failure.json", {"error_code": getattr(error, "code", "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "INTERNAL"),
+                                                "detail": repr(error),
+                                                "cleanup_errors": getattr(error, "cleanup_errors", [])})
         raise
     finally:
         stopped = True
+        cleanup_errors = []
         for item in run.record["resources"]:
             if item["kind"] == "container":
                 try:
@@ -232,10 +252,25 @@ def execute(profile, docker, budget, cases, *, probe=False, expected_cases=None)
                         docker.stop(item["id"])
                     else:
                         stopped = False
-                except Exception:
+                        cleanup_errors.append({"operation": "stop_container", "name": item["name"],
+                                               "error_code": "IDENTITY"})
+                except BaseException as error:
                     stopped = False
-        if stopped and run.record["phase"] in ("preparing", "running"):
-            run.transition("stopped")
+                    cleanup_errors.append({"operation": "stop_container", "name": item["name"],
+                                           "error_code": getattr(error, "code", "CLEANUP"),
+                                           "detail": error.detail if isinstance(error, Failure) else repr(error)})
+        try:
+            if cleanup_errors:
+                atomic_json(run.root / "cleanup-errors.json", cleanup_errors)
+            if stopped and run.record["phase"] in ("preparing", "running"):
+                run.transition("stopped")
+            elif primary is None:
+                atomic_json(run.root / "failure.json", {"error_code": "CLEANUP", "cleanup_errors": cleanup_errors})
+                raise Failure("CLEANUP")
+        except BaseException as error:
+            if primary is None:
+                raise
+            record_cleanup_error(primary, "persist_stop_state", error)
     return run
 
 
@@ -299,7 +334,8 @@ def collect(profile, docker, budget, run_id):
             require((run.root / "failure.json").exists(), "COLLECT")
             atomic_json(destination / "result.json", {"cases": [], "status": "failed",
                                                       "error_code": "INCOMPLETE"})
-        for name in ("failure.json", "exit.json", "container.log", "stage.log", "collect-copy-error.json"):
+        for name in ("failure.json", "exit.json", "container.log", "stage.log", "collect-copy-error.json",
+                     "cleanup-errors.json"):
             if (run.root / name).exists():
                 shutil.copyfile(run.root / name, destination / name)
         if (run.root / "failure.json").exists():
@@ -421,6 +457,7 @@ def main(argv=None):
             atomic_json(output / "last-error.json", {
                 "error_code": code,
                 "detail": error.detail if isinstance(error, Failure) else repr(error),
+                "cleanup_errors": getattr(error, "cleanup_errors", []),
             })
         print(json.dumps({"status": "failed", "error_code": code}))
         return ERRORS[code]
