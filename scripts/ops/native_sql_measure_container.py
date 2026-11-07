@@ -65,7 +65,9 @@ def verify_collected(run, config, assets_digest):
             "result_sha256": digest(cell / "measurement.json"), "raw_sha256": result["raw_sha256"]}
 
 
-def execute_cell(profile, budget, config):
+def execute_cell(profile, budget, config, *, verify=None, recovered=None):
+    verify = verify_collected if verify is None else verify
+    recovered = failed_worker_was_recovered if recovered is None else recovered
     docker = MeasurementDocker(profile)
     run = Run(profile["private_output"], profile["run_id"])
     original = None
@@ -74,7 +76,7 @@ def execute_cell(profile, budget, config):
         envctl.execute(profile, docker, budget, [])
         envctl.collect(profile, docker, budget, profile["run_id"])
         run.load()
-        verified = verify_collected(run, config, digest(profile["assets"]))
+        verified = verify(run, config, digest(profile["assets"]))
     except BaseException as error:
         original = error
     finally:
@@ -97,7 +99,7 @@ def execute_cell(profile, budget, config):
         # successful stop, hash-verified collection and complete owned cleanup.
         if (getattr(original, "code", None) == "COMMAND" and
                 not getattr(original, "cleanup_errors", []) and run.path.exists() and
-                failed_worker_was_recovered(run, config, digest(profile["assets"]))):
+                recovered(run, config, digest(profile["assets"]))):
             from common import Failure
             raise Failure("CASE", "worker failure; original command evidence retained") from original
         raise original
