@@ -19,7 +19,12 @@ def validate_config(config):
     require(config['schema'] == 'alopex.hnsw-stage-input/v1' and set(config['subjects']) == {'before','candidate'},
             'stage configuration differs')
     plan(config['rows'])
-    require(config['limits'] == dict(case_seconds={1000:120,10000:300,100000:900}[config['rows']],
+    time_budget = config.get('time_budget', 'original')
+    require(time_budget in ('original', 'fullscale-1800')
+            and (time_budget != 'fullscale-1800' or config['rows'] == 100000),
+            'time budget does not match selected stage')
+    case_seconds = 1800 if time_budget == 'fullscale-1800' else {1000:120,10000:300,100000:900}[config['rows']]
+    require(config['limits'] == dict(case_seconds=case_seconds,
                                      rss_bytes=4*1024**3, runtime_bytes=5_000_000_000)
             and type(config['cpu_count']) is int and 1 <= config['cpu_count'] <= 64,
             'stage execution limits differ')

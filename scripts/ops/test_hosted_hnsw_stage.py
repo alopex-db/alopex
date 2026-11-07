@@ -15,6 +15,34 @@ def config(rows=1000):
 
 
 class StageControlTests(unittest.TestCase):
+    def test_explicit_fullscale_time_budget_keeps_all_five_pairs(self):
+        value=config(100000)
+        value['time_budget']='fullscale-1800'
+        value['limits']['case_seconds']=1800
+        value['stage_seconds']=10*(1800+30)+120
+        self.assertEqual(stage.validate_config(value),value)
+        called=[]
+        rows=stage.run_samples(value,lambda cell:called.append(cell) or {'verified':True},lambda rows:None,clock=lambda:0)
+        self.assertEqual(len(rows),10)
+        self.assertEqual([r['sample'] for r in called if r['subject']=='before'],list(range(5)))
+        self.assertEqual([r['sample'] for r in called if r['subject']=='candidate'],list(range(5)))
+        self.assertEqual(value['limits']['rss_bytes'],4*1024**3)
+        self.assertEqual(value['limits']['runtime_bytes'],5_000_000_000)
+
+    def test_expanded_time_budget_requires_exact_opt_in_and_scope(self):
+        for change in ('missing','unknown','wrong_stage','case','stage','memory','disk'):
+            value=config(100000)
+            value.update(time_budget='fullscale-1800',stage_seconds=10*(1800+30)+120)
+            value['limits']['case_seconds']=1800
+            if change=='missing':del value['time_budget']
+            if change=='unknown':value['time_budget']='unbounded'
+            if change=='wrong_stage':value['rows']=10000
+            if change=='case':value['limits']['case_seconds']=1801
+            if change=='stage':value['stage_seconds']+=1
+            if change=='memory':value['limits']['rss_bytes']*=2
+            if change=='disk':value['limits']['runtime_bytes']*=2
+            with self.subTest(change=change),self.assertRaises(ValueError):stage.validate_config(value)
+
     def test_no_automatic_scale_expansion(self):
         for size in (1000,10000,100000):
             value=config(size)
