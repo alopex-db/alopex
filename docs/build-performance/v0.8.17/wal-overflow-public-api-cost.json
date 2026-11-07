@@ -1876,16 +1876,6 @@
       ]
     }
   ],
-  "host": {
-    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "architecture": "arm64",
-    "logical_cpus": 18,
-    "cpu_brand": "Apple M5 Pro",
-    "memory_bytes": 51539607552,
-    "affinity": "macOS OS scheduling; no CPU pinning",
-    "threads": "RAYON_NUM_THREADS=2 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1",
-    "other_work": "no local builds or test suites during formal timed run"
-  },
   "raw_rows_sha256": "bcf74f925aa497bcc557f3a83bb7565c7b03087ca257e4472dc44c334ac5eb78",
   "independent_recalculation": "48 unique writers, 96 successful reader receipts; sorted middle values and ratios match report; both Python package source hashes rechecked",
   "smoke": {

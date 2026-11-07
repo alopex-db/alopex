@@ -120,8 +120,8 @@ memory acceptance. Per-case limits were 90 seconds and 2 GiB sampled RSS, with
 concurrent product builds during timing.
 
 Raw samples, MADs, binary hashes, comparison results, storage measurements and
-failed attempts are retained in `/private/tmp/alopex-684-fix`; the baseline is
-in `/private/tmp/alopex-684`. Owned executables/parser downloads are reclaimed
+failed attempts are retained in `$PRIVATE_PATH`; the baseline is
+in `$PRIVATE_PATH`. Owned executables/parser downloads are reclaimed
 after recording; shared dependencies remain for active release work.
 
 ## Remaining acceptance

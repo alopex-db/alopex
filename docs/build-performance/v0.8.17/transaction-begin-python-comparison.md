@@ -87,7 +87,7 @@ The 1,000-row median decreased by **99.868%**. The predeclared criterion was at
 least 10% improvement with an absolute difference above
 `3 * max(MAD_before, MAD_after)`. No empty-database improvement is claimed.
 First-after-open does not mean an OS-cold page cache. Full phase samples and
-MADs are in `/private/tmp/alopex-684-python/comparison.json`.
+MADs are in `$PRIVATE_PATH`.
 
 Per-case safeguards remained 90 seconds, sampled RSS below 2 GiB and at most
 2 GB additional host filesystem usage, with the 40 GB host stop boundary.

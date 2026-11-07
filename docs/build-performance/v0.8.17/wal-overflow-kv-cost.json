@@ -11,7 +11,6 @@
       },
       "baseline_sha": "d9ff8783b8d18a63d167204e55902ea6cd90dcd1",
       "candidate_sha": "a58b77b136e35faa6a0bffc44ea22c0bb688f74e",
-      "cpu": 0,
       "rounds": 5,
       "warmup_rounds": 1,
       "cache": "warm OS cache; fresh DB per case; no cache eviction",
@@ -912,11 +911,6 @@
       }
     },
     "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n"
-  },
-  "environment": {
-    "platform": "Linux x86_64 / WSL2",
-    "filesystem": "ext4",
-    "profile": "release, debug=0, incremental=false, codegen-units=16; build jobs=2"
   },
   "initial_failures": [
     "Probe used rollback instead of rollback_self; corrected before measurement.",

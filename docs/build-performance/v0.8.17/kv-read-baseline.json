@@ -54,19 +54,19 @@
       }
     },
     "outputs": {
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+      "$PRIVATE_PATH_1": {
         "sha256": "a13dd2e04861384dc7a04d43ef79a92fb8f31d4ba472952f1c6f380041abc656",
         "bytes": 36637792
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+      "$PRIVATE_PATH_2": {
         "sha256": "edae0cf7ee8cc6bd4ff02b81f1e98559c0ff6f4ffd0dd9c54a8c6e59684d2673",
         "bytes": 6887864
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+      "$PRIVATE_PATH_3": {
         "sha256": "a13dd2e04861384dc7a04d43ef79a92fb8f31d4ba472952f1c6f380041abc656",
         "bytes": 36637792
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+      "$PRIVATE_PATH_4": {
         "sha256": "edae0cf7ee8cc6bd4ff02b81f1e98559c0ff6f4ffd0dd9c54a8c6e59684d2673",
         "bytes": 6887864
       }
@@ -7775,109 +7775,109 @@
   "cleanup": {
     "removed": [
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_1",
         "sha256": "a13dd2e04861384dc7a04d43ef79a92fb8f31d4ba472952f1c6f380041abc656",
         "bytes": 36637792
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_2",
         "sha256": "edae0cf7ee8cc6bd4ff02b81f1e98559c0ff6f4ffd0dd9c54a8c6e59684d2673",
         "bytes": 6887864
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_3",
         "sha256": "a13dd2e04861384dc7a04d43ef79a92fb8f31d4ba472952f1c6f380041abc656",
         "bytes": 36637792
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_4",
         "sha256": "edae0cf7ee8cc6bd4ff02b81f1e98559c0ff6f4ffd0dd9c54a8c6e59684d2673",
         "bytes": 6887864
       }
     ],
     "retained": [
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/asyncio.pyi",
+        "path": "$PRIVATE_PATH_5",
         "bytes": 7048,
         "sha256": "0ee6196c6eced1021d43933eb79d24b94ef16d8913bfe6dadb0fff5933ea9bd5"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/remote.py",
+        "path": "$PRIVATE_PATH_6",
         "bytes": 49863,
         "sha256": "d422bcc4bb22815bed74507ba024b20cd1593150e030e37c1b8def69a832338b"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/protocols.py",
+        "path": "$PRIVATE_PATH_7",
         "bytes": 1564,
         "sha256": "ac50bf120298d7b679881ee1081ec3c7cc4c7265863d9046ff4a5957419e571f"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/asyncio.py",
+        "path": "$PRIVATE_PATH_8",
         "bytes": 19842,
         "sha256": "cc1304ebc59ae459116e1db7c3758f074d152ff521259012600aef70a9111603"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/__init__.py",
+        "path": "$PRIVATE_PATH_9",
         "bytes": 4101,
         "sha256": "ca72d826c6159d2574edf737cb46922c2f10453ab75b057db431c68bb5c56a55"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/_alopex.abi3.so",
+        "path": "$PRIVATE_PATH_10",
         "bytes": 36637792,
         "sha256": "a13dd2e04861384dc7a04d43ef79a92fb8f31d4ba472952f1c6f380041abc656"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/py.typed",
+        "path": "$PRIVATE_PATH_11",
         "bytes": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/remote.pyi",
+        "path": "$PRIVATE_PATH_12",
         "bytes": 5221,
         "sha256": "db171685c3c8ad94a671ecf9ac51808c7f25d5b68dd3db40c513c979f8d48d1b"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/_alopex.pyi",
+        "path": "$PRIVATE_PATH_13",
         "bytes": 26853,
         "sha256": "558c956c695a76cdbee717100b685af9d14e5966bc545fa500eac656016dc5b8"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/native/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_14",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/native/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_15",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/package/alopex/native/SHA256SUMS",
+        "path": "$PRIVATE_PATH_16",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/parser/alopex-sql-parser/aarch64-apple-darwin/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_17",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/parser/alopex-sql-parser/aarch64-apple-darwin/BUILD_IDENTITY.json",
+        "path": "$PRIVATE_PATH_18",
         "bytes": 2800,
         "sha256": "ac74d6d2daec3d6d92006479703b77b1639207dfceb3a3abd7cb83900c9fafd9"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_19",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.a",
+        "path": "$PRIVATE_PATH_20",
         "bytes": 793984,
         "sha256": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
       },
       {
-        "path": "/private/tmp/alopex-712-kv-profile/parser/alopex-sql-parser/aarch64-apple-darwin/SHA256SUMS",
+        "path": "$PRIVATE_PATH_21",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       }

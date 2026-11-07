@@ -237,11 +237,11 @@
       ]
     },
     "binaries": {
-      "D:\\a\\alopex\\alopex\\target\\debug\\alopex-wal-v0816.exe": {
+      "$PRIVATE_PATH_1": {
         "bytes": 1295872,
         "sha256": "26881fe949600af9fd46b6743db3026b35d21df6d27c72d8586a768e8f79a053"
       },
-      "D:\\a\\alopex\\alopex\\target\\debug\\alopex-wal-current.exe": {
+      "$PRIVATE_PATH_2": {
         "bytes": 1573376,
         "sha256": "29f71e4cc9f2b7d58ff148fc6c27262d08e3da8d6da89cd3ff63b4cd75d3f54a"
       }
@@ -491,7 +491,7 @@
   "container": {
     "legacy-write": {
       "phase": "legacy-write",
-      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\legacy\\Lib\\site-packages\\alopex\\_alopex.pyd",
+      "native": "$PRIVATE_PATH_3",
       "native_sha256": "7816d0721669dda998e44cc2a8181eaf883909260df67b5c8cfed4f0ebcdf445",
       "legacy_version": "0.8.16",
       "files": {
@@ -504,7 +504,7 @@
     },
     "upgrade": {
       "phase": "upgrade",
-      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\normal\\alopex\\_alopex.cp311-win_amd64.pyd",
+      "native": "$PRIVATE_PATH_4",
       "native_sha256": "8897f2f992558ab62981a2c0841fdb0f318ab4f81e85157e78a35a1f421ab63c",
       "legacy_version": null,
       "files": {
@@ -517,7 +517,7 @@
     },
     "legacy-reject": {
       "phase": "legacy-reject",
-      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\legacy\\Lib\\site-packages\\alopex\\_alopex.pyd",
+      "native": "$PRIVATE_PATH_3",
       "native_sha256": "7816d0721669dda998e44cc2a8181eaf883909260df67b5c8cfed4f0ebcdf445",
       "legacy_version": "0.8.16",
       "error": "container format error: Incompatible version: file version FileVersion { major: 0, minor: 2, patch: 0 } is newer than reader version FileVersion { major: 0, minor: 1, patch: 0 }. Please upgrade Alopex DB.",
@@ -532,7 +532,7 @@
     },
     "reopen": {
       "phase": "reopen",
-      "native": "D:\\a\\_temp\\alopex-windows-overflow-public\\normal\\alopex\\_alopex.cp311-win_amd64.pyd",
+      "native": "$PRIVATE_PATH_4",
       "native_sha256": "8897f2f992558ab62981a2c0841fdb0f318ab4f81e85157e78a35a1f421ab63c",
       "legacy_version": null,
       "files": {

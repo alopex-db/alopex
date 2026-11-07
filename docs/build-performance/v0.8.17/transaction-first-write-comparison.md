@@ -15,8 +15,8 @@ report. Use `first_write_profile.py` through `run_first_write_profile.py`:
 
 ```sh
 python scripts/performance/run_first_write_profile.py \
-  --python /path/to/venv/bin/python --identity /path/to/source-identity.json \
-  --output /path/to/new-output-directory
+  --python $PRIVATE_PATH --identity $PRIVATE_PATH \
+  --output $PRIVATE_PATH
 ```
 
 - 100/1,000 rows, identical two-vector-column fixtures, 0/1/2 HNSW indexes.
@@ -151,7 +151,7 @@ verified. Measurement worker SHA-256:
 final runner SHA-256:
 `2dc83fd71068ec34ad7d004b33129dee206eb7a4238242f4d92f325a31a205ec`.
 
-Evidence: `/private/tmp/alopex-684-first-write` contains both plans, source and
+Evidence: `$PRIVATE_PATH` contains both plans, source and
 harness identities, raw phase samples, results, `comparison.json`,
 `replication-comparison.json`, summary scripts, resource logs and cleanup record.
 The source-qualified wheels were reused without network/build work, then both

@@ -15,8 +15,8 @@ on native macOS. Install each qualified wheel offline into one venv, serially:
 
 ```sh
 python scripts/performance/run_begin_acceptance.py \
-  --python /path/to/venv/bin/python --identity /path/to/source-identity.json \
-  --output /path/to/new-output-directory
+  --python $PRIVATE_PATH --identity $PRIVATE_PATH \
+  --output $PRIVATE_PATH
 ```
 
 The identity JSON records `product_source`, `product_equivalent_to`,
@@ -161,7 +161,7 @@ This is development evidence. Native Rust HNSW/index/resource coverage,
 first-write overhead, OS CI and composed candidate acceptance remain. #684 and
 v0.8.17 release readiness are not declared complete.
 
-Evidence directory: `/private/tmp/alopex-684-grid` (`plan.json`, per-run identity,
+Evidence directory: `$PRIVATE_PATH` (`plan.json`, per-run identity,
 raw JSONL, selected `results.json`, `comparison.json`, `summarize.py`, storage and
 cleanup records). Worker SHA-256:
 `6a661662beac7c4fda6b138cda752fe92bcd0b14b81545228f73ceae957122ea`.

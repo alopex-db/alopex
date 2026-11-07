@@ -4,7 +4,6 @@
     "tree": "ccae51fd061c80ce3d92649d1ff357062fda32bf",
     "run_id": "41422265175",
     "attempt": "1",
-    "platform": "win32",
     "writer_supported": true,
     "lowlevel_wal_writer_supported": true,
     "lsm_file_publication_supported": true

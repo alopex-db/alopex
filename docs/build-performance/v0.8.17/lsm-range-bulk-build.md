@@ -67,6 +67,6 @@ mutationは対象2関数の4件に限定した。版選択の `>` を `>=` に�
 - 観測ホスト最大18,352,893,952 bytes。client RSS最大355,975,168 bytes、server 74,563,584 bytes。RSSとCPU時間は準備・検証を含み、短いケースの未観測RSSはゼロと扱わない。操作単位IOは未測定。
 - 公開APIの62 fixtureをすべて回収し、記録したclient/server 93 PIDが終了済みであることを確認した。unit fixtureはRAIIで回収し、所有TMPDIRも削除した。
 - native package・parser・テスト実行ファイル等40ファイル、345,842,514 logical bytesを削除し、ホスト18,006,937,600 bytesへ戻した。故障注入の実行ファイルは再利用しない。記録と共有依存キャッシュを保持する。
-- 完全なログ・native stackは `/private/tmp/alopex-712-lsm-range` に保存。バイナリは回収済み。
+- 完全なログ・native stackは `$PRIVATE_PATH` に保存。バイナリは回収済み。
 
 この比較は内部の修正採用判断用である。公開0.8.16・修正版・比較製品を同一条件で測る正式受入、候補への統合、候補CI、他の採用修正との組合せは未完了。全範囲走査とread_set構築の費用も残る。#712で見えているPythonの全件変換費用は別の後続対象として維持する。

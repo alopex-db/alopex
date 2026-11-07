@@ -9,9 +9,8 @@ measurement driver and its tests. Subsequent report changes do not change the
 measured product or driver. The intervening candidate includes other fixes, so
 these timings alone do not attribute every difference to inline WAL selection.
 
-Both extensions were built on the same Apple M5 Pro Mac (18 logical CPUs,
-48 GiB RAM, macOS 27.0.1), with the same Rust/Python toolchains, test profile
-opt-level1, two build jobs, incremental/debug symbols disabled, and the same
+Both builds used the same Rust/Python toolchains and test profile (opt-level1),
+with two build jobs and incremental/debug symbols disabled. They used the
 published 0.8.16 parser contract0.28.0 development override. They are ordinary
 extensions without the private fault hook, not qualified release wheels.
 Source/tree/native/parser/lock/Python-source digests and tool versions are in

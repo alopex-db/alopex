@@ -10,7 +10,7 @@
     "unanswered": "Do the two green PRs compose with current candidate without changing owned behavior/evidence files?",
     "action": "Merge candidate into each existing owned branch; compare parent-relative binary diff and owned blobs; push and require new composition CI",
     "no_execution": "No builds, native/manual tests, worktrees or fixtures; no rerun of unchanged evidence for freshness",
-    "output": "/private/tmp/alopex-749-771-efa-composition",
+    "output": "$PRIVATE_PATH_1",
     "cleanup": "Retain only compact composition and CI evidence; preserve existing .codex/worktrees"
   },
   "component_composition": [

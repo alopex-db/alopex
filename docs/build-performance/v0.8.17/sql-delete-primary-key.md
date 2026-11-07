@@ -135,7 +135,7 @@ Host storage peaked at 18,466,422,784 bytes and ended at
 owned test executables, before/after server and Python native outputs, copied
 packages and pinned parser/archive were removed. Artifact hashes and cleanup
 receipts remain in the report; compact execution logs are retained in
-`/private/tmp/alopex-712-delete-fix`. Shared Cargo dependencies remain for the
+`$PRIVATE_PATH`. Shared Cargo dependencies remain for the
 active release work. No worktree was created; `.codex/worktrees/` is untouched.
 
 ## Remaining integration and acceptance

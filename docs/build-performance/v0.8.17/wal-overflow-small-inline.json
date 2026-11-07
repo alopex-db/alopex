@@ -12,7 +12,6 @@
       },
       "baseline_sha": "d9ff8783b8d18a63d167204e55902ea6cd90dcd1",
       "candidate_sha": "77a2e6a8058260ff223d5ab64550f80969cc6d0c",
-      "cpu": 0,
       "rounds": 5,
       "warmup_rounds": 1,
       "cache": "warm OS cache; fresh DB per case; no cache eviction",
@@ -1208,11 +1207,6 @@
       "crates/alopex-core/src/lsm/overflow.rs": "0a291e6fa213490a0faf975ce0b84254f0039ff541753a5f796a135cf4d6088d",
       "crates/alopex-core/src/lsm/wal/overflow.rs": "858b26061947c8dd9c0c193d2f5420c3aa3b50ae66dc467da122bacd39493554"
     }
-  },
-  "environment": {
-    "platform": "Linux x86_64 / WSL2",
-    "filesystem": "ext4",
-    "profile": "release, debug=0, incremental=false, codegen-units=16; build jobs=2"
   },
   "verification": {
     "small_inline_tests": 7,
