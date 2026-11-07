@@ -114,3 +114,11 @@ These are development results. Candidate CI and released-wheel qualification
 must be recorded against their own source/artifact identities in
 [#690](https://github.com/alopex-db/alopex/issues/690) before accepting
 [#693](https://github.com/alopex-db/alopex/issues/693) for release.
+
+The primary RC wheel checks invoke `scripts/release/verify_python_parquet.py`
+from the isolated installed-wheel environment. All 34 cases must execute and
+pass; missing PyArrow, skipped cases, a different installed module or a changed
+wheel rejects qualification. The source/wheel digests and case results are
+retained in `artifacts/python-release/vector-parquet.json`. The fixtures remain
+limited to three rows and are removed after each case. Actual RC execution and
+the separate published-old-version interchange evidence are still required.

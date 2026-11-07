@@ -169,14 +169,20 @@ class PythonReleaseTests(unittest.TestCase):
         for kind in ("linux", "macos", "windows"):
             with self.subTest(kind=kind), patch.object(smoke.subprocess, "run") as run:
                 smoke.main(["--kind", kind])
-                self.assertEqual(run.call_count, 5 if kind == "macos" else 4)
+                self.assertEqual(run.call_count, 6 if kind == "macos" else 5)
                 calls = run.call_args_list
                 self.assertIn("--only-binary=:all:", calls[1].args[0])
+                self.assertIn("pyarrow==26.0.0", calls[1].args[0])
                 self.assertTrue(calls[3].args[0][-1].endswith("verify_python_vector_api.py"))
                 self.assertEqual(calls[3].kwargs["cwd"], self.runner if kind == "windows" else self.workspace)
                 self.assertTrue(all(c.kwargs["check"] for c in calls))
+                self.assertIn("-I", calls[4].args[0])
+                self.assertTrue(calls[4].args[0][2].endswith("verify_python_parquet.py"))
+                self.assertEqual(calls[4].kwargs["cwd"], self.runner)
+                self.assertEqual(calls[4].kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"], "1")
+                self.assertNotIn("PYTHONPATH", calls[4].kwargs["env"])
                 if kind == "macos":
-                    self.assertEqual(calls[4].args[0][-1], "crates/alopex-py/tests/test_sql.py")
+                    self.assertEqual(calls[5].args[0][-1], "crates/alopex-py/tests/test_sql.py")
 
     def test_failed_wheel_install_stops_before_api_smoke(self):
         self.put(self.workspace / "dist/fixture.whl")
@@ -184,6 +190,16 @@ class PythonReleaseTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 smoke.main(["--kind", "windows"])
         self.assertEqual(run.call_count, 3)
+
+    def test_failed_parquet_qualification_stops_the_release_check(self):
+        self.put(self.workspace / "dist/fixture.whl")
+        for kind in ("linux", "macos", "windows"):
+            with self.subTest(kind=kind), patch.object(smoke.subprocess, "run", side_effect=[
+                None, None, None, None, subprocess.CalledProcessError(1, ['qualification']),
+            ]) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    smoke.main(["--kind", kind])
+                self.assertEqual(run.call_count, 5)
 
     def test_missing_or_ambiguous_wheel_does_not_create_venv(self):
         with patch.object(smoke.subprocess, "run") as run:
