@@ -1,25 +1,20 @@
-name: Native transaction begin fixed comparison
+name: Linux phase runner runtime acceptance
 on:
   workflow_dispatch:
     inputs:
       runner_label:
-        description: Managed VM label from the execution profile
-        required: true
-        type: string
-      performance_config:
-        description: Source-bound artifact identities and operation bounds
+        description: Managed VM label from execution profile
         required: true
         type: string
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: alopex-v0817-native-performance
   cancel-in-progress: false
 jobs:
-  construct:
+  verify:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 150
+    timeout-minutes: 15
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -83,46 +78,15 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Retrieve source-built products and verified environment image
-        env:
-          RUNNER_KIND: ${{ runner.environment }}
-          GH_TOKEN: ${{ github.token }}
-          PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
+      - name: Verify real Linux phase runner and cleanup
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_begin.py fetch
-      - name: Measure fixed begin fixtures and collect owned resources
-        env:
-          RUNNER_KIND: ${{ runner.environment }}
-          NATIVE_IMAGE_INPUTS: ${{ secrets.ALOPEX_NATIVE_IMAGE_INPUTS }}
-          PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
-        shell: bash
-        run: |
-          python3 - <<'PYCODE'
-          import json, os, pathlib, subprocess
-          try:
-              assert os.environ.get('RUNNER_KIND') == 'github-hosted'
-              env = dict(os.environ, OPERATOR_HOME=os.environ['HOME'], OPERATOR_UID=str(os.getuid()), OPERATOR_GID=str(os.getgid()))
-              names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,PUBLIC_PERFORMANCE_CONFIG,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
-              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_begin.py','run']
-              result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=8400)
-              for line in result.stdout.splitlines():
-                  value = json.loads(line)
-                  assert set(value) <= {'status','error_code'}
-                  assert value.get('status') in ('passed','failed')
-                  assert value.get('error_code') in (None,'VM_SCOPE','PERFORMANCE')
-                  print(json.dumps(value,sort_keys=True))
-              raise SystemExit(result.returncode)
-          except SystemExit: raise
-          except BaseException:
-              print('{"status":"failed","error_code":"PERFORMANCE"}')
-              raise SystemExit(1)
-          PYCODE
-      - name: Preserve comparison and encrypted evidence
+        run: python3 -B scripts/ops/hosted_phase_runner_probe.py
+      - name: Preserve public result and encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-begin-fixed-performance
-          path: native-export/
+          name: phase-runner-runtime
+          path: phase-runner-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
