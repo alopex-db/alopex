@@ -1,4 +1,4 @@
-name: Native transaction begin fixed comparison
+name: Native transaction phase diagnostics
 on:
   workflow_dispatch:
     inputs:
@@ -89,7 +89,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_begin.py fetch
+        run: python3 -B scripts/ops/hosted_native_begin_diagnostic.py fetch
       - name: Measure fixed begin fixtures and collect owned resources
         env:
           RUNNER_KIND: ${{ runner.environment }}
@@ -103,7 +103,7 @@ jobs:
               assert os.environ.get('RUNNER_KIND') == 'github-hosted'
               env = dict(os.environ, OPERATOR_HOME=os.environ['HOME'], OPERATOR_UID=str(os.getuid()), OPERATOR_GID=str(os.getgid()))
               names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,PUBLIC_PERFORMANCE_CONFIG,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
-              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_begin.py','run']
+              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_begin_diagnostic.py','run']
               result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=8400)
               for line in result.stdout.splitlines():
                   value = json.loads(line)
@@ -121,7 +121,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-begin-fixed-performance
+          name: native-begin-phase-diagnostics
           path: native-export/
           if-no-files-found: error
           compression-level: 0
