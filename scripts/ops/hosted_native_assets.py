@@ -65,6 +65,20 @@ def stage_parser_sidecars(parser_root, record, expected_contract):
     (directory / "SHA256SUMS").write_text("".join(checksums))
 
 
+def validate_published_wheel(record, version, source_commit):
+    name = record["filename"]
+    tag = "alopex-py-v" + version
+    if (record["version"] != version or record["source_commit"] != source_commit or
+            record["release_tag"] != tag or Path(name).name != name or
+            not name.startswith("alopex-" + version + "-") or not name.endswith(".whl") or
+            record["url"] != "https://github.com/alopex-db/alopex/releases/download/" + tag + "/" + name or
+            not re.fullmatch(r"[a-f0-9]{64}", record["sha256"]) or
+            record["pypi_sha256"] != record["sha256"] or
+            record["release_asset_digest"] != "sha256:" + record["sha256"] or
+            type(record["size"]) is not int or not 0 < record["size"] < 100_000_000):
+        raise ValueError("unqualified published wheel identity")
+
+
 def main():
     if os.environ.get("RUNNER_KIND") != "github-hosted" or os.geteuid() == 0:
         print('{"status":"failed","error_code":"VM_SCOPE"}')
@@ -107,7 +121,9 @@ def main():
         budget.before(phase)
         budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
     def fetch(url, output, expected, limit):
-        require(url.startswith("https://github.com/alopex-db/alopex/releases/download/v0.8.16/"), "POLICY")
+        require(any(url.startswith(prefix) for prefix in (
+            "https://github.com/alopex-db/alopex/releases/download/v0.8.16/",
+            "https://github.com/alopex-db/alopex/releases/download/alopex-py-v0.8.16/")), "POLICY")
         budget.before("prepare")
         received = 0
         with urllib.request.urlopen(url, timeout=30) as response, output.open("xb") as stream:
@@ -155,6 +171,9 @@ def main():
         require(git_value("rev-parse", "HEAD") == config["source_commit"], "IDENTITY")
         identity = {"commit": config["source_commit"], "tree": git_value("rev-parse", "HEAD^{tree}"), "profile": "release"}
         version = tomllib.loads((source / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+        published_wheel = config.get("published_wheel")
+        if published_wheel is not None:
+            validate_published_wheel(published_wheel, version, config["source_commit"])
         record_file = work / "parser-record.json"
         parser_archive = work / "parser.tar.gz"
         fetch(config["parser_record_url"], record_file, config["parser_record_sha256"], 65536)
@@ -181,17 +200,23 @@ def main():
                 "host: " + record["target"] + "\n" in rust_version, "IDENTITY")
         command([sys.executable, "-m", "venv", str(scratch / "venv")], "tools", "venv")
         python = scratch / "venv/bin/python"
-        command([str(python), "-m", "pip", "install", "--only-binary=:all:", "--report", str(work / "tool-install.json"),
-                 "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
+        if published_wheel is None:
+            command([str(python), "-m", "pip", "install", "--only-binary=:all:", "--report", str(work / "tool-install.json"),
+                     "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
         os.chdir(source)
         command(["cargo", "build", "--locked", "--release", "-p", "alopex-server", "--bin", "alopex-server"],
                 "server", "server-build", config["build_seconds"])
         assets = private_dir(export / "assets")
         server = private_dir(assets / "bin") / "alopex-server"
         shutil.copyfile(target / "release/alopex-server", server); server.chmod(0o700)
-        command([str(scratch / "venv/bin/maturin"), "build", "--locked", "--release", "--compatibility", "linux",
-                 "--manifest-path", "crates/alopex-py/Cargo.toml", "--interpreter", str(python),
-                 "--out", str(private_dir(assets / "wheels"))], "wheel", "wheel-build", config["build_seconds"])
+        wheel_directory = private_dir(assets / "wheels")
+        if published_wheel is None:
+            command([str(scratch / "venv/bin/maturin"), "build", "--locked", "--release", "--compatibility", "linux",
+                     "--manifest-path", "crates/alopex-py/Cargo.toml", "--interpreter", str(python),
+                     "--out", str(wheel_directory)], "wheel", "wheel-build", config["build_seconds"])
+        else:
+            fetch(published_wheel["url"], wheel_directory / published_wheel["filename"],
+                  published_wheel["sha256"], published_wheel["size"])
         wheels = list((assets / "wheels").glob("*.whl")); require(len(wheels) == 1, "IDENTITY")
         wheel = wheels[0]
         command([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], "collect", "wheel-install")
@@ -208,11 +233,12 @@ def main():
                    "server_sha256": digest(server), "python_wheel_sha256": digest(wheel), "parser_sha256": digest(lib_out),
                    "parser_contract": record["contract_version"], "parser_record_sha256": digest(record_file),
                    "cargo_lock_sha256": digest(source / "Cargo.lock"),
-                   "tools": {"rust": config["rust_version"], "maturin": config["maturin_version"]},
+                   "tools": {"rust": config["rust_version"], "maturin": config["maturin_version"] if published_wheel is None else None},
                    "build": {"incremental": False, "release_debug": False,
                              "path_remap": {"control": "/alopex-build/control", "work": "/alopex-build/work"},
                              "server": ["cargo", "build", "--locked", "--release", "-p", "alopex-server", "--bin", "alopex-server"],
-                             "wheel": "maturin build --locked --release --compatibility linux"},
+                             "wheel": "maturin build --locked --release --compatibility linux" if published_wheel is None else
+                             {"mode": "published_distribution", **published_wheel}},
                    "qualification": "development comparison asset; not RC qualification"}
         receipt_file = private_dir(assets / "receipts") / "build.json"; atomic_json(receipt_file, receipt)
         files = [{"role": role, "path": str(path.relative_to(assets)), "size": path.stat().st_size, "sha256": digest(path)}
