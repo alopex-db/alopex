@@ -26,6 +26,7 @@ class Counter:
     def __init__(self, pid):
         self.pid = pid
         self.active = None
+        self.pending_observation = None
         self.closed = False
         self.instances.append(self)
 
@@ -36,6 +37,8 @@ class Counter:
 
     def finish(self, phase):
         if self.fail == "finish":
+            self.pending_observation = {"phase": phase, "after_reset": {"high_water_bytes": 2048},
+                                        "after": {"high_water_bytes": 1024}}
             raise RuntimeError("injected counter failure")
         if self.active != phase:
             raise AssertionError("unexpected phase")
@@ -166,6 +169,10 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("injected", report["failure"])
                 self.assertEqual(len(logged), count)
+                if fail == "finish":
+                    self.assertEqual(report["incomplete_kernel_phase"], {
+                        "phase": "seed", "after_reset": {"high_water_bytes": 2048},
+                        "after": {"high_water_bytes": 1024}})
 
     def test_kernel_limit_fails_even_when_sampled_rss_is_small(self):
         code, report, logged, _ = self.run_fixture(peak=8_000_000_000)

@@ -43,6 +43,7 @@ class PhaseRss:
             raise PhaseRssError("invalid child PID")
         self.directory = None
         self.active = None
+        self.pending_observation = None
         try:
             self.directory = os.open(os.path.join(proc_root, str(pid)),
                                      os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -81,6 +82,7 @@ class PhaseRss:
         if self.active is not None or not isinstance(phase, str) or not phase:
             raise PhaseRssError("invalid phase start")
         before_reset = self.snapshot()
+        self.pending_observation = {"phase": phase, "before_reset": before_reset}
         try:
             fd = os.open("clear_refs", os.O_WRONLY | os.O_NOFOLLOW,
                          dir_fd=self.directory)
@@ -92,16 +94,19 @@ class PhaseRss:
         except OSError:
             raise PhaseRssError("RSS reset unavailable") from None
         after_reset = self.snapshot()
+        self.pending_observation["after_reset"] = after_reset
         self.active = (phase, before_reset, after_reset)
 
     def finish(self, phase):
         if self.active is None or phase != self.active[0]:
             raise PhaseRssError("phase end does not match start")
         after = self.snapshot()
+        self.pending_observation["after"] = after
         _, previous, before = self.active
         if after["high_water_bytes"] < before["high_water_bytes"]:
             raise PhaseRssError("RSS high-water mark decreased during phase")
         self.active = None
+        self.pending_observation = None
         return {"phase": phase, "before_reset": previous, "after_reset": before,
                 "after": after, "kernel_reported_peak_rss_bytes": after["high_water_bytes"],
                 "scope": "child process between phase handshakes, including end-event serialization",

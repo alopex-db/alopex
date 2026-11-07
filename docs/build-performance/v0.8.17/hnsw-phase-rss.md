@@ -27,6 +27,10 @@ workload is added to normal CI.
   Missing counters, rejected resets, identity changes, decreasing high-water
   marks and incomplete phase coverage fail the run. A reported phase peak at
   the RSS limit also fails the run.
+  `incomplete_kernel_phase` preserves the last attempted phase and every
+  available reset/end counter even when validation fails. An unavailable end
+  reading remains absent; a decreasing reading is retained unchanged and does
+  not qualify as a successful peak. This evidence survives child cleanup.
 - Both sampled and kernel modes require all nine start/end pairs in order,
   followed by exactly one `complete` handshake and a zero process exit.
   The runner drains stdout through EOF and saves each raw event before parsing

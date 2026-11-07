@@ -175,6 +175,7 @@ def main():
               "children_lifetime_peak_rss_bytes":None if args.phase_kernel_rss else (peak if sys.platform=="darwin" else peak*1024),
               "children_rusage_reported_maxrss_bytes":peak if sys.platform=="darwin" else peak*1024,
               "phase_kernel_rss":kernel_phases,
+              "incomplete_kernel_phase":kernel_observer.pending_observation if kernel_observer is not None else None,
               "kernel_rss_reset":args.phase_kernel_rss,
               "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; when kernel reset is enabled its reported value is not a lifetime peak. Sampled phase values remain lower bounds. Kernel phase values cover the handshake window and have kernel RSS accounting accuracy.",
               "final_inventory":storage.inventory([args.output])}

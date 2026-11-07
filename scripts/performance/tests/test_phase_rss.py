@@ -59,6 +59,7 @@ class PhaseRssTests(unittest.TestCase):
         self.assertEqual(result["after"]["rss_bytes"], 14336)
         self.assertEqual(result["kernel_reported_peak_rss_bytes"], 20480)
         self.assertIsNone(observer.active)
+        self.assertIsNone(observer.pending_observation)
 
     def test_interval_order_is_checked(self):
         observer = self.observer()
@@ -105,6 +106,14 @@ class PhaseRssTests(unittest.TestCase):
         self.status(10, 11)
         with self.assertRaises(PhaseRssError):
             observer.finish("insert")
+        self.assertEqual(observer.pending_observation, {
+            "phase": "insert",
+            "before_reset": {"rss_bytes": 10240, "high_water_bytes": 12288},
+            "after_reset": {"rss_bytes": 10240, "high_water_bytes": 12288},
+            "after": {"rss_bytes": 10240, "high_water_bytes": 11264},
+        })
+        observer.close()
+        self.assertEqual(observer.pending_observation["after"]["high_water_bytes"], 11264)
 
     def test_counter_disappearance_is_not_zero(self):
         observer = self.observer()
@@ -112,6 +121,9 @@ class PhaseRssTests(unittest.TestCase):
         (self.process / "status").unlink()
         with self.assertRaises(PhaseRssError):
             observer.finish("insert")
+
+        self.assertEqual(observer.pending_observation["phase"], "insert")
+        self.assertNotIn("after", observer.pending_observation)
 
     def test_close_is_idempotent_and_disables_reads(self):
         observer = self.observer()
