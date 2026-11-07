@@ -1,4 +1,4 @@
-name: Build native comparison assets
+name: Build native HNSW comparison example
 on:
   workflow_dispatch:
     inputs:
@@ -82,17 +82,17 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Build source-bound server and wheel serially
+      - name: Build source-bound HNSW example and tiny smoke
         env:
           RUNNER_KIND: ${{ runner.environment }}
           PUBLIC_BUILD_CONFIG: ${{ inputs.build_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_assets.py
+        run: python3 -B scripts/ops/hosted_native_hnsw_assets.py
       - name: Preserve software assets and encrypted build evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-product-assets
+          name: native-hnsw-example-assets
           path: native-assets-export/
           if-no-files-found: error
           compression-level: 0
