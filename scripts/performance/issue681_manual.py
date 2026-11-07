@@ -185,4 +185,7 @@ def main():
 
 
 if __name__ == "__main__":
+    def interrupted(signum, frame):
+        raise InterruptedError("manual workload interrupted")
+    signal.signal(signal.SIGTERM, interrupted)
     raise SystemExit(main())

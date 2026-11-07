@@ -31,6 +31,8 @@ workload is added to normal CI.
   followed by exactly one `complete` handshake and a zero process exit.
   The runner drains stdout through EOF and saves each raw event before parsing
   or reading counters, so a rejected event remains available for diagnosis.
+  SIGTERM enters the failure path, stops and waits for the workload process
+  group, and retains the interruption in the private report.
 - The peak is the **kernel-reported process RSS high-water mark over the
   handshake interval**, including end-event serialization. It is not an exact
   allocation peak or an HNSW-only memory value. Kernel RSS accounting accuracy
