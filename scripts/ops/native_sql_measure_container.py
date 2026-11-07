@@ -22,6 +22,24 @@ class MeasurementDocker(Docker):
         return live
 
 
+def failed_worker_was_recovered(run, config, assets_digest):
+    """Distinguish a reported worker failure from an infrastructure command failure."""
+    if run.record["phase"] != "deleted":
+        return False
+    run.verify_collection()
+    root = run.root / "collected"
+    report = read_json(root / "result.json")
+    if report.get("schema") != "alopex.native-sql-measurement/v1" or report.get("status") != "failed":
+        return False
+    require(report["assets_digest"] == assets_digest and report["source"] == config["source"] and
+            all(report[key] == config[key] for key in ("case", "engine", "trial")), "IDENTITY")
+    status_path = root / "cell/status.json"
+    require(digest(status_path) == report["cell_status_sha256"], "IDENTITY")
+    status = read_json(status_path)
+    return (status["status"] == "failed" and status["worker_error"] is not None and
+            status["stop_error"] is None and not (root / "cleanup-errors.json").exists())
+
+
 def verify_collected(run, config, assets_digest):
     run.verify_collection()
     root = run.root / "collected"
@@ -74,5 +92,13 @@ def execute_cell(profile, budget, config):
                     from common import record_cleanup_error
                     record_cleanup_error(original, "measurement_collection_cleanup", error)
     if original is not None:
+        # docker start --attach returns the worker's nonzero status as COMMAND.
+        # Continue independent cells only after a source-bound failure report,
+        # successful stop, hash-verified collection and complete owned cleanup.
+        if (getattr(original, "code", None) == "COMMAND" and
+                not getattr(original, "cleanup_errors", []) and run.path.exists() and
+                failed_worker_was_recovered(run, config, digest(profile["assets"]))):
+            from common import Failure
+            raise Failure("CASE", "worker failure; original command evidence retained") from original
         raise original
     return verified

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from common import Failure
+from common import Failure, digest
 from lifecycle import Run
 from docker_backend import Docker
 import native_sql_measure_container as controller
@@ -85,6 +85,42 @@ class ContainerCollectionTests(unittest.TestCase):
             with self.assertRaises(Failure) as caught: controller.execute_cell(self.profile, None, {})
         self.assertEqual(caught.exception.code, "IDENTITY")
         self.assertEqual(Run(self.root, "unit-cell").load().record["phase"], "collected")
+
+    def recovered_worker(self, stop_error=None, wrong_source=False):
+        config = {"case": "aggregate", "engine": "alopex-server", "trial": 0, "source": {"commit": "a" * 40}}
+        original = Failure("COMMAND")
+        def execute(*args):
+            self.execute()
+            raise original
+        def collect(*args):
+            def copy(destination):
+                cell = destination / "cell"
+                cell.mkdir()
+                (cell / "status.json").write_text(json.dumps({"status": "failed", "worker_error": "fixture failure", "stop_error": stop_error}))
+                report = dict(config, schema="alopex.native-sql-measurement/v1", status="failed",
+                              assets_digest=digest(self.assets), cell_status_sha256=digest(cell / "status.json"))
+                if wrong_source: report["source"] = {"commit": "b" * 40}
+                (destination / "result.json").write_text(json.dumps(report))
+            Run(self.root, "unit-cell").load().collect(copy)
+        with patch.object(controller.envctl, "execute", side_effect=execute), \
+             patch.object(controller.envctl, "collect", side_effect=collect):
+            with self.assertRaises(Failure) as caught: controller.execute_cell(self.profile, None, config)
+        return caught.exception, original
+
+    def test_recovered_worker_command_error_becomes_independent_case_failure(self):
+        error, original = self.recovered_worker()
+        self.assertEqual(error.code, "CASE")
+        self.assertIs(error.__cause__, original)
+        self.assertEqual(Run(self.root, "unit-cell").load().record["phase"], "deleted")
+
+    def test_worker_stop_failure_is_not_reclassified_as_case_failure(self):
+        error, original = self.recovered_worker(stop_error="stop failed")
+        self.assertIs(error, original)
+        self.assertEqual(error.code, "COMMAND")
+
+    def test_wrong_subject_failure_report_stops_matrix(self):
+        error, _ = self.recovered_worker(wrong_source=True)
+        self.assertEqual(error.code, "IDENTITY")
 
 
 if __name__ == "__main__":
