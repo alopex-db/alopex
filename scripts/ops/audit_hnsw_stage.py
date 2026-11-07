@@ -1,0 +1,73 @@
+"""Read-only reconstruction of one collected five-sample HNSW stage."""
+import json
+import statistics
+
+from audit_native_sql_matrix import require, sha
+from hnsw_stage_contract import PHASES, TIMED_PHASES, plan, verify_sample
+
+
+def comparison(before, candidate):
+    require(len(before) == len(candidate) == 5, 'missing comparison samples')
+    b, c = (statistics.median(values) for values in (before, candidate))
+    db = statistics.median(abs(value-b) for value in before)
+    dc = statistics.median(abs(value-c) for value in candidate)
+    noise = 3 * max(db, dc)
+    return dict(before=before, candidate=candidate, baseline_median=b, candidate_median=c,
+                baseline_mad=db, candidate_mad=dc, noise=noise, difference=c-b, ratio=c/b,
+                improvement_at_least_ten_percent=b-c >= b*.1 and b-c > noise,
+                increase_exceeds_noise=c-b > noise)
+
+
+def audit(evidence, public, cleanup, config, controller):
+    expected_public = dict(schema='alopex.hnsw-stage/v1', status='passed',
+                           stage_rows=config['rows'], controller=controller,
+                           completed_samples=10, owned_resources_cleaned=True,
+                           assets={role:s['assets_digest'] for role,s in config['subjects'].items()},
+                           performance_qualification=False)
+    require(public == expected_public, 'public result differs')
+    frozen = evidence.json('plan.json')
+    cells = plan(config['rows'])
+    require(frozen['configuration'] == config and frozen['controller'] == controller
+            and frozen['cells'] == cells, 'executed plan differs')
+    affinity = frozen['affinity']
+    require(len(affinity) == config['cpu_count'] and len(set(affinity)) == len(affinity)
+            and all(type(cpu) is int and cpu >= 0 for cpu in affinity), 'affinity evidence differs')
+    require(cleanup['imports_removed'] is True and cleanup['raw_work_removed'] is True
+            and set(affinity) <= set(cleanup['restored_affinity']), 'cleanup incomplete')
+    for size in (evidence.json('storage-before.json')['allocated_bytes'], cleanup['allocated_bytes']):
+        require(type(size) is int and 0 < size < 40_000_000_000, 'storage evidence differs')
+    require('failure.json' not in evidence.members, 'failed stage')
+    records = evidence.json('results.json')
+    require(records == evidence.json('progress.json') and len(records) == 10, 'progress incomplete')
+    raw = {'before': [], 'candidate': []}
+    required_files = {'output/identity.json', 'output/summary.json', 'output/events.jsonl',
+                      'output/rss.jsonl', 'output/stderr.log', 'runner.log'}
+    for row, cell in zip(records, cells):
+        require(all(row.get(k) == v for k,v in cell.items()) and row['status'] == 'passed'
+                and set(row['files']) == required_files, 'cell order, status or inventory differs')
+        prefix = cell['id'] + '/'
+        actual = {name[len(prefix):] for name,member in evidence.members.items()
+                  if name.startswith(prefix) and member.isfile()}
+        require(actual == required_files, 'unlisted sample file')
+        for name, digest in row['files'].items():
+            require(sha(evidence.read(prefix+name)) == digest, 'sample file hash differs')
+        identity = evidence.json(prefix+'output/identity.json')
+        summary = evidence.json(prefix+'output/summary.json')
+        events = [json.loads(line) for line in evidence.read(prefix+'output/events.jsonl').splitlines()]
+        verified = verify_sample(identity, summary, events, cell, config['subjects'][cell['subject']],
+                                 config['instrument'], controller, config['limits'])
+        require(verified == row['values'], 'stored derived sample differs')
+        # Reconstruct reported comparisons from raw phase events/counters, not saved values.
+        times = {e['phase']: e['data']['elapsed_ns'] for e in events
+                 if e['phase'] in TIMED_PHASES and e['data'].get('event') == 'end'}
+        peaks = {r['phase']: r['after']['high_water_bytes'] for r in summary['phase_kernel_rss']}
+        raw[cell['subject']].append(dict(elapsed_ns=times, kernel_peak_rss_bytes=peaks))
+    comparisons = {}
+    for metric, phases in (('elapsed_ns', TIMED_PHASES), ('kernel_peak_rss_bytes', PHASES)):
+        comparisons[metric] = {phase: comparison([row[metric][phase] for row in raw['before']],
+                                                 [row[metric][phase] for row in raw['candidate']])
+                               for phase in phases}
+    return dict(status='verified', stage_rows=config['rows'], controller=controller,
+                assets=public['assets'], completed_samples=10, comparisons=comparisons,
+                cold_cache_contracts_verified=True, cleanup_verified=True,
+                performance_qualification=False)
