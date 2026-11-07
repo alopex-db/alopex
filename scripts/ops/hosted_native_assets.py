@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -43,6 +44,25 @@ def extract_regular(archive, destination, maximum):
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with target.open("xb") as output:
                     shutil.copyfileobj(source.extractfile(member), output)
+
+
+def stage_parser_sidecars(parser_root, record, expected_contract):
+    """Adapt a verified release archive to the Rust resolver's local layout."""
+    if record["contract_version"] + "\n" != expected_contract:
+        raise ValueError("parser source contract mismatch")
+    libraries = [parser_root / record[kind]["path"] for kind in ("library", "static_library")]
+    if libraries[0].parent != libraries[1].parent:
+        raise ValueError("parser library directory mismatch")
+    checksums = []
+    for kind, path in zip(("library", "static_library"), libraries):
+        item = record[kind]
+        if (not path.is_file() or path.is_symlink() or path.stat().st_size != item["size"] or
+                hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]):
+            raise ValueError("parser library identity mismatch")
+        checksums.append(item["sha256"] + "  " + path.name + "\n")
+    directory = libraries[0].parent
+    (directory / "CONTRACT_VERSION").write_text(expected_contract)
+    (directory / "SHA256SUMS").write_text("".join(checksums))
 
 
 def main():
@@ -147,6 +167,8 @@ def main():
             require(path.stat().st_size == item["size"] and digest(path) == item["sha256"], "IDENTITY")
         library = parser_root / record["library"]["path"]
         command([sys.executable, "-c", "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); lib.alopex_parser_init(); lib.alopex_parser_version.restype=ctypes.c_char_p; assert lib.alopex_parser_version().decode()==sys.argv[2]", str(library), record["contract_version"]], "prepare", "parser-contract")
+        stage_parser_sidecars(parser_root, record,
+                              (source / "crates/alopex-sql/nim-sql-parser/PARSER_CONTRACT_VERSION").read_text())
         env.update(NIM_SQL_PARSER_LIB_DIR=str(library.parent), ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1")
         native = private_dir(source / "crates/alopex-py/python/alopex/native")
         shutil.copyfile(library, native / library.name)
