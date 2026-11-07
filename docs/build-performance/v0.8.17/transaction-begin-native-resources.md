@@ -32,8 +32,8 @@ release build.
 ```sh
 cargo build --offline --locked --profile test -p alopex-embedded --example begin_resources
 python3 scripts/performance/run_native_begin_resources.py \
-  --binary /absolute/shared-target/debug/examples/begin_resources \
-  --product-source <exact-checkout-commit> --output /path/to/new-output
+  --binary $PRIVATE_PATH \
+  --product-source <exact-checkout-commit> --output $PRIVATE_PATH
 ```
 
 The new condition is fixed at 1,000 rows with two 2D vector columns and indexes
@@ -162,7 +162,7 @@ dependencies remain for active release work. No new worktree, venv or wheel was
 created. The original branch is restored and pre-existing `.codex/worktrees/`
 remains untouched.
 
-Evidence directory `/private/tmp/alopex-684-native-grid` holds plans, logs,
+Evidence directory `$PRIVATE_PATH` holds plans, logs,
 source/binary/harness hashes, comparison summaries, exact diagnostic sources,
 source reconciliation and cleanup record. Example SHA-256:
 `46b2d10fb79e41d5c0b5c2bfb5352d8df0a0f7091152c8ca8744c7459faa0b4d`.

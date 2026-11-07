@@ -9,9 +9,6 @@
   "timeout_seconds": 900,
   "base_candidate": "a40e39cb3d833363c8683faee5701b267d3917dc",
   "date": "2026-10-29",
-  "platform": "macOS aarch64",
-  "physical_memory_bytes": 51539607552,
-  "logical_cpus": 18,
   "profile": "test (opt-level=1), incremental=0, dev/test debug=0, build jobs=2",
   "runtime_threads": {
     "RAYON_NUM_THREADS": 2,

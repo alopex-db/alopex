@@ -69,7 +69,6 @@ from the 378-sample timing set. All 22 fixtures were removed.
 
 ## Conditions and limits
 
-- macOS 27.0.1 arm64, Apple M5 Pro, 18 logical CPUs, 48 GiB RAM; no CPU pinning.
 - Python 3.13.16, Rust 1.96.0; `--profile test` opt-level1, debug/incremental0,
   jobs2 and `RUSTFLAGS=-D warnings`. No local builds or tests during sampling.
 - Rayon2, Tokio2, OMP2, OpenBLAS1; warm OS cache. Server runs on loopback with
@@ -90,7 +89,7 @@ from the 378-sample timing set. All 22 fixtures were removed.
   bounded; performance execution is never added to ordinary CI.
 
 The independent checks, complete native samples, smoke and raw per-process logs
-are retained under `/private/tmp/alopex-712-delete-profile`. Native artifact
+are retained under `$PRIVATE_PATH`. Native artifact
 hashes, source identities, selected stack lines and all timed samples are in the
 compact report. Host storage peaked at 17,500,901,376 bytes and ended at
 17,370,382,336 after removing six duplicate native outputs and every fixture.
@@ -106,11 +105,11 @@ use a matching copied Python package in `PYTHONPATH`. On a measured macOS host:
 
 ```sh
 python scripts/performance/run_sql_delete_profile.py \
-  --python /absolute/python --server /absolute/alopex-server \
-  --output /new/diagnostic-directory
+  --python $PRIVATE_PATH --server $PRIVATE_PATH \
+  --output $PRIVATE_PATH
 python scripts/performance/run_sql_delete_profile.py \
-  --python /absolute/python --server /absolute/alopex-server \
-  --output /new/profile-directory --rows 10000 --operations delete --profile
+  --python $PRIVATE_PATH --server $PRIVATE_PATH \
+  --output $PRIVATE_PATH --rows 10000 --operations delete --profile
 ```
 
 Next implement and test the primary-key lookup, then compare fixed before/after

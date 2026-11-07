@@ -8,7 +8,6 @@ This is one development comparison. Candidate integration and release qualificat
 
 ## Same workload and bounded execution
 
-- Same local macOS arm64 host; 18 logical CPUs and 51,539,607,552 bytes RAM.
 - Cargo test profile (`opt-level=1`), incremental/debug disabled, build jobs 2; runtime Rayon/OMP threads 2.
 - In-memory DB, one generated input vector at a time, 256 MiB cache. Seed/build and query/INSERT durations are separate.
 - 8 GB RSS stop, 900-second timeout, 40 GB host storage stop, 1 GB additional runtime storage budget. No limit reached in the successful run.

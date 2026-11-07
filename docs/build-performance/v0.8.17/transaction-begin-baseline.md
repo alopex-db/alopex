@@ -80,7 +80,6 @@ transaction. This keeps #684 separate from #681.
 
 ## Reproduction and resource rules
 
-- Host: Apple M5 Pro, macOS 27.0.1 arm64, 18 logical CPUs, 51,539,607,552 bytes RAM.
 - Native source: candidate `5fe5cbc1`; Cargo test profile (`opt-level=1`),
   incremental/debug off, build jobs 2. Public Python: wheel 0.8.16, CPython 3.13.16.
 - Native parser: published v0.8.16 contract 0.28.0 with explicit development
@@ -101,9 +100,9 @@ plan, using the shared Cargo target and approved parser setup:
 ```sh
 cargo build --offline --profile test -p alopex-embedded --example begin_profile
 python3 scripts/performance/run_begin_profile.py \
-  --native /absolute/shared-target/debug/examples/begin_profile \
-  --python /absolute/public-wheel-venv/bin/python \
-  --output /absolute/new-evidence-directory --rows 0 100 1000
+  --native $PRIVATE_PATH \
+  --python $PRIVATE_PATH \
+  --output $PRIVATE_PATH --rows 0 100 1000
 ```
 
 Add `--profile --rows 1000` with a different output directory for separate macOS
@@ -111,7 +110,7 @@ stack sampling. The Python worker and native example also accept one explicit
 bounded case. The runner refuses an existing output directory.
 
 Detailed samples, MADs, stack traces, binary/parser identities and failure logs
-remain in local evidence `/private/tmp/alopex-684`. Initial example compile errors
+remain in local evidence `$PRIVATE_PATH`. Initial example compile errors
 used the wrong expected SQL integer type; the final build and focused Clippy
 passed. Guard probes reject RSS overflow, unavailable live RSS measurements and
 missing completed results, and remove their fixture directories.

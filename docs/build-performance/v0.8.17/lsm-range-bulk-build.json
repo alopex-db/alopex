@@ -7,7 +7,7 @@
     "initial_host_bytes": 17779081216,
     "estimated_peak_additional_bytes": 4000000000,
     "per_command_additional_bound_bytes": 2000000000,
-    "target": "/Users/yoshinori/work/alopexDB/alopex/target",
+    "target": "$PRIVATE_PATH_1",
     "commands": [
       "cargo test --offline --locked -p alopex-core --lib lsm::scan_tests::",
       "cargo coupling crates/alopex-core/src/lsm --changed-since main --impact-depth 4 --json",
@@ -60,27 +60,27 @@
       "source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
       "tree": "a20c999eb5758d46ba3be7d346663bb95857057c",
       "native_outputs": {
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server": {
+        "$PRIVATE_PATH_2": {
           "sha256": "97fd4340ab9f235ab7f41f1f828b330766a118303093c4d9e96a065cfeb02188",
           "bytes": 42824160
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+        "$PRIVATE_PATH_3": {
           "sha256": "b1ae4c74397d77078ac0d00919481ed2da84389ed8b87f35251eca71f0054bab",
           "bytes": 37041712
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+        "$PRIVATE_PATH_4": {
           "sha256": "f355297ef98ce7b413a113be06d3ba49cad7e43b542162a465bd60f3c7094453",
           "bytes": 6886224
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+        "$PRIVATE_PATH_5": {
           "sha256": "b1ae4c74397d77078ac0d00919481ed2da84389ed8b87f35251eca71f0054bab",
           "bytes": 37041712
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+        "$PRIVATE_PATH_6": {
           "sha256": "f355297ef98ce7b413a113be06d3ba49cad7e43b542162a465bd60f3c7094453",
           "bytes": 6886224
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d": {
+        "$PRIVATE_PATH_7": {
           "sha256": "97fd4340ab9f235ab7f41f1f828b330766a118303093c4d9e96a065cfeb02188",
           "bytes": 42824160
         }
@@ -186,27 +186,27 @@
       "source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
       "tree": "c18466f74e2ae417883f77b70c17cb2f86357d5f",
       "native_outputs": {
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server": {
+        "$PRIVATE_PATH_2": {
           "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
           "bytes": 42826400
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+        "$PRIVATE_PATH_3": {
           "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
           "bytes": 37043440
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+        "$PRIVATE_PATH_4": {
           "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
           "bytes": 6886224
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+        "$PRIVATE_PATH_5": {
           "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
           "bytes": 37043440
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+        "$PRIVATE_PATH_6": {
           "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
           "bytes": 6886224
         },
-        "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d": {
+        "$PRIVATE_PATH_7": {
           "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
           "bytes": 42826400
         }
@@ -16144,7 +16144,7 @@
       "side": "before",
       "group": "original",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-1-before-original",
+      "output": "$PRIVATE_PATH_8",
       "returncode": 0,
       "elapsed_seconds": 65.9058108329773
     },
@@ -16153,7 +16153,7 @@
       "side": "before",
       "group": "small",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-1-before-small",
+      "output": "$PRIVATE_PATH_9",
       "returncode": 0,
       "elapsed_seconds": 16.237092971801758
     },
@@ -16162,7 +16162,7 @@
       "side": "after",
       "group": "original",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-2-after-original",
+      "output": "$PRIVATE_PATH_10",
       "returncode": 0,
       "elapsed_seconds": 62.7957649230957
     },
@@ -16171,7 +16171,7 @@
       "side": "after",
       "group": "small",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-2-after-small",
+      "output": "$PRIVATE_PATH_11",
       "returncode": 0,
       "elapsed_seconds": 15.976050853729248
     },
@@ -16180,7 +16180,7 @@
       "side": "after",
       "group": "original",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-3-after-original",
+      "output": "$PRIVATE_PATH_12",
       "returncode": 0,
       "elapsed_seconds": 58.599117279052734
     },
@@ -16189,7 +16189,7 @@
       "side": "after",
       "group": "small",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-3-after-small",
+      "output": "$PRIVATE_PATH_13",
       "returncode": 0,
       "elapsed_seconds": 15.75476884841919
     },
@@ -16198,7 +16198,7 @@
       "side": "before",
       "group": "original",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-4-before-original",
+      "output": "$PRIVATE_PATH_14",
       "returncode": 0,
       "elapsed_seconds": 68.19299411773682
     },
@@ -16207,7 +16207,7 @@
       "side": "before",
       "group": "small",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-4-before-small",
+      "output": "$PRIVATE_PATH_15",
       "returncode": 0,
       "elapsed_seconds": 16.305393934249878
     },
@@ -16216,7 +16216,7 @@
       "side": "before",
       "group": "original",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-5-before-original",
+      "output": "$PRIVATE_PATH_16",
       "returncode": 0,
       "elapsed_seconds": 65.0685887336731
     },
@@ -16225,7 +16225,7 @@
       "side": "before",
       "group": "small",
       "build_source": "79b32c30a984eebcb8b7ef86fa023fff52f84f75",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-5-before-small",
+      "output": "$PRIVATE_PATH_17",
       "returncode": 0,
       "elapsed_seconds": 16.30853509902954
     },
@@ -16234,7 +16234,7 @@
       "side": "after",
       "group": "original",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-6-after-original",
+      "output": "$PRIVATE_PATH_18",
       "returncode": 0,
       "elapsed_seconds": 61.762531995773315
     },
@@ -16243,7 +16243,7 @@
       "side": "after",
       "group": "small",
       "build_source": "a9800355309aa1b4296225a13dc07c7aa7c24747",
-      "output": "/private/tmp/alopex-712-lsm-range/pair-6-after-small",
+      "output": "$PRIVATE_PATH_19",
       "returncode": 0,
       "elapsed_seconds": 14.028743743896484
     }
@@ -16261,24 +16261,6 @@
     "all_timed_fixtures_removed": 60,
     "profile_cases": 2,
     "all_fixtures_removed": 62
-  },
-  "environment": {
-    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
-    "hardware": [
-      "Mac17,16",
-      "18",
-      "51539607552"
-    ],
-    "architecture": "arm64",
-    "python": "Python 3.13.16",
-    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2",
-    "runtime_threads": {
-      "Rayon": 2,
-      "Tokio": 2,
-      "OMP": 2,
-      "OpenBLAS": 1
-    },
-    "limits": "test opt1 profile; warm OS cache; no CPU affinity; loopback HTTP auth none keep-alive; original SQL and fully materialized Python results"
   },
   "limitations": [
     "Internal before/after comparison, not published0.8.16/reference-product qualification.",
@@ -16400,7 +16382,7 @@
         }
       ],
       "client_sha256": "b415e603990729c5b0e67effb9efe7ad926346eb62f54351ec12340c8d464baf",
-      "client_text": "         5360 function calls in 3.979 seconds\n\n   Ordered by: cumulative time\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n     1072    0.001    0.000    3.973    0.004 /Users/yoshinori/work/alopexDB/alopex/scripts/performance/sql_query_profile.py:47(timed_operation)\n     1072    3.972    0.004    3.972    0.004 {method 'execute_sql' of 'builtins.Database' objects}\n     1072    0.006    0.000    0.006    0.000 {method 'disable' of '_lsprof.Profiler' objects}\n     2144    0.000    0.000    0.000    0.000 {built-in method time.perf_counter_ns}\n\n\n",
+      "client_text": "         5360 function calls in 3.979 seconds\n\n   Ordered by: cumulative time\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n     1072    0.001    0.000    3.973    0.004 $PRIVATE_PATH_20)\n     1072    3.972    0.004    3.972    0.004 {method 'execute_sql' of 'builtins.Database' objects}\n     1072    0.006    0.000    0.006    0.000 {method 'disable' of '_lsprof.Profiler' objects}\n     2144    0.000    0.000    0.000    0.000 {built-in method time.perf_counter_ns}\n\n\n",
       "interpretation": "Separate instrumented run. Inclusive parent/child counts overlap; no elapsed-time share or direct count comparison to the previous profile."
     },
     {
@@ -16522,7 +16504,7 @@
         }
       ],
       "client_sha256": "288b17fb8cf1fa1b408071416f919cc9d43951fb2d1ffaf02f41371b852686ea",
-      "client_text": "         660504 function calls in 3.990 seconds\n\n   Ordered by: cumulative time\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n      949    0.001    0.000    3.985    0.004 /Users/yoshinori/work/alopexDB/alopex/scripts/performance/sql_query_profile.py:47(timed_operation)\n      949    0.001    0.000    3.984    0.004 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:934(execute_sql)\n      949    0.002    0.000    3.983    0.004 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:1030(_execute_sql)\n      949    0.001    0.000    3.943    0.004 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:1101(_request_json)\n      949    0.001    0.000    3.934    0.004 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:568(request)\n      949    0.002    0.000    3.929    0.004 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:595(_send)\n      949    0.001    0.000    3.890    0.004 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1434(getresponse)\n      949    0.003    0.000    3.886    0.004 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:336(begin)\n      949    0.002    0.000    3.834    0.004 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:303(_read_status)\n     5694    0.001    0.000    3.832    0.001 {method 'readline' of '_io.BufferedReader' objects}\n      949    0.001    0.000    3.831    0.004 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:710(readinto)\n      949    3.829    0.004    3.829    0.004 {method 'recv_into' of '_socket.socket' objects}\n      949    0.000    0.000    0.046    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:257(parse_headers)\n      949    0.001    0.000    0.043    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:243(_parse_header_lines)\n      949    0.001    0.000    0.041    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/parser.py:56(parsestr)\n      949    0.001    0.000    0.040    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/parser.py:41(parse)\n      949    0.000    0.000    0.037    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:301(_result_from_body)\n      949    0.009    0.000    0.035    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:278(_rows_to_dicts)\n      949    0.000    0.000    0.031    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1383(request)\n      949    0.002    0.000    0.031    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1388(_send_request)\n      949    0.000    0.000    0.030    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:173(feed)\n     1898    0.001    0.000    0.029    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:178(_call_parse)\n     1898    0.004    0.000    0.028    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:218(_parsegen)\n    30368    0.013    0.000    0.024    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:201(_unwrap_sql_value)\n      949    0.000    0.000    0.013    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1370(endheaders)\n      949    0.001    0.000    0.013    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1132(_send_output)\n     1898    0.001    0.000    0.011    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1077(send)\n     1898    0.010    0.000    0.010    0.000 {method 'sendall' of '_socket.socket' objects}\n      949    0.003    0.000    0.010    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1186(putrequest)\n     3796    0.002    0.000    0.010    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:608(get_content_type)\n      949    0.003    0.000    0.009    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:472(_parse_headers)\n     4745    0.005    0.000    0.009    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1342(putheader)\n      949    0.000    0.000    0.008    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:313(_parse_json)\n      949    0.001    0.000    0.008    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/__init__.py:304(loads)\n     6643    0.003    0.000    0.008    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:506(get)\n     2847    0.001    0.000    0.008    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:632(get_content_maintype)\n      949    0.001    0.000    0.007    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/decoder.py:340(decode)\n      949    0.001    0.000    0.007    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:184(close)\n   152789    0.006    0.000    0.006    0.000 {built-in method builtins.isinstance}\n      949    0.006    0.000    0.006    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/decoder.py:351(raw_decode)\n      949    0.005    0.000    0.005    0.000 {method 'disable' of '_lsprof.Profiler' objects}\n     3796    0.002    0.000    0.004    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/_policybase.py:301(header_source_parse)\n      949    0.001    0.000    0.004    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:478(read)\n    15184    0.002    0.000    0.004    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:250(_require_finite_number)\n     6643    0.001    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:129(__next__)\n     4745    0.001    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/_policybase.py:319(header_fetch_parse)\n      949    0.002    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:225(_read_headers)\n    73073    0.003    0.000    0.003    0.000 {built-in method builtins.len}\n      949    0.001    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:273(__init__)\n      949    0.001    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:102(push)\n     4745    0.001    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/_policybase.py:289(_sanitize_header)\n      949    0.000    0.000    0.003    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/__init__.py:185(dumps)\n      949    0.002    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:304(makefile)\n    36062    0.002    0.000    0.002    0.000 {method 'append' of 'list' objects}\n      949    0.000    0.000    0.002    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:546(_acquire)\n      949    0.001    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/encoder.py:185(encode)\n     6643    0.002    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:79(readline)\n     3796    0.001    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:29(_splitparam)\n    26572    0.002    0.000    0.002    0.000 {method 'lower' of 'str' objects}\n    31317    0.002    0.000    0.002    0.000 {method 'items' of 'dict' objects}\n      949    0.002    0.000    0.002    0.000 {method 'settimeout' of '_socket.socket' objects}\n      949    0.001    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:139(__init__)\n      949    0.000    0.000    0.002    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:440(_close_conn)\n     7592    0.002    0.000    0.002    0.000 {method 'match' of 're.Pattern' objects}\n      949    0.001    0.000    0.002    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:264(_column_names)\n    17082    0.002    0.000    0.002    0.000 {method 'encode' of 'str' objects}\n      949    0.001    0.000    0.001    0.000 {method 'close' of '_io.BufferedReader' objects}\n      949    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/json/encoder.py:207(iterencode)\n      949    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:71(close)\n      949    0.001    0.000    0.001    0.000 {built-in method alopex._alopex._bind_sql_params}\n     7592    0.001    0.000    0.001    0.000 {method 'split' of 'str' objects}\n     4745    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/utils.py:47(_has_surrogates)\n    14235    0.001    0.000    0.001    0.000 {built-in method builtins.hasattr}\n      949    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:445(close)\n     5694    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1114(_output)\n      949    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:411(_check_close)\n      949    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:786(close)\n     6643    0.001    0.000    0.001    0.000 {method 'search' of 're.Pattern' objects}\n      949    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:659(_safe_read)\n     1898    0.001    0.000    0.001    0.000 {method 'readlines' of '_io._IOBase' objects}\n     3796    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:523(set_raw)\n     1898    0.000    0.000    0.001    0.000 {function HTTPResponse.close at 0x10a815940}\n     4745    0.001    0.000    0.001    0.000 {method 'fullmatch' of 're.Pattern' objects}\n      949    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:197(_new_message)\n     7592    0.001    0.000    0.001    0.000 {method 'startswith' of 'str' objects}\n     1898    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:123(pushlines)\n     6643    0.001    0.000    0.001    0.000 {method 'join' of 'bytes' objects}\n      949    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:54(__init__)\n     2847    0.000    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1390(<genexpr>)\n      949    0.001    0.000    0.001    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:698(__init__)\n     5694    0.000    0.000    0.000    0.000 {method 'join' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'lstrip' of 'str' objects}\n     5694    0.000    0.000    0.000    0.000 {method 'strip' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'find' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:874(_get_content_length)\n     2847    0.000    0.000    0.000    0.000 {method 'decode' of 'bytes' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1317(_validate_method)\n     3796    0.000    0.000    0.000    0.000 {method 'partition' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'rstrip' of 'str' objects}\n     4745    0.000    0.000    0.000    0.000 {method 'popleft' of 'collections.deque' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:988(_wrap_ipv6)\n     4745    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'count' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:210(_pop_message)\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:457(flush)\n     1898    0.000    0.000    0.000    0.000 {method 'extend' of 'collections.deque' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'seek' of '_io.StringIO' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:343(set_payload)\n     1898    0.000    0.000    0.000    0.000 {method 'truncate' of '_io.StringIO' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1326(_validate_path)\n      949    0.000    0.000    0.000    0.000 {method '_checkReadable' of '_io._IOBase' objects}\n      949    0.000    0.000    0.000    0.000 {method 'read' of '_io.BufferedReader' objects}\n     1898    0.000    0.000    0.000    0.000 {method 'read' of '_io.StringIO' objects}\n     1898    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/message.py:156(__init__)\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:1313(_encode_request)\n      949    0.000    0.000    0.000    0.000 {method 'write' of '_io.StringIO' objects}\n     1898    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:748(readable)\n     1898    0.000    0.000    0.000    0.000 {built-in method time.perf_counter_ns}\n     1898    0.000    0.000    0.000    0.000 {built-in method time.monotonic}\n     1898    0.000    0.000    0.000    0.000 {method 'end' of 're.Match' objects}\n     1898    0.000    0.000    0.000    0.000 {built-in method sys.audit}\n      949    0.000    0.000    0.000    0.000 {method '_checkClosed' of '_io._IOBase' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/socket.py:491(_decref_socketios)\n     1898    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/feedparser.py:126(__iter__)\n      949    0.000    0.000    0.000    0.000 {built-in method builtins.min}\n      949    0.000    0.000    0.000    0.000 {method 'endswith' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 {method '__exit__' of '_thread.RLock' objects}\n      949    0.000    0.000    0.000    0.000 {method 'pop' of 'list' objects}\n      949    0.000    0.000    0.000    0.000 {method 'setdefault' of 'dict' objects}\n      949    0.000    0.000    0.000    0.000 {built-in method builtins.max}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/http/client.py:468(isclosed)\n      949    0.000    0.000    0.000    0.000 {method 'extend' of 'list' objects}\n      949    0.000    0.000    0.000    0.000 /Users/yoshinori/.local/alopex-toolchains/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/email/parser.py:17(__init__)\n      949    0.000    0.000    0.000    0.000 /private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py:1026(_ensure_open)\n      949    0.000    0.000    0.000    0.000 {function HTTPResponse.flush at 0x10a8159e0}\n\n\n",
+      "client_text": "         660504 function calls in 3.990 seconds\n\n   Ordered by: cumulative time\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n      949    0.001    0.000    3.985    0.004 $PRIVATE_PATH_20)\n      949    0.001    0.000    3.984    0.004 $PRIVATE_PATH_21)\n      949    0.002    0.000    3.983    0.004 $PRIVATE_PATH_22)\n      949    0.001    0.000    3.943    0.004 $PRIVATE_PATH_23)\n      949    0.001    0.000    3.934    0.004 $PRIVATE_PATH_24)\n      949    0.002    0.000    3.929    0.004 $PRIVATE_PATH_25)\n      949    0.001    0.000    3.890    0.004 $PRIVATE_PATH_26)\n      949    0.003    0.000    3.886    0.004 $PRIVATE_PATH_27)\n      949    0.002    0.000    3.834    0.004 $PRIVATE_PATH_28)\n     5694    0.001    0.000    3.832    0.001 {method 'readline' of '_io.BufferedReader' objects}\n      949    0.001    0.000    3.831    0.004 $PRIVATE_PATH_29)\n      949    3.829    0.004    3.829    0.004 {method 'recv_into' of '_socket.socket' objects}\n      949    0.000    0.000    0.046    0.000 $PRIVATE_PATH_30)\n      949    0.001    0.000    0.043    0.000 $PRIVATE_PATH_31)\n      949    0.001    0.000    0.041    0.000 $PRIVATE_PATH_32)\n      949    0.001    0.000    0.040    0.000 $PRIVATE_PATH_33)\n      949    0.000    0.000    0.037    0.000 $PRIVATE_PATH_34)\n      949    0.009    0.000    0.035    0.000 $PRIVATE_PATH_35)\n      949    0.000    0.000    0.031    0.000 $PRIVATE_PATH_36)\n      949    0.002    0.000    0.031    0.000 $PRIVATE_PATH_37)\n      949    0.000    0.000    0.030    0.000 $PRIVATE_PATH_38)\n     1898    0.001    0.000    0.029    0.000 $PRIVATE_PATH_39)\n     1898    0.004    0.000    0.028    0.000 $PRIVATE_PATH_40)\n    30368    0.013    0.000    0.024    0.000 $PRIVATE_PATH_41)\n      949    0.000    0.000    0.013    0.000 $PRIVATE_PATH_42)\n      949    0.001    0.000    0.013    0.000 $PRIVATE_PATH_43)\n     1898    0.001    0.000    0.011    0.000 $PRIVATE_PATH_44)\n     1898    0.010    0.000    0.010    0.000 {method 'sendall' of '_socket.socket' objects}\n      949    0.003    0.000    0.010    0.000 $PRIVATE_PATH_45)\n     3796    0.002    0.000    0.010    0.000 $PRIVATE_PATH_46)\n      949    0.003    0.000    0.009    0.000 $PRIVATE_PATH_47)\n     4745    0.005    0.000    0.009    0.000 $PRIVATE_PATH_48)\n      949    0.000    0.000    0.008    0.000 $PRIVATE_PATH_49)\n      949    0.001    0.000    0.008    0.000 $PRIVATE_PATH_50)\n     6643    0.003    0.000    0.008    0.000 $PRIVATE_PATH_51)\n     2847    0.001    0.000    0.008    0.000 $PRIVATE_PATH_52)\n      949    0.001    0.000    0.007    0.000 $PRIVATE_PATH_53)\n      949    0.001    0.000    0.007    0.000 $PRIVATE_PATH_54)\n   152789    0.006    0.000    0.006    0.000 {built-in method builtins.isinstance}\n      949    0.006    0.000    0.006    0.000 $PRIVATE_PATH_55)\n      949    0.005    0.000    0.005    0.000 {method 'disable' of '_lsprof.Profiler' objects}\n     3796    0.002    0.000    0.004    0.000 $PRIVATE_PATH_56)\n      949    0.001    0.000    0.004    0.000 $PRIVATE_PATH_57)\n    15184    0.002    0.000    0.004    0.000 $PRIVATE_PATH_58)\n     6643    0.001    0.000    0.003    0.000 $PRIVATE_PATH_59)\n     4745    0.001    0.000    0.003    0.000 $PRIVATE_PATH_60)\n      949    0.002    0.000    0.003    0.000 $PRIVATE_PATH_61)\n    73073    0.003    0.000    0.003    0.000 {built-in method builtins.len}\n      949    0.001    0.000    0.003    0.000 $PRIVATE_PATH_62)\n      949    0.001    0.000    0.003    0.000 $PRIVATE_PATH_63)\n     4745    0.001    0.000    0.003    0.000 $PRIVATE_PATH_64)\n      949    0.000    0.000    0.003    0.000 $PRIVATE_PATH_65)\n      949    0.002    0.000    0.002    0.000 $PRIVATE_PATH_66)\n    36062    0.002    0.000    0.002    0.000 {method 'append' of 'list' objects}\n      949    0.000    0.000    0.002    0.000 $PRIVATE_PATH_67)\n      949    0.001    0.000    0.002    0.000 $PRIVATE_PATH_68)\n     6643    0.002    0.000    0.002    0.000 $PRIVATE_PATH_69)\n     3796    0.001    0.000    0.002    0.000 $PRIVATE_PATH_70)\n    26572    0.002    0.000    0.002    0.000 {method 'lower' of 'str' objects}\n    31317    0.002    0.000    0.002    0.000 {method 'items' of 'dict' objects}\n      949    0.002    0.000    0.002    0.000 {method 'settimeout' of '_socket.socket' objects}\n      949    0.001    0.000    0.002    0.000 $PRIVATE_PATH_71)\n      949    0.000    0.000    0.002    0.000 $PRIVATE_PATH_72)\n     7592    0.002    0.000    0.002    0.000 {method 'match' of 're.Pattern' objects}\n      949    0.001    0.000    0.002    0.000 $PRIVATE_PATH_73)\n    17082    0.002    0.000    0.002    0.000 {method 'encode' of 'str' objects}\n      949    0.001    0.000    0.001    0.000 {method 'close' of '_io.BufferedReader' objects}\n      949    0.001    0.000    0.001    0.000 $PRIVATE_PATH_74)\n      949    0.001    0.000    0.001    0.000 $PRIVATE_PATH_75)\n      949    0.001    0.000    0.001    0.000 {built-in method alopex._alopex._bind_sql_params}\n     7592    0.001    0.000    0.001    0.000 {method 'split' of 'str' objects}\n     4745    0.001    0.000    0.001    0.000 $PRIVATE_PATH_76)\n    14235    0.001    0.000    0.001    0.000 {built-in method builtins.hasattr}\n      949    0.000    0.000    0.001    0.000 $PRIVATE_PATH_77)\n     5694    0.001    0.000    0.001    0.000 $PRIVATE_PATH_78)\n      949    0.000    0.000    0.001    0.000 $PRIVATE_PATH_79)\n      949    0.001    0.000    0.001    0.000 $PRIVATE_PATH_80)\n     6643    0.001    0.000    0.001    0.000 {method 'search' of 're.Pattern' objects}\n      949    0.000    0.000    0.001    0.000 $PRIVATE_PATH_81)\n     1898    0.001    0.000    0.001    0.000 {method 'readlines' of '_io._IOBase' objects}\n     3796    0.001    0.000    0.001    0.000 $PRIVATE_PATH_82)\n     1898    0.000    0.000    0.001    0.000 {function HTTPResponse.close at 0x10a815940}\n     4745    0.001    0.000    0.001    0.000 {method 'fullmatch' of 're.Pattern' objects}\n      949    0.000    0.000    0.001    0.000 $PRIVATE_PATH_83)\n     7592    0.001    0.000    0.001    0.000 {method 'startswith' of 'str' objects}\n     1898    0.000    0.000    0.001    0.000 $PRIVATE_PATH_84)\n     6643    0.001    0.000    0.001    0.000 {method 'join' of 'bytes' objects}\n      949    0.001    0.000    0.001    0.000 $PRIVATE_PATH_85)\n     2847    0.000    0.000    0.001    0.000 $PRIVATE_PATH_86<genexpr>)\n      949    0.001    0.000    0.001    0.000 $PRIVATE_PATH_87)\n     5694    0.000    0.000    0.000    0.000 {method 'join' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'lstrip' of 'str' objects}\n     5694    0.000    0.000    0.000    0.000 {method 'strip' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'find' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_88)\n     2847    0.000    0.000    0.000    0.000 {method 'decode' of 'bytes' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_89)\n     3796    0.000    0.000    0.000    0.000 {method 'partition' of 'str' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'rstrip' of 'str' objects}\n     4745    0.000    0.000    0.000    0.000 {method 'popleft' of 'collections.deque' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_90)\n     4745    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'count' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_91)\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_92)\n     1898    0.000    0.000    0.000    0.000 {method 'extend' of 'collections.deque' objects}\n     3796    0.000    0.000    0.000    0.000 {method 'seek' of '_io.StringIO' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_93)\n     1898    0.000    0.000    0.000    0.000 {method 'truncate' of '_io.StringIO' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_94)\n      949    0.000    0.000    0.000    0.000 {method '_checkReadable' of '_io._IOBase' objects}\n      949    0.000    0.000    0.000    0.000 {method 'read' of '_io.BufferedReader' objects}\n     1898    0.000    0.000    0.000    0.000 {method 'read' of '_io.StringIO' objects}\n     1898    0.000    0.000    0.000    0.000 $PRIVATE_PATH_95)\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_96)\n      949    0.000    0.000    0.000    0.000 {method 'write' of '_io.StringIO' objects}\n     1898    0.000    0.000    0.000    0.000 $PRIVATE_PATH_97)\n     1898    0.000    0.000    0.000    0.000 {built-in method time.perf_counter_ns}\n     1898    0.000    0.000    0.000    0.000 {built-in method time.monotonic}\n     1898    0.000    0.000    0.000    0.000 {method 'end' of 're.Match' objects}\n     1898    0.000    0.000    0.000    0.000 {built-in method sys.audit}\n      949    0.000    0.000    0.000    0.000 {method '_checkClosed' of '_io._IOBase' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_98)\n     1898    0.000    0.000    0.000    0.000 $PRIVATE_PATH_99)\n      949    0.000    0.000    0.000    0.000 {built-in method builtins.min}\n      949    0.000    0.000    0.000    0.000 {method 'endswith' of 'str' objects}\n      949    0.000    0.000    0.000    0.000 {method '__exit__' of '_thread.RLock' objects}\n      949    0.000    0.000    0.000    0.000 {method 'pop' of 'list' objects}\n      949    0.000    0.000    0.000    0.000 {method 'setdefault' of 'dict' objects}\n      949    0.000    0.000    0.000    0.000 {built-in method builtins.max}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_100)\n      949    0.000    0.000    0.000    0.000 {method 'extend' of 'list' objects}\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_101)\n      949    0.000    0.000    0.000    0.000 $PRIVATE_PATH_102)\n      949    0.000    0.000    0.000    0.000 {function HTTPResponse.flush at 0x10a8159e0}\n\n\n",
       "interpretation": "Separate instrumented run. Inclusive parent/child counts overlap; no elapsed-time share or direct count comparison to the previous profile."
     }
   ],
@@ -16534,211 +16516,211 @@
   "cleanup": {
     "files": [
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server",
+        "path": "$PRIVATE_PATH_2",
         "bytes": 42826400,
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_3",
         "bytes": 37043440,
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_4",
         "bytes": 6886224,
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_5",
         "bytes": 37043440,
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_6",
         "bytes": 6886224,
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d",
+        "path": "$PRIVATE_PATH_7",
         "bytes": 42826400,
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_core-0ba0a637acb03ac4",
+        "path": "$PRIVATE_PATH_103",
         "bytes": 9914176,
         "sha256": "017f00ed48db20784c41655dd5f347e8cd6674117427ad6a9d18d651a3251d28"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser.tar.gz",
+        "path": "$PRIVATE_PATH_104",
         "bytes": 452776,
         "sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/alopex-server",
+        "path": "$PRIVATE_PATH_105",
         "bytes": 42824160,
         "sha256": "97fd4340ab9f235ab7f41f1f828b330766a118303093c4d9e96a065cfeb02188"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/asyncio.pyi",
+        "path": "$PRIVATE_PATH_106",
         "bytes": 7048,
         "sha256": "0ee6196c6eced1021d43933eb79d24b94ef16d8913bfe6dadb0fff5933ea9bd5"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/remote.py",
+        "path": "$PRIVATE_PATH_107",
         "bytes": 49417,
         "sha256": "5a610138ba4703a6573ee6b43ee7959576f53f1bf1cd89bbffc59f5d1e64b270"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/protocols.py",
+        "path": "$PRIVATE_PATH_108",
         "bytes": 1564,
         "sha256": "ac50bf120298d7b679881ee1081ec3c7cc4c7265863d9046ff4a5957419e571f"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/asyncio.py",
+        "path": "$PRIVATE_PATH_109",
         "bytes": 19842,
         "sha256": "cc1304ebc59ae459116e1db7c3758f074d152ff521259012600aef70a9111603"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/__init__.py",
+        "path": "$PRIVATE_PATH_110",
         "bytes": 4101,
         "sha256": "ca72d826c6159d2574edf737cb46922c2f10453ab75b057db431c68bb5c56a55"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/_alopex.abi3.so",
+        "path": "$PRIVATE_PATH_111",
         "bytes": 37041712,
         "sha256": "b1ae4c74397d77078ac0d00919481ed2da84389ed8b87f35251eca71f0054bab"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/py.typed",
+        "path": "$PRIVATE_PATH_112",
         "bytes": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/remote.pyi",
+        "path": "$PRIVATE_PATH_113",
         "bytes": 5221,
         "sha256": "db171685c3c8ad94a671ecf9ac51808c7f25d5b68dd3db40c513c979f8d48d1b"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/_alopex.pyi",
+        "path": "$PRIVATE_PATH_114",
         "bytes": 26853,
         "sha256": "558c956c695a76cdbee717100b685af9d14e5966bc545fa500eac656016dc5b8"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/native/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_115",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/native/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_116",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/before/package/alopex/native/SHA256SUMS",
+        "path": "$PRIVATE_PATH_117",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/alopex-server",
+        "path": "$PRIVATE_PATH_118",
         "bytes": 42826400,
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/asyncio.pyi",
+        "path": "$PRIVATE_PATH_119",
         "bytes": 7048,
         "sha256": "0ee6196c6eced1021d43933eb79d24b94ef16d8913bfe6dadb0fff5933ea9bd5"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/remote.py",
+        "path": "$PRIVATE_PATH_120",
         "bytes": 49417,
         "sha256": "5a610138ba4703a6573ee6b43ee7959576f53f1bf1cd89bbffc59f5d1e64b270"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/protocols.py",
+        "path": "$PRIVATE_PATH_121",
         "bytes": 1564,
         "sha256": "ac50bf120298d7b679881ee1081ec3c7cc4c7265863d9046ff4a5957419e571f"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/asyncio.py",
+        "path": "$PRIVATE_PATH_122",
         "bytes": 19842,
         "sha256": "cc1304ebc59ae459116e1db7c3758f074d152ff521259012600aef70a9111603"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/__init__.py",
+        "path": "$PRIVATE_PATH_123",
         "bytes": 4101,
         "sha256": "ca72d826c6159d2574edf737cb46922c2f10453ab75b057db431c68bb5c56a55"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/_alopex.abi3.so",
+        "path": "$PRIVATE_PATH_124",
         "bytes": 37043440,
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/py.typed",
+        "path": "$PRIVATE_PATH_125",
         "bytes": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/remote.pyi",
+        "path": "$PRIVATE_PATH_126",
         "bytes": 5221,
         "sha256": "db171685c3c8ad94a671ecf9ac51808c7f25d5b68dd3db40c513c979f8d48d1b"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/_alopex.pyi",
+        "path": "$PRIVATE_PATH_127",
         "bytes": 26853,
         "sha256": "558c956c695a76cdbee717100b685af9d14e5966bc545fa500eac656016dc5b8"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/native/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_128",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/native/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_129",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/after/package/alopex/native/SHA256SUMS",
+        "path": "$PRIVATE_PATH_130",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser/alopex-sql-parser/aarch64-apple-darwin/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_131",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser/alopex-sql-parser/aarch64-apple-darwin/BUILD_IDENTITY.json",
+        "path": "$PRIVATE_PATH_132",
         "bytes": 2800,
         "sha256": "ac74d6d2daec3d6d92006479703b77b1639207dfceb3a3abd7cb83900c9fafd9"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_133",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.a",
+        "path": "$PRIVATE_PATH_134",
         "bytes": 793984,
         "sha256": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/parser/alopex-sql-parser/aarch64-apple-darwin/SHA256SUMS",
+        "path": "$PRIVATE_PATH_135",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-lsm-range/tmp/xcrun_db",
+        "path": "$PRIVATE_PATH_136",
         "bytes": 2447,
         "sha256": "42eb8f36259efbaa94045b19c3ae000193e3e6c76ff943cbc14ae6c5ebc754ca"
       }
     ],
     "directories": [
-      "/private/tmp/alopex-712-lsm-range/before",
-      "/private/tmp/alopex-712-lsm-range/after",
-      "/private/tmp/alopex-712-lsm-range/parser",
-      "/private/tmp/alopex-712-lsm-range/tmp"
+      "$PRIVATE_PATH_137",
+      "$PRIVATE_PATH_138",
+      "$PRIVATE_PATH_139",
+      "$PRIVATE_PATH_140"
     ],
     "note": "Remove both native packages/parser and emitted test executables including intentional mutation binaries. Compact logs, identities, raw samples and shared active dependency cache retained.",
     "removed_logical_bytes": 345842514,

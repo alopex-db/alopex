@@ -13,7 +13,6 @@ not a release performance qualification or a latency threshold.
 - Example binary built at `6f850bd6`; the example source is unchanged at the
   measurement HEAD. Binary/example/runner hashes and compact raw events are in
   [the evidence JSON](hnsw-transaction-cache-baseline.json).
-- macOS aarch64, 51,539,607,552 bytes physical RAM, 18 logical CPUs.
 - Cargo test profile (`opt-level=1`), incremental/debug info disabled, build jobs 2;
   Rayon and OMP runtime threads limited to 2.
 - Explicit published 0.8.16 parser override for development. This does not qualify
@@ -62,7 +61,7 @@ one shared target directory and the documented parser environment. Then run:
 ```sh
 python3 scripts/performance/issue681_manual.py \
   target/debug/examples/issue681_hnsw_first_write \
-  --output /private/tmp/alopex-681-comparison \
+  --output $PRIVATE_PATH \
   --rows 100000 --dimensions 384 --timeout 900 --rss-limit 8000000000
 ```
 

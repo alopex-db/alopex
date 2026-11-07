@@ -119,27 +119,27 @@
       }
     },
     "outputs": {
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+      "$PRIVATE_PATH_1": {
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
         "bytes": 37043440
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server": {
+      "$PRIVATE_PATH_2": {
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
         "bytes": 42826400
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+      "$PRIVATE_PATH_3": {
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
         "bytes": 6886224
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+      "$PRIVATE_PATH_4": {
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
         "bytes": 37043440
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+      "$PRIVATE_PATH_5": {
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
         "bytes": 6886224
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d": {
+      "$PRIVATE_PATH_6": {
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
         "bytes": 42826400
       }
@@ -10756,17 +10756,8 @@
       "shared native: cargo build --offline --locked --profile test -p alopex-server -p alopex-py",
       "pytest new normalization cases before/after and existing test_remote_client.py after",
       "4 bounded scalar validation negative controls against new normalization cases",
-      "existing run_sql_query_profile.py via /private/tmp/alopex-712-remote-conversion/run_pairs.py; original/small server cells serially"
+      "existing run_sql_query_profile.py via $PRIVATE_PATH_7; original/small server cells serially"
     ]
-  },
-  "environment": {
-    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "python": "3.13.16 (main, Oct  3 2026, 00:54:36) [Clang 22.1.3 ]",
-    "executable": "/Users/yoshinori/.local/bin/python3",
-    "cpu": "Apple M5 Pro",
-    "logical_cpus": 18,
-    "memory_bytes": 51539607552,
-    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)"
   },
   "probe": {
     "source_sha256": "5a610138ba4703a6573ee6b43ee7959576f53f1bf1cd89bbffc59f5d1e64b270",
@@ -11170,182 +11161,182 @@
     "note": "Shared hardlinks count more than once in logical path sizes; host allocated-byte inventory deduplicates inode identities.",
     "removed": [
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_1",
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
         "bytes": 37043440
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server",
+        "path": "$PRIVATE_PATH_2",
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
         "bytes": 42826400
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_3",
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
         "bytes": 6886224
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib",
+        "path": "$PRIVATE_PATH_4",
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287",
         "bytes": 37043440
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib",
+        "path": "$PRIVATE_PATH_5",
         "sha256": "2617b014c646795b2b732633badb64a898c26de2c109db469a4b81a096624838",
         "bytes": 6886224
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d",
+        "path": "$PRIVATE_PATH_6",
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
         "bytes": 42826400
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/asyncio.pyi",
+        "path": "$PRIVATE_PATH_8",
         "bytes": 7048,
         "sha256": "0ee6196c6eced1021d43933eb79d24b94ef16d8913bfe6dadb0fff5933ea9bd5"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/remote.py",
+        "path": "$PRIVATE_PATH_9",
         "bytes": 49417,
         "sha256": "5a610138ba4703a6573ee6b43ee7959576f53f1bf1cd89bbffc59f5d1e64b270"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/protocols.py",
+        "path": "$PRIVATE_PATH_10",
         "bytes": 1564,
         "sha256": "ac50bf120298d7b679881ee1081ec3c7cc4c7265863d9046ff4a5957419e571f"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/asyncio.py",
+        "path": "$PRIVATE_PATH_11",
         "bytes": 19842,
         "sha256": "cc1304ebc59ae459116e1db7c3758f074d152ff521259012600aef70a9111603"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/__init__.py",
+        "path": "$PRIVATE_PATH_12",
         "bytes": 4101,
         "sha256": "ca72d826c6159d2574edf737cb46922c2f10453ab75b057db431c68bb5c56a55"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/_alopex.abi3.so",
+        "path": "$PRIVATE_PATH_13",
         "bytes": 37043440,
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/py.typed",
+        "path": "$PRIVATE_PATH_14",
         "bytes": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/remote.pyi",
+        "path": "$PRIVATE_PATH_15",
         "bytes": 5221,
         "sha256": "db171685c3c8ad94a671ecf9ac51808c7f25d5b68dd3db40c513c979f8d48d1b"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/_alopex.pyi",
+        "path": "$PRIVATE_PATH_16",
         "bytes": 26853,
         "sha256": "558c956c695a76cdbee717100b685af9d14e5966bc545fa500eac656016dc5b8"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/native/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_17",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/native/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_18",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/before/alopex/native/SHA256SUMS",
+        "path": "$PRIVATE_PATH_19",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/asyncio.pyi",
+        "path": "$PRIVATE_PATH_20",
         "bytes": 7048,
         "sha256": "0ee6196c6eced1021d43933eb79d24b94ef16d8913bfe6dadb0fff5933ea9bd5"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/remote.py",
+        "path": "$PRIVATE_PATH_21",
         "bytes": 49863,
         "sha256": "d422bcc4bb22815bed74507ba024b20cd1593150e030e37c1b8def69a832338b"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/protocols.py",
+        "path": "$PRIVATE_PATH_22",
         "bytes": 1564,
         "sha256": "ac50bf120298d7b679881ee1081ec3c7cc4c7265863d9046ff4a5957419e571f"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/asyncio.py",
+        "path": "$PRIVATE_PATH_23",
         "bytes": 19842,
         "sha256": "cc1304ebc59ae459116e1db7c3758f074d152ff521259012600aef70a9111603"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/__init__.py",
+        "path": "$PRIVATE_PATH_24",
         "bytes": 4101,
         "sha256": "ca72d826c6159d2574edf737cb46922c2f10453ab75b057db431c68bb5c56a55"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/_alopex.abi3.so",
+        "path": "$PRIVATE_PATH_25",
         "bytes": 37043440,
         "sha256": "df83ab94c2a68008802858ed8071b73a81d0b2d55c6099854515599dda164287"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/py.typed",
+        "path": "$PRIVATE_PATH_26",
         "bytes": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/remote.pyi",
+        "path": "$PRIVATE_PATH_27",
         "bytes": 5221,
         "sha256": "db171685c3c8ad94a671ecf9ac51808c7f25d5b68dd3db40c513c979f8d48d1b"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/_alopex.pyi",
+        "path": "$PRIVATE_PATH_28",
         "bytes": 26853,
         "sha256": "558c956c695a76cdbee717100b685af9d14e5966bc545fa500eac656016dc5b8"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/native/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_29",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/native/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_30",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/after/alopex/native/SHA256SUMS",
+        "path": "$PRIVATE_PATH_31",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/parser/alopex-sql-parser/aarch64-apple-darwin/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_32",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/parser/alopex-sql-parser/aarch64-apple-darwin/BUILD_IDENTITY.json",
+        "path": "$PRIVATE_PATH_33",
         "bytes": 2800,
         "sha256": "ac74d6d2daec3d6d92006479703b77b1639207dfceb3a3abd7cb83900c9fafd9"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_34",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.a",
+        "path": "$PRIVATE_PATH_35",
         "bytes": 793984,
         "sha256": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/parser/alopex-sql-parser/aarch64-apple-darwin/SHA256SUMS",
+        "path": "$PRIVATE_PATH_36",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-712-remote-conversion/alopex-server",
+        "path": "$PRIVATE_PATH_37",
         "sha256": "1d5e2af53111385882dcfbdf8361815a9ea3ea007dd6d7c6e4a9e853b833395f",
         "bytes": 42826400
       }

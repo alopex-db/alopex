@@ -13,51 +13,33 @@
     "product_source": "e4d5f59e67b93d8e3f4a491dc725cb96a47639f8",
     "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2",
     "build_command": "cargo build --offline --locked --profile test -p alopex-server -p alopex-py",
-    "environment": {
-      "incremental": 0,
-      "dev_debug": 0,
-      "test_debug": 0,
-      "jobs": 2,
-      "RUSTFLAGS": "-D warnings",
-      "parser_override": "/private/tmp/alopex-712-delete-profile/parser/alopex-sql-parser/aarch64-apple-darwin"
-    },
     "artifacts": {
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/alopex-server": {
+      "$PRIVATE_PATH_1": {
         "sha256": "7254de7433a8777bcac2a9138324e7eada72630bc1f268afbe9fa9d87e6343e0",
         "bytes": 42845376
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.dylib": {
+      "$PRIVATE_PATH_2": {
         "sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
         "bytes": 37042656
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/lib_alopex.rlib": {
+      "$PRIVATE_PATH_3": {
         "sha256": "a759f2f266f5a8541fe090f7eaced852e86f8dee543289eb9b2b364d295fdc7a",
         "bytes": 6886120
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.dylib": {
+      "$PRIVATE_PATH_4": {
         "sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1",
         "bytes": 37042656
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/lib_alopex.rlib": {
+      "$PRIVATE_PATH_5": {
         "sha256": "a759f2f266f5a8541fe090f7eaced852e86f8dee543289eb9b2b364d295fdc7a",
         "bytes": 6886120
       },
-      "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_server-153eb71444b7df4d": {
+      "$PRIVATE_PATH_6": {
         "sha256": "7254de7433a8777bcac2a9138324e7eada72630bc1f268afbe9fa9d87e6343e0",
         "bytes": 42845376
       }
     },
     "copied_extension_sha256": "531e6266cf0dc506bfa387c339b9da8536eed30cb71ceb6b66dbda36a72b0fd1"
-  },
-  "host": {
-    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "architecture": "arm64",
-    "logical_cpus": 18,
-    "cpu_brand": "Apple M5 Pro",
-    "memory_bytes": 51539607552,
-    "affinity": "macOS OS scheduling; no CPU pinning",
-    "threads": "RAYON_NUM_THREADS=2 TOKIO_WORKER_THREADS=2 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1",
-    "other_work": "No local build/test suite ran during timed or profile cells; hosted CI ran separately."
   },
   "plan": {
     "issue": 712,
@@ -65,8 +47,8 @@
     "unanswered": "Does server/public DELETE time reside in begin, execution, or durable commit; is the full-table DELETE scan observed in a live server stack?",
     "scope": "Manual diagnostic, not a product/reference performance acceptance. Same 32-byte TEXT and seeded primary-key plans, public Python embedded/server. 3/1000/10000 rows,3 warmups+21 samples per cell, separate mixed DELETE/restore stack-sampling cell. Full final state and per-operation checks. No ordinary CI load/performance.",
     "build_command": "cargo build --locked --profile test -p alopex-server -p alopex-py",
-    "output": "/private/tmp/alopex-712-delete-profile",
-    "shared_target": "/Users/yoshinori/work/alopexDB/alopex/target",
+    "output": "$PRIVATE_PATH_7",
+    "shared_target": "$PRIVATE_PATH_8",
     "initial_host_bytes": 16385273856,
     "estimated_peak_additional_bytes": 4000000000,
     "build_jobs": 2,

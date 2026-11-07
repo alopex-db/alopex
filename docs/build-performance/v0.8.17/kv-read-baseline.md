@@ -103,7 +103,7 @@ parser (38,349,334 logical bytes) for the immediate tracking fix comparison.
 Target export links were removed so a future build cannot overwrite that
 baseline. This avoids a redundant baseline rebuild. Remove these retained assets
 immediately after the fix comparison/profiles; shared dependencies and compact
-receipts remain. Receipt directory: `/private/tmp/alopex-712-kv-profile`.
+receipts remain. Receipt directory: `$PRIVATE_PATH`.
 
 Draft diagnostic handoff only: product retention is unresolved, profiling is
 incomplete, and PR/candidate integration and #712 reference qualification remain

@@ -48,7 +48,7 @@ INSERT/rollbackのserver各相の中央値は、begin 0.140 ms、execute 0.233 m
 
 ## 保存・回収・次の作業
 
-[JSON記録](sql-query-baseline.json)に全計時値、ケース結果、ソースとバイナリのhash、選択したnativeスタック、Python profile、資源計測、削除記録を保存した。完全なnativeスタックとコンパクトな実行ログは `/private/tmp/alopex-712-query-profile` に残した。
+[JSON記録](sql-query-baseline.json)に全計時値、ケース結果、ソースとバイナリのhash、選択したnativeスタック、Python profile、資源計測、削除記録を保存した。完全なnativeスタックとコンパクトな実行ログは `$PRIVATE_PATH` に残した。
 
 - ハーネスの単体検証10件成功（既存DELETE 4件＋新規6件）。ネイティブビルド成功。Rust製品コードは変更しておらず、mutation/coupling/Miri/Kaniの追加実行は対象外。
 - ホスト使用量の観測最大18,033,999,872 bytes、回収後17,778,679,808 bytes。所有するバイナリ・package・parser等25ファイル、255,533,728 logical bytesを削除した。共有依存キャッシュと記録を保持する。

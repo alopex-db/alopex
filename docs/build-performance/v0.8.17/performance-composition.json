@@ -107,7 +107,7 @@
       "focused core Clippy and fmt/diff checks",
       "cargo test --offline --locked -p alopex-embedded --test hnsw_transaction_cache (5 existing two-row public snapshot cases)"
     ],
-    "output": "/private/tmp/alopex-performance-composition",
+    "output": "$PRIVATE_PATH_1",
     "build_policy": "serialized, shared target, debug0/incremental0/jobs2, storage watchdog stop40GB; no performance/load tests",
     "cleanup": "Preserve logs/source identities; remove owned core validation binaries and any parser archive/files after checks; keep existing shared dependencies. No new worktree.",
     "cross_boundary_reason": "Confirm reconciled MemoryKV scans preserve the HNSW Database old-reader contract, rather than relying only on direct KV assertions"
@@ -572,59 +572,59 @@
     "source": "80cfd8a77dc1e674b0ca9955cb131df34b037f4d",
     "executables": [
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/alopex_core-0ba0a637acb03ac4",
+        "path": "$PRIVATE_PATH_2",
         "bytes": 10449472,
         "sha256": "0f0d245545ad082d4467e91829d9c8cb584847577df97ea69cdd16bc809a5722"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/hnsw_build_scale-32e715820bc66f3a",
+        "path": "$PRIVATE_PATH_3",
         "bytes": 690000,
         "sha256": "e1a90b88fc0a7797bbe5e791d254e8e329ee4a7e935f28f2535286ce065439f6"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/hnsw_transaction_cache-e1c5317508d861c0",
+        "path": "$PRIVATE_PATH_4",
         "bytes": 31252896,
         "sha256": "8e0303b815ada325e1aa20d673d338f8d469b5c2beffc98072f3a749a1e0cda5"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/deps/memory_snapshot_overwrite-18c808d22507a147",
+        "path": "$PRIVATE_PATH_5",
         "bytes": 4209136,
         "sha256": "eeffd7d8fbeb7d720c777fd9eb614f2b3ecf8a98b183d786dc4f1eb8c04b2632"
       },
       {
-        "path": "/Users/yoshinori/work/alopexDB/alopex/target/debug/hnsw_build_scale",
+        "path": "$PRIVATE_PATH_6",
         "bytes": 690000,
         "sha256": "e1a90b88fc0a7797bbe5e791d254e8e329ee4a7e935f28f2535286ce065439f6"
       }
     ],
     "parser_and_archive": [
       {
-        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/CONTRACT_VERSION",
+        "path": "$PRIVATE_PATH_7",
         "bytes": 7,
         "sha256": "a80bff70756ff2e0f528e9b6844fcb5fe4baea4c6f257257c4aea3a38ab31222"
       },
       {
-        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/BUILD_IDENTITY.json",
+        "path": "$PRIVATE_PATH_8",
         "bytes": 2800,
         "sha256": "ac74d6d2daec3d6d92006479703b77b1639207dfceb3a3abd7cb83900c9fafd9"
       },
       {
-        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.dylib",
+        "path": "$PRIVATE_PATH_9",
         "bytes": 399944,
         "sha256": "e8d769ce9de1234a1a8bdf6e581b78f65fe4b7861d9fc766633c674652bf0e26"
       },
       {
-        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/libalopex_sql_parser.a",
+        "path": "$PRIVATE_PATH_10",
         "bytes": 793984,
         "sha256": "8fe21fa70ce21e4b431a3b9b932d6802b567a2ea3be82577b74090672ed9a6fa"
       },
       {
-        "path": "/private/tmp/alopex-performance-composition/parser/alopex-sql-parser/aarch64-apple-darwin/SHA256SUMS",
+        "path": "$PRIVATE_PATH_11",
         "bytes": 182,
         "sha256": "25e20a789bcf001c0a1c416958df98d633b83e849d83d43b21fc20b565efb808"
       },
       {
-        "path": "/private/tmp/alopex-performance-composition/parser.tar.gz",
+        "path": "$PRIVATE_PATH_12",
         "bytes": 452776,
         "sha256": "8ac1f708efdfdbf6c85a65aebd34a368de41e798d9441a2785abad011cec038d"
       }

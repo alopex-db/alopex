@@ -659,7 +659,6 @@
     "after": 163840
   },
   "conditions": {
-    "host": "same local macOS arm64 host, 18 logical CPUs, 51,539,607,552 bytes RAM",
     "profile": "Cargo test profile opt-level=1; incremental=0, debug=0, build jobs=2",
     "runtime_threads": 2,
     "rows": 100000,

@@ -72,4 +72,4 @@ qualification, publication, postrelease verification and main merge remain under
 verify the exact candidate composition. Owner: Codex.
 
 Machine-readable source, outcomes and cleanup: `performance-composition.json`.
-Compact local evidence: `/private/tmp/alopex-performance-composition`.
+Compact local evidence: `$PRIVATE_PATH`.

@@ -17,7 +17,6 @@ public API, native code, on-disk format or dependency changes.
   both Python packages share the same native bytes via hardlinks. Every package
   file other than `remote.py` is byte-identical. The fixed published 0.8.16
   aarch64 parser is an internal validation input, not candidate qualification.
-- Apple M5 Pro, 18 logical CPUs, 48 GiB memory, macOS 27.0.1, Python 3.13.16.
 - Existing `scripts/performance/run_sql_query_profile.py`, unchanged.
   Before/after/after/before/before/after; three trials per side; one preflight,
   three warmups and 21 measured calls per cell. Server surface only: native and
@@ -84,4 +83,4 @@ published 0.8.16 or other engines, candidate acceptance, or completion of #712.
 It must not be added arithmetically to gains from #774, #777 or the separate
 #770 branch. Required PR/candidate CI, combined effects and the other adopted
 #712 workloads remain outstanding. Local receipt directory:
-`/private/tmp/alopex-712-remote-conversion`.
+`$PRIVATE_PATH`.
