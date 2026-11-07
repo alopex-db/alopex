@@ -1,0 +1,45 @@
+# HNSW first-write phase RSS observation
+
+The manual #681 runner accepts `--phase-kernel-rss` on Linux. It resets the
+child's RSS high-water mark while the child is waiting at each start handshake,
+then reads the mark at the matching end handshake. The existing operation
+timers and sampled RSS observations are preserved.
+
+```sh
+python3 scripts/performance/issue681_manual.py "$BINARY" \
+  --output "$PRIVATE_OUTPUT" --rows "$ROWS" --dimensions "$DIMENSIONS" \
+  --timeout "$TIMEOUT_SECONDS" --rss-limit "$RSS_LIMIT_BYTES" --phase-kernel-rss
+```
+
+The binary must have the existing `issue681_hnsw_first_write` event protocol.
+The runner records its hash, source identity and observer-module hash. The
+existing manual execution, storage, time and RSS limits still apply. No load
+workload is added to normal CI.
+
+## Measurement contract
+
+- The observer opens the child process directory once and checks its start
+  ticks. A reused PID path cannot redirect an existing descriptor to a new
+  process. The process must belong to the runner's UID.
+- `clear_refs=5` resets the process high-water mark to its current RSS. It does
+  not change cgroups, capabilities, host settings or page access bits.
+- Each record retains values before reset, after reset and at the phase end.
+  Missing counters, rejected resets, identity changes, decreasing high-water
+  marks and incomplete phase coverage fail the run. A reported phase peak at
+  the RSS limit also fails the run.
+- The peak is the **kernel-reported process RSS high-water mark over the
+  handshake interval**, including end-event serialization. It is not an exact
+  allocation peak or an HNSW-only memory value. Kernel RSS accounting accuracy
+  applies; sampled RSS values remain sampled lower bounds.
+- Resetting the high-water mark affects subsequent process lifetime reporting.
+  With this option, `children_lifetime_peak_rss_bytes` is null. The raw
+  `RUSAGE_CHILDREN` result is retained under a separate name and is not used as
+  a lifetime peak; it also includes monitor utilities.
+
+Small synthetic-file tests verify parsing, phase order, identity checks and
+failure handling. Linux container execution must additionally verify actual
+reset behavior before using this mode for #681 acceptance.
+
+References: [clear_refs](https://man7.org/linux/man-pages/man5/proc_pid_clear_refs.5.html),
+[process status and RSS accuracy](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html),
+[process-directory descriptor lifetime](https://www.kernel.org/doc/html/latest/filesystems/proc.html).

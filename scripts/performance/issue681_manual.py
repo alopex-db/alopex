@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 
+from phase_rss import PhaseRss
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/compatibility"))
 import storage
@@ -30,6 +32,8 @@ def main():
     parser.add_argument("--dimensions", type=int, default=384)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--rss-limit", type=int, default=8_000_000_000)
+    parser.add_argument("--phase-kernel-rss", action="store_true",
+                        help="record Linux process RSS high-water marks between phase handshakes")
     args = parser.parse_args()
     if os.environ.get("CI") or not (1 <= args.rows <= 100_000 and 1 <= args.dimensions <= 384):
         parser.error("manual local run only; rows<=100000, dimensions<=384")
@@ -37,6 +41,8 @@ def main():
         parser.error("timeout<=1800 seconds and RSS<=8 GB required")
     if sys.platform not in ("darwin", "linux"):
         parser.error("this process monitor supports macOS/Linux only")
+    if args.phase_kernel_rss and sys.platform != "linux":
+        parser.error("phase kernel RSS requires Linux proc counters")
     args.output.mkdir(parents=True, exist_ok=False)
     inventory = storage.inventory([args.output])
     if inventory["allocated_bytes"] + 1_000_000_000 >= storage.STOP_BYTES:
@@ -46,11 +52,15 @@ def main():
                 "binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
                 "example_source_sha256":hashlib.sha256((ROOT / "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs").read_bytes()).hexdigest(),
                 "runner_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "phase_rss_source_sha256":hashlib.sha256(Path(__file__).with_name("phase_rss.py").read_bytes()).hexdigest(),
                 "rows":args.rows,"dimensions":args.dimensions,"rss_limit":args.rss_limit,
+                "phase_kernel_rss":args.phase_kernel_rss,
                 "timeout_seconds":args.timeout,"initial_inventory":inventory}
     (args.output / "identity.json").write_text(json.dumps(identity,indent=2))
     events = queue.Queue()
     phases = {}
+    kernel_phases = []
+    kernel_observer = None
     phase = "startup"
     outcome = "failed"
     failure = None
@@ -71,6 +81,8 @@ def main():
         reader = threading.Thread(target=read_events,daemon=True)
         reader.start()
         try:
+            if args.phase_kernel_rss:
+                kernel_observer = PhaseRss(process.pid)
             while process.poll() is None or not events.empty():
                 if time.monotonic()-started > args.timeout:
                     raise RuntimeError("manual workload timeout")
@@ -81,6 +93,15 @@ def main():
                 event = json.loads(line) if line else None
                 if event:
                     phase = event["phase"]
+                    if kernel_observer is not None:
+                        if event["data"].get("event") == "start":
+                            kernel_observer.begin(phase)
+                        elif event["data"].get("event") == "end":
+                            kernel_phases.append(kernel_observer.finish(phase))
+                            if kernel_phases[-1]["kernel_reported_peak_rss_bytes"] >= args.rss_limit:
+                                raise RuntimeError("manual workload kernel RSS limit exceeded")
+                        elif phase != "complete":
+                            raise RuntimeError("invalid kernel RSS phase event")
                     event_log.write(line)
                     event_log.flush()
                     print(line.strip(),flush=True)
@@ -109,6 +130,11 @@ def main():
             code = process.wait()
             if code != 0:
                 raise RuntimeError(f"manual workload exited {code}")
+            if kernel_observer is not None:
+                expected = ["seed", "index_build", "cold_transaction_1", "cold_transaction_2",
+                            "warm", "writer_begin", "first_insert", "second_insert", "rollback"]
+                if kernel_observer.active is not None or [row["phase"] for row in kernel_phases] != expected:
+                    raise RuntimeError("incomplete kernel RSS phase coverage")
             outcome = "passed"
         except Exception as error:
             failure = str(error)
@@ -123,10 +149,15 @@ def main():
             reader.join(timeout=2)
             process.stdin.close()
             process.stdout.close()
+            if kernel_observer is not None:
+                kernel_observer.close()
     peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     report = {"outcome":outcome,"failure":failure,"phase_sampled_peak_rss_bytes":phases,
-              "children_lifetime_peak_rss_bytes":peak if sys.platform=="darwin" else peak*1024,
-              "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; workload phase values are sampled lower bounds, not exact phase maxima",
+              "children_lifetime_peak_rss_bytes":None if args.phase_kernel_rss else (peak if sys.platform=="darwin" else peak*1024),
+              "children_rusage_reported_maxrss_bytes":peak if sys.platform=="darwin" else peak*1024,
+              "phase_kernel_rss":kernel_phases,
+              "kernel_rss_reset":args.phase_kernel_rss,
+              "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; when kernel reset is enabled its reported value is not a lifetime peak. Sampled phase values remain lower bounds. Kernel phase values cover the handshake window and have kernel RSS accounting accuracy.",
               "final_inventory":storage.inventory([args.output])}
     (args.output / "summary.json").write_text(json.dumps(report,indent=2))
     print(json.dumps({**{k:v for k,v in report.items() if k != "final_inventory"},
