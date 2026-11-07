@@ -103,12 +103,18 @@ class PhaseRss:
         after = self.snapshot()
         self.pending_observation["after"] = after
         _, previous, before = self.active
-        if after["high_water_bytes"] < before["high_water_bytes"]:
-            raise PhaseRssError("RSS high-water mark decreased during phase")
+        # VmHWM combines a stored high-water value with approximate RSS counters.
+        # Releasing pages can lower the reported value without another reset.
+        # Preserve both readings and their maximum rather than discarding a valid
+        # interval or claiming that the final reading covers its starting RSS.
+        decreased = after["high_water_bytes"] < before["high_water_bytes"]
+        observed_peak = max(before["high_water_bytes"], after["high_water_bytes"])
         self.active = None
         self.pending_observation = None
         return {"phase": phase, "before_reset": previous, "after_reset": before,
-                "after": after, "kernel_reported_peak_rss_bytes": after["high_water_bytes"],
+                "after": after, "kernel_reported_peak_rss_bytes": observed_peak,
+                "kernel_high_water_decreased": decreased,
+                "aggregation": "maximum of reset and end kernel high-water readings",
                 "scope": "child process between phase handshakes, including end-event serialization",
                 "counter": "Linux VmHWM after clear_refs=5; kernel RSS accounting accuracy applies"}
 

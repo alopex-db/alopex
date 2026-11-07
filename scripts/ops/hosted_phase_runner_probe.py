@@ -33,7 +33,7 @@ def run():
     rows = []
     failure = None
     try:
-        for case in ("complete", "missing_complete", "invalid_event", "timeout", "interrupt", "release", "madvise", "counter_reset_fault"):
+        for case in ("complete", "missing_complete", "invalid_event", "timeout", "interrupt", "release", "madvise", "transient"):
             storage.check(extra=[work, export], limit=limit)
             events = [{"phase": phase, "data": {"event": kind}}
                       for phase in PHASES for kind in ("start", "end")]
@@ -59,7 +59,10 @@ def run():
                                " if event['phase']=='rollback' and event['data'].get('event')=='start' and allocation is not None:\n"
                                "  if case=='madvise': allocation.madvise(mmap.MADV_DONTNEED)\n"
                                "  else: allocation.close()\n"
-                               "  if case=='counter_reset_fault': open('/proc/self/clear_refs','w').write('5\\n')\n"
+                               " if event['phase']=='index_build' and event['data'].get('event')=='start' and case=='transient':\n"
+                               "  transient=mmap.mmap(-1,8*1024*1024,flags=mmap.MAP_PRIVATE|mmap.MAP_ANONYMOUS)\n"
+                               "  for offset in range(0,len(transient),mmap.PAGESIZE): transient[offset]=1\n"
+                               "  transient.close()\n"
                                + ("time.sleep(20)\n" if case in ("timeout", "interrupt") else ""))
             fixture.chmod(0o700)
             output = case_root / "result"
@@ -96,20 +99,13 @@ def run():
                             child.wait(timeout=5)
             report = json.loads((output / "summary.json").read_text())
             events_saved = (output / "events.jsonl").read_text().splitlines()
-            observed_decrease = case in ("release", "madvise", "counter_reset_fault") and report["failure"] == "RSS high-water mark decreased during phase"
-            if observed_decrease:
-                assert child.returncode == 1 and report["outcome"] == "failed"
-                pending = report["incomplete_kernel_phase"]
-                assert pending["phase"] == "rollback"
-                assert pending["after"]["high_water_bytes"] < pending["after_reset"]["high_water_bytes"]
-                assert len(events_saved) == 18 and len(report["phase_kernel_rss"]) == 8
-            elif case in ("complete", "release", "madvise"):
+            observed_decrease = any(row["kernel_high_water_decreased"] for row in report["phase_kernel_rss"])
+            if case in ("complete", "release", "madvise", "transient"):
                 assert child.returncode == 0 and report["outcome"] == "passed"
                 assert [r["phase"] for r in report["phase_kernel_rss"]] == list(PHASES)
                 assert all(r["kernel_reported_peak_rss_bytes"] > 0 for r in report["phase_kernel_rss"])
                 assert len(events_saved) == 19
             else:
-                assert case != "counter_reset_fault", "injected reset did not cause rejection"
                 assert child.returncode == 1 and report["outcome"] == "failed"
                 expected = {"missing_complete": "incomplete manual workload phase coverage",
                             "invalid_event": "invalid manual workload phase sequence",
@@ -117,10 +113,16 @@ def run():
                             "interrupt": "manual workload interrupted"}[case]
                 assert report["failure"] == expected
                 assert len(events_saved) == {"missing_complete": 18, "invalid_event": 1, "timeout": 19, "interrupt": 19}[case]
+            if case == "transient":
+                row = next(row for row in report["phase_kernel_rss"] if row["phase"] == "index_build")
+                assert row["kernel_reported_peak_rss_bytes"] > row["after_reset"]["high_water_bytes"] + 4*1024*1024
+                assert row["kernel_reported_peak_rss_bytes"] > row["after"]["rss_bytes"] + 4*1024*1024
+            for row in report["phase_kernel_rss"]:
+                assert row["kernel_reported_peak_rss_bytes"] == max(row["after_reset"]["high_water_bytes"], row["after"]["high_water_bytes"])
             assert report["children_lifetime_peak_rss_bytes"] is None and report["kernel_rss_reset"]
             assert not Path("/proc", pid_file.read_text()).exists(), "workload was not reaped"
             rows.append({"case": case, "status": "passed", "kernel_phases": len(report["phase_kernel_rss"]),
-                         "child_reaped": True, "saved_events": len(events_saved), "observed_decrease": observed_decrease, "fault_injected": case == "counter_reset_fault"})
+                         "child_reaped": True, "saved_events": len(events_saved), "observed_decrease": observed_decrease, "fault_injected": False})
     except BaseException as error:
         failure = type(error).__name__
     finally:
@@ -140,7 +142,7 @@ def run():
         shutil.rmtree(work)
         storage.check(extra=[export], limit=limit)
         (export / "result.json").write_text(json.dumps({
-            "schema": "alopex.phase-runner-runtime/v2", "status": "passed" if failure is None else "failed",
+            "schema": "alopex.phase-runner-runtime/v3", "status": "passed" if failure is None else "failed",
             "error_type": failure, "controller": os.environ["GITHUB_SHA"], "sources": hashes,
             "cases": rows, "fixture_cleanup": True, "counter_source": "actual Linux proc",
             "storage_source": "actual storage.inventory with outer VM guard", "performance_acceptance": False}, indent=2))
