@@ -27,6 +27,10 @@ workload is added to normal CI.
   Missing counters, rejected resets, identity changes, decreasing high-water
   marks and incomplete phase coverage fail the run. A reported phase peak at
   the RSS limit also fails the run.
+- Both sampled and kernel modes require all nine start/end pairs in order,
+  followed by exactly one `complete` handshake and a zero process exit.
+  The runner drains stdout through EOF and saves each raw event before parsing
+  or reading counters, so a rejected event remains available for diagnosis.
 - The peak is the **kernel-reported process RSS high-water mark over the
   handshake interval**, including end-event serialization. It is not an exact
   allocation peak or an HNSW-only memory value. Kernel RSS accounting accuracy
@@ -37,8 +41,11 @@ workload is added to normal CI.
   a lifetime peak; it also includes monitor utilities.
 
 Small synthetic-file tests verify parsing, phase order, identity checks and
-failure handling. Linux container execution must additionally verify actual
-reset behavior before using this mode for #681 acceptance.
+failure handling. Tiny child-process tests exercise the runner's handshakes,
+missing/duplicate events, observer failure, kernel limit, timeout, nonzero exit
+and child reaping. Their storage and kernel counters are injected; they do not
+qualify product performance. Linux container execution must additionally verify
+actual reset behavior before using this mode for #681 acceptance.
 
 References: [clear_refs](https://man7.org/linux/man-pages/man5/proc_pid_clear_refs.5.html),
 [process status and RSS accuracy](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html),

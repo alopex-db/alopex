@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/compatibility"))
 import storage
 
+PHASES = ("seed", "index_build", "cold_transaction_1", "cold_transaction_2",
+          "warm", "writer_begin", "first_insert", "second_insert", "rollback")
+EXPECTED_EVENTS = tuple((phase, kind) for phase in PHASES for kind in ("start", "end")) + (("complete", None),)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -64,6 +68,8 @@ def main():
     phase = "startup"
     outcome = "failed"
     failure = None
+    event_count = 0
+    stream_closed = False
     started = time.monotonic()
     last_inventory = started
     def rss(pid):
@@ -76,21 +82,36 @@ def main():
             env=dict(os.environ,ALOPEX_MANUAL_681="1",RAYON_NUM_THREADS="2",OMP_NUM_THREADS="2"),
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=stderr,text=True,start_new_session=True)
         def read_events():
-            for line in process.stdout:
-                events.put(line)
+            try:
+                for line in process.stdout:
+                    events.put(line)
+            finally:
+                events.put(None)
         reader = threading.Thread(target=read_events,daemon=True)
         reader.start()
         try:
             if args.phase_kernel_rss:
                 kernel_observer = PhaseRss(process.pid)
-            while process.poll() is None or not events.empty():
+            while not stream_closed or process.poll() is None:
                 if time.monotonic()-started > args.timeout:
                     raise RuntimeError("manual workload timeout")
                 try:
                     line = events.get(timeout=0.1)
+                    if line is None:
+                        stream_closed = True
                 except queue.Empty:
                     line = None
-                event = json.loads(line) if line else None
+                event = None
+                if line is not None:
+                    # Preserve the offending event even if parsing or observation fails.
+                    event_log.write(line)
+                    event_log.flush()
+                    event = json.loads(line)
+                    if (not isinstance(event, dict) or not isinstance(event.get("data"), dict) or
+                            event_count >= len(EXPECTED_EVENTS) or
+                            (event.get("phase"), event["data"].get("event")) != EXPECTED_EVENTS[event_count]):
+                        raise RuntimeError("invalid manual workload phase sequence")
+                    event_count += 1
                 if event:
                     phase = event["phase"]
                     if kernel_observer is not None:
@@ -102,8 +123,6 @@ def main():
                                 raise RuntimeError("manual workload kernel RSS limit exceeded")
                         elif phase != "complete":
                             raise RuntimeError("invalid kernel RSS phase event")
-                    event_log.write(line)
-                    event_log.flush()
                     print(line.strip(),flush=True)
                 if process.poll() is None:
                     try:
@@ -130,10 +149,10 @@ def main():
             code = process.wait()
             if code != 0:
                 raise RuntimeError(f"manual workload exited {code}")
+            if event_count != len(EXPECTED_EVENTS):
+                raise RuntimeError("incomplete manual workload phase coverage")
             if kernel_observer is not None:
-                expected = ["seed", "index_build", "cold_transaction_1", "cold_transaction_2",
-                            "warm", "writer_begin", "first_insert", "second_insert", "rollback"]
-                if kernel_observer.active is not None or [row["phase"] for row in kernel_phases] != expected:
+                if kernel_observer.active is not None or [row["phase"] for row in kernel_phases] != list(PHASES):
                     raise RuntimeError("incomplete kernel RSS phase coverage")
             outcome = "passed"
         except Exception as error:
