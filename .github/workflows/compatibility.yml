@@ -1,4 +1,4 @@
-name: Compatibility
+name: Manual candidate Windows overflow acceptance
 
 on:
   workflow_dispatch:
@@ -8,21 +8,6 @@ on:
         type: choice
         default: full
         options: [full, windows-overflow]
-  schedule:
-    - cron: '17 2 * * 1'
-  push:
-    branches: [main, 'integration/**', 'release/**']
-    paths-ignore:
-      - '.github/workflows/**'
-      - 'scripts/release/**'
-      - 'scripts/parity/**'
-      - 'formal/release-report/**'
-  pull_request:
-    paths-ignore:
-      - '.github/workflows/**'
-      - 'scripts/release/**'
-      - 'scripts/parity/**'
-      - 'formal/release-report/**'
 
 # Supersede PRs and unprotected development branch pushes. Preserve other
 # push runs (protected/integration/release branches and tags), scheduled
@@ -62,329 +47,43 @@ jobs:
       PYTHONDONTWRITEBYTECODE: 1
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Check manual runner selection and cleanup guards
         run: python -m unittest discover -s scripts/compatibility -p test_windows_overflow_acceptance.py -v
       - name: Record source, scope and measured host budget
-        run: python scripts/compatibility/windows_overflow_acceptance.py prepare
+        run: python scripts/ops/windows_overflow_private.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build parser under storage watchdog
-        run: python scripts/compatibility/windows_overflow_acceptance.py parser
+        run: python scripts/ops/windows_overflow_private.py parser
       - name: Normal extension and 15 ordinary public API cases
         timeout-minutes: 45
-        run: python scripts/compatibility/windows_overflow_acceptance.py normal
+        run: python scripts/ops/windows_overflow_private.py normal
       - name: Instrumented Rust and Python boundary cases (24 each)
         timeout-minutes: 45
-        run: python scripts/compatibility/windows_overflow_acceptance.py instrumented
+        run: python scripts/ops/windows_overflow_private.py instrumented
       - name: Published old reader, container and live WAL compatibility
         timeout-minutes: 25
-        run: python scripts/compatibility/windows_overflow_acceptance.py legacy
+        run: python scripts/ops/windows_overflow_private.py legacy
       - name: Reconcile all source-bound acceptance receipts
-        run: python scripts/compatibility/windows_overflow_acceptance.py verify
+        run: python scripts/ops/windows_overflow_private.py verify
       - name: Remove owned binaries and fixtures, record final storage
         if: always()
-        run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
-      - name: Upload compact Windows acceptance evidence
+        run: python scripts/ops/windows_overflow_private.py cleanup
+      - name: Encrypt compact acceptance evidence
+        if: always()
+        run: python scripts/ops/windows_overflow_private.py collect
+      - name: Upload encrypted Windows acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-overflow-public-${{ github.sha }}
-          path: |
-            artifacts/windows-overflow-public/**/*.json
-            artifacts/windows-overflow-public/**/*.jsonl
-            artifacts/windows-overflow-public/**/*.log
-            artifacts/windows-overflow-public/**/*.xml
+          name: windows-overflow-private
+          path: windows-overflow-private-export/
           if-no-files-found: error
-          retention-days: 14
-
-  historical-parser:
-    name: Historical parser artifact owner
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
-    runs-on: ubuntu-latest
-    env:
-      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
-      - name: Build and test historical parser owner
-        run: |
-          bash scripts/build-nim-parser.sh --backend host
-          bash scripts/test-nim-parser.sh --backend host
-      - name: Stage verified historical parser artifact
-        run: |
-          stage="${RUNNER_TEMP}/alopex-historical-parser"
-          mkdir -p "$stage"
-          for candidate in \
-            libalopex_sql_parser.so \
-            CONTRACT_VERSION \
-            PARSER_CONTRACT_VERSION \
-            SHA256SUMS; do
-            test -f "${NIM_SQL_PARSER_DIR}/${candidate}"
-            test ! -L "${NIM_SQL_PARSER_DIR}/${candidate}"
-            cp -- "${NIM_SQL_PARSER_DIR}/${candidate}" "$stage/${candidate}"
-          done
-          (cd "$stage" && sha256sum -c SHA256SUMS)
-      - name: Upload historical parser artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: historical-parser-linux
-          path: ${{ runner.temp }}/alopex-historical-parser
-          if-no-files-found: error
+          compression-level: 0
           retention-days: 7
-
-  historical-contract:
-    name: Historical contract (${{ matrix.gate }})
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
-    needs: historical-parser
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        gate: [v06, v07]
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/historical-${{ matrix.gate }}
-      NIM_SQL_PARSER_DIR: ${{ github.workspace }}/artifacts/historical-parser
-      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/artifacts/historical-parser
-      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: historical-${{ matrix.gate }}
-      - name: Install historical gate dependencies
-        run: python -m pip install --upgrade pip maturin pytest numpy
-      - name: Download historical parser artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: historical-parser-linux
-          path: artifacts/historical-parser
-      - name: Verify historical parser artifact
-        run: |
-          for candidate in \
-            libalopex_sql_parser.so \
-            CONTRACT_VERSION \
-            PARSER_CONTRACT_VERSION \
-            SHA256SUMS; do
-            test -f "${NIM_SQL_PARSER_DIR}/${candidate}"
-            test ! -L "${NIM_SQL_PARSER_DIR}/${candidate}"
-          done
-          (cd "${NIM_SQL_PARSER_DIR}" && sha256sum -c SHA256SUMS)
-      - name: Run independent historical owner with metrics
-        run: |
-          case "${{ matrix.gate }}" in
-            v06) gate_script="scripts/release/v06_gate.sh" ;;
-            v07) gate_script="scripts/release/v07_gate.sh" ;;
-            *) echo "unknown historical gate" >&2; exit 2 ;;
-          esac
-          python scripts/ci/run_with_metrics.py \
-            --owner "historical-${{ matrix.gate }}" \
-            --output "artifacts/build-metrics/historical-${{ matrix.gate }}.json" \
-            --target-dir "${CARGO_TARGET_DIR}" \
-            -- bash "$gate_script"
-      - name: Upload historical build metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-metrics-historical-${{ matrix.gate }}
-          path: artifacts/build-metrics/*.json
-          if-no-files-found: error
-          retention-days: 14
-
-  current-windows-full:
-    name: Full Windows current compatibility
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
-    runs-on: windows-latest
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/current-windows-full
-      RUSTFLAGS: -D warnings
-      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Set up Python venv
-        shell: bash
-        run: |
-          venv_dir="${RUNNER_TEMP}/alopex-current-windows-full-venv"
-          python -m venv "$venv_dir"
-          venv_root=$(VENV_DIR="$venv_dir" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
-          venv_python="$venv_root/Scripts/python.exe"
-          test -x "$venv_python"
-          echo "$venv_root/Scripts" >> "$GITHUB_PATH"
-          echo "VIRTUAL_ENV=$venv_root" >> "$GITHUB_ENV"
-          echo "PYO3_PYTHON=$venv_python" >> "$GITHUB_ENV"
-          echo "PYTHON_SYS_EXECUTABLE=$venv_python" >> "$GITHUB_ENV"
-          echo "ALOPEX_PYTHON=$venv_python" >> "$GITHUB_ENV"
-          "$venv_python" -m ensurepip --upgrade
-          "$venv_python" -m pip install --upgrade pip
-          "$venv_python" -m pip install "numpy<2"
-          python_site=$("$venv_python" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          echo "PYTHONPATH=$python_site" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: current-windows-full
-      - name: Set up exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
-      - name: Build and test current Windows parser
-        shell: bash
-        run: |
-          bash scripts/build-nim-parser.sh --backend host
-          bash scripts/test-nim-parser.sh --backend host
-      - name: Add parser DLL to PATH
-        shell: bash
-        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
-      - name: Run full Windows current owner with metrics
-        shell: bash
-        run: |
-          python scripts/ci/run_with_metrics.py \
-            --owner "current-windows-full" \
-            --output "artifacts/build-metrics/current-windows-full.json" \
-            --target-dir "${CARGO_TARGET_DIR}" \
-            -- cargo test --workspace --features lane_ci --locked --timings
-      - name: Upload full Windows build metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-metrics-current-windows-full
-          path: |
-            artifacts/build-metrics/*.json
-            target/current-windows-full/cargo-timings/*.html
-          if-no-files-found: error
-          retention-days: 14
-
-  native:
-    name: Native Compatibility (${{ matrix.target }} | ${{ matrix.compression }})
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ${{ matrix.runner }}
-    env:
-      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            compression: none
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            compression: snappy
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            compression: zstd
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            compression: lz4
-          # v0.6.0 hold: GitHub hosted ubuntu-24.04-arm64 jobs are staying
-          # queued and block release PRs. Keep x86_64 compatibility required,
-          # and re-enable native ARM after the runner lane is stable. WASM is
-          # advisory until v1.0.0; see the wasm job below.
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-compat-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-compat-git-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-compat-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Select compression features
-        run: |
-          case "${{ matrix.compression }}" in
-            zstd) echo "FEATURE_FLAGS=--features compression-zstd" >> $GITHUB_ENV ;;
-            lz4) echo "FEATURE_FLAGS=--features compression-lz4" >> $GITHUB_ENV ;;
-            *) echo "FEATURE_FLAGS=" >> $GITHUB_ENV ;;
-          esac
-
-      - name: Build Nim SQL parser library
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Run compatibility tests
-        env:
-          ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
-          # alopex-core のテストバイナリは alopex-sql 経由で Nim 共有ライブラリを
-          # ロードする。build.rs の rpath だけでは解決できないため、ライブラリの
-          # ディレクトリを LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test -p alopex-core --test format_compatibility_test --features lane_ci $FEATURE_FLAGS
-
-  wasm:
-    # Advisory until v1.0.0, which is when WASM becomes a supported target.
-    # A failure here reports what does not build for wasm32 today; it does not
-    # hold a release, because nothing is promised on that target yet.
-    name: WASM Compatibility (advisory, ${{ matrix.compression }})
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        compression: [none, snappy]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        env:
-          # The action renames from os.tmpdir() into ~/.cargo/bin. Keep
-          # extraction beside the destination when /tmp is a separate mount.
-          TMPDIR: ${{ env.CARGO_HOME }}/bin
-        with:
-          version: v0.15.0
-
-      - name: Ensure wasm-pack in PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Run wasm compatibility tests
-        env:
-          ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
-          NODE_OPTIONS: --experimental-global-webcrypto
-          RUSTFLAGS: -D warnings --cfg getrandom_backend="wasm_js"
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target-wasm
-          WASM_BINDGEN_TEST_NO_CAPTURE: "1"
-        run: |
-          wasm-pack test --node crates/alopex-core
