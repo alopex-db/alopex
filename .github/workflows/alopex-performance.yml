@@ -1,4 +1,4 @@
-name: Installed wheel VECTOR Parquet qualification
+name: Published wheel VECTOR Parquet interchange
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-wheel-qualification
+  group: alopex-v0817-wheel-legacy
   cancel-in-progress: false
 jobs:
   verify:
@@ -89,12 +89,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WHEEL_QUALIFICATION_CONFIG: ${{ inputs.wheel_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_wheel_parquet_qualification.py
+        run: python3 -B scripts/ops/hosted_wheel_parquet_legacy.py
       - name: Preserve public result and encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-parquet-qualification
+          name: wheel-parquet-legacy
           path: wheel-qualification-export/
           if-no-files-found: error
           compression-level: 0
