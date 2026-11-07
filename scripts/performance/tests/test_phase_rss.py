@@ -58,6 +58,7 @@ class PhaseRssTests(unittest.TestCase):
         self.assertEqual(result["after_reset"]["rss_bytes"], 10240)
         self.assertEqual(result["after"]["rss_bytes"], 14336)
         self.assertEqual(result["kernel_reported_peak_rss_bytes"], 20480)
+        self.assertFalse(result["kernel_high_water_decreased"])
         self.assertIsNone(observer.active)
         self.assertIsNone(observer.pending_observation)
 
@@ -100,20 +101,29 @@ class PhaseRssTests(unittest.TestCase):
             observer.begin("insert")
         self.assertIsNone(observer.active)
 
-    def test_decreasing_high_water_mark_is_missing_evidence(self):
+    def test_release_can_lower_reported_high_water_without_losing_start_value(self):
         observer = self.observer()
         observer.begin("insert")
         self.status(10, 11)
-        with self.assertRaises(PhaseRssError):
-            observer.finish("insert")
-        self.assertEqual(observer.pending_observation, {
-            "phase": "insert",
-            "before_reset": {"rss_bytes": 10240, "high_water_bytes": 12288},
-            "after_reset": {"rss_bytes": 10240, "high_water_bytes": 12288},
-            "after": {"rss_bytes": 10240, "high_water_bytes": 11264},
-        })
-        observer.close()
-        self.assertEqual(observer.pending_observation["after"]["high_water_bytes"], 11264)
+        result = observer.finish("insert")
+        self.assertTrue(result["kernel_high_water_decreased"])
+        self.assertEqual(result["kernel_reported_peak_rss_bytes"], 12288)
+        self.assertEqual(result["after"]["high_water_bytes"], 11264)
+        self.assertEqual(result["after_reset"]["high_water_bytes"], 12288)
+        self.assertIsNone(observer.pending_observation)
+        self.assertIsNone(observer.active)
+
+    def test_previous_phase_peak_is_excluded_from_current_interval(self):
+        observer = self.observer()
+        with patch.object(observer, "snapshot", side_effect=[
+            {"rss_bytes": 10240, "high_water_bytes": 1048576},
+            {"rss_bytes": 10240, "high_water_bytes": 10240},
+            {"rss_bytes": 8192, "high_water_bytes": 9216},
+        ]):
+            observer.begin("release")
+            result = observer.finish("release")
+        self.assertEqual(result["kernel_reported_peak_rss_bytes"], 10240)
+        self.assertEqual(result["before_reset"]["high_water_bytes"], 1048576)
 
     def test_counter_disappearance_is_not_zero(self):
         observer = self.observer()
