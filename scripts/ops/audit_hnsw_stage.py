@@ -71,7 +71,8 @@ def audit(evidence, public, cleanup, config, controller):
                 require(type(sample['allocated_bytes']) is int and 0 < sample['allocated_bytes'] < 40_000_000_000
                         and sample['roots'] and sample['method'].startswith('native allocated bytes'),
                         'invalid periodic storage observation')
-        peaks = {r['phase']: r['after']['high_water_bytes'] for r in summary['phase_kernel_rss']}
+        peaks = {r['phase']: max(r['after_reset']['high_water_bytes'], r['after']['high_water_bytes'])
+                 for r in summary['phase_kernel_rss']}
         raw[cell['subject']].append(dict(elapsed_ns=times, kernel_peak_rss_bytes=peaks))
     comparisons = {}
     for metric, phases in (('elapsed_ns', TIMED_PHASES), ('kernel_peak_rss_bytes', PHASES)):

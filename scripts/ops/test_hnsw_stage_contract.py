@@ -46,7 +46,9 @@ class StageTests(unittest.TestCase):
         events.append(dict(phase='complete',data={}))
         observation = dict(rss_bytes=1000,high_water_bytes=1024)
         phases = [dict(phase=p,before_reset=copy.deepcopy(observation),after_reset=copy.deepcopy(observation),
-                       after=copy.deepcopy(observation),kernel_reported_peak_rss_bytes=1024) for p in contract.PHASES]
+                       after=copy.deepcopy(observation),kernel_reported_peak_rss_bytes=1024,
+                       kernel_high_water_decreased=False,
+                       aggregation='maximum of reset and end kernel high-water readings') for p in contract.PHASES]
         summary = dict(outcome='passed',failure=None,kernel_rss_reset=True,children_lifetime_peak_rss_bytes=None,
                        phase_kernel_rss=phases,final_inventory=copy.deepcopy(inv))
         return identity, summary, events, cell, expected, instrument, 'controller', limits
@@ -64,6 +66,16 @@ class StageTests(unittest.TestCase):
             end=next(e for e in args[2] if e['phase']==phase and e['data'].get('event')=='end')
             end['data']['stats'][field]=value
             with self.assertRaises(ValueError): contract.verify_sample(*args)
+
+    def test_decreasing_reading_retains_reset_boundary_and_flag(self):
+        args=self.fixture();row=args[1]['phase_kernel_rss'][-1]
+        row['after']=dict(rss_bytes=800,high_water_bytes=900)
+        row['kernel_high_water_decreased']=True
+        self.assertEqual(contract.verify_sample(*args)['kernel_peak_rss_bytes']['rollback'],1024)
+        row['kernel_reported_peak_rss_bytes']=900
+        with self.assertRaises(ValueError):contract.verify_sample(*args)
+        row['kernel_reported_peak_rss_bytes']=1024;row['kernel_high_water_decreased']=False
+        with self.assertRaises(ValueError):contract.verify_sample(*args)
 
     def test_source_binding_and_phase_coverage_rejected(self):
         for field in ('source','binary_sha256','runner_sha256','phase_rss_source_sha256','example_source_sha256'):

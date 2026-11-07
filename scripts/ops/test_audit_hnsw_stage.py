@@ -49,6 +49,19 @@ class AuditTests(unittest.TestCase):
         args=self.fixture();args[0].put('hnsw-1000-0-before/output/events.jsonl',b'{}')
         with self.assertRaises(ValueError):audit(*args)
 
+    def test_reconstructs_declining_readings_from_reset_and_end(self):
+        args=self.fixture();ev=args[0];rows=ev.json('results.json')
+        for record in rows:
+            key=record['id']+'/output/summary.json';summary=ev.json(key)
+            phase=summary['phase_kernel_rss'][-1]
+            phase['after']=dict(rss_bytes=800,high_water_bytes=900)
+            phase['kernel_high_water_decreased']=True
+            ev.put(key,summary);record['files']['output/summary.json']=sha(ev.read(key))
+        ev.put('results.json',rows);ev.put('progress.json',rows)
+        result=audit(*args)['comparisons']['kernel_peak_rss_bytes']['rollback']
+        self.assertEqual(result['before'],[1024]*5)
+        self.assertEqual(result['candidate'],[1024]*5)
+
     def test_removed_or_reordered_sample_rejected(self):
         for remove in (True, False):
             args=self.fixture();ev=args[0];rows=ev.json('results.json')

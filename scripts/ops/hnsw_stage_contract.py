@@ -114,15 +114,20 @@ def verify_sample(identity, summary, events, cell, expected, instrument, control
         require(cell['subject'] == 'before' and first['entries'] == second['entries'] == 0
                 and second['misses'] > first['misses'], 'baseline cache behavior differs')
     observations = summary['phase_kernel_rss']
+    require(summary.get('incomplete_kernel_phase') is None, 'incomplete kernel phase')
     require([r['phase'] for r in observations] == list(PHASES), 'kernel phase coverage differs')
     peaks = {}
     for row in observations:
         peak = row['kernel_reported_peak_rss_bytes']
         require(type(peak) is int and 0 < peak < limits['rss_bytes']
-                and peak == row['after']['high_water_bytes'] >= row['after_reset']['high_water_bytes'],
+                and peak == max(row['after']['high_water_bytes'], row['after_reset']['high_water_bytes']),
                 'kernel peak or limit differs')
+        require(row.get('kernel_high_water_decreased') is (row['after']['high_water_bytes'] < row['after_reset']['high_water_bytes'])
+                and row.get('aggregation') == 'maximum of reset and end kernel high-water readings',
+                'kernel peak aggregation differs')
         for field in ('before_reset', 'after_reset', 'after'):
-            require(row[field]['high_water_bytes'] >= row[field]['rss_bytes'] > 0, 'invalid RSS counter')
+            require(type(row[field]['high_water_bytes']) is int and type(row[field]['rss_bytes']) is int
+                    and row[field]['high_water_bytes'] >= row[field]['rss_bytes'] > 0, 'invalid RSS counter')
         peaks[row['phase']] = peak
     for inventory in (identity['initial_inventory'], summary['final_inventory']):
         require(type(inventory['allocated_bytes']) is int and 0 < inventory['allocated_bytes'] < 40_000_000_000
