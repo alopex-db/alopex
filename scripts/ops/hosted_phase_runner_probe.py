@@ -33,7 +33,7 @@ def run():
     rows = []
     failure = None
     try:
-        for case in ("complete", "missing_complete", "invalid_event", "timeout", "interrupt"):
+        for case in ("complete", "missing_complete", "invalid_event", "timeout", "interrupt", "release", "madvise", "counter_reset_fault"):
             storage.check(extra=[work, export], limit=limit)
             events = [{"phase": phase, "data": {"event": kind}}
                       for phase in PHASES for kind in ("start", "end")]
@@ -45,12 +45,21 @@ def run():
             case_root.mkdir()
             pid_file = case_root / "child.pid"
             fixture = case_root / "fixture"
-            fixture.write_text(f"#!{sys.executable}\nimport json,os,sys,time\n"
+            fixture.write_text(f"#!{sys.executable}\nimport json,mmap,os,sys,time\n"
                                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
                                f"events={events!r}\n"
+                               f"case={case!r}\n"
+                               "allocation=None\n"
                                "for event in events:\n"
                                " print(json.dumps(event),flush=True)\n"
                                " if sys.stdin.readline().strip() != 'continue': sys.exit(9)\n"
+                               " if event['phase']=='seed' and event['data'].get('event')=='start' and case in ('release','madvise','counter_reset_fault'):\n"
+                               "  allocation=mmap.mmap(-1,8*1024*1024,flags=mmap.MAP_PRIVATE|mmap.MAP_ANONYMOUS)\n"
+                               "  for offset in range(0,len(allocation),mmap.PAGESIZE): allocation[offset]=1\n"
+                               " if event['phase']=='rollback' and event['data'].get('event')=='start' and allocation is not None:\n"
+                               "  if case=='madvise': allocation.madvise(mmap.MADV_DONTNEED)\n"
+                               "  else: allocation.close()\n"
+                               "  if case=='counter_reset_fault': open('/proc/self/clear_refs','w').write('5\\n')\n"
                                + ("time.sleep(20)\n" if case in ("timeout", "interrupt") else ""))
             fixture.chmod(0o700)
             output = case_root / "result"
@@ -87,12 +96,20 @@ def run():
                             child.wait(timeout=5)
             report = json.loads((output / "summary.json").read_text())
             events_saved = (output / "events.jsonl").read_text().splitlines()
-            if case == "complete":
+            observed_decrease = case in ("release", "madvise", "counter_reset_fault") and report["failure"] == "RSS high-water mark decreased during phase"
+            if observed_decrease:
+                assert child.returncode == 1 and report["outcome"] == "failed"
+                pending = report["incomplete_kernel_phase"]
+                assert pending["phase"] == "rollback"
+                assert pending["after"]["high_water_bytes"] < pending["after_reset"]["high_water_bytes"]
+                assert len(events_saved) == 18 and len(report["phase_kernel_rss"]) == 8
+            elif case in ("complete", "release", "madvise"):
                 assert child.returncode == 0 and report["outcome"] == "passed"
                 assert [r["phase"] for r in report["phase_kernel_rss"]] == list(PHASES)
                 assert all(r["kernel_reported_peak_rss_bytes"] > 0 for r in report["phase_kernel_rss"])
                 assert len(events_saved) == 19
             else:
+                assert case != "counter_reset_fault", "injected reset did not cause rejection"
                 assert child.returncode == 1 and report["outcome"] == "failed"
                 expected = {"missing_complete": "incomplete manual workload phase coverage",
                             "invalid_event": "invalid manual workload phase sequence",
@@ -103,7 +120,7 @@ def run():
             assert report["children_lifetime_peak_rss_bytes"] is None and report["kernel_rss_reset"]
             assert not Path("/proc", pid_file.read_text()).exists(), "workload was not reaped"
             rows.append({"case": case, "status": "passed", "kernel_phases": len(report["phase_kernel_rss"]),
-                         "child_reaped": True, "saved_events": len(events_saved)})
+                         "child_reaped": True, "saved_events": len(events_saved), "observed_decrease": observed_decrease, "fault_injected": case == "counter_reset_fault"})
     except BaseException as error:
         failure = type(error).__name__
     finally:
@@ -123,7 +140,7 @@ def run():
         shutil.rmtree(work)
         storage.check(extra=[export], limit=limit)
         (export / "result.json").write_text(json.dumps({
-            "schema": "alopex.phase-runner-runtime/v1", "status": "passed" if failure is None else "failed",
+            "schema": "alopex.phase-runner-runtime/v2", "status": "passed" if failure is None else "failed",
             "error_type": failure, "controller": os.environ["GITHUB_SHA"], "sources": hashes,
             "cases": rows, "fixture_cleanup": True, "counter_source": "actual Linux proc",
             "storage_source": "actual storage.inventory with outer VM guard", "performance_acceptance": False}, indent=2))
