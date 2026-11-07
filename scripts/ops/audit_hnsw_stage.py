@@ -43,12 +43,14 @@ def audit(evidence, public, cleanup, config, controller):
     required_files = {'output/identity.json', 'output/summary.json', 'output/events.jsonl',
                       'output/rss.jsonl', 'output/stderr.log', 'runner.log'}
     for row, cell in zip(records, cells):
+        inventory = set(row['files'])
         require(all(row.get(k) == v for k,v in cell.items()) and row['status'] == 'passed'
-                and set(row['files']) == required_files, 'cell order, status or inventory differs')
+                and required_files <= inventory <= required_files | {'output/storage.jsonl'},
+                'cell order, status or inventory differs')
         prefix = cell['id'] + '/'
         actual = {name[len(prefix):] for name,member in evidence.members.items()
                   if name.startswith(prefix) and member.isfile()}
-        require(actual == required_files, 'unlisted sample file')
+        require(actual == inventory, 'unlisted sample file')
         for name, digest in row['files'].items():
             require(sha(evidence.read(prefix+name)) == digest, 'sample file hash differs')
         identity = evidence.json(prefix+'output/identity.json')
@@ -60,6 +62,15 @@ def audit(evidence, public, cleanup, config, controller):
         # Reconstruct reported comparisons from raw phase events/counters, not saved values.
         times = {e['phase']: e['data']['elapsed_ns'] for e in events
                  if e['phase'] in TIMED_PHASES and e['data'].get('event') == 'end'}
+        require(sum(times.values()) < 30_000_000_000 or 'output/storage.jsonl' in inventory,
+                'periodic storage observations missing')
+        if 'output/storage.jsonl' in inventory:
+            storage = [json.loads(line) for line in evidence.read(prefix+'output/storage.jsonl').splitlines()]
+            require(storage, 'empty periodic storage evidence')
+            for sample in storage:
+                require(type(sample['allocated_bytes']) is int and 0 < sample['allocated_bytes'] < 40_000_000_000
+                        and sample['roots'] and sample['method'].startswith('native allocated bytes'),
+                        'invalid periodic storage observation')
         peaks = {r['phase']: r['after']['high_water_bytes'] for r in summary['phase_kernel_rss']}
         raw[cell['subject']].append(dict(elapsed_ns=times, kernel_peak_rss_bytes=peaks))
     comparisons = {}

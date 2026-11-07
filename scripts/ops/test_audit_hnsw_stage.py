@@ -69,5 +69,26 @@ class AuditTests(unittest.TestCase):
         args=self.fixture();args[1]['machine']='synthetic-confidential'
         with self.assertRaises(ValueError):audit(*args)
 
+    def periodic(self, value):
+        args=self.fixture();ev=args[0];rows=ev.json('results.json')
+        name='output/storage.jsonl';key=rows[0]['id']+'/'+name
+        ev.put(key,dict(allocated_bytes=value,roots=['synthetic'],method='native allocated bytes fixture'))
+        rows[0]['files'][name]=sha(ev.read(key))
+        ev.put('results.json',rows);ev.put('progress.json',rows)
+        return args
+
+    def test_periodic_storage_is_hashed_and_validated(self):
+        self.assertEqual(audit(*self.periodic(100))['status'],'verified')
+        args=self.periodic(100);args[0].put('hnsw-1000-0-before/output/storage.jsonl',b'{}')
+        with self.assertRaises(ValueError):audit(*args)
+
+    def test_invalid_periodic_storage_refuses_acceptance(self):
+        for value in (0,40_000_000_000,True):
+            with self.assertRaises(ValueError):audit(*self.periodic(value))
+
+    def test_unlisted_sample_file_refuses_acceptance(self):
+        args=self.fixture();args[0].put('hnsw-1000-0-before/output/unexpected.json',{})
+        with self.assertRaises(ValueError):audit(*args)
+
 
 if __name__=='__main__':unittest.main()
