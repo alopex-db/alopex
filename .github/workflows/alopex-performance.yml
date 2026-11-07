@@ -1,4 +1,4 @@
-name: Native SQL environment acceptance
+name: Native SQL fixed performance matrix
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +6,7 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      sql_config:
+      performance_config:
         description: Source-bound artifact identities and operation bounds
         required: true
         type: string
@@ -14,12 +14,12 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-native-sql
+  group: alopex-v0817-native-performance
   cancel-in-progress: false
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 40
+    timeout-minutes: 150
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -87,14 +87,14 @@ jobs:
         env:
           RUNNER_KIND: ${{ runner.environment }}
           GH_TOKEN: ${{ github.token }}
-          PUBLIC_SQL_CONFIG: ${{ inputs.sql_config }}
+          PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_transfer.py
-      - name: Accept native SQL and collect owned resources
+        run: python3 -B scripts/ops/hosted_native_performance.py fetch
+      - name: Measure fixed SQL cases and collect owned resources
         env:
           RUNNER_KIND: ${{ runner.environment }}
           NATIVE_IMAGE_INPUTS: ${{ secrets.ALOPEX_NATIVE_IMAGE_INPUTS }}
-          PUBLIC_SQL_CONFIG: ${{ inputs.sql_config }}
+          PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
         shell: bash
         run: |
           python3 - <<'PYCODE'
@@ -102,26 +102,26 @@ jobs:
           try:
               assert os.environ.get('RUNNER_KIND') == 'github-hosted'
               env = dict(os.environ, OPERATOR_HOME=os.environ['HOME'], OPERATOR_UID=str(os.getuid()), OPERATOR_GID=str(os.getgid()))
-              names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,PUBLIC_SQL_CONFIG,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
-              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_sql.py']
-              result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=2100)
+              names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,PUBLIC_PERFORMANCE_CONFIG,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
+              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_performance.py','run']
+              result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=8400)
               for line in result.stdout.splitlines():
                   value = json.loads(line)
                   assert set(value) <= {'status','error_code'}
                   assert value.get('status') in ('passed','failed')
-                  assert value.get('error_code') in (None,'VM_SCOPE','CONSTRUCTION')
+                  assert value.get('error_code') in (None,'VM_SCOPE','PERFORMANCE')
                   print(json.dumps(value,sort_keys=True))
               raise SystemExit(result.returncode)
           except SystemExit: raise
           except BaseException:
-              print('{"status":"failed","error_code":"CONSTRUCTION"}')
+              print('{"status":"failed","error_code":"PERFORMANCE"}')
               raise SystemExit(1)
           PYCODE
-      - name: Preserve image and encrypted evidence
+      - name: Preserve comparison and encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-sql-environment-acceptance
+          name: native-sql-fixed-performance
           path: native-export/
           if-no-files-found: error
           compression-level: 0
