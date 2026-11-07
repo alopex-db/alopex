@@ -168,13 +168,13 @@ def operation(repo, config):
     return run
 
 
-def main():
+def main(*, settings_reader=None, operation_factory=None):
     os.umask(0o077)
     if os.environ.get("RUNNER_KIND") != "github-hosted":
         return 78
     repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
     sys.path.insert(0, str(repo / "scripts/test-env"))
-    config = settings()
+    config = (settings if settings_reader is None else settings_reader)()
     if sys.argv[1:] == ["fetch"]:
         if os.geteuid() == 0:
             return 78
@@ -191,7 +191,8 @@ def main():
     signal.alarm(config["matrix_seconds"] + 600)
     try:
         return construct(repo, Path(os.environ["RUNNER_TEMP"]) / "alopex-native-private", repo / "native-export",
-                         inputs, repo / ".github/ops/native-evidence-cert.pem", operation(repo, config))
+                         inputs, repo / ".github/ops/native-evidence-cert.pem",
+                         (operation if operation_factory is None else operation_factory)(repo, config))
     finally:
         signal.alarm(0)
 
