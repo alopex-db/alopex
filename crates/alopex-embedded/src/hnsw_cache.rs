@@ -112,18 +112,24 @@ struct EntryMetadata {
 pub(crate) struct HnswCacheState {
     indices: HashMap<String, Arc<HnswIndex>>,
     metadata: HashMap<String, EntryMetadata>,
+    observation: Arc<Observation>,
     pub(crate) used_bytes: u64,
     pub(crate) max_entries: usize,
     pub(crate) counters: Arc<Counters>,
 }
 impl Default for HnswCacheState {
     fn default() -> Self {
+        let counters = Arc::new(Counters::default());
         Self {
             indices: HashMap::new(),
             metadata: HashMap::new(),
+            observation: Arc::new(Observation {
+                counters: counters.clone(),
+                entries: HashMap::new(),
+            }),
             used_bytes: 0,
             max_entries: crate::HNSW_CACHE_MAX_ENTRIES,
-            counters: Arc::new(Counters::default()),
+            counters,
         }
     }
 }
@@ -166,11 +172,15 @@ impl HnswCacheState {
         );
         self.used_bytes = self.used_bytes.saturating_add(bytes);
         self.indices.insert(name.clone(), index);
+        Arc::make_mut(&mut self.observation)
+            .entries
+            .insert(name.clone(), metrics.clone());
         self.metadata.insert(name, EntryMetadata { bytes, metrics });
     }
     fn remove_untracked(&mut self, name: &str) -> Option<Arc<HnswIndex>> {
         if let Some(meta) = self.metadata.remove(name) {
             self.used_bytes = self.used_bytes.saturating_sub(meta.bytes);
+            Arc::make_mut(&mut self.observation).entries.remove(name);
         }
         self.indices.remove(name)
     }
@@ -189,6 +199,13 @@ impl HnswCacheState {
             .fetch_add(self.indices.len() as u64, Ordering::Relaxed);
         self.indices.clear();
         self.metadata.clear();
+        if !self.observation.entries.is_empty() {
+            // Clearing must not copy a retained observer's map just to discard it.
+            self.observation = Arc::new(Observation {
+                counters: self.counters.clone(),
+                entries: HashMap::new(),
+            });
+        }
         self.used_bytes = 0;
     }
     pub(crate) fn reject_oversize(&mut self, name: &str, bytes: u64, limit: u64) {
@@ -223,14 +240,10 @@ impl HnswCacheState {
         }
     }
     pub(crate) fn observer(&self) -> Arc<dyn HnswCacheObserver> {
-        Arc::new(Observation {
-            counters: self.counters.clone(),
-            entries: self
-                .metadata
-                .iter()
-                .map(|(name, meta)| (name.clone(), meta.metrics.clone()))
-                .collect(),
-        })
+        // Beginning a transaction only retains the current observation view.
+        // Copy-on-write on membership changes keeps old transactions attached
+        // to their original metrics, including replacement under the same name.
+        self.observation.clone()
     }
     pub(crate) fn stats(&self, limit_bytes: u64) -> HnswCacheStats {
         let mut indexes: Vec<_> = self
@@ -260,6 +273,7 @@ impl HnswCacheState {
         }
     }
 }
+#[derive(Clone)]
 struct Observation {
     counters: Arc<Counters>,
     entries: HashMap<String, Arc<EntryMetrics>>,
@@ -357,6 +371,114 @@ mod observation_tests {
     fn reject(db: &Database, name: &str) {
         let mut cache = db.hnsw_cache.write().unwrap();
         Database::hnsw_cache_insert_bounded(&mut cache, name.into(), graph(name), 0);
+    }
+
+    #[test]
+    fn unchanged_membership_reuses_the_observer_without_losing_counts() {
+        let mut cache = HnswCacheState::default();
+        let empty = cache.observer();
+        assert!(Arc::ptr_eq(&empty, &cache.observer()));
+        assert!(cache.remove("missing").is_none());
+        cache.clear();
+        assert!(Arc::ptr_eq(&empty, &cache.observer()));
+
+        cache.insert("a".into(), graph("a"));
+        let current = cache.observer();
+        assert!(!Arc::ptr_eq(&empty, &current));
+        assert!(Arc::ptr_eq(&current, &cache.observer()));
+        current.hit("a", true);
+        current.miss();
+        current.loaded(7);
+        let stats = cache.stats(u64::MAX);
+        assert_eq!((stats.hits, stats.misses, stats.load_ns_total), (1, 1, 7));
+        assert_eq!(stats.indexes[0].hits, 1);
+        assert!(Arc::ptr_eq(&current, &cache.observer()));
+    }
+
+    #[test]
+    fn membership_snapshots_keep_old_metrics_and_exclude_new_entries() {
+        let mut cache = HnswCacheState::default();
+        cache.insert("a".into(), graph("a"));
+        let old = cache.observer();
+        cache.insert("b".into(), graph("b"));
+        old.hit("b", true);
+        old.hit("a", true);
+        let current = cache.observer();
+        current.hit("b", true);
+        let stats = cache.stats(u64::MAX);
+        assert_eq!(stats.hits, 3);
+        assert_eq!(
+            stats
+                .indexes
+                .iter()
+                .map(|entry| entry.hits)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+
+        cache.insert("a".into(), graph("a"));
+        old.hit("a", true);
+        current.hit("a", true);
+        assert_eq!(cache.stats(u64::MAX).indexes[0].hits, 0);
+        cache.observer().hit("a", true);
+        assert_eq!(cache.stats(u64::MAX).indexes[0].hits, 1);
+    }
+
+    #[test]
+    fn every_removal_path_retires_the_observation_membership() {
+        for removal in 0..4 {
+            let mut cache = HnswCacheState::default();
+            cache.insert("a".into(), graph("a"));
+            let old = cache.observer();
+            let retired_metrics = cache.metadata["a"].metrics.clone();
+            match removal {
+                0 => {
+                    cache.remove("a");
+                }
+                1 => cache.clear(),
+                2 => cache.reject_oversize("a", 1, 0),
+                _ => cache.trim(0, None),
+            }
+            assert!(cache.is_empty());
+            let empty = cache.observer();
+            empty.hit("a", true);
+            assert_eq!(retired_metrics.hits.load(Ordering::Relaxed), 0);
+            old.hit("a", true);
+            assert_eq!(retired_metrics.hits.load(Ordering::Relaxed), 1);
+            cache.insert("a".into(), graph("a"));
+            old.hit("a", true);
+            empty.hit("a", true);
+            assert_eq!(cache.stats(u64::MAX).indexes[0].hits, 0);
+            cache.observer().hit("a", true);
+            assert_eq!(cache.stats(u64::MAX).indexes[0].hits, 1);
+        }
+    }
+
+    #[test]
+    fn insertion_after_an_observer_hit_is_newer_for_eviction() {
+        let mut cache = HnswCacheState::default();
+        cache.insert("z".into(), graph("z"));
+        cache.observer().hit("z", true);
+        cache.insert("a".into(), graph("a"));
+        cache.max_entries = 1;
+        cache.trim(u64::MAX, None);
+        assert!(cache.contains_key("a"));
+        assert!(!cache.contains_key("z"));
+        assert_eq!(cache.stats(u64::MAX).evictions, 1);
+    }
+
+    #[test]
+    fn cloned_cache_mutation_does_not_change_the_original_observer() {
+        let mut original = HnswCacheState::default();
+        original.insert("a".into(), graph("a"));
+        let mut copy = original.clone();
+        copy.insert("a".into(), graph("a"));
+        original.observer().hit("a", true);
+        assert_eq!(original.stats(u64::MAX).indexes[0].hits, 1);
+        assert_eq!(copy.stats(u64::MAX).indexes[0].hits, 0);
+        copy.observer().hit("a", true);
+        assert_eq!(original.stats(u64::MAX).indexes[0].hits, 1);
+        assert_eq!(copy.stats(u64::MAX).indexes[0].hits, 1);
     }
 
     #[test]
