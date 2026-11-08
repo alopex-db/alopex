@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+import types
 from unittest.mock import Mock, patch
 
 import hnsw_search_phase_dependencies as subject
@@ -25,7 +27,7 @@ class PhaseDependenciesTests(unittest.TestCase):
             budget = Mock()
             budget.run.side_effect = run
             with patch.object(subject, 'download', side_effect=lambda record, *args: record['filename']) as download:
-                if kind != 'wheel':
+                if kind != 'bdist_wheel':
                     with self.assertRaises(ValueError): subject.install(lock, root, budget, {}, root)
                     download.assert_not_called()
                 else:
@@ -36,6 +38,34 @@ class PhaseDependenciesTests(unittest.TestCase):
                 self.assertEqual(budget.run.call_count, 2)
                 self.assertTrue(all('wheel' not in call.args[0] for call in budget.run.call_args_list))
 
-    def test_only_locked_input_wheels_are_downloaded(self): self.exercise('wheel')
+    def test_only_locked_input_wheels_are_downloaded(self): self.exercise('bdist_wheel')
 
     def test_source_build_substitution_is_rejected(self): self.exercise('sdist')
+
+
+class LockedSelectorTests(unittest.TestCase):
+    def select(self, lock):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary) / 'lock.json', Path(temporary) / 'selected.json'
+            source.write_text(json.dumps(lock))
+            tags = types.ModuleType('pip._vendor.packaging.tags')
+            tags.sys_tags = lambda: ['supported-test-tag']
+            utils = types.ModuleType('pip._vendor.packaging.utils')
+            utils.parse_wheel_filename = lambda name: (None, None, None, {'supported-test-tag'})
+            with patch.dict(sys.modules, {tags.__name__: tags, utils.__name__: utils}), \
+                 patch.object(sys, 'argv', ['selector', str(source), str(output)]):
+                exec(subject.SELECTOR_CODE, {})
+            return json.loads(output.read_bytes())
+
+    def test_actual_locked_package_types_are_selected(self):
+        lock = json.loads(Path(__file__).with_name('hnsw_search.lock.json').read_bytes())
+        inputs = {name: lock[name] for name in subject.PREPARE}
+        result = self.select(inputs)
+        self.assertEqual(set(result), set(subject.PREPARE))
+        for name, row in result.items():
+            self.assertIn(row, inputs[name]['files'])
+            self.assertEqual(row['kind'], 'bdist_wheel')
+
+    def test_selector_rejects_source_only_package(self):
+        with self.assertRaisesRegex(AssertionError, 'unavailable'):
+            self.select({'input': {'files': [{'kind': 'sdist', 'filename': 'input.tar.gz'}]}})
