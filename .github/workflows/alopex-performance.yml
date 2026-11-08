@@ -1,4 +1,4 @@
-name: HNSW profiler capability probe
+name: HNSW userspace timer profiler capability
 on:
   workflow_dispatch:
     inputs:
@@ -84,18 +84,18 @@ jobs:
               raise SystemExit(1)
           PYCODE
       - name: Verify capability probe contracts
-        run: PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_hnsw_profiler_probe -v
+        run: PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_hnsw_timer_profiler_probe -v
       - name: Probe existing normal-user profiling permissions
         env:
           PROFILER_PROBE_CONFIG: ${{ inputs.profiler_probe_config }}
           RUNNER_KIND: ${{ runner.environment }}
-        run: python3 -B scripts/ops/hnsw_profiler_probe.py
+        run: python3 -B scripts/ops/hnsw_timer_profiler_probe.py
       - name: Preserve encrypted capability evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-profiler-capability
-          path: profiler-probe-export/
+          name: hnsw-timer-profiler-capability
+          path: timer-profiler-probe-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
