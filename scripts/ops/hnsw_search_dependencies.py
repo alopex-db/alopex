@@ -54,10 +54,7 @@ json.dump(selected,open(sys.argv[2],'w'))
 """
     budget.run([str(python),'-B','-c',code,str(lockpath),str(selected)],timeout=30,log=work/'dependencies.log',env=env)
     records=json.loads(selected.read_bytes());paths={name:download(r,wheels,budget) for name,r in records.items()}
-    def pip(python,names):
-        budget.run([str(python),'-B','-m','pip','install','--no-index','--no-deps','--no-cache-dir',
-            *(str(paths[n]) for n in names)],timeout=120,log=work/'dependencies.log',env=env)
-    pip(python,BUILD)
+    install_wheels(python,[paths[n] for n in BUILD],work,budget,env)
     destination=work/'reference-built';destination.mkdir()
     build_env=dict(env,CMAKE_BUILD_PARALLEL_LEVEL='1',MAX_JOBS='1')
     budget.before('prepare')
@@ -74,9 +71,16 @@ json.dump(selected,open(sys.argv[2],'w'))
     return paths,records
 
 
+def install_wheels(python, wheels, work, budget, env):
+    # pip compiles explicitly even when the interpreter runs with -B.
+    # Avoid transient pyc files racing the strict allocated-byte inventory.
+    budget.run([str(python),'-B','-m','pip','install','--no-index','--no-deps',
+        '--no-cache-dir','--no-compile',*(str(wheel) for wheel in wheels)],
+        timeout=120,log=work/'dependencies.log',env=env)
+
+
 def install_set(name, python, names, paths, records, work, budget, env, root):
-    budget.run([str(python),'-B','-m','pip','install','--no-index','--no-deps','--no-cache-dir',
-        *(str(paths[n]) for n in names)],timeout=120,log=work/'dependencies.log',env=env)
+    install_wheels(python,[paths[n] for n in names],work,budget,env)
     budget.run([str(python),'-B','-m','pip','check'],timeout=30,log=work/'dependencies.log',env=env)
     path=work/'identities'/f'{name}-dependencies.json'
     record=dict(schema='alopex.hnsw-dependencies/v1',wheels=[dict(name=n,version=records[n]['version'],

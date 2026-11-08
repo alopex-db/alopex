@@ -99,7 +99,7 @@ def main():
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'HNSW source differs')
         test_env=dict(env,PYTHONPATH=os.pathsep.join(str(ROOT/p) for p in ('scripts/ops','scripts/performance','scripts/test-env')))
         budget.run([sys.executable,'-B','-m','unittest','test_hnsw_search_contract','test_hnsw_search_identity','test_hnsw_search_point',
-            'test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
+            'test_hnsw_search_dependencies','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('published','before','candidate')}
         lock=json.loads((ROOT/'scripts/ops/hnsw_search.lock.json').read_bytes())
         paths,records=install(lock,work,budget,env,ROOT)
