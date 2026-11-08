@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import sys
 
 
 def sha(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
 def main():
@@ -27,6 +29,8 @@ def main():
     import public_api_cost as workload
     from subject_identity import verify_subject
     from alopex import _alopex
+    from phase_rss import parse_status
+    boundary_before_identity=parse_status(Path('/proc/self/status').read_text())
     identity = verify_subject()
     assert identity['manifest_sha256'] == config['subject_manifest_sha256']
     assert workload.OPTIONS == config['options']
@@ -34,11 +38,17 @@ def main():
     assert config['phase'] in ('write', 'verify')
     output = Path(config['output'])
     (output/'identity.json').write_text(json.dumps(identity, allow_nan=False)+'\n')
+    native_digest=sha(Path(_alopex.__file__))
+    (output/'memory-before-workload.json').write_text(json.dumps(dict(
+        before_identity=boundary_before_identity,
+        after_identity_and_native_digest=parse_status(Path('/proc/self/status').read_text()),
+        lifetime_high_water_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
+        scope='after import, original-wheel identity verification and streaming native digest; before workload'))+'\n')
     # Calling the workload function does not disable its CLI's ordinary-CI guard.
     # The controller and this worker independently require workflow_dispatch.
     # The writer deliberately os._exit()s to preserve live WAL before two readers.
     workload.child(config['phase'], Path(config['fixture']), config['surface'],
-                   config['value_bytes'], sha(Path(_alopex.__file__)))
+                   config['value_bytes'], native_digest)
 
 
 if __name__ == '__main__':
