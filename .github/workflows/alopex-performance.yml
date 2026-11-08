@@ -1,4 +1,4 @@
-name: Build native HNSW comparison example
+name: Validate HNSW completion mutations
 on:
   workflow_dispatch:
     inputs:
@@ -82,17 +82,17 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Build source-bound HNSW example and tiny smoke
+      - name: Validate source-bound completion mutations
         env:
           RUNNER_KIND: ${{ runner.environment }}
           PUBLIC_BUILD_CONFIG: ${{ inputs.build_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_hnsw_completion_assets.py
-      - name: Preserve software assets and encrypted build evidence
+        run: python3 -B scripts/ops/hosted_hnsw_completion_mutations.py
+      - name: Preserve encrypted mutation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-hnsw-example-assets
+          name: native-completion-mutations
           path: native-assets-export/
           if-no-files-found: error
           compression-level: 0

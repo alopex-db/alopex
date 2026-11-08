@@ -1,0 +1,162 @@
+[
+  {
+    "diff": "--- hnsw-completion-mutation-source.rs\n+++ replace main -> Result<(), Box<dyn std::error::Error>> with Ok(())\n@@ -28,146 +28,10 @@\n             state ^= state >> 17;\n             state ^= state << 5;\n             (state >> 24) as f32\n         })\n         .collect()\n }\n \n fn main() -> Result<(), Box<dyn std::error::Error>> {\n-    assert_eq!(\n-        std::env::var(\"ALOPEX_MANUAL_681\").as_deref(),\n-        Ok(\"1\"),\n-        \"set ALOPEX_MANUAL_681=1 only under the bounded manual runner\"\n-    );\n-    let arguments: Vec<_> = std::env::args().skip(1).collect();\n-    let rows: usize = arguments.first().map_or(Ok(100_000), |s| s.parse())?;\n-    let dimensions: usize = arguments.get(1).map_or(Ok(384), |s| s.parse())?;\n-    assert!((1..=100_000).contains(&rows) && (1..=384).contains(&dimensions));\n-    let measured_finish = arguments.get(2).map(String::as_str);\n-    assert!(arguments.len() <= 3);\n-    assert!(matches!(\n-        measured_finish,\n-        None | Some(\"commit\" | \"rollback\")\n-    ));\n-    let finish = measured_finish.unwrap_or(\"rollback\");\n-    event(\n-        \"seed\",\n-        json!({\"event\":\"start\",\"rows\":rows,\"dimensions\":dimensions}),\n-    );\n-    let started = Instant::now();\n-    let db = Arc::new(Database::open_in_memory()?);\n-    db.execute_sql(&format!(\n-        \"CREATE TABLE items(id INTEGER PRIMARY KEY, e VECTOR({dimensions},L2))\"\n-    ))?;\n-    let mut insert = db.prepare(\"INSERT INTO items VALUES (?,?)\")?;\n-    // The iterator keeps one vector live; avoid one enormous SQL string or\n-    // retaining a second 100k-vector input alongside the database.\n-    insert.execute_many((0..rows).map(|row| {\n-        vec![\n-            SqlValue::Integer(row as i32),\n-            SqlValue::Vector(vector(row, dimensions)),\n-        ]\n-    }))?;\n-    insert.finalize()?;\n-    event(\n-        \"seed\",\n-        json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos()}),\n-    );\n-    event(\"index_build\", json!({\"event\":\"start\"}));\n-    let started = Instant::now();\n-    db.execute_sql(\"CREATE INDEX ih ON items(e) USING HNSW\")?;\n-    event(\n-        \"index_build\",\n-        json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos()}),\n-    );\n-    let query = format!(\"SELECT id FROM items ORDER BY vector_distance(e,[{}],'l2') LIMIT 1 WITH (enable_hnsw=true,ef_search=16)\",vec![\"0\";dimensions].join(\",\"));\n-    // Force an empty shared cache while retaining the normal cache limit.\n-    db.set_hnsw_cache_limit(0);\n-    db.set_hnsw_cache_limit(256 * 1024 * 1024);\n-    for phase in [\"cold_transaction_1\", \"cold_transaction_2\"] {\n-        event(\n-            phase,\n-            json!({\"event\":\"start\",\"stats\":db.hnsw_cache_stats()}),\n-        );\n-        let started = Instant::now();\n-        let mut transaction = db\n-            .clone()\n-            .begin_owned_embedded_transaction(TxnMode::ReadOnly)?;\n-        transaction.execute_sql(&query)?;\n-        transaction.rollback()?;\n-        event(\n-            phase,\n-            json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos(),\"stats\":db.hnsw_cache_stats()}),\n-        );\n-    }\n-    event(\"warm\", json!({\"event\":\"start\"}));\n-    let bytes = db.warm_hnsw_index(\"ih\")?;\n-    assert!(bytes > 0, \"graph must fit the declared 256 MiB cache\");\n-    event(\n-        \"warm\",\n-        json!({\"event\":\"end\",\"graph_bytes\":bytes,\"stats\":db.hnsw_cache_stats()}),\n-    );\n-    event(\"writer_begin\", json!({\"event\":\"start\"}));\n-    let started = Instant::now();\n-    let mut transaction = db\n-        .clone()\n-        .begin_owned_embedded_transaction(TxnMode::ReadWrite)?;\n-    event(\n-        \"writer_begin\",\n-        json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos()}),\n-    );\n-    for (offset, phase) in [\"first_insert\", \"second_insert\"].into_iter().enumerate() {\n-        let values = vector(rows + offset, dimensions)\n-            .iter()\n-            .map(f32::to_string)\n-            .collect::<Vec<_>>()\n-            .join(\",\");\n-        let sql = format!(\"INSERT INTO items VALUES ({},[{values}])\", rows + offset);\n-        event(phase, json!({\"event\":\"start\"}));\n-        let started = Instant::now();\n-        transaction.execute_sql(&sql)?;\n-        event(\n-            phase,\n-            json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos(),\"stats\":db.hnsw_cache_stats()}),\n-        );\n-    }\n-    event(finish, json!({\"event\":\"start\"}));\n-    let started = Instant::now();\n-    if finish == \"commit\" {\n-        transaction.commit()?;\n-    } else {\n-        transaction.rollback()?;\n-    }\n-    let elapsed_ns = started.elapsed().as_nanos();\n-    if measured_finish.is_some() {\n-        event(finish, json!({\"event\":\"end\",\"elapsed_ns\":elapsed_ns}));\n-        // Validate through a new reader after the finish timer and RSS window.\n-        // No verification query or input construction is charged to completion.\n-        let result = db.execute_sql(&format!(\n-            \"SELECT id,e FROM items WHERE id >= {rows} ORDER BY id\"\n-        ))?;\n-        let ExecutionResult::Query(result) = result else {\n-            panic!(\"completion verification must return rows\");\n-        };\n-        let expected = if finish == \"commit\" {\n-            (rows..rows + 2)\n-                .map(|row| {\n-                    vec![\n-                        SqlValue::Integer(row as i32),\n-                        SqlValue::Vector(vector(row, dimensions)),\n-                    ]\n-                })\n-                .collect::<Vec<_>>()\n-        } else {\n-            Vec::new()\n-        };\n-        assert_eq!(result.rows, expected, \"transaction completion differs\");\n-        event(\n-            \"complete\",\n-            json!({\"stats\":db.hnsw_cache_stats(),\"finish\":finish,\"result_validated\":true}),\n-        );\n-    } else {\n-        event(finish, json!({\"event\":\"end\"}));\n-        event(\"complete\", json!({\"stats\":db.hnsw_cache_stats()}));\n-    }\n-    Ok(())\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n",
+    "file": "hnsw-completion-mutation-source.rs",
+    "function": {
+      "function_name": "main",
+      "return_type": "-> Result<(), Box<dyn std::error::Error>>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 173
+        },
+        "start": {
+          "column": 1,
+          "line": 35
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "hnsw-completion-mutation-source.rs:36:5: replace main -> Result<(), Box<dyn std::error::Error>> with Ok(())",
+    "package": "single_file",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 172
+      },
+      "start": {
+        "column": 5,
+        "line": 36
+      }
+    }
+  },
+  {
+    "diff": "--- hnsw-completion-mutation-source.rs\n+++ replace == with != in main\n@@ -127,17 +127,17 @@\n         transaction.execute_sql(&sql)?;\n         event(\n             phase,\n             json!({\"event\":\"end\",\"elapsed_ns\":started.elapsed().as_nanos(),\"stats\":db.hnsw_cache_stats()}),\n         );\n     }\n     event(finish, json!({\"event\":\"start\"}));\n     let started = Instant::now();\n-    if finish == \"commit\" {\n+    if finish != /* ~ changed by cargo-mutants ~ */ \"commit\" {\n         transaction.commit()?;\n     } else {\n         transaction.rollback()?;\n     }\n     let elapsed_ns = started.elapsed().as_nanos();\n     if measured_finish.is_some() {\n         event(finish, json!({\"event\":\"end\",\"elapsed_ns\":elapsed_ns}));\n         // Validate through a new reader after the finish timer and RSS window.\n",
+    "file": "hnsw-completion-mutation-source.rs",
+    "function": {
+      "function_name": "main",
+      "return_type": "-> Result<(), Box<dyn std::error::Error>>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 173
+        },
+        "start": {
+          "column": 1,
+          "line": 35
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "hnsw-completion-mutation-source.rs:135:15: replace == with != in main",
+    "package": "single_file",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 17,
+        "line": 135
+      },
+      "start": {
+        "column": 15,
+        "line": 135
+      }
+    }
+  },
+  {
+    "diff": "--- hnsw-completion-mutation-source.rs\n+++ replace == with != in main\n@@ -143,17 +143,17 @@\n         // Validate through a new reader after the finish timer and RSS window.\n         // No verification query or input construction is charged to completion.\n         let result = db.execute_sql(&format!(\n             \"SELECT id,e FROM items WHERE id >= {rows} ORDER BY id\"\n         ))?;\n         let ExecutionResult::Query(result) = result else {\n             panic!(\"completion verification must return rows\");\n         };\n-        let expected = if finish == \"commit\" {\n+        let expected = if finish != /* ~ changed by cargo-mutants ~ */ \"commit\" {\n             (rows..rows + 2)\n                 .map(|row| {\n                     vec![\n                         SqlValue::Integer(row as i32),\n                         SqlValue::Vector(vector(row, dimensions)),\n                     ]\n                 })\n                 .collect::<Vec<_>>()\n",
+    "file": "hnsw-completion-mutation-source.rs",
+    "function": {
+      "function_name": "main",
+      "return_type": "-> Result<(), Box<dyn std::error::Error>>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 173
+        },
+        "start": {
+          "column": 1,
+          "line": 35
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "hnsw-completion-mutation-source.rs:151:34: replace == with != in main",
+    "package": "single_file",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 151
+      },
+      "start": {
+        "column": 34,
+        "line": 151
+      }
+    }
+  },
+  {
+    "diff": "--- hnsw-completion-mutation-source.rs\n+++ replace + with - in main\n@@ -144,17 +144,17 @@\n         // No verification query or input construction is charged to completion.\n         let result = db.execute_sql(&format!(\n             \"SELECT id,e FROM items WHERE id >= {rows} ORDER BY id\"\n         ))?;\n         let ExecutionResult::Query(result) = result else {\n             panic!(\"completion verification must return rows\");\n         };\n         let expected = if finish == \"commit\" {\n-            (rows..rows + 2)\n+            (rows..rows - /* ~ changed by cargo-mutants ~ */ 2)\n                 .map(|row| {\n                     vec![\n                         SqlValue::Integer(row as i32),\n                         SqlValue::Vector(vector(row, dimensions)),\n                     ]\n                 })\n                 .collect::<Vec<_>>()\n         } else {\n",
+    "file": "hnsw-completion-mutation-source.rs",
+    "function": {
+      "function_name": "main",
+      "return_type": "-> Result<(), Box<dyn std::error::Error>>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 173
+        },
+        "start": {
+          "column": 1,
+          "line": 35
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "hnsw-completion-mutation-source.rs:152:25: replace + with - in main",
+    "package": "single_file",
+    "replacement": "-",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 152
+      },
+      "start": {
+        "column": 25,
+        "line": 152
+      }
+    }
+  },
+  {
+    "diff": "--- hnsw-completion-mutation-source.rs\n+++ replace + with * in main\n@@ -144,17 +144,17 @@\n         // No verification query or input construction is charged to completion.\n         let result = db.execute_sql(&format!(\n             \"SELECT id,e FROM items WHERE id >= {rows} ORDER BY id\"\n         ))?;\n         let ExecutionResult::Query(result) = result else {\n             panic!(\"completion verification must return rows\");\n         };\n         let expected = if finish == \"commit\" {\n-            (rows..rows + 2)\n+            (rows..rows * /* ~ changed by cargo-mutants ~ */ 2)\n                 .map(|row| {\n                     vec![\n                         SqlValue::Integer(row as i32),\n                         SqlValue::Vector(vector(row, dimensions)),\n                     ]\n                 })\n                 .collect::<Vec<_>>()\n         } else {\n",
+    "file": "hnsw-completion-mutation-source.rs",
+    "function": {
+      "function_name": "main",
+      "return_type": "-> Result<(), Box<dyn std::error::Error>>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 173
+        },
+        "start": {
+          "column": 1,
+          "line": 35
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "hnsw-completion-mutation-source.rs:152:25: replace + with * in main",
+    "package": "single_file",
+    "replacement": "*",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 152
+      },
+      "start": {
+        "column": 25,
+        "line": 152
+      }
+    }
+  }
+]
