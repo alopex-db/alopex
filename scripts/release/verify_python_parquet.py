@@ -1,4 +1,4 @@
-"""Qualify VECTOR/Parquet through the installed RC wheel with tiny public cases."""
+"""Qualify VECTOR and scalar Parquet through the installed RC wheel."""
 import argparse
 from collections import Counter
 import hashlib
@@ -22,7 +22,11 @@ EXPECTED_CASES = {
     "test_destination_ddl_controls_dimension_despite_metadata": 2,
     "test_outer_null_obeys_not_null_without_partial_import": 2,
     "test_read_parquet_infers_plain_arrays": 3,
+    "test_parquet_copy_and_insert_preserve_large_types_and_integer_bounds": 1,
+    "test_parquet_overflow_reports_row_after_batch_boundary": 2,
+    "test_parquet_type_mismatch_does_not_report_matching_column_counts": 1,
 }
+TEST_FILES = ("test_vector_parquet.py", "test_parquet_sql.py")
 
 
 def digest(stream):
@@ -94,9 +98,9 @@ def main(argv=None):
             ["git", "rev-parse", "HEAD"], cwd=args.workspace, text=True
         ).strip()
         test_dir = args.workspace / "crates/alopex-py/tests"
-        test = test_dir / "test_vector_parquet.py"
+        tests = [test_dir / name for name in TEST_FILES]
         report["sources"] = {path.name: file_digest(path) for path in (
-            test, test_dir / "conftest.py", Path(__file__)
+            *tests, test_dir / "conftest.py", Path(__file__)
         )}
         report["versions"] = {name: version(name) for name in ("alopex", "pyarrow", "pytest", "numpy")}
         # The existing fixture closes every DB and removes its files after each case.
@@ -107,7 +111,8 @@ def main(argv=None):
             code = pytest.main([
                 "-q", "-c", os.devnull, "--override-ini", "addopts=", "--import-mode=importlib",
                 "-p", "no:cacheprovider", "--confcutdir", str(test_dir),
-                "--basetemp", str(root / "tmp"), "--junitxml", str(junit), str(test),
+                "--basetemp", str(root / "tmp"), "--junitxml", str(junit),
+                *map(str, tests),
             ])
             if code != 0:
                 raise RuntimeError("VECTOR/Parquet qualification process failed")
