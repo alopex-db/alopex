@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alopex_core::TxnMode;
+use alopex_sql::storage::bridge::manual_hnsw_writer_profile as writer_profile;
 use alopex_embedded::Database;
-use alopex_sql::SqlValue;
+use alopex_sql::{ExecutionResult, SqlValue};
 use serde_json::json;
 
 fn event(phase: &str, value: serde_json::Value) {
@@ -42,6 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows: usize = arguments.first().map_or(Ok(100_000), |s| s.parse())?;
     let dimensions: usize = arguments.get(1).map_or(Ok(384), |s| s.parse())?;
     assert!((1..=100_000).contains(&rows) && (1..=384).contains(&dimensions));
+    let measured_finish = arguments.get(2).map(String::as_str);
+    assert!(arguments.len() <= 3);
+    assert!(matches!(
+        measured_finish,
+        None | Some("commit" | "rollback")
+    ));
+    let finish = measured_finish.unwrap_or("rollback");
     event(
         "seed",
         json!({"event":"start","rows":rows,"dimensions":dimensions}),
@@ -116,16 +124,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(",");
         let sql = format!("INSERT INTO items VALUES ({},[{values}])", rows + offset);
         event(phase, json!({"event":"start"}));
+        writer_profile::begin();
         let started = Instant::now();
-        transaction.execute_sql(&sql)?;
+        let result = transaction.execute_sql(&sql);
+        let elapsed_ns = started.elapsed().as_nanos();
+        let internal = writer_profile::finish();
+        result?;
+        assert_eq!(internal.stage_calls, 1, "one HNSW flush per INSERT required");
+        assert_eq!(internal.fork_calls, u64::from(offset == 0), "first INSERT forks; second reuses owned graph");
+        assert!(u128::from(internal.fork_ns) + u128::from(internal.stage_ns) <= elapsed_ns);
         event(
             phase,
-            json!({"event":"end","elapsed_ns":started.elapsed().as_nanos(),"stats":db.hnsw_cache_stats()}),
+            json!({"event":"end","elapsed_ns":elapsed_ns,"stats":db.hnsw_cache_stats(),
+                   "writer_internal":{"schema":"alopex.hnsw-writer-diagnostic/v1",
+                       "fork_calls":internal.fork_calls,"fork_ns":internal.fork_ns,
+                       "stage_calls":internal.stage_calls,"stage_ns":internal.stage_ns,
+                       "scope":"synchronous INSERT on the calling thread",
+                       "performance_qualification":false}}),
         );
     }
-    event("rollback", json!({"event":"start"}));
-    transaction.rollback()?;
-    event("rollback", json!({"event":"end"}));
-    event("complete", json!({"stats":db.hnsw_cache_stats()}));
+    event(finish, json!({"event":"start"}));
+    let started = Instant::now();
+    if finish == "commit" {
+        transaction.commit()?;
+    } else {
+        transaction.rollback()?;
+    }
+    let elapsed_ns = started.elapsed().as_nanos();
+    if measured_finish.is_some() {
+        event(finish, json!({"event":"end","elapsed_ns":elapsed_ns}));
+        // Validate through a new reader after the finish timer and RSS window.
+        // No verification query or input construction is charged to completion.
+        let result = db.execute_sql(&format!(
+            "SELECT id,e FROM items WHERE id >= {rows} ORDER BY id"
+        ))?;
+        let ExecutionResult::Query(result) = result else {
+            panic!("completion verification must return rows");
+        };
+        let expected = if finish == "commit" {
+            (rows..rows + 2)
+                .map(|row| {
+                    vec![
+                        SqlValue::Integer(row as i32),
+                        SqlValue::Vector(vector(row, dimensions)),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(result.rows, expected, "transaction completion differs");
+        event(
+            "complete",
+            json!({"stats":db.hnsw_cache_stats(),"finish":finish,"result_validated":true}),
+        );
+    } else {
+        event(finish, json!({"event":"end"}));
+        event("complete", json!({"stats":db.hnsw_cache_stats()}));
+    }
     Ok(())
 }
