@@ -1,7 +1,7 @@
 """Source-identical collector preparation extracted from the verified native probe."""
 from build_gprofng_timer_probe import (ARCHIVE_URL,ARCHIVE_SHA,ROOT,source_members,patch,
     atomic_json,sha,require,safe_executable,build_command,run)
-import shutil,sys,tarfile,urllib.request
+import os,shutil,sys,tarfile,urllib.request
 
 def build_collector(work,env,budget,records):
     archive=work/'source.tar.xz'

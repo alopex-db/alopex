@@ -65,4 +65,26 @@ class SamplingTests(unittest.TestCase):
         with self.assertRaises(ValueError):verify_profile('paused','full','',12,'<Total> 1.23')
         with self.assertRaises(ValueError):verify_profile('paused','full','<event kind="resume"/>',0,None)
 
+    def test_builder_and_sampler_have_no_unbound_globals(self):
+        import builtins,symtable
+        from pathlib import Path
+        import gprofng_collector_build,hnsw_search_sampling,hosted_hnsw_search_sampling
+        for module in (gprofng_collector_build,hnsw_search_sampling,hosted_hnsw_search_sampling):
+            source=Path(module.__file__).read_text()
+            table=symtable.symtable(source,module.__name__,'exec')
+            bound={s.get_name() for s in table.get_symbols() if s.is_assigned() or s.is_imported()}
+            bound.update(dir(builtins));bound.update(['__name__','__file__'])
+            pending=list(table.get_children());missing=set()
+            while pending:
+                child=pending.pop();pending.extend(child.get_children())
+                missing.update(s.get_name() for s in child.get_symbols()
+                    if s.is_global() and s.is_referenced() and s.get_name() not in bound)
+            self.assertEqual(missing,set(),module.__name__)
+        # The original extraction defect must be caught without a native build.
+        source=Path(gprofng_collector_build.__file__).read_text().replace('import os,shutil','import shutil')
+        table=symtable.symtable(source,'missing-import','exec')
+        bound={s.get_name() for s in table.get_symbols() if s.is_assigned() or s.is_imported()}
+        child=next(c for c in table.get_children() if c.get_name()=='build_collector')
+        self.assertIn('os',{s.get_name() for s in child.get_symbols() if s.is_global() and s.is_referenced() and s.get_name() not in bound})
+
 if __name__=='__main__':unittest.main()
