@@ -36,9 +36,14 @@ def main():
     parser.add_argument("--dimensions", type=int, default=384)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--rss-limit", type=int, default=8_000_000_000)
+    parser.add_argument("--finish", choices=("commit", "rollback"),
+                        help="measure completion and require new-reader result verification")
     parser.add_argument("--phase-kernel-rss", action="store_true",
                         help="record Linux process RSS high-water marks between phase handshakes")
     args = parser.parse_args()
+    phases_expected = (*PHASES[:-1], args.finish or "rollback")
+    events_expected = tuple((phase, kind) for phase in phases_expected
+                            for kind in ("start", "end")) + (("complete", None),)
     if os.environ.get("CI") or not (1 <= args.rows <= 100_000 and 1 <= args.dimensions <= 384):
         parser.error("manual local run only; rows<=100000, dimensions<=384")
     if not (1 <= args.timeout <= 1800 and 1 <= args.rss_limit <= 8_000_000_000):
@@ -58,6 +63,7 @@ def main():
                 "runner_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "phase_rss_source_sha256":hashlib.sha256(Path(__file__).with_name("phase_rss.py").read_bytes()).hexdigest(),
                 "rows":args.rows,"dimensions":args.dimensions,"rss_limit":args.rss_limit,
+                "finish":args.finish,
                 "phase_kernel_rss":args.phase_kernel_rss,
                 "timeout_seconds":args.timeout,"initial_inventory":inventory}
     (args.output / "identity.json").write_text(json.dumps(identity,indent=2))
@@ -78,7 +84,10 @@ def main():
             raise RuntimeError("process RSS measurement unavailable")
         return int(value) * 1024
     with (args.output / "stderr.log").open("w") as stderr, (args.output / "events.jsonl").open("w") as event_log, (args.output / "rss.jsonl").open("w") as rss_log:
-        process = subprocess.Popen([str(binary),str(args.rows),str(args.dimensions)],cwd=ROOT,
+        command = [str(binary),str(args.rows),str(args.dimensions)]
+        if args.finish is not None:
+            command.append(args.finish)
+        process = subprocess.Popen(command,cwd=ROOT,
             env=dict(os.environ,ALOPEX_MANUAL_681="1",RAYON_NUM_THREADS="2",OMP_NUM_THREADS="2"),
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=stderr,text=True,start_new_session=True)
         def read_events():
@@ -108,9 +117,18 @@ def main():
                     event_log.flush()
                     event = json.loads(line)
                     if (not isinstance(event, dict) or not isinstance(event.get("data"), dict) or
-                            event_count >= len(EXPECTED_EVENTS) or
-                            (event.get("phase"), event["data"].get("event")) != EXPECTED_EVENTS[event_count]):
+                            event_count >= len(events_expected) or
+                            (event.get("phase"), event["data"].get("event")) != events_expected[event_count]):
                         raise RuntimeError("invalid manual workload phase sequence")
+                    if args.finish is not None:
+                        if event["phase"] == args.finish and event["data"].get("event") == "end":
+                            elapsed = event["data"].get("elapsed_ns")
+                            if type(elapsed) is not int or elapsed <= 0:
+                                raise RuntimeError("missing completion elapsed time")
+                        if event["phase"] == "complete" and (
+                                event["data"].get("finish") != args.finish or
+                                event["data"].get("result_validated") is not True):
+                            raise RuntimeError("missing completion result verification")
                     event_count += 1
                 if event:
                     phase = event["phase"]
@@ -149,10 +167,10 @@ def main():
             code = process.wait()
             if code != 0:
                 raise RuntimeError(f"manual workload exited {code}")
-            if event_count != len(EXPECTED_EVENTS):
+            if event_count != len(events_expected):
                 raise RuntimeError("incomplete manual workload phase coverage")
             if kernel_observer is not None:
-                if kernel_observer.active is not None or [row["phase"] for row in kernel_phases] != list(PHASES):
+                if kernel_observer.active is not None or [row["phase"] for row in kernel_phases] != list(phases_expected):
                     raise RuntimeError("incomplete kernel RSS phase coverage")
             outcome = "passed"
         except Exception as error:
@@ -175,6 +193,7 @@ def main():
               "children_lifetime_peak_rss_bytes":None if args.phase_kernel_rss else (peak if sys.platform=="darwin" else peak*1024),
               "children_rusage_reported_maxrss_bytes":peak if sys.platform=="darwin" else peak*1024,
               "phase_kernel_rss":kernel_phases,
+              "incomplete_kernel_phase":kernel_observer.pending_observation if kernel_observer is not None else None,
               "kernel_rss_reset":args.phase_kernel_rss,
               "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; when kernel reset is enabled its reported value is not a lifetime peak. Sampled phase values remain lower bounds. Kernel phase values cover the handshake window and have kernel RSS accounting accuracy.",
               "final_inventory":storage.inventory([args.output])}
