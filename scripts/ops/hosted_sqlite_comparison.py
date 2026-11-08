@@ -18,6 +18,7 @@ from capacity import Budget
 from common import atomic_json
 from hosted_dataframe_comparison import install_product, require, sha
 from sqlite_reference import install_reference
+from private_failure import error_record
 from wal_cost_supervisor import run_cell
 from sqlite_phase_contract import plan, verify_cell
 from dataframe_phase_contract import verify_cell as verify_plan
@@ -61,7 +62,7 @@ def main():
             require(sha(ROOT/name) == expected, 'SQLite source differs')
         test_env = dict(env, PYTHONPATH=os.pathsep.join(str(ROOT/p) for p in
             ('scripts/ops', 'scripts/performance', 'scripts/performance/tests', 'scripts/performance/workloads', 'scripts/test-env')))
-        budget.run([sys.executable,'-B','-m','unittest','test_sqlite_observed_measure','test_sqlite_composite_profile','-v'],
+        budget.run([sys.executable,'-B','-m','unittest','test_sqlite_observed_measure','test_sqlite_composite_profile','test_private_failure','-v'],
             timeout=60,log=work/'contracts.log',env=test_env)
         products = {name:install_product(name, config['products'][name], work, budget, env)
                     for name in ('published', 'before', 'candidate')}
@@ -110,7 +111,7 @@ def main():
             rows.append(dict(cell=cell, checked=checked, checked_plan=checked_plan,status='passed'));atomic_json(work/'cells.json', rows)
         status = 'passed'
     except BaseException as error:
-        failure = type(error).__name__;atomic_json(work/'failure.json', dict(error=repr(error)))
+        failure = type(error).__name__;atomic_json(work/'failure.json', error_record(error))
     finally:
         signal.alarm(0)
         for name in ('imports', 'venvs', 'reference-wheels', 'fixtures', 'tmp'):
