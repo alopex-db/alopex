@@ -1,4 +1,4 @@
-name: Fixed SQLite composite comparison
+name: Fixed SQL streaming comparison
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +6,7 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      sqlite_config:
+      sqlstream_config:
         description: Fixed comparison configuration
         required: true
         type: string
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-sqlite-comparison
+  group: alopex-v0817-sqlstream-comparison
   cancel-in-progress: false
 jobs:
   construct:
@@ -86,17 +86,17 @@ jobs:
       - name: Run source-pinned comparison
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ALOPEX_MANUAL_SQLITE: "1"
-          SQLITE_CONFIG: ${{ inputs.sqlite_config }}
+          ALOPEX_MANUAL_SQLSTREAM: "1"
+          SQLSTREAM_CONFIG: ${{ inputs.sqlstream_config }}
           RUNNER_KIND: ${{ runner.environment }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_sqlite_comparison.py
+        run: python3 -B scripts/ops/hosted_sqlstream_comparison.py
       - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sqlite-comparison
-          path: sqlite-comparison-export/
+          name: sqlstream-comparison
+          path: sqlstream-comparison-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
