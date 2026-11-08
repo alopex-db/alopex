@@ -125,9 +125,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         event(phase, json!({"event":"start"}));
         let started = Instant::now();
         transaction.execute_sql(&sql)?;
+        let elapsed_ns = started.elapsed().as_nanos();
         event(
             phase,
-            json!({"event":"end","elapsed_ns":started.elapsed().as_nanos(),"stats":db.hnsw_cache_stats()}),
+            json!({"event":"end","elapsed_ns":elapsed_ns,"stats":db.hnsw_cache_stats()}),
         );
     }
     event(finish, json!({"event":"start"}));
