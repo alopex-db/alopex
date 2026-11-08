@@ -22,6 +22,20 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def verify_input(manifest, expected, mode):
+    cell = plan(mode)[0]
+    require(set(expected) == {'queries_sha256', 'csv_sha256'}, 'fixed input identity incomplete')
+    require(all(manifest[key] == value for key, value in expected.items()), 'fixed query/dataset differs')
+    require(manifest['vectors_shape'] == [cell['rows'], 128]
+        and manifest['queries_shape'] == [cell['query_vectors'], 128]
+        and manifest['dtype'] == 'float32' and manifest['source_seed'] == 42,
+        'input generation definition differs')
+    for key in ('vectors_sha256', 'queries_sha256'):
+        digest = manifest[key]
+        require(type(digest) is str and len(digest) == 64
+            and all(c in '0123456789abcdef' for c in digest), 'input digest missing')
+
+
 def verify_cell(cell, directory, truth, config):
     output = directory / 'diagnostic'
     result = json.loads((output / 'diagnostic.json').read_bytes())

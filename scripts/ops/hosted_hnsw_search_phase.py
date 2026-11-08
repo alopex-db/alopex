@@ -20,7 +20,7 @@ from common import atomic_json
 from hosted_dataframe_comparison import install_product,require,sha
 from private_failure import error_record
 from wal_cost_supervisor import run_cell
-from hnsw_search_phase_contract import plan,verify_cell
+from hnsw_search_phase_contract import plan,verify_cell,verify_input
 from hnsw_search_phase_audit import audit_pairs,compare_subjects
 from dataframe_phase_contract import verify_resources
 from hnsw_search_dependencies import install_set,PREPARE
@@ -53,7 +53,7 @@ def main():
         and os.environ.get('ALOPEX_MANUAL_HNSW_SEARCH_PHASE')=='1','unexpected HNSW boundary')
     os.umask(0o077);config=json.loads(base64.b64decode(os.environ['HNSW_SEARCH_PHASE_CONFIG'],validate=True))
     require(set(config['products'])=={'before','candidate'},'diagnostic products differ')
-    require(set(config['input_identity'])=={'vectors_sha256','queries_sha256','csv_sha256'},
+    require(set(config['input_identity'])=={'queries_sha256','csv_sha256'},
         'fixed input identity is incomplete')
     cells=plan(config['mode']);allowed=sorted(os.sched_getaffinity(0))
     require(config['cpu_selection']=='first_allowed' and len(allowed)>=2,'CPU assignment unavailable')
@@ -110,7 +110,7 @@ def main():
         evidence=work/'input';evidence.mkdir()
         for name in ('input.npz','input-manifest.json','truth.json'):shutil.copyfile(work/'fixtures'/name,evidence/name)
         fixture_identity=json.loads((evidence/'input-manifest.json').read_bytes())
-        require(all(fixture_identity[key]==value for key,value in config['input_identity'].items()),'fixed diagnostic input identity differs')
+        verify_input(fixture_identity,config['input_identity'],config['mode'])
         truth=json.loads((evidence/'truth.json').read_bytes());budget.before('measure')
         for cell in cells:
             require(deadline-time.monotonic()>config['cell_seconds']+60,'insufficient HNSW stage time')

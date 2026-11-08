@@ -5,11 +5,20 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from hnsw_search_phase_contract import plan, verify_cell
+from hnsw_search_phase_contract import plan, verify_cell, verify_input
 from test_hnsw_search_phase_audit import fixture
 
 
 class PhaseContractTests(unittest.TestCase):
+    def test_query_and_dataset_are_fixed_and_every_generated_vector_set_is_identified(self):
+        expected = dict(queries_sha256='a' * 64, csv_sha256=None)
+        manifest = dict(expected, vectors_sha256='b' * 64, vectors_shape=[32, 128],
+            queries_shape=[4, 128], dtype='float32', source_seed=42)
+        verify_input(manifest, expected, 'preflight')
+        for change in [dict(queries_sha256='c' * 64), dict(vectors_sha256=''),
+                       dict(vectors_shape=[33, 128]), dict(source_seed=1)]:
+            with self.assertRaises(ValueError): verify_input(dict(manifest, **change), expected, 'preflight')
+
     def test_fixed_two_subject_matrix_is_alternated_and_bounded(self):
         self.assertEqual([c['subject'] for c in plan('preflight')], ['before', 'candidate'])
         cells = plan('full')
