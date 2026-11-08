@@ -385,7 +385,11 @@ impl WalWriter {
             fault(4)?;
             self.append_encoded(&reference(descriptor), identity.lsn())?;
             fault(5)?;
-            self.force_sync()?;
+            // EveryWrite has already synced the reference and section header.
+            // Other modes must still make the reference durable before success.
+            if !matches!(self.config.sync_mode, SyncMode::EveryWrite) {
+                self.force_sync()?;
+            }
             #[cfg(any(test, alopex_wal_test_hooks))]
             fault(8)?; // Durable reference, before returning success to the caller.
             Ok(())
