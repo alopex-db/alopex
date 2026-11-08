@@ -137,10 +137,8 @@ impl<'a, T> IntoIterator for &'a PagedVec<T> {
         >,
     >;
     fn into_iter(self) -> Self::IntoIter {
-        self.pages
-            .iter()
-            .flat_map(|page| page.iter())
-            .take(self.len)
+        let page_iter: fn(&'a Arc<[T; PAGE_SIZE]>) -> std::slice::Iter<'a, T> = |page| page.iter();
+        self.pages.iter().flat_map(page_iter).take(self.len)
     }
 }
 
