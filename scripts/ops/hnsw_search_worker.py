@@ -71,31 +71,11 @@ def main():
             build_time_seconds=engine.build_time_seconds,index_size_bytes=engine.index_size_bytes,
             note='Original build/update/delete/reopen boundaries; not cross-product build performance.'))
         observer=DataFrameObserver(rss_limit=config['rss_bytes'])
-        for index,ef in enumerate(cell['ef_values']):
-            if cell['engine']=='alopex-hnsw':engine.native_observations.clear()
-            prepared,before=_prepare_setting(engine,queries,truth['truth'],truth['acceptable'],ef_search=ef,k=10)
-            native=[]
-            if cell['engine']=='alopex-hnsw':
-                native=list(engine.native_observations)
-                require(len(native)==cell['query_vectors'] and all(
-                    type(r['nodes_visited']) is int and r['nodes_visited']>0
-                    and type(r['distance_computations']) is int and r['distance_computations']>0
-                    and type(r['search_time_us']) is int and r['search_time_us']>=0 for r in native),
-                    'real HNSW traversal diagnostics missing')
-            observer.begin(index)
-            row=_measure_prepared_run(engine,queries,prepared,ef_search=ef,k=10,run=1,
-                min_queries=cell['min_queries'],min_duration_seconds=cell['min_seconds'],dataset_size=cell['rows'])
-            resources=observer.finish(index);resources['scope']=RESOURCE_SCOPE
-            after=[engine.search(q,10,ef) for q in queries]
-            predictions=dict(before=before,after=after)
-            verify_point(cell,row,predictions,truth['truth'],truth['acceptable'])
-            record=dict(trial=cell['trial'],measurement=row,predictions=predictions,
-                native_diagnostics=native,resources=resources,
-                residual_note='Legacy difference of separate measurements; not Python-only latency.')
-            filename=f'ef-{ef}.json.gz'
-            with gzip.open(output/filename,'wt',encoding='utf-8') as stream:
-                json.dump(record,stream,allow_nan=False,separators=(',',':'))
-            points.append(dict(ef_search=ef,file=filename,sha256=sha(output/filename),query_count=row['query_count']))
+        from hnsw_search_point import run_point
+        for index in range(len(cell['ef_values'])):
+            point=run_point(engine,queries,truth,cell,index,observer,output,
+                prepare=_prepare_setting,measure=_measure_prepared_run)
+            points.append(point)
             save(output/'points.json',points)
         engine.close();engine=None
         if cell['engine']=='alopex-hnsw':
