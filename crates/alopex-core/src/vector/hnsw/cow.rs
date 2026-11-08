@@ -278,6 +278,11 @@ mod tests {
         for length in [0, 1, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 1] {
             let mut actual: PagedVec<_> = (1..=length).collect();
             let snapshot = actual.clone();
+            assert!(
+                !actual.contains(&0),
+                "unused default slots are not elements"
+            );
+            assert_eq!(actual.contains(&length), length > 0);
             assert_eq!(
                 actual.iter().copied().collect::<Vec<_>>(),
                 (1..=length).collect::<Vec<_>>()
