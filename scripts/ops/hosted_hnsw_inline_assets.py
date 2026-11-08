@@ -225,18 +225,6 @@ def main():
                  "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
         os.chdir(source)
         require(config.get("validation") == "hnsw-inline-pages", "INPUT")
-        command(["cargo", "install", "--locked", "--version", "27.1.0", "cargo-mutants"],
-                "wheel", "mutants-install", 1200)
-        mutants = scratch / "cargo/bin/cargo-mutants"
-        require(mutants.is_file(), "PREREQUISITE")
-        command([str(mutants), "--version"], "tools", "mutants-version")
-        # One shared target, with tool compilation outputs removed before tests.
-        shutil.rmtree(target)
-        private_dir(target)
-        validation_tools = {name: shutil.which("cargo-" + name) is not None
-                            for name in ("mutants", "coupling", "miri")}
-        validation_tools["mutants"] = "27.1.0"
-        atomic_json(work / "validation-tools.json", validation_tools)
         command(["cargo", "test", "--locked", "-p", "alopex-core", "--lib",
                  "vector::hnsw::cow::tests", "--", "--nocapture"],
                 "wheel", "hnsw-cow-tests", 1800)
@@ -246,6 +234,17 @@ def main():
         command(["rustup", "component", "add", "clippy"], "tools", "clippy-install", 300)
         command(["cargo", "clippy", "--locked", "-p", "alopex-core", "--lib", "--", "-D", "warnings"],
                 "wheel", "hnsw-clippy", 900)
+        command(["cargo", "install", "--locked", "--version", "27.1.0", "cargo-mutants"],
+                "wheel", "mutants-install", 1200)
+        mutants = scratch / "cargo/bin/cargo-mutants"
+        require(mutants.is_file(), "PREREQUISITE")
+        command([str(mutants), "--version"], "tools", "mutants-version")
+        # Keep focused-test outputs in the single target; remove tool outputs.
+        shutil.rmtree(target / "release")
+        validation_tools = {name: shutil.which("cargo-" + name) is not None
+                            for name in ("coupling", "miri")}
+        validation_tools["mutants"] = "27.1.0"
+        atomic_json(work / "validation-tools.json", validation_tools)
         mutation_root = private_dir(scratch / "mutation-results")
         try:
             command([str(mutants), "--no-config", "--in-place", "-p", "alopex-core",
