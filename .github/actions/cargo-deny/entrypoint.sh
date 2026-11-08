@@ -1,0 +1,43 @@
+#!/bin/bash
+set -e
+
+PATH=$PATH:/usr/local/cargo/bin
+
+if [ -n "$1" ]; then
+    rustup set profile minimal
+    rustup default "$1"
+fi
+
+if [ -n "$2" ]; then
+    git config --global credential.helper store
+    git config --global --replace-all url.https://github.com/.insteadOf ssh://git@github.com/
+    git config --global --add url.https://github.com/.insteadOf git@github.com:
+
+    echo "$2" > "$HOME/.git-credentials"
+    chmod 600 "$HOME/.git-credentials"
+fi
+
+if [ -n "$3" ]; then
+    mkdir -p "/root/.ssh"
+    chmod 0700 "/root/.ssh"
+    echo "${3}" > "/root/.ssh/id_rsa"
+    chmod 0600 "/root/.ssh/id_rsa"
+fi
+
+if [ -n "$4" ]; then
+    mkdir -p "/root/.ssh"
+    chmod 0700 "/root/.ssh"
+    echo "${4}" > "/root/.ssh/known_hosts"
+    chmod 0600 "/root/.ssh/known_hosts"
+fi
+
+shift 4
+
+# Due to how github actions run containers we need to explicitly force colors
+# as TTY detection fails inside them
+export CARGO_TERM_COLOR="always"
+
+# Workaround for rustup 1.28 completely breaking rust-toolchain.toml
+(cd "$(dirname "$4")"; rustup show || rustup toolchain install)
+
+cargo-deny $*
