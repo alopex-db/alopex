@@ -4,7 +4,7 @@
 //! needs a separately durable WAL reference before recovery may apply it. The
 //! live LSM writer still uses WAL v2; activation and reference replay are separate.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, IoSlice, Read, Seek, SeekFrom, Write};
 
 use crate::error::{Error, Result};
 
@@ -180,6 +180,22 @@ fn require_eof(reader: &mut impl Read) -> Result<()> {
     }
 }
 
+// Borrow the existing frame and payload buffers. File sinks can submit both in
+// one syscall; writers with only scalar support keep Write's default fallback.
+fn write_frame(output: &mut impl Write, frame: &[u8; FRAME_LEN], payload: &[u8]) -> io::Result<()> {
+    let mut buffers = [IoSlice::new(frame), IoSlice::new(payload)];
+    let mut remaining = &mut buffers[..];
+    while !remaining.is_empty() {
+        match output.write_vectored(remaining) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Encode exactly `payload_bytes` from a stream with one bounded buffer.
 ///
 /// Budget/shape errors occur before writing anything. An I/O or input-length
@@ -209,8 +225,7 @@ pub fn write_spool(
         frame[4..8].copy_from_slice(&(length as u32).to_le_bytes());
         let crc = frame_crc(&frame[..8], payload);
         frame[8..].copy_from_slice(&crc.to_le_bytes());
-        output.write_all(&frame)?;
-        output.write_all(payload)?;
+        write_frame(output, &frame, payload)?;
         whole.update(&frame);
         whole.update(payload);
         remaining -= length as u64;

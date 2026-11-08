@@ -291,6 +291,10 @@ struct ShortWriter {
 }
 impl Write for ShortWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        assert!(
+            self.bytes.len() < 256,
+            "short writer made no bounded progress"
+        );
         if self.fail_at == Some(self.bytes.len()) {
             return Err(io::Error::other("injected write failure"));
         }
@@ -341,6 +345,177 @@ fn handles_short_writes_and_propagates_write_errors() {
             Err(Error::Io(_))
         ));
         assert_eq!(output.bytes.len(), position);
+    }
+}
+
+#[derive(Default)]
+struct VectoredWriter {
+    bytes: Vec<u8>,
+    max_write: usize,
+    interrupt_at: Option<usize>,
+    stop_at: Option<(usize, io::ErrorKind)>,
+    vectors: usize,
+    scalar_writes: usize,
+}
+
+impl Write for VectoredWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.scalar_writes += 1;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.vectors += 1;
+        assert!(
+            self.vectors < 1024,
+            "vectored writer made no bounded progress"
+        );
+        let position = self.bytes.len();
+        if self.interrupt_at == Some(position) {
+            self.interrupt_at = None;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        if let Some((stop, kind)) = self.stop_at {
+            if position == stop {
+                return if kind == io::ErrorKind::WriteZero {
+                    Ok(0)
+                } else {
+                    Err(kind.into())
+                };
+            }
+        }
+        let mut available = self.max_write;
+        for boundary in [self.interrupt_at, self.stop_at.map(|(stop, _)| stop)]
+            .into_iter()
+            .flatten()
+        {
+            available = available.min(boundary - position);
+        }
+        let mut written = 0;
+        for buffer in buffers {
+            let size = available.min(buffer.len());
+            self.bytes.extend_from_slice(&buffer[..size]);
+            written += size;
+            available -= size;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn submits_each_spool_frame_and_payload_together() {
+    let (expected, descriptor) = fixture();
+    let mut output = VectoredWriter {
+        max_write: usize::MAX,
+        ..Default::default()
+    };
+    let actual = write_spool(
+        &mut &[1, 2, 3, 4, 5][..],
+        &mut output,
+        identity(),
+        5,
+        2,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(actual, descriptor);
+    assert_eq!(output.bytes, expected);
+    assert_eq!(output.scalar_writes, 2, "header and seal remain scalar");
+    assert_eq!(output.vectors, 3, "one vectored submission per fragment");
+}
+
+#[test]
+fn resumes_vectored_frame_at_every_short_write_and_interrupt_boundary() {
+    let frame = [0x41; FRAME_LEN];
+    let payload = [0x62, 0x63, 0x64];
+    let expected = [&frame[..], &payload[..]].concat();
+    for max_write in 1..=expected.len() {
+        for interrupt_at in 0..expected.len() {
+            let mut output = VectoredWriter {
+                max_write,
+                interrupt_at: Some(interrupt_at),
+                ..Default::default()
+            };
+            write_frame(&mut output, &frame, &payload).unwrap();
+            assert_eq!(output.bytes, expected);
+            assert_eq!(output.interrupt_at, None);
+            assert_eq!(output.scalar_writes, 0);
+        }
+    }
+}
+
+#[test]
+fn vectored_frame_supports_scalar_fallback() {
+    let frame = [0x41; FRAME_LEN];
+    let payload = [0x62, 0x63, 0x64];
+    let mut output = ShortWriter {
+        bytes: Vec::new(),
+        fail_at: None,
+    };
+    write_frame(&mut output, &frame, &payload).unwrap();
+    assert_eq!(output.bytes, [&frame[..], &payload[..]].concat());
+}
+
+#[test]
+fn vectored_frame_submits_both_borrowed_slices() {
+    let frame = [0x41; FRAME_LEN];
+    let payload = [0x62, 0x63, 0x64];
+    let mut output = VectoredWriter {
+        max_write: usize::MAX,
+        ..Default::default()
+    };
+    write_frame(&mut output, &frame, &payload).unwrap();
+    assert_eq!(output.bytes, [&frame[..], &payload[..]].concat());
+    assert_eq!(output.vectors, 1);
+    assert_eq!(output.scalar_writes, 0);
+}
+
+#[test]
+fn vectored_frame_preserves_partial_prefix_on_zero_or_error() {
+    let frame = [0x41; FRAME_LEN];
+    let payload = [0x62, 0x63, 0x64];
+    let expected = [&frame[..], &payload[..]].concat();
+    for stop in 0..expected.len() {
+        for kind in [io::ErrorKind::WriteZero, io::ErrorKind::Other] {
+            let mut output = VectoredWriter {
+                max_write: usize::MAX,
+                stop_at: Some((stop, kind)),
+                ..Default::default()
+            };
+            let error = write_frame(&mut output, &frame, &payload).unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(output.bytes, expected[..stop]);
+            assert_eq!(output.vectors, usize::from(stop != 0) + 1);
+        }
+    }
+}
+
+#[test]
+fn failed_vectored_spool_never_writes_a_seal() {
+    let (expected, _) = fixture();
+    for stop in HEADER_LEN..expected.len() - SEAL_LEN {
+        let mut output = VectoredWriter {
+            max_write: usize::MAX,
+            stop_at: Some((stop, io::ErrorKind::WriteZero)),
+            ..Default::default()
+        };
+        let error = write_spool(
+            &mut &[1, 2, 3, 4, 5][..],
+            &mut output,
+            identity(),
+            5,
+            2,
+            limits(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::WriteZero));
+        assert_eq!(output.bytes, expected[..stop]);
+        assert_eq!(output.scalar_writes, 1, "only the header was written");
     }
 }
 
