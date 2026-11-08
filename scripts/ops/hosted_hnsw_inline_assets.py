@@ -225,20 +225,25 @@ def main():
                  "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
         os.chdir(source)
         require(config.get("validation") == "hnsw-inline-pages", "INPUT")
-        command(["cargo", "test", "--locked", "-p", "alopex-core", "--lib",
+        atomic_json(work / "validation-identity.json", {
+            "source": {"commit": identity["commit"], "tree": identity["tree"]},
+            "controller": os.environ["GITHUB_SHA"], "configuration": config,
+            "validation_profile": {"cargo_profile": "test", "features": ["lane_ci"],
+                                   "incremental": False, "debug": False}})
+        command(["cargo", "test", "--locked", "-p", "alopex-core", "--features", "lane_ci", "--lib",
                  "vector::hnsw::cow::tests", "--", "--nocapture"],
                 "wheel", "hnsw-cow-tests", 1800)
-        command(["cargo", "test", "--locked", "-p", "alopex-core", "--lib",
+        command(["cargo", "test", "--locked", "-p", "alopex-core", "--features", "lane_ci", "--lib",
                  "vector::hnsw", "--", "--nocapture"],
                 "wheel", "hnsw-regressions", 1200)
         command(["rustup", "component", "add", "clippy"], "tools", "clippy-install", 300)
-        command(["cargo", "clippy", "--locked", "-p", "alopex-core", "--lib", "--", "-D", "warnings"],
+        command(["cargo", "clippy", "--locked", "-p", "alopex-core", "--features", "lane_ci", "--lib", "--", "-D", "warnings"],
                 "wheel", "hnsw-clippy", 900)
         command(["cargo", "install", "--locked", "--version", "27.1.0", "cargo-mutants"],
                 "wheel", "mutants-install", 1200)
         mutants = scratch / "cargo/bin/cargo-mutants"
         require(mutants.is_file(), "PREREQUISITE")
-        command([str(mutants), "--version"], "tools", "mutants-version")
+        command([str(mutants), "mutants", "--version"], "tools", "mutants-version")
         # Keep focused-test outputs in the single target; remove tool outputs.
         shutil.rmtree(target / "release")
         validation_tools = {name: shutil.which("cargo-" + name) is not None
@@ -247,8 +252,9 @@ def main():
         atomic_json(work / "validation-tools.json", validation_tools)
         mutation_root = private_dir(scratch / "mutation-results")
         try:
-            command([str(mutants), "--no-config", "--in-place", "-p", "alopex-core",
+            command([str(mutants), "mutants", "--no-config", "--in-place", "-p", "alopex-core",
                      "--file", "crates/alopex-core/src/vector/hnsw/cow.rs", "--re", "PagedVec",
+                     "--features", "lane_ci",
                      "--jobserver-tasks", "2", "--timeout", "120",
                      "--build-timeout", "900", "--cargo-arg=--locked", "--output", str(mutation_root),
                      "--", "--lib", "vector::hnsw::cow::tests"],
