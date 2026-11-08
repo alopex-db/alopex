@@ -177,7 +177,7 @@ def main():
         build_command([str(make),'-j2','stmp-bfd-h'],'bfd-headers',bfd,work,env,budget,records)
         build_command([str(shell),str(source/'gprofng/configure'),'--disable-gprofng-tools','--disable-werror','--disable-nls'],
             'collector-configure',gp,work,env,budget,records)
-        build_command([str(make),'-C',str(gp/'libcollector'),'-j2','libgp-collector.la','libgp-collectorAPI.la'],
+        build_command([str(make),'-C',str(gp),'-j2','all'],
             'collector-build',gp,work,env,budget,records)
         build_command([str(cc),'-std=c11','-O1','-g0','-Wall','-Wextra','-Werror',
             str(ROOT/'scripts/ops/gprofng_timer_validity_test.c'),'-o',str(work/'timer-test')],
