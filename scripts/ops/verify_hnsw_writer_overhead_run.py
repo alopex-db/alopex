@@ -14,15 +14,16 @@ from hosted_hnsw_writer_overhead import validate_config
 BASE = Path(__file__).resolve().parent
 
 
-def decrypt_and_audit(root, config, controller):
+def decrypt_and_audit(root, config, controller, *, evidence_directory=None):
+    evidence_directory = evidence_directory or BASE
     evidence = None
-    with tempfile.TemporaryDirectory(prefix='overhead-audit-', dir=BASE) as directory:
+    with tempfile.TemporaryDirectory(prefix='overhead-audit-', dir=evidence_directory) as directory:
         temporary = Path(directory)
         try:
             for name, suffix in (('private-evidence', 'tar.gz'), ('cleanup', 'json')):
                 result = subprocess.run(
                     ['openssl', 'cms', '-decrypt', '-binary', '-inform', 'DER',
-                     '-in', str(root / (name + '.cms')), '-inkey', str(BASE / 'native-evidence.key'),
+                     '-in', str(root / (name + '.cms')), '-inkey', str(evidence_directory / 'native-evidence.key'),
                      '-out', str(temporary / (name + '.' + suffix))],
                     capture_output=True, timeout=30)
                 require(result.returncode == 0, 'evidence decryption failed')
@@ -39,6 +40,7 @@ def main():
     parser.add_argument('--run', type=int, required=True)
     parser.add_argument('--controller', required=True)
     parser.add_argument('--configuration', type=Path, required=True)
+    parser.add_argument('--evidence-directory', type=Path)
     args = parser.parse_args()
     require(args.run > 0 and re.fullmatch('[0-9a-f]{40}', args.controller), 'invalid run identity')
     os.umask(0o077)
@@ -52,8 +54,9 @@ def main():
             and run['status'] == 'completed' and run['conclusion'] == 'success'
             and run['event'] == 'workflow_dispatch'
             and run['head_repository']['full_name'] == 'alopex-db/alopex', 'run identity differs')
-    root = BASE / f'hnsw-writer-overhead-run-{args.run}'
-    proof = decrypt_and_audit(root, config, args.controller)
+    evidence_directory = args.evidence_directory or BASE
+    root = evidence_directory / f'hnsw-writer-overhead-run-{args.run}'
+    proof = decrypt_and_audit(root, config, args.controller, evidence_directory=evidence_directory)
     proof.update(run=args.run, configuration_sha256=sha(raw_config),
                  auditor_sha256=sha(Path(__file__).read_bytes()),
                  contract_sha256=sha((BASE / 'hnsw_writer_overhead_contract.py').read_bytes()),
@@ -62,7 +65,7 @@ def main():
                  encrypted_evidence_sha256=sha((root / 'private-evidence.cms').read_bytes()),
                  encrypted_cleanup_sha256=sha((root / 'cleanup.cms').read_bytes()),
                  plaintext_removed=True)
-    output = BASE / f'hnsw-writer-overhead-{args.run}-proof.private.json'
+    output = evidence_directory / f'hnsw-writer-overhead-{args.run}-proof.private.json'
     output.write_text(json.dumps(proof, indent=2) + '\n')
     output.chmod(0o600)
     print(json.dumps({key: proof[key] for key in
