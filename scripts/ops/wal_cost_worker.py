@@ -44,6 +44,14 @@ def main():
         after_identity_and_native_digest=parse_status(Path('/proc/self/status').read_text()),
         lifetime_high_water_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
         scope='after import, original-wheel identity verification and streaming native digest; before workload'))+'\n')
+    from wal_cost_commit_observer import observe
+    original_measure=workload.measure
+    def measure(action):
+        if getattr(action,'__name__',None)!='commit':return original_measure(action)
+        result,observation=observe(action,original_measure)
+        (output/'commit-observation.json').write_text(json.dumps(observation,allow_nan=False)+'\n')
+        return result
+    workload.measure=measure
     # Calling the workload function does not disable its CLI's ordinary-CI guard.
     # The controller and this worker independently require workflow_dispatch.
     # The writer deliberately os._exit()s to preserve live WAL before two readers.

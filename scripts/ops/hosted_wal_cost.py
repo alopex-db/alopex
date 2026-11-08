@@ -44,7 +44,8 @@ def main():
     try:
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'controller source differs')
         test_env=dict(env,PYTHONPATH=str(ROOT/'scripts/ops'))
-        budget.run([sys.executable,'-B','-m','unittest','test_wal_cost_contract','test_wal_cost_supervisor','test_wal_cost_worker','-v'],timeout=30,log=work/'contracts.log',env=test_env)
+        budget.run([sys.executable,'-B','-m','unittest','test_wal_cost_contract','test_wal_cost_supervisor',
+            'test_wal_cost_worker','test_wal_cost_commit_observer','-v'],timeout=30,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('before','candidate')}
         before=products['before']['receipt'];after=products['candidate']['receipt']
         for key in ('tools','parser_record_sha256','parser_contract'):
