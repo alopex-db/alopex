@@ -11,8 +11,9 @@ import tarfile
 import time
 import traceback
 
-from hosted_dataframe_comparison import ROOT, Budget, atomic_json, install_product, require, run_cell, sha
+from hosted_dataframe_comparison import ROOT, Budget, atomic_json, install_product, require, sha
 from wal_cost_contract import plan, summarize, verify_record
+from wal_cost_supervisor import run_cell
 
 
 def main():
@@ -43,7 +44,7 @@ def main():
     try:
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'controller source differs')
         test_env=dict(env,PYTHONPATH=str(ROOT/'scripts/ops'))
-        budget.run([sys.executable,'-B','-m','unittest','test_wal_cost_contract','-v'],timeout=30,log=work/'contracts.log',env=test_env)
+        budget.run([sys.executable,'-B','-m','unittest','test_wal_cost_contract','test_wal_cost_supervisor','-v'],timeout=30,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('before','candidate')}
         before=products['before']['receipt'];after=products['candidate']['receipt']
         for key in ('tools','parser_record_sha256','parser_contract'):
