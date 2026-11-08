@@ -111,6 +111,71 @@ class OverheadTests(unittest.TestCase):
         self.assertEqual([r['status'] for r in rows], ['passed', 'failed'] + ['not_run'] * 8)
 
 
+def candidate_fixture(finish='commit', subject='normal'):
+    args = OverheadTests().fixture(finish, subject)
+    args[4].update(engine_base=contract.CANDIDATE_ENGINE,
+                   source_commit=contract.CANDIDATE_SOURCES[subject == 'diagnostic'])
+    for event in args[2]:
+        if event['phase'] in ('cold_transaction_1', 'cold_transaction_2') and event['data'].get('event') == 'end':
+            event['data']['stats'].update(entries=1, misses=1,
+                                          hits=int(event['phase'] == 'cold_transaction_2'))
+    return args
+
+
+class CandidateOverheadTests(unittest.TestCase):
+    def test_both_modes_and_roles_require_cache_reuse_without_losing_internal_times(self):
+        for finish in ('commit', 'rollback'):
+            for role in ('normal', 'diagnostic'):
+                result = contract.verify_sample(*candidate_fixture(finish, role))
+                self.assertEqual(result['cold_cache']['second']['hits'], 1)
+                self.assertEqual(result['elapsed_ns'][finish], 321)
+                self.assertEqual(len(result['writer_internal']), 2 if role == 'diagnostic' else 0)
+
+    def test_candidate_reload_miss_or_missing_hit_never_passes(self):
+        for field, value in (('entries', 0), ('entries', 2), ('misses', 2), ('misses', 0), ('hits', 0)):
+            args = candidate_fixture()
+            event = next(e for e in args[2] if e['phase'] == 'cold_transaction_2' and e['data'].get('event') == 'end')
+            event['data']['stats'][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                contract.verify_sample(*args)
+
+    def test_boolean_negative_and_noninteger_cache_counters_rejected(self):
+        for phase in ('cold_transaction_1', 'cold_transaction_2'):
+            for field in ('entries', 'misses', 'hits'):
+                for value in (True, -1, 1.0):
+                    args = candidate_fixture()
+                    event = next(e for e in args[2] if e['phase'] == phase and e['data'].get('event') == 'end')
+                    event['data']['stats'][field] = value
+                    with self.subTest(phase=phase, field=field, value=value), self.assertRaises(ValueError):
+                        contract.verify_sample(*args)
+
+    def test_unknown_engine_wrong_source_and_undeclared_candidate_rejected(self):
+        for fault in ('engine', 'source', 'role', 'undeclared'):
+            args = candidate_fixture()
+            if fault == 'engine': args[4]['engine_base'] = 'unknown'
+            if fault == 'source': args[4]['source_commit'] = 'other'
+            if fault == 'role': args[4]['source_commit'] = contract.CANDIDATE_SOURCES[True]
+            if fault == 'undeclared': args[4].pop('engine_base')
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                contract.verify_sample(*args)
+
+    def test_runtime_configuration_binds_both_roles_to_the_same_accepted_engine(self):
+        value = config()
+        value['timing_pair']['engine'] = contract.CANDIDATE_ENGINE
+        for role, subject in value['subjects'].items():
+            subject.update(engine_base=contract.CANDIDATE_ENGINE,
+                           source_commit=contract.CANDIDATE_SOURCES[role == 'diagnostic'])
+            value['timing_pair'][role]['commit'] = subject['source_commit']
+        control.validate_config(value)
+        for fault in ('mixed_engine', 'source', 'timing_engine'):
+            changed = copy.deepcopy(value)
+            if fault == 'mixed_engine': changed['subjects']['normal']['engine_base'] = contract.BASELINE_ENGINE
+            if fault == 'source': changed['subjects']['diagnostic']['source_commit'] = 'other'
+            if fault == 'timing_engine': changed['timing_pair']['engine'] = contract.BASELINE_ENGINE
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                control.validate_config(changed)
+
+
 class OverheadAssets(unittest.TestCase):
     def test_schemas_and_compiled_source_cannot_be_swapped(self):
         fixture = completion.CompletionAssetTests()

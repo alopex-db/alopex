@@ -10,7 +10,7 @@ import sys
 import tarfile
 import time
 
-from hnsw_writer_overhead_contract import plan, require, sha, verify_assets, verify_sample
+from hnsw_writer_overhead_contract import engine_contract, plan, require, sha, verify_assets, verify_sample
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,7 +30,7 @@ def validate_config(config):
     require(normal['diagnostic'] is False and diagnostic['diagnostic'] is True, 'comparison roles differ')
     for name in ('platform','rust_version','parser_contract','parser_sha256','cargo_lock_sha256'):
         require(normal[name] == diagnostic[name], 'comparison build conditions differ')
-    require(config['timing_pair']['engine'] == '5e05f0149e93e92455e59fe8c3a4cdfbec19e578'
+    require(config['timing_pair']['engine'] == engine_contract(normal) == engine_contract(diagnostic)
             and config['timing_pair']['normal'] == {'commit': normal['source_commit'], 'example_sha256': normal['example_source_sha256']}
             and config['timing_pair']['diagnostic'] == {'commit': diagnostic['source_commit'], 'example_sha256': diagnostic['example_source_sha256']}
             and config['timing_pair']['timed_window_sha256'] == 'ee7954f21000fd9f121bd76812097fcf8135fb8b2c70398e805c9fce2b130025',

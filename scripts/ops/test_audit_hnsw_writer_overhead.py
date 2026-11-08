@@ -16,13 +16,14 @@ class MemoryEvidence:
 
 
 class AuditTests(unittest.TestCase):
-    def fixture(self, finish="commit"):
+    def fixture(self, finish="commit", sample_fixture=None):
+        sample_fixture = sample_fixture or fixture_source.OverheadTests().fixture
         ev = MemoryEvidence(); rows = []
-        original = fixture_source.OverheadTests().fixture(finish)
+        original = sample_fixture(finish)
         config = dict(finish=finish, rows=1000, cpu_count=2, limits=original[-1], instrument=original[-3],
-                      subjects={s:dict(fixture_source.OverheadTests().fixture(finish, s)[4], assets_digest=s) for s in ('normal','diagnostic')})
+                      subjects={s:dict(sample_fixture(finish, s)[4], assets_digest=s) for s in ('normal','diagnostic')})
         for cell in plan(1000, finish):
-            args = list(fixture_source.OverheadTests().fixture(finish, cell['subject'])); args[3] = cell
+            args = list(sample_fixture(finish, cell['subject'])); args[3] = cell
             identity, summary, events = args[:3]
             contents = {'output/identity.json':identity, 'output/summary.json':summary,
                         'output/events.jsonl':b'\n'.join(json.dumps(e).encode() for e in events),
@@ -44,6 +45,30 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result['completed_samples'],10)
         self.assertEqual(sum(map(len,result['comparisons'].values())),17)
         self.assertEqual(result['comparisons']['elapsed_ns']['first_insert']['normal'],[100]*5)
+
+    def test_candidate_both_modes_reconstruct_all_samples_and_internal_observations(self):
+        for finish in ('commit', 'rollback'):
+            result = audit(*self.fixture(finish, fixture_source.candidate_fixture))
+            self.assertEqual(result['completed_samples'], 10)
+            self.assertTrue(result['cold_cache_contracts_verified'])
+            self.assertEqual(result['comparisons']['elapsed_ns'][finish]['normal'], [321] * 5)
+            self.assertEqual(result['comparisons']['elapsed_ns'][finish]['diagnostic'], [321] * 5)
+            self.assertTrue(result['writer_internal'])
+
+    def test_candidate_cache_fault_rejected_even_with_recomputed_raw_hash(self):
+        args = self.fixture(sample_fixture=fixture_source.candidate_fixture)
+        evidence = args[0]
+        rows = evidence.json('results.json')
+        key = rows[0]['id'] + '/output/events.jsonl'
+        events = [json.loads(line) for line in evidence.read(key).splitlines()]
+        next(e['data']['stats'] for e in events if e['phase'] == 'cold_transaction_2'
+             and e['data'].get('event') == 'end')['misses'] += 1
+        evidence.put(key, b'\n'.join(json.dumps(e).encode() for e in events))
+        rows[0]['files']['output/events.jsonl'] = sha(evidence.read(key))
+        evidence.put('results.json', rows)
+        evidence.put('progress.json', rows)
+        with self.assertRaises(ValueError):
+            audit(*args)
 
     def test_tampered_raw_file_rejected(self):
         args=self.fixture();args[0].put('hnsw-overhead-commit-1000-0-normal/output/events.jsonl',b'{}')

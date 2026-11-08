@@ -8,11 +8,30 @@ PHASES = ('seed', 'index_build', 'cold_transaction_1', 'cold_transaction_2', 'wa
           'writer_begin', 'first_insert', 'second_insert', 'rollback')
 TIMED_PHASES = tuple(p for p in PHASES if p not in ('warm', 'rollback'))
 STAGES = (1000,)
+BASELINE_ENGINE = '5e05f0149e93e92455e59fe8c3a4cdfbec19e578'
+CANDIDATE_ENGINE = '635d217d7dda9d42aafcce24aa8076463fa873b3'
+CANDIDATE_SOURCES = {
+    False: '41a9f466587213a91b21c2033ee631d4045cd1c2',
+    True: '02bcc6e69821a44bfafb94c4b8c293c0fc5d1671',
+}
 
 
 def require(value, message):
     if not value:
         raise ValueError(message)
+
+
+def engine_contract(expected):
+    engine = expected.get('engine_base', BASELINE_ENGINE)
+    require(engine in (BASELINE_ENGINE, CANDIDATE_ENGINE), 'unverified engine')
+    require(type(expected['diagnostic']) is bool, 'diagnostic role differs')
+    if engine == CANDIDATE_ENGINE:
+        require(expected['source_commit'] == CANDIDATE_SOURCES[expected['diagnostic']],
+                'candidate engine source differs')
+    else:
+        require(expected.get('source_commit') not in CANDIDATE_SOURCES.values(),
+                'candidate source cannot use baseline cache contract')
+    return engine
 
 
 def sha(value):
@@ -140,8 +159,16 @@ def verify_sample(identity, summary, events, cell, expected, instrument, control
             'first reader did not load from an empty shared cache')
     require(cell['subject'] in ('normal', 'diagnostic')
             and expected['diagnostic'] is (cell['subject'] == 'diagnostic'), 'subject scope differs')
-    require(first['entries'] == second['entries'] == 0 and second['misses'] > first['misses'],
-            'baseline engine cache behavior differs')
+    for counters in (cold_start, first, second):
+        require(all(type(counters[k]) is int and counters[k] >= 0
+                    for k in ('entries', 'misses', 'hits')), 'invalid cache counter')
+    if engine_contract(expected) == CANDIDATE_ENGINE:
+        require(first['entries'] == second['entries'] == 1
+                and second['misses'] == first['misses']
+                and second['hits'] > first['hits'], 'candidate reloads transaction graph')
+    else:
+        require(first['entries'] == second['entries'] == 0 and second['misses'] > first['misses'],
+                'baseline engine cache behavior differs')
     internal = verify_internal(events, expected['diagnostic'])
     observations = summary['phase_kernel_rss']
     require(summary.get('incomplete_kernel_phase') is None, 'incomplete kernel phase')
