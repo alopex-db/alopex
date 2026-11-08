@@ -38,11 +38,14 @@ def main():
     for name,expected in config['sources'].items():
         require(sha(root/name)==expected, 'HNSW source differs')
     sys.path.insert(0,str(root/'scripts/ops/hnsw_harness'))
+    sys.path.insert(0,str(root/'scripts/ops/dataframe_harness'))
     from hnsw_v0811_contract import build_hnswlib, build_faiss_hnsw
     from hnsw_search_build import build_alopex, _prepare_setting
     from hnsw_search_measure import _measure_prepared_run
     from dataframe_phase_observer import DataFrameObserver
     from subject_identity import verify_subject, _verify
+    from hnsw_search_identity import verify_identity
+    dependency_identity=verify_identity(Path(config['dependency_identity']),config['dependency_identity_sha256'])
     import numpy as np
     require(np.__version__=='2.4.6', 'NumPy version differs')
     require(sha(data/'input.npz')==config['input_sha256']
@@ -61,8 +64,7 @@ def main():
         if cell['engine']=='alopex-hnsw':
             identity=verify_subject()
             require(identity['manifest_sha256']==config['subject_manifest_sha256'], 'subject differs')
-        # Installed NumPy/reference hashes are checked by the controller before
-        # and after every worker; identity is retained alongside product receipts.
+        # Native NumPy/reference files are checked before and after this worker.
         engine={'alopex-hnsw':build_alopex,'hnswlib':build_hnswlib,'faiss-hnsw':build_faiss_hnsw}[cell['engine']](vectors)
         require(engine.node_count==cell['rows'], 'index node count differs')
         save(output/'build.json',dict(node_count=engine.node_count,
@@ -100,8 +102,10 @@ def main():
             _verify.cache_clear();require(verify_subject()==identity, 'product changed during measurement')
         require(sha(data/'input.npz')==config['input_sha256']
             and sha(data/'truth.json')==config['truth_sha256'], 'input changed during measurement')
+        require(verify_identity(Path(config['dependency_identity']),config['dependency_identity_sha256'])==dependency_identity,
+            'dependencies changed during measurement')
         save(output/'measurement.json',dict(cell=cell,points=points,input_sha256=config['input_sha256'],
-            truth_sha256=config['truth_sha256'],subject_identity=identity,
+            truth_sha256=config['truth_sha256'],subject_identity=identity,dependency_identity=dependency_identity,
             sources=config['sources'],worker_sha256=sha(Path(__file__)),index_closed=True))
         status='passed'
     finally:
