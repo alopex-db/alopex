@@ -20,7 +20,7 @@ WORKFLOW = SCRIPT.parents[2] / ".github/workflows/ci.yml"
 
 
 class WindowsPhaseTests(unittest.TestCase):
-    def execute(self, phase, *, exit_code=0, output=None, hosted=True):
+    def execute(self, phase, *, exit_code=0, output=None, hosted=True, output_overrides=None):
         calls = []
         # Fake native results exercise the runner's selection and validation;
         # these are deliberately not evidence of Windows native execution.
@@ -42,7 +42,7 @@ class WindowsPhaseTests(unittest.TestCase):
                 self.assertIn("20000000000", command)
                 self.assertEqual(stderr, subprocess.STDOUT)
                 calls.append((Path(stdout.name).stem, command[command.index("--") + 1:]))
-                stdout.write(output)
+                stdout.write((output_overrides or {}).get(Path(stdout.name).stem, output))
                 return SimpleNamespace(returncode=exit_code)
 
             error = None
@@ -60,7 +60,8 @@ class WindowsPhaseTests(unittest.TestCase):
             if calls:
                 self.assertTrue((root / "artifacts/windows-wal/source.json").is_file())
                 for name, _ in calls:
-                    self.assertEqual((root / f"artifacts/windows-wal/{name}.log").read_text(encoding="utf-8"), output)
+                    self.assertEqual((root / f"artifacts/windows-wal/{name}.log").read_text(encoding="utf-8"),
+                                     (output_overrides or {}).get(name, output))
         return calls, error
 
     def test_phases_cover_every_command_once_with_shared_storage_guard(self):
@@ -103,6 +104,22 @@ class WindowsPhaseTests(unittest.TestCase):
         calls, error = self.execute("wal-contracts", hosted=False)
         self.assertEqual(calls, [])
         self.assertIn("isolated GitHub-hosted Windows runner", error)
+
+    def test_hnsw_cow_requires_all_nine_cases_before_dirty_writes(self):
+        name = "hnsw-copy-on-write"
+        calls, error = self.execute("hnsw-contracts", output_overrides={
+            name: "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out"
+        })
+        self.assertIsNone(error)
+        self.assertEqual(calls[-1][0], "hnsw-dirty-writes")
+        for result in ("7 passed; 0 failed; 0 ignored", "8 passed; 0 failed; 0 ignored",
+                       "8 passed; 0 failed; 1 ignored", "8 passed; 1 failed; 0 ignored"):
+            with self.subTest(result=result):
+                calls, error = self.execute("hnsw-contracts", output_overrides={
+                    name: f"test result: ok. {result}; 0 measured; 630 filtered out"
+                })
+                self.assertEqual(error, f"{name}: expected native tests did not run")
+                self.assertEqual(calls[-1][0], name)
 
     def test_workflow_runs_both_contract_phases_serially_before_cleanup(self):
         build = WORKFLOW.read_text(encoding="utf-8").split("\n  build:", 1)[1].split("\n  v08-release-gate:", 1)[0]
