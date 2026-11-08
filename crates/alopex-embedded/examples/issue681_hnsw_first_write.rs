@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alopex_core::TxnMode;
+use alopex_sql::storage::bridge::manual_hnsw_writer_profile as writer_profile;
 use alopex_embedded::Database;
 use alopex_sql::{ExecutionResult, SqlValue};
 use serde_json::json;
@@ -123,11 +124,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(",");
         let sql = format!("INSERT INTO items VALUES ({},[{values}])", rows + offset);
         event(phase, json!({"event":"start"}));
+        writer_profile::begin();
         let started = Instant::now();
         transaction.execute_sql(&sql)?;
+        let elapsed_ns = started.elapsed().as_nanos();
+        let internal = writer_profile::finish();
+        assert_eq!(internal.stage_calls, 1, "one HNSW flush per INSERT required");
+        assert_eq!(internal.fork_calls, u64::from(offset == 0), "first INSERT forks; second reuses owned graph");
+        assert!(u128::from(internal.fork_ns) + u128::from(internal.stage_ns) <= elapsed_ns);
         event(
             phase,
-            json!({"event":"end","elapsed_ns":started.elapsed().as_nanos(),"stats":db.hnsw_cache_stats()}),
+            json!({"event":"end","elapsed_ns":elapsed_ns,"stats":db.hnsw_cache_stats(),
+                   "writer_internal":{"schema":"alopex.hnsw-writer-diagnostic/v1",
+                       "fork_calls":internal.fork_calls,"fork_ns":internal.fork_ns,
+                       "stage_calls":internal.stage_calls,"stage_ns":internal.stage_ns,
+                       "scope":"synchronous INSERT on the calling thread",
+                       "performance_qualification":false}}),
         );
     }
     event(finish, json!({"event":"start"}));
