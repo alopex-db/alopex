@@ -29,6 +29,13 @@ class WindowsPhaseTests(unittest.TestCase):
                 f"test result: ok. {n} passed; 0 failed; 0 ignored"
                 for n in range(1, 40)
             )
+        outputs = {
+            "hnsw-scoring-dispatch": (
+                "test vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics ... ok\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out\n"
+            ),
+            **(output_overrides or {}),
+        }
         with tempfile.TemporaryDirectory(prefix="alopex-phase-") as directory:
             root = Path(directory).resolve()
             script = root / "scripts/ci" / SCRIPT.name
@@ -42,7 +49,7 @@ class WindowsPhaseTests(unittest.TestCase):
                 self.assertIn("20000000000", command)
                 self.assertEqual(stderr, subprocess.STDOUT)
                 calls.append((Path(stdout.name).stem, command[command.index("--") + 1:]))
-                stdout.write((output_overrides or {}).get(Path(stdout.name).stem, output))
+                stdout.write(outputs.get(Path(stdout.name).stem, output))
                 return SimpleNamespace(returncode=exit_code)
 
             error = None
@@ -61,7 +68,7 @@ class WindowsPhaseTests(unittest.TestCase):
                 self.assertTrue((root / "artifacts/windows-wal/source.json").is_file())
                 for name, _ in calls:
                     self.assertEqual((root / f"artifacts/windows-wal/{name}.log").read_text(encoding="utf-8"),
-                                     (output_overrides or {}).get(name, output))
+                                     outputs.get(name, output))
         return calls, error
 
     def test_phases_cover_every_command_once_with_shared_storage_guard(self):
@@ -118,6 +125,26 @@ class WindowsPhaseTests(unittest.TestCase):
                 calls, error = self.execute("hnsw-contracts", output_overrides={
                     name: f"test result: ok. {result}; 0 measured; 630 filtered out"
                 })
+                self.assertEqual(error, f"{name}: expected native tests did not run")
+                self.assertEqual(calls[-1][0], name)
+
+    def test_scoring_requires_named_property_without_skips(self):
+        name = "hnsw-scoring-dispatch"
+        calls, error = self.execute("hnsw-contracts")
+        self.assertIsNone(error)
+        command = dict(calls)[name]
+        self.assertEqual(command[-2:], ["--", "--exact"])
+        self.assertIn("layer_scoring_matches_dynamic_distance_bits_order_and_statistics", command[-3])
+        expected = "test vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics ... ok\n"
+        for log in (
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out\n",
+            "test unrelated ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out\n",
+            expected + "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 671 filtered out\n",
+            expected + "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 681 filtered out\n",
+            expected + "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 681 filtered out\n",
+        ):
+            with self.subTest(log=log):
+                calls, error = self.execute("hnsw-contracts", output_overrides={name: log})
                 self.assertEqual(error, f"{name}: expected native tests did not run")
                 self.assertEqual(calls[-1][0], name)
 

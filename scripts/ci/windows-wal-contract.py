@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from windows_wal_console import print_log_tail
@@ -86,6 +87,9 @@ commands = [
                               "--test", "hnsw_savepoint_cache"]),
     ("hnsw-begin-cache", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                           "--lib", "hnsw_begin_tests"]),
+    ("hnsw-scoring-dispatch", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                               "--lib", "vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics",
+                               "--", "--exact"]),
     ("hnsw-copy-on-write", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                             "--lib", "vector::hnsw::cow::tests"]),
     ("hnsw-dirty-writes", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
@@ -106,6 +110,15 @@ for name, command in commands:
     print_log_tail(contents)
     if result.returncode:
         raise SystemExit(result.returncode)
+    if name == "hnsw-scoring-dispatch":
+        expected = "vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics"
+        summaries = re.findall(
+            r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;",
+            contents, re.M,
+        )
+        passed = re.findall(r"^test (\S+) \.\.\. ok\s*$", contents, re.M)
+        if summaries != [("ok", "1", "0", "0", "0")] or passed != [expected]:
+            raise SystemExit(f"{name}: expected native tests did not run")
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "35 passed; 0 failed",
                 "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
                 "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
