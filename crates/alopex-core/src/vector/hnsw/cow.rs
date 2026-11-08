@@ -32,9 +32,12 @@ impl DerefMut for SharedNode {
 
 /// A snapshot shares the directory and pages. A write detaches one directory
 /// and at most one page; node payloads have a separate copy-on-write boundary.
+/// Values live inside each shared page, avoiding a separate Vec allocation and
+/// data-pointer lookup on every graph read. Unused tail slots contain defaults
+/// and are excluded from indexed access and iteration by the logical length.
 #[derive(Clone, Debug)]
 pub(crate) struct PagedVec<T> {
-    pages: Arc<Vec<Arc<Vec<T>>>>,
+    pages: Arc<Vec<Arc<[T; PAGE_SIZE]>>>,
     len: usize,
 }
 impl<T> Default for PagedVec<T> {
@@ -53,10 +56,16 @@ impl<T> PagedVec<T> {
         self.pages.len() * PAGE_SIZE
     }
     pub(crate) fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len {
+            return None;
+        }
         self.pages.get(index / PAGE_SIZE)?.get(index % PAGE_SIZE)
     }
     pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        self.pages.iter().flat_map(|page| page.iter())
+        self.pages
+            .iter()
+            .flat_map(|page| page.iter())
+            .take(self.len)
     }
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn contains(&self, value: &T) -> bool
@@ -74,12 +83,14 @@ impl<T: Clone> PagedVec<T> {
         let pages = Arc::make_mut(&mut self.pages);
         Arc::make_mut(&mut pages[index / PAGE_SIZE]).get_mut(index % PAGE_SIZE)
     }
+}
+impl<T: Clone + Default> PagedVec<T> {
     pub(crate) fn push(&mut self, value: T) {
         let pages = Arc::make_mut(&mut self.pages);
         if self.len.is_multiple_of(PAGE_SIZE) {
-            pages.push(Arc::new(Vec::with_capacity(PAGE_SIZE)));
+            pages.push(Arc::new(std::array::from_fn(|_| T::default())));
         }
-        Arc::make_mut(pages.last_mut().expect("page allocated")).push(value);
+        Arc::make_mut(pages.last_mut().expect("page allocated"))[self.len % PAGE_SIZE] = value;
         self.len += 1;
     }
     pub(crate) fn pop(&mut self) -> Option<T> {
@@ -88,12 +99,12 @@ impl<T: Clone> PagedVec<T> {
         }
         let pages = Arc::make_mut(&mut self.pages);
         let page = Arc::make_mut(pages.last_mut().expect("nonempty pages"));
-        let value = page.pop();
-        if page.is_empty() {
+        self.len -= 1;
+        let value = std::mem::take(&mut page[self.len % PAGE_SIZE]);
+        if self.len.is_multiple_of(PAGE_SIZE) {
             pages.pop();
         }
-        self.len -= 1;
-        value
+        Some(value)
     }
 }
 impl<T> Index<usize> for PagedVec<T> {
@@ -107,7 +118,7 @@ impl<T: Clone> IndexMut<usize> for PagedVec<T> {
         self.get_mut(index).expect("node index in bounds")
     }
 }
-impl<T: Clone> FromIterator<T> for PagedVec<T> {
+impl<T: Clone + Default> FromIterator<T> for PagedVec<T> {
     fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
         let mut result = Self::default();
         for value in values {
@@ -118,13 +129,18 @@ impl<T: Clone> FromIterator<T> for PagedVec<T> {
 }
 impl<'a, T> IntoIterator for &'a PagedVec<T> {
     type Item = &'a T;
-    type IntoIter = std::iter::FlatMap<
-        std::slice::Iter<'a, Arc<Vec<T>>>,
-        std::slice::Iter<'a, T>,
-        fn(&'a Arc<Vec<T>>) -> std::slice::Iter<'a, T>,
+    type IntoIter = std::iter::Take<
+        std::iter::FlatMap<
+            std::slice::Iter<'a, Arc<[T; PAGE_SIZE]>>,
+            std::slice::Iter<'a, T>,
+            fn(&'a Arc<[T; PAGE_SIZE]>) -> std::slice::Iter<'a, T>,
+        >,
     >;
     fn into_iter(self) -> Self::IntoIter {
-        self.pages.iter().flat_map(|page| page.iter())
+        self.pages
+            .iter()
+            .flat_map(|page| page.iter())
+            .take(self.len)
     }
 }
 
@@ -181,7 +197,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct Counted(Rc<Cell<usize>>, usize);
     impl Clone for Counted {
         fn clone(&self) -> Self {
@@ -255,6 +271,56 @@ mod tests {
         copy.push(7);
         assert_eq!(copy[0], 7);
         assert_eq!(original.len(), PAGE_SIZE + 1);
+    }
+
+    #[test]
+    fn unused_tail_slots_are_inaccessible_and_do_not_leak_into_iteration() {
+        for length in [0, 1, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 1] {
+            let mut actual: PagedVec<_> = (1..=length).collect();
+            let snapshot = actual.clone();
+            assert_eq!(
+                actual.iter().copied().collect::<Vec<_>>(),
+                (1..=length).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                (&actual).into_iter().copied().collect::<Vec<_>>(),
+                (1..=length).collect::<Vec<_>>()
+            );
+            for index in [length, actual.capacity(), usize::MAX] {
+                assert!(actual.get(index).is_none());
+                assert!(actual.get_mut(index).is_none());
+            }
+            if length > 0 {
+                assert_eq!(actual.pop(), Some(length));
+                assert!(actual.get(length - 1).is_none());
+                assert!(actual.get_mut(length - 1).is_none());
+                assert_eq!(actual.iter().count(), length - 1);
+                assert_eq!(snapshot.get(length - 1), Some(&length));
+                actual.push(999);
+                assert_eq!(actual.get(length - 1), Some(&999));
+                assert_eq!(snapshot.get(length - 1), Some(&length));
+            }
+        }
+    }
+
+    #[test]
+    fn popped_payload_is_released_without_retaining_it_in_unused_tail() {
+        let value = Arc::new(7);
+        let mut actual: PagedVec<_> = [Some(value.clone()), Some(value.clone())]
+            .into_iter()
+            .collect();
+        let snapshot = actual.clone();
+        assert_eq!(Arc::strong_count(&value), 3);
+        let removed = actual.pop().unwrap();
+        assert_eq!(Arc::strong_count(&value), 5);
+        drop(removed);
+        assert_eq!(Arc::strong_count(&value), 4);
+        drop(snapshot);
+        assert_eq!(Arc::strong_count(&value), 2);
+        assert_eq!(actual.iter().count(), 1);
+        drop(actual.pop());
+        assert_eq!(Arc::strong_count(&value), 1);
+        assert!(actual.iter().next().is_none());
     }
 
     #[test]
