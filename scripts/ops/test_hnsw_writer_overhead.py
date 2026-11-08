@@ -7,8 +7,8 @@ import hosted_hnsw_writer_overhead as control
 import test_hnsw_completion_stage as completion
 
 
-def config(finish='commit'):
-    value = completion.configuration(finish=finish)
+def config(finish='commit', rows=1000):
+    value = completion.configuration(rows=rows, finish=finish)
     value['schema'] = 'alopex.hnsw-writer-overhead-input/v1'
     value['subjects'] = {'normal': value['subjects']['before'],
                          'diagnostic': value['subjects']['candidate']}
@@ -19,7 +19,22 @@ def config(finish='commit'):
                                timed_window_sha256='ee7954f21000fd9f121bd76812097fcf8135fb8b2c70398e805c9fce2b130025',
                                normal=dict(commit='normal', example_sha256='normal'),
                                diagnostic=dict(commit='diagnostic', example_sha256='diagnostic'))
+    if rows != 1000:
+        previous_result(value)
     return value
+
+
+def previous_result(value):
+    for role, subject in value['subjects'].items():
+        subject.setdefault('assets_digest', role)
+    raw = json.dumps(dict(schema='alopex.hnsw-writer-overhead/v1', status='passed',
+                          finish=value['finish'], stage_rows=contract.STAGES[contract.STAGES.index(value['rows']) - 1],
+                          completed_samples=10, owned_resources_cleaned=True,
+                          controller='a' * 40, performance_qualification=False,
+                          assets={role: s['assets_digest'] for role, s in value['subjects'].items()})).encode()
+    value['previous_stage'] = dict(run=1, controller='a' * 40, artifact_id=2,
+                                  artifact_digest='sha256:' + 'b' * 64, result_sha256=contract.sha(raw))
+    return raw
 
 
 class OverheadTests(unittest.TestCase):
@@ -78,16 +93,71 @@ class OverheadTests(unittest.TestCase):
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 contract.verify_sample(*args)
 
-    def test_fixed_small_stage_has_five_alternating_pairs(self):
+    def test_each_fixed_stage_has_five_alternating_pairs(self):
         for finish in ('commit', 'rollback'):
-            control.validate_config(config(finish))
-            cells = contract.plan(1000, finish)
-            self.assertEqual(len(cells), 10)
-            for sample in range(5):
-                self.assertEqual([c['subject'] for c in cells[2*sample:2*sample+2]],
-                                 ['normal', 'diagnostic'] if sample % 2 == 0 else ['diagnostic', 'normal'])
-        for rows in (2, 10000, 100000):
+            for rows in contract.STAGES:
+                control.validate_config(config(finish, rows))
+                cells = contract.plan(rows, finish)
+                self.assertEqual(len(cells), 10)
+                self.assertEqual({c['rows'] for c in cells}, {rows})
+                self.assertEqual(len({c['id'] for c in cells}), 10)
+                for sample in range(5):
+                    self.assertEqual([c['subject'] for c in cells[2*sample:2*sample+2]],
+                                     ['normal', 'diagnostic'] if sample % 2 == 0 else ['diagnostic', 'normal'])
+        for rows in (True, 2, 999, 1001, 10001, 100001):
             with self.assertRaises(ValueError): contract.plan(rows, 'commit')
+
+    def test_scaled_deadlines_and_resource_bounds_remain_fixed(self):
+        for size, seconds in ((1000, 120), (10000, 300), (100000, 900)):
+            value = config(rows=size)
+            self.assertEqual(control.validate_config(value)['limits']['case_seconds'], seconds)
+            for field in ('case_seconds', 'rss_bytes', 'runtime_bytes'):
+                changed = copy.deepcopy(value); changed['limits'][field] += 1
+                with self.subTest(size=size, field=field), self.assertRaises(ValueError):
+                    control.validate_config(changed)
+            value['stage_seconds'] += 1
+            with self.assertRaises(ValueError): control.validate_config(value)
+        value = config(rows=100000)
+        value['time_budget'] = 'fullscale-1800'
+        value['limits']['case_seconds'] = 1800
+        value['stage_seconds'] = 18420
+        control.validate_config(value)
+        for size in (1000, 10000):
+            value = config(rows=size); value['time_budget'] = 'fullscale-1800'
+            with self.assertRaises(ValueError): control.validate_config(value)
+
+    def test_predecessor_identity_is_required_only_after_first_stage(self):
+        first = config(); first['previous_stage'] = {}
+        with self.assertRaises(ValueError): control.validate_config(first)
+        for size in (10000, 100000):
+            for fault in ('missing', 'partial', 'run', 'artifact', 'controller', 'digest', 'result_digest'):
+                value = config(rows=size)
+                if fault == 'missing': value['previous_stage'] = None
+                if fault == 'partial': value['previous_stage'].pop('result_sha256')
+                if fault == 'run': value['previous_stage']['run'] = True
+                if fault == 'artifact': value['previous_stage']['artifact_id'] = 0
+                if fault == 'controller': value['previous_stage']['controller'] = 'wrong'
+                if fault == 'digest': value['previous_stage']['artifact_digest'] = 'wrong'
+                if fault == 'result_digest': value['previous_stage']['result_sha256'] = 'wrong'
+                with self.subTest(size=size, fault=fault), self.assertRaises(ValueError):
+                    control.validate_config(value)
+
+    def test_wrong_preceding_scale_mode_assets_or_cleanup_cannot_authorize_run(self):
+        for size in (10000, 100000):
+            for finish in ('commit', 'rollback'):
+                value = config(finish, size); raw = previous_result(value)
+                contract.verify_previous_stage(raw, value)
+                with self.assertRaises(ValueError): contract.verify_previous_stage(raw + b' ', value)
+                for field, replacement in (('schema', 'other'), ('status', 'failed'),
+                        ('stage_rows', size), ('finish', 'rollback' if finish == 'commit' else 'commit'),
+                        ('controller', 'c' * 40), ('completed_samples', 9),
+                        ('owned_resources_cleaned', False), ('owned_resources_cleaned', 1),
+                        ('assets', {}), ('performance_qualification', True), ('performance_qualification', 0)):
+                    result = json.loads(raw); result[field] = replacement
+                    altered = json.dumps(result).encode()
+                    changed = copy.deepcopy(value); changed['previous_stage']['result_sha256'] = contract.sha(altered)
+                    with self.subTest(size=size, finish=finish, field=field), self.assertRaises(ValueError):
+                        contract.verify_previous_stage(altered, changed)
 
     def test_build_or_timer_mismatch_cannot_enter_comparison(self):
         for fault in ('role', 'compiler', 'parser', 'lock', 'timer', 'source'):

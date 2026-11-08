@@ -3,7 +3,8 @@ import json
 import statistics
 
 from audit_native_sql_matrix import require, sha
-from hnsw_writer_overhead_contract import PHASES, TIMED_PHASES, plan, verify_sample
+from hnsw_writer_overhead_contract import (PHASES, TIMED_PHASES, plan, verify_sample,
+                                         validate_previous_stage, verify_previous_stage)
 
 
 def comparison(before, candidate):
@@ -20,6 +21,12 @@ def comparison(before, candidate):
 
 
 def audit(evidence, public, cleanup, config, controller):
+    validate_previous_stage(config)
+    if config.get('previous_stage') is not None:
+        require('previous-result.json' in evidence.members, 'previous stage evidence missing')
+        verify_previous_stage(evidence.read('previous-result.json'), config)
+    else:
+        require('previous-result.json' not in evidence.members, 'unexpected previous stage evidence')
     finish = config['finish']
     require(finish in ('commit', 'rollback'), 'explicit completion mode required')
     phases = (*PHASES[:-1], finish)

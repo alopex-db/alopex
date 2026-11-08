@@ -2,12 +2,13 @@
 import hashlib
 import json
 from pathlib import PurePosixPath
+import re
 import statistics
 
 PHASES = ('seed', 'index_build', 'cold_transaction_1', 'cold_transaction_2', 'warm',
           'writer_begin', 'first_insert', 'second_insert', 'rollback')
 TIMED_PHASES = tuple(p for p in PHASES if p not in ('warm', 'rollback'))
-STAGES = (1000,)
+STAGES = (1000, 10000, 100000)
 BASELINE_ENGINE = '5e05f0149e93e92455e59fe8c3a4cdfbec19e578'
 CANDIDATE_ENGINE = '635d217d7dda9d42aafcce24aa8076463fa873b3'
 CANDIDATE_SOURCES = {
@@ -45,6 +46,43 @@ def plan(rows, finish):
                  sample=sample, subject=subject)
             for sample in range(5)
             for subject in (('normal', 'diagnostic') if sample % 2 == 0 else ('diagnostic', 'normal'))]
+
+
+def validate_previous_stage(config):
+    plan(config['rows'], config['finish'])
+    previous = config.get('previous_stage')
+    require((previous is None) == (config['rows'] == STAGES[0]),
+            'previous stage evidence required')
+    if previous is None:
+        return
+    require(isinstance(previous, dict) and set(previous) == {
+        'run', 'controller', 'artifact_id', 'artifact_digest', 'result_sha256'},
+        'previous stage identity fields differ')
+    for field in ('run', 'artifact_id'):
+        require(type(previous[field]) is int and previous[field] > 0,
+                'previous stage numeric identity differs')
+    for field, pattern in (('controller', '[0-9a-f]{40}'),
+                           ('artifact_digest', 'sha256:[0-9a-f]{64}'),
+                           ('result_sha256', '[0-9a-f]{64}')):
+        require(isinstance(previous[field], str) and re.fullmatch(pattern, previous[field]),
+                'previous stage digest identity differs')
+
+
+def verify_previous_stage(raw, config):
+    validate_previous_stage(config)
+    previous = config['previous_stage']
+    require(previous is not None and sha(raw) == previous['result_sha256'],
+            'previous stage digest differs')
+    expected = dict(schema='alopex.hnsw-writer-overhead/v1', status='passed',
+                    finish=config['finish'], stage_rows=STAGES[STAGES.index(config['rows']) - 1],
+                    completed_samples=10, owned_resources_cleaned=True,
+                    controller=previous['controller'], performance_qualification=False,
+                    assets={role: subject['assets_digest'] for role, subject in config['subjects'].items()})
+    result = json.loads(raw)
+    require(isinstance(result, dict) and result == expected
+            and result['owned_resources_cleaned'] is True
+            and result['performance_qualification'] is False,
+            'previous stage is not the same completed comparison')
 
 
 def regular(root, relative):

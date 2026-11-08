@@ -10,7 +10,8 @@ import sys
 import tarfile
 import time
 
-from hnsw_writer_overhead_contract import engine_contract, plan, require, sha, verify_assets, verify_sample
+from hnsw_writer_overhead_contract import (engine_contract, plan, require, sha, verify_assets,
+                                         verify_sample, validate_previous_stage, verify_previous_stage)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,7 +20,11 @@ def validate_config(config):
     require(config['schema'] == 'alopex.hnsw-writer-overhead-input/v1' and set(config['subjects']) == {'normal','diagnostic'},
             'stage configuration differs')
     plan(config['rows'], config['finish'])
-    case_seconds = 120
+    time_budget = config.get('time_budget', 'original')
+    require(time_budget in ('original', 'fullscale-1800')
+            and (time_budget != 'fullscale-1800' or config['rows'] == 100000),
+            'time budget does not match selected stage')
+    case_seconds = 1800 if time_budget == 'fullscale-1800' else {1000:120,10000:300,100000:900}[config['rows']]
     require(config['limits'] == dict(case_seconds=case_seconds,
                                      rss_bytes=4*1024**3, runtime_bytes=5_000_000_000)
             and type(config['cpu_count']) is int and 1 <= config['cpu_count'] <= 64,
@@ -35,7 +40,7 @@ def validate_config(config):
             and config['timing_pair']['diagnostic'] == {'commit': diagnostic['source_commit'], 'example_sha256': diagnostic['example_source_sha256']}
             and config['timing_pair']['timed_window_sha256'] == 'ee7954f21000fd9f121bd76812097fcf8135fb8b2c70398e805c9fce2b130025',
             'matched timer sources differ')
-    require(config.get('previous_stage') is None, 'overhead calibration has no preceding scale stage')
+    validate_previous_stage(config)
     return config
 
 
@@ -104,6 +109,14 @@ def main():
             download(expected, 'native-hnsw-writer-diagnostic-assets' if expected['diagnostic'] else 'native-hnsw-example-assets', imports[role])
             paths[role]=verify_assets(imports[role],expected)
             paths[role]['binary'].chmod(0o700)
+        previous = config.get('previous_stage')
+        if previous is not None:
+            previous_import = ROOT/'hnsw-previous-import'
+            download(previous, 'native-hnsw-writer-overhead', previous_import)
+            raw = (previous_import/'result.json').read_bytes()
+            verify_previous_stage(raw, config)
+            # Preserve the exact bytes for independent reconstruction after cleanup.
+            (work/'previous-result.json').write_bytes(raw)
         expected_instrument=config['instrument']
         for name,field in (('scripts/performance/issue681_manual.py','runner_sha256'),
                            ('scripts/performance/phase_rss.py','phase_rss_source_sha256'),
@@ -160,7 +173,7 @@ def main():
         subprocess.run(['openssl','cms','-encrypt','-aes-256-cbc','-binary','-outform','DER','-in',str(archive),
                         '-out',str(export/'private-evidence.cms'),str(ROOT/'.github/ops/native-evidence-cert.pem')],
                        capture_output=True,check=True,timeout=30)
-        for path in imports.values():
+        for path in [*imports.values(), ROOT/'hnsw-previous-import']:
             if path.exists():shutil.rmtree(path)
         shutil.rmtree(work)
         final=budget.check()

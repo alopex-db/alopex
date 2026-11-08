@@ -16,15 +16,21 @@ class MemoryEvidence:
 
 
 class AuditTests(unittest.TestCase):
-    def fixture(self, finish="commit", sample_fixture=None):
+    def fixture(self, finish="commit", sample_fixture=None, stage_rows=1000):
         sample_fixture = sample_fixture or fixture_source.OverheadTests().fixture
         ev = MemoryEvidence(); rows = []
         original = sample_fixture(finish)
-        config = dict(finish=finish, rows=1000, cpu_count=2, limits=original[-1], instrument=original[-3],
+        config = dict(finish=finish, rows=stage_rows, cpu_count=2, limits=original[-1], instrument=original[-3],
                       subjects={s:dict(sample_fixture(finish, s)[4], assets_digest=s) for s in ('normal','diagnostic')})
-        for cell in plan(1000, finish):
+        config['limits']['case_seconds'] = {1000:120,10000:300,100000:900}[stage_rows]
+        if stage_rows != 1000:
+            ev.put('previous-result.json', fixture_source.previous_result(config))
+        for cell in plan(stage_rows, finish):
             args = list(sample_fixture(finish, cell['subject'])); args[3] = cell
             identity, summary, events = args[:3]
+            args[-1] = config['limits']
+            identity.update(rows=stage_rows, timeout_seconds=config['limits']['case_seconds'])
+            events[0]['data']['rows'] = stage_rows
             contents = {'output/identity.json':identity, 'output/summary.json':summary,
                         'output/events.jsonl':b'\n'.join(json.dumps(e).encode() for e in events),
                         'output/rss.jsonl':b'', 'output/stderr.log':b'', 'runner.log':b''}
@@ -32,9 +38,9 @@ class AuditTests(unittest.TestCase):
             for name, value in contents.items():
                 key=cell['id']+'/'+name; ev.put(key,value); hashes[name]=sha(ev.read(key))
             rows.append(dict(cell,status='passed',files=hashes,values=verify_sample(*args)))
-        ev.put('plan.json',dict(configuration=config,controller='controller',cells=plan(1000, finish),affinity=[0,1]))
+        ev.put('plan.json',dict(configuration=config,controller='controller',cells=plan(stage_rows, finish),affinity=[0,1]))
         ev.put('results.json',rows);ev.put('progress.json',rows);ev.put('storage-before.json',dict(allocated_bytes=100))
-        public=dict(schema='alopex.hnsw-writer-overhead/v1',finish=finish,status='passed',stage_rows=1000,controller='controller',
+        public=dict(schema='alopex.hnsw-writer-overhead/v1',finish=finish,status='passed',stage_rows=stage_rows,controller='controller',
                     completed_samples=10,owned_resources_cleaned=True,assets={'normal':'normal','diagnostic':'diagnostic'},
                     performance_qualification=False)
         cleanup=dict(imports_removed=True,raw_work_removed=True,restored_affinity=[0,1],allocated_bytes=100)
@@ -54,6 +60,38 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(result['comparisons']['elapsed_ns'][finish]['normal'], [321] * 5)
             self.assertEqual(result['comparisons']['elapsed_ns'][finish]['diagnostic'], [321] * 5)
             self.assertTrue(result['writer_internal'])
+
+    def test_scaled_raw_evidence_reconstructs_both_engines_and_finishes(self):
+        for size in (10000, 100000):
+            for finish in ('commit', 'rollback'):
+                for source in (None, fixture_source.candidate_fixture):
+                    with self.subTest(size=size, finish=finish, candidate=source is not None):
+                        result = audit(*self.fixture(finish, source, size))
+                        self.assertEqual(result['stage_rows'], size)
+                        self.assertEqual(result['completed_samples'], 10)
+                        self.assertEqual(len(result['writer_internal']), 5)
+
+    def test_missing_tampered_or_wrong_preceding_stage_rejected_independently(self):
+        for fault in ('missing', 'hash', 'stage', 'finish', 'assets'):
+            args = self.fixture(stage_rows=10000); evidence, _, _, config, _ = args
+            if fault == 'missing':
+                del evidence.members['previous-result.json']
+            elif fault == 'hash':
+                evidence.put('previous-result.json', b'{}')
+            else:
+                raw = evidence.json('previous-result.json')
+                if fault == 'stage': raw['stage_rows'] = 100000
+                if fault == 'finish': raw['finish'] = 'rollback'
+                if fault == 'assets': raw['assets']['normal'] = 'other'
+                evidence.put('previous-result.json', raw)
+                config['previous_stage']['result_sha256'] = sha(evidence.read('previous-result.json'))
+                frozen = evidence.json('plan.json'); frozen['configuration'] = config
+                evidence.put('plan.json', frozen)
+            with self.subTest(fault=fault), self.assertRaises(ValueError): audit(*args)
+
+    def test_first_stage_cannot_claim_a_predecessor(self):
+        args = self.fixture(); args[0].put('previous-result.json', {})
+        with self.assertRaises(ValueError): audit(*args)
 
     def test_candidate_cache_fault_rejected_even_with_recomputed_raw_hash(self):
         args = self.fixture(sample_fixture=fixture_source.candidate_fixture)

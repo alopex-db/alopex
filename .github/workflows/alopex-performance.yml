@@ -19,7 +19,7 @@ concurrency:
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 50
+    timeout-minutes: 350
     steps:
       - name: Prepare source within the measured VM work budget
         env:
