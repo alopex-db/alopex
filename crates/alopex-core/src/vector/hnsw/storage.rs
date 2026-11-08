@@ -340,6 +340,7 @@ impl HnswStorage {
             max_level: metadata.max_level,
             config: metadata.config,
             kernel: select_kernel(),
+            cosine_kernel: super::cosine::CosineKernel::select(),
             free_list,
             active_count: metadata.node_count,
             deleted_count: metadata.deleted_count,

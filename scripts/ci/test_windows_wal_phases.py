@@ -17,6 +17,13 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("windows-wal-contract.py")
 WORKFLOW = SCRIPT.parents[2] / ".github/workflows/ci.yml"
+COSINE_RESULTS = "".join(
+    f"test vector::hnsw::cosine::tests::{name} ... ok\n" for name in (
+        "finite_vectors_match_scalar_bits",
+        "known_scores_preserve_reduction_order_tails_and_clamping",
+        "tails_unaligned_slices_and_zero_norm_preserve_bits",
+    )
+) + "HNSW_COSINE_KERNEL=avx\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 682 filtered out\n"
 
 
 class WindowsPhaseTests(unittest.TestCase):
@@ -30,6 +37,7 @@ class WindowsPhaseTests(unittest.TestCase):
                 for n in range(1, 40)
             )
         outputs = {
+            "hnsw-cosine-kernel": COSINE_RESULTS,
             "hnsw-scoring-dispatch": (
                 "test vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics ... ok\n"
                 "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out\n"
@@ -159,6 +167,30 @@ class WindowsPhaseTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", block)
         self.assertLess(build.index("--phase hnsw-contracts"), build.index("Clean Windows validation outputs"))
         self.assertIn("if: always() && runner.os == 'Windows'", build.split("Clean Windows validation outputs", 1)[1])
+
+    def test_cosine_requires_all_named_cases_and_runtime_kernel(self):
+        name = "hnsw-cosine-kernel"
+        calls, error = self.execute("hnsw-contracts")
+        self.assertIsNone(error)
+        self.assertEqual(dict(calls)[name][-2:], ["--", "--show-output"])
+        for original, replacement in (
+            ("finite_vectors_match_scalar_bits", "unrelated"),
+            ("3 passed", "13 passed"),
+            ("3 passed; 0 failed; 0 ignored", "2 passed; 0 failed; 1 ignored"),
+            ("... ok", "... FAILED"),
+            ("HNSW_COSINE_KERNEL=avx\n", ""),
+            ("HNSW_COSINE_KERNEL=avx", "HNSW_COSINE_KERNEL=unknown"),
+        ):
+            with self.subTest(original=original):
+                calls, error = self.execute("hnsw-contracts", output_overrides={
+                    name: COSINE_RESULTS.replace(original, replacement, 1),
+                })
+                self.assertIsNotNone(error)
+                self.assertEqual(calls[-1][0], name)
+        _, error = self.execute("hnsw-contracts", output_overrides={
+            name: COSINE_RESULTS.replace("=avx", "=scalar"),
+        })
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

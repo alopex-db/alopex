@@ -3,6 +3,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashSet};
 
+use super::cosine::CosineKernel;
 use super::cow::{KeyMap, PagedVec, SharedNode};
 use super::types::{HnswConfig, HnswNode, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 use crate::vector::simd::{select_kernel, DistanceKernel};
@@ -23,6 +24,7 @@ pub struct HnswGraph {
     pub(crate) max_level: usize,
     pub(crate) config: HnswConfig,
     pub(crate) kernel: Box<dyn DistanceKernel>,
+    pub(super) cosine_kernel: CosineKernel,
     pub(crate) free_list: PagedVec<u32>,
     pub(crate) active_count: u64,
     pub(crate) deleted_count: u64,
@@ -40,6 +42,7 @@ impl Clone for HnswGraph {
             max_level: self.max_level,
             config: self.config.clone(),
             kernel: select_kernel(),
+            cosine_kernel: CosineKernel::select(),
             free_list: self.free_list.clone(),
             active_count: self.active_count,
             deleted_count: self.deleted_count,
@@ -61,6 +64,7 @@ impl HnswGraph {
             entry_point: None,
             max_level: 0,
             kernel: select_kernel(),
+            cosine_kernel: CosineKernel::select(),
             config,
             free_list: PagedVec::default(),
             active_count: 0,
@@ -672,7 +676,8 @@ impl HnswGraph {
         match self.config.metric {
             Metric::Cosine => {
                 self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
-                    cosine_similarity(query.values, &node.vector, query.norm, node.norm)
+                    self.cosine_kernel
+                        .score(query.values, &node.vector, query.norm, node.norm)
                 })
             }
             Metric::L2 => {
@@ -1032,7 +1037,10 @@ impl HnswGraph {
             return f64::NEG_INFINITY;
         };
         match self.config.metric {
-            Metric::Cosine => cosine_similarity(&left.vector, &right.vector, left.norm, right.norm),
+            Metric::Cosine => {
+                self.cosine_kernel
+                    .score(&left.vector, &right.vector, left.norm, right.norm)
+            }
             Metric::L2 => f64::from(self.kernel.l2(&left.vector, &right.vector)),
             Metric::InnerProduct => {
                 f64::from(self.kernel.inner_product(&left.vector, &right.vector))
@@ -1055,7 +1063,8 @@ impl HnswGraph {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
             return match self.config.metric {
                 Metric::Cosine => {
-                    cosine_similarity(query.values, &node.vector, query.norm, node.norm)
+                    self.cosine_kernel
+                        .score(query.values, &node.vector, query.norm, node.norm)
                 }
                 Metric::L2 => f64::from(self.kernel.l2(query.values, &node.vector)),
                 Metric::InnerProduct => {
@@ -1073,27 +1082,6 @@ impl HnswGraph {
             Metric::L2 | Metric::InnerProduct => -score as f32,
         }
     }
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32], left_norm: f64, right_norm: f64) -> f64 {
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return 0.0;
-    }
-    let length = left.len().min(right.len());
-    let (left_chunks, left_remainder) = left[..length].as_chunks::<4>();
-    let (right_chunks, right_remainder) = right[..length].as_chunks::<4>();
-    let (mut dot0, mut dot1, mut dot2, mut dot3) = (0.0, 0.0, 0.0, 0.0);
-    for (left, right) in left_chunks.iter().zip(right_chunks) {
-        dot0 += f64::from(left[0]) * f64::from(right[0]);
-        dot1 += f64::from(left[1]) * f64::from(right[1]);
-        dot2 += f64::from(left[2]) * f64::from(right[2]);
-        dot3 += f64::from(left[3]) * f64::from(right[3]);
-    }
-    let mut dot = dot0 + dot1 + dot2 + dot3;
-    for (&a, &b) in left_remainder.iter().zip(right_remainder) {
-        dot += f64::from(a) * f64::from(b);
-    }
-    (dot / (left_norm * right_norm)).clamp(-1.0, 1.0)
 }
 
 #[derive(Clone, Copy)]
@@ -1217,11 +1205,15 @@ mod scoring_dispatch_tests {
                     };
                     let mut expected_stats = actual_stats.clone();
                     let actual = graph.search_layer(prepared, 0, level, ef, &hints, Some(&mut actual_stats));
-                    // The unchanged dynamic scorer is still used by greedy
-                    // traversal. Compare exact score bits, including signed
-                    // zero, as well as ordering and the public counters.
+                    // Compare Cosine against the original scalar arithmetic,
+                    // and other metrics against the dynamic greedy scorer.
+                    // Include exact score bits, ordering and public counters.
                     let expected = graph.search_layer_with_score(0, level, ef, &hints, Some(&mut expected_stats), |node| {
-                        graph.distance_to_node(prepared, Some(node), &mut SearchStats::default())
+                        if metric == Metric::Cosine {
+                            super::super::cosine::scalar(prepared.values, &node.vector, prepared.norm, node.norm)
+                        } else {
+                            graph.distance_to_node(prepared, Some(node), &mut SearchStats::default())
+                        }
                     });
                     prop_assert_eq!(&actual, &expected);
                     prop_assert_eq!(actual_stats.nodes_visited, expected_stats.nodes_visited);
