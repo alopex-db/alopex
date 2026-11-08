@@ -2,6 +2,7 @@
 
 mod cow;
 mod graph;
+mod search_phase_probe;
 mod stats;
 mod storage;
 mod types;
