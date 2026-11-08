@@ -1,4 +1,4 @@
-name: Tiny WAL public API costs
+name: Fixed plain CSV comparison
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +6,7 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      wal_cost_config:
+      csv_config:
         description: Fixed comparison configuration
         required: true
         type: string
@@ -14,12 +14,12 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-wal-cost
+  group: alopex-v0817-csv-comparison
   cancel-in-progress: false
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 95
+    timeout-minutes: 100
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -86,16 +86,17 @@ jobs:
       - name: Run source-pinned comparison
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WAL_COST_CONFIG: ${{ inputs.wal_cost_config }}
+          ALOPEX_MANUAL_CSV: "1"
+          CSV_CONFIG: ${{ inputs.csv_config }}
           RUNNER_KIND: ${{ runner.environment }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_wal_cost.py
+        run: python3 -B scripts/ops/hosted_csv_comparison.py
       - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wal-public-cost
-          path: wal-cost-export/
+          name: csv-comparison
+          path: csv-comparison-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
