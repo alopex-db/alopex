@@ -17,7 +17,9 @@ from alopex import TxnMode, _alopex
 from publication_python import expected_error, open_db, verify, verify_indexes
 from spool_os_write import pending
 
-STAGES = ("spool", "directory", "reference_append", "reference_force")
+# Public overflow transactions use EveryWrite: the reference append itself is
+# synchronous. Other SyncModes' forced-sync fallback is covered by Rust tests.
+STAGES = ("spool", "directory", "reference_append")
 SYNC = re.compile(r"^(fsync|fdatasync)\(\d+<([^>]+)>\)\s+= (.+)$")
 
 
@@ -87,11 +89,11 @@ def select_target(events, path, stage):
     elif stage == "directory":
         matches = [e for e in commit if e["syscall"] == "fsync"
                    and e["path"] == sidecar + "/overflow"]
-    else:
+    elif stage == "reference_append":
         matches = [e for e in commit if e["syscall"] == "fdatasync"
                    and e["path"] == sidecar + "/lsm.wal"]
-        assert len(matches) == 2, matches
-        matches = [matches[0 if stage == "reference_append" else 1]]
+    else:
+        raise ValueError("unknown sync boundary")
     assert len(matches) == 1 and matches[0]["result"] == "0", matches
     return matches[0]
 

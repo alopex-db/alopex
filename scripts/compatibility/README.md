@@ -461,8 +461,10 @@ version supporting `-yy` and `inject=...:error=EIO:when=...`.
 "$PYTHON" scripts/compatibility/sync_syscall.py --case kv-spool --output "$ONE_OUTPUT"
 ```
 
-Eight cases cover KV/SQL and four sync boundaries: spool `fsync`, publication
-directory `fsync`, reference append `fdatasync`, and forced `fdatasync`.
+Six cases cover KV/SQL and three sync boundaries: spool `fsync`, publication
+directory `fsync`, and reference append `fdatasync`. EveryWrite makes the
+reference durable during append; it does not issue a second forced sync.
+The NoSync/BatchSync forced-sync fallback is covered by focused Rust tests.
 Each case first calibrates a successful commit on a separate three-record
 fixture. Its trace identifies the syscall ordinal and decoded file path inside
 the marked commit interval. The fault trace must contain exactly one injected

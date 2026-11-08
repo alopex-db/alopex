@@ -84,6 +84,63 @@ fn inline_synced_forces_durability_for_every_sync_mode() {
 }
 
 #[test]
+fn spool_synced_once_when_append_or_force_provides_durability() {
+    for mode in [
+        SyncMode::EveryWrite,
+        SyncMode::NoSync,
+        SyncMode::BatchSync {
+            max_batch_size: usize::MAX,
+            max_wait_ms: u64::MAX,
+        },
+    ] {
+        let mut f = Fixture::new();
+        f.config.sync_mode = mode;
+        let mut writer = f.writer();
+        reset_sync_calls();
+        append(&mut writer, &f, 1).unwrap();
+        assert_eq!(sync_calls(), 1, "reference must be synced exactly once");
+        let (_, payload, lsns) = f.recover(0).unwrap();
+        assert_eq!(payload, b"abc");
+        assert_eq!(lsns, vec![1]);
+    }
+}
+
+#[test]
+fn spool_synced_uncertain_outcomes_poison_each_sync_mode() {
+    for mode in [
+        SyncMode::EveryWrite,
+        SyncMode::NoSync,
+        SyncMode::BatchSync {
+            max_batch_size: usize::MAX,
+            max_wait_ms: u64::MAX,
+        },
+    ] {
+        for boundary in [4, 5, 8] {
+            let mut f = Fixture::new();
+            f.config.sync_mode = mode.clone();
+            let mut writer = f.writer();
+            reset_sync_calls();
+            assert!(stage(boundary, || append(&mut writer, &f, 1)).is_err());
+            let expected_syncs = usize::from(
+                boundary == 8 || (boundary == 5 && matches!(mode, SyncMode::EveryWrite)),
+            );
+            assert_eq!(sync_calls(), expected_syncs);
+            assert!(append(&mut writer, &f, 2).is_err());
+            assert!(writer.force_sync().is_err());
+            assert_eq!(sync_calls(), expected_syncs);
+            let (_, payload, lsns) = f.recover(0).unwrap();
+            if boundary == 4 {
+                assert!(payload.is_empty());
+                assert!(lsns.is_empty());
+            } else {
+                assert_eq!(payload, b"abc");
+                assert_eq!(lsns, vec![1]);
+            }
+        }
+    }
+}
+
+#[test]
 fn inline_synced_uncertain_outcome_poisoning_preserves_replay() {
     for boundary in [9, 10] {
         let f = Fixture::new();
