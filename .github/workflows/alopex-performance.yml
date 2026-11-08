@@ -1,4 +1,4 @@
-name: Tiny WAL public API costs
+name: Tiny WAL commit diagnosis
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 95
+    timeout-minutes: 30
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -89,13 +89,13 @@ jobs:
           WAL_COST_CONFIG: ${{ inputs.wal_cost_config }}
           RUNNER_KIND: ${{ runner.environment }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_wal_cost.py
+        run: python3 -B scripts/ops/hosted_wal_diagnostic.py
       - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wal-public-cost
-          path: wal-cost-export/
+          name: wal-commit-diagnostic
+          path: wal-diagnostic-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

@@ -22,7 +22,7 @@ def require(value, message):
 
 def trace_command(command, destination):
     require(command and all(isinstance(arg, str) and arg for arg in command), "invalid child command")
-    return ["strace", "-f", "-qq", "-ttt", "-T", "-yy", "-s", "128", "-o", str(destination),
+    return ["strace", "-f", "-q", "-ttt", "-T", "-yy", "-s", "128", "-o", str(destination),
             "-e", "trace=" + ",".join(CALLS), "--", *command]
 
 
@@ -176,7 +176,7 @@ def summarize_trace(text, database):
         total = totals.setdefault(key, dict(count=0, duration_ns=0))
         total["count"] += 1
         total["duration_ns"] += event["duration_ns"]
-    return dict(events=selected, totals=totals, marker_interval_ns=right-left,
+    return dict(events=selected, totals=totals, marker_interval_ns=right-left, marker_pid=begin["pid"],
                 performance_acceptance=False,
                 scope="strace-observed syscall durations including tracing/scheduling effects; "
                       "cross-thread sums are not elapsed wall time or physical device latency")
