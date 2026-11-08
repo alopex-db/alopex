@@ -1,4 +1,4 @@
-name: Private collector timer repair validation
+name: Continuous HNSW search sampling
 on:
   workflow_dispatch:
     inputs:
@@ -6,8 +6,8 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      profiler_probe_config:
-        description: Source-pinned capability configuration
+      hnsw_search_sampling_config:
+        description: Fixed comparison configuration
         required: true
         type: string
 permissions:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 15
+    timeout-minutes: 100
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -83,19 +83,21 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Verify capability probe contracts
-        run: PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_build_gprofng_timer_probe -v
-      - name: Build and verify the private clock collector
+      - name: Run source-pinned comparison
         env:
-          PROFILER_PROBE_CONFIG: ${{ inputs.profiler_probe_config }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALOPEX_MANUAL_HNSW_SEARCH: "1"
+          ALOPEX_MANUAL_HNSW_SEARCH_SAMPLING: "1"
+          HNSW_SEARCH_SAMPLING_CONFIG: ${{ inputs.hnsw_search_sampling_config }}
           RUNNER_KIND: ${{ runner.environment }}
-        run: python3 -B scripts/ops/build_gprofng_timer_probe.py
-      - name: Preserve encrypted capability evidence
+        shell: bash
+        run: python3 -B scripts/ops/hosted_hnsw_search_sampling.py
+      - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-collector-timer-repair
-          path: collector-repair-export/
+          name: hnsw-search-sampling
+          path: hnsw-search-sampling-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
