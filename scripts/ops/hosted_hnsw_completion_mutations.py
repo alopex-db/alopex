@@ -16,6 +16,17 @@ import tomllib
 import urllib.request
 
 
+def parser_request(url):
+    """Read the same hash-pinned release asset through its public API ID."""
+    if re.fullmatch(r"https://api\.github\.com/repos/alopex-db/alopex/releases/assets/[1-9][0-9]*", url):
+        return urllib.request.Request(url, headers={
+            "Accept": "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28"})
+    if re.fullmatch(r"https://github\.com/alopex-db/alopex/releases/download/"
+                    r"(?:v0\.8\.16|alopex-py-v0\.8\.16)/[A-Za-z0-9._-]+", url):
+        return urllib.request.Request(url)
+    raise ValueError("parser asset URL outside release policy")
+
+
 def validate_storage_boundary(scratch, disk, roots, disk_bytes):
     counted = [path.resolve() for path in roots]
     if (type(disk_bytes) is not int or not 0 < disk_bytes < 40_000_000_000 or
@@ -108,12 +119,10 @@ def main():
         budget.before(phase)
         budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
     def fetch(url, output, expected, limit):
-        require(any(url.startswith(prefix) for prefix in (
-            "https://github.com/alopex-db/alopex/releases/download/v0.8.16/",
-            "https://github.com/alopex-db/alopex/releases/download/alopex-py-v0.8.16/")), "POLICY")
+        request = parser_request(url)
         budget.before("prepare")
         received = 0
-        with urllib.request.urlopen(url, timeout=30) as response, output.open("xb") as stream:
+        with urllib.request.urlopen(request, timeout=30) as response, output.open("xb") as stream:
             while chunk := response.read(65536):
                 received += len(chunk)
                 require(received <= limit, "CAPACITY")
