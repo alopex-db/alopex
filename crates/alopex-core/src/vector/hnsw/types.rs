@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::cow::SharedSlice;
 use crate::vector::Metric;
 use crate::{Error, Result};
 
@@ -145,15 +146,15 @@ pub struct InsertStats {
 #[derive(Clone, Debug)]
 pub(crate) struct HnswNode {
     /// External key for the vector.
-    pub key: Vec<u8>,
+    pub key: SharedSlice<u8>,
     /// Vector payload.
-    pub vector: Vec<f32>,
+    pub vector: SharedSlice<f32>,
     /// Cached L2 norm for cosine scoring.
     pub norm: f64,
     /// Metadata blob associated with the vector.
-    pub metadata: Vec<u8>,
+    pub metadata: SharedSlice<u8>,
     /// Adjacency lists per level (level -> node IDs).
-    pub neighbors: Vec<Vec<u32>>,
+    pub neighbors: SharedSlice<Vec<u32>>,
     /// Logical deletion marker.
     pub deleted: bool,
 }

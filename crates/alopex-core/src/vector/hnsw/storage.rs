@@ -297,11 +297,11 @@ impl HnswStorage {
                 let norm = super::vector_norm(&node_data.vector);
                 nodes.push(Some(
                     HnswNode {
-                        key: node_data.key,
-                        vector: node_data.vector,
+                        key: node_data.key.into(),
+                        vector: node_data.vector.into(),
                         norm,
-                        metadata: node_data.metadata,
-                        neighbors: node_data.neighbors,
+                        metadata: node_data.metadata.into(),
+                        neighbors: node_data.neighbors.into(),
                         deleted: node_data.deleted,
                     }
                     .into(),
@@ -402,10 +402,10 @@ impl HnswStorage {
         #[cfg(all(test, not(target_arch = "wasm32")))]
         SERIALIZED_NODES.with(|count| count.set(count.get() + 1));
         HnswNodeData {
-            key: node.key.clone(),
-            vector: node.vector.clone(),
-            metadata: node.metadata.clone(),
-            neighbors: node.neighbors.clone(),
+            key: node.key.to_vec(),
+            vector: node.vector.to_vec(),
+            metadata: node.metadata.to_vec(),
+            neighbors: node.neighbors.to_vec(),
             deleted: node.deleted,
             level: node.neighbors.len().saturating_sub(1),
         }

@@ -13,11 +13,56 @@ const KEY_SHARDS: usize = 256;
 type Page<T> = Arc<[T; PAGE_SIZE]>;
 type PageSlot<T> = Option<Page<T>>;
 
+/// Contiguous payload shared by node headers; mutable access detaches it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SharedSlice<T>(Arc<[T]>);
+impl<T> From<Vec<T>> for SharedSlice<T> {
+    fn from(value: Vec<T>) -> Self {
+        Self(value.into())
+    }
+}
+impl<T: Clone> From<&[T]> for SharedSlice<T> {
+    fn from(value: &[T]) -> Self {
+        Self(value.into())
+    }
+}
+impl<T> SharedSlice<T> {
+    pub(crate) fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+impl<T> Deref for SharedSlice<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<T: Clone> DerefMut for SharedSlice<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+impl<'a, T> IntoIterator for &'a SharedSlice<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl<'a, T: Clone> IntoIterator for &'a mut SharedSlice<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.deref_mut().iter_mut()
+    }
+}
+
+/// The header lives in its page; cloning shares each separately owned payload.
 #[derive(Clone, Debug)]
-pub(crate) struct SharedNode(Arc<HnswNode>);
+pub(crate) struct SharedNode(HnswNode);
 impl From<HnswNode> for SharedNode {
     fn from(node: HnswNode) -> Self {
-        Self(Arc::new(node))
+        Self(node)
     }
 }
 impl Deref for SharedNode {
@@ -28,7 +73,7 @@ impl Deref for SharedNode {
 }
 impl DerefMut for SharedNode {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.0)
+        &mut self.0
     }
 }
 
@@ -252,11 +297,11 @@ mod tests {
     fn node_page_detachment_does_not_copy_unmodified_payloads() {
         let node = || {
             SharedNode::from(HnswNode {
-                key: b"a".to_vec(),
-                vector: vec![1.0, 2.0],
+                key: b"a".to_vec().into(),
+                vector: vec![1.0, 2.0].into(),
                 norm: 5.0_f64.sqrt(),
-                metadata: vec![3],
-                neighbors: vec![vec![]],
+                metadata: vec![3].into(),
+                neighbors: vec![vec![]].into(),
                 deleted: false,
             })
         };
@@ -264,14 +309,58 @@ mod tests {
         let mut copy = original.clone();
         copy[0].as_mut().unwrap().deleted = true;
         assert!(!original[0].as_ref().unwrap().deleted);
-        assert!(!Arc::ptr_eq(
-            &original[0].as_ref().unwrap().0,
-            &copy[0].as_ref().unwrap().0
-        ));
+        for index in 0..2 {
+            let old = original[index].as_ref().unwrap();
+            let new = copy[index].as_ref().unwrap();
+            assert!(Arc::ptr_eq(&old.vector.0, &new.vector.0));
+            assert!(Arc::ptr_eq(&old.key.0, &new.key.0));
+            assert!(Arc::ptr_eq(&old.metadata.0, &new.metadata.0));
+            assert!(Arc::ptr_eq(&old.neighbors.0, &new.neighbors.0));
+        }
+        copy[0].as_mut().unwrap().neighbors[0].push(1);
+        assert!(original[0].as_ref().unwrap().neighbors[0].is_empty());
+        assert_eq!(copy[0].as_ref().unwrap().neighbors[0], vec![1]);
         assert!(Arc::ptr_eq(
-            &original[1].as_ref().unwrap().0,
-            &copy[1].as_ref().unwrap().0
+            &original[0].as_ref().unwrap().vector.0,
+            &copy[0].as_ref().unwrap().vector.0
         ));
+        assert!(!Arc::ptr_eq(
+            &original[0].as_ref().unwrap().neighbors.0,
+            &copy[0].as_ref().unwrap().neighbors.0
+        ));
+    }
+
+    #[test]
+    fn shared_slice_mutation_detaches_once_and_preserves_snapshot() {
+        let clones = Rc::new(Cell::new(0));
+        let original: SharedSlice<_> = (0..3)
+            .map(|i| Counted(clones.clone(), i))
+            .collect::<Vec<_>>()
+            .into();
+        let mut changed = original.clone();
+        assert_eq!(clones.get(), 0);
+        changed[1].1 = 9;
+        assert_eq!(clones.get(), 3);
+        for item in &mut changed {
+            item.1 += 1;
+        }
+        assert_eq!(clones.get(), 3);
+        assert_eq!(
+            (&original)
+                .into_iter()
+                .map(|item| item.1)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            changed
+                .as_slice()
+                .iter()
+                .map(|item| item.1)
+                .collect::<Vec<_>>(),
+            vec![1, 10, 3]
+        );
+        assert!(SharedSlice::<u8>::default().is_empty());
     }
 
     #[test]
@@ -446,10 +535,12 @@ mod tests {
         let before = state.snapshot.as_ref().unwrap();
         assert!(Arc::ptr_eq(&before.nodes.pages, &forked.nodes.pages));
         for (node, saved) in original.nodes.iter().zip(before.nodes.iter()) {
-            assert!(Arc::ptr_eq(
-                &node.as_ref().unwrap().0,
-                &saved.as_ref().unwrap().0
-            ));
+            let node = node.as_ref().unwrap();
+            let saved = saved.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&node.vector.0, &saved.vector.0));
+            assert!(Arc::ptr_eq(&node.neighbors.0, &saved.neighbors.0));
+            assert!(Arc::ptr_eq(&node.key.0, &saved.key.0));
+            assert!(Arc::ptr_eq(&node.metadata.0, &saved.metadata.0));
         }
     }
 

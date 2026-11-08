@@ -498,11 +498,12 @@ impl HnswIndex {
                     total_bytes += (level_neighbors.len() * 4) as u64;
                     total_bytes += 24;
                 }
-                total_bytes += std::mem::size_of::<types::HnswNode>() as u64;
+                total_bytes += (4 * 2 * std::mem::size_of::<usize>()) as u64;
             }
         }
 
-        total_bytes += (graph.nodes.capacity() * 8) as u64;
+        total_bytes +=
+            (graph.nodes.capacity() * std::mem::size_of::<Option<cow::SharedNode>>()) as u64;
         total_bytes += (graph.free_list.capacity() * 4) as u64;
 
         total_bytes

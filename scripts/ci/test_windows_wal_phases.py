@@ -105,15 +105,15 @@ class WindowsPhaseTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("isolated GitHub-hosted Windows runner", error)
 
-    def test_hnsw_cow_requires_all_nine_cases_before_dirty_writes(self):
+    def test_hnsw_cow_requires_all_ten_cases_before_dirty_writes(self):
         name = "hnsw-copy-on-write"
         calls, error = self.execute("hnsw-contracts", output_overrides={
-            name: "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out"
+            name: "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out"
         })
         self.assertIsNone(error)
         self.assertEqual(calls[-1][0], "hnsw-dirty-writes")
-        for result in ("7 passed; 0 failed; 0 ignored", "8 passed; 0 failed; 0 ignored",
-                       "8 passed; 0 failed; 1 ignored", "8 passed; 1 failed; 0 ignored"):
+        for result in ("8 passed; 0 failed; 0 ignored", "9 passed; 0 failed; 0 ignored",
+                       "9 passed; 0 failed; 1 ignored", "9 passed; 1 failed; 0 ignored"):
             with self.subTest(result=result):
                 calls, error = self.execute("hnsw-contracts", output_overrides={
                     name: f"test result: ok. {result}; 0 measured; 630 filtered out"

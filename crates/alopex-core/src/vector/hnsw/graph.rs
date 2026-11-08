@@ -111,11 +111,11 @@ impl HnswGraph {
         let node_id = self.allocate_node_id();
         let neighbors = vec![Vec::new(); level + 1];
         let node = HnswNode {
-            key: key.to_vec(),
-            vector: vector.to_vec(),
+            key: key.into(),
+            vector: vector.into(),
             norm: super::vector_norm(vector),
-            metadata: metadata.to_vec(),
-            neighbors,
+            metadata: metadata.into(),
+            neighbors: neighbors.into(),
             deleted: false,
         };
 
@@ -254,11 +254,9 @@ impl HnswGraph {
                 // マップに存在しても実体が無い場合は新規挿入扱い。
                 return self.insert(key, vector, metadata);
             };
-            node.vector.clear();
-            node.vector.extend_from_slice(vector);
+            node.vector = vector.into();
             node.norm = super::vector_norm(vector);
-            node.metadata.clear();
-            node.metadata.extend_from_slice(metadata);
+            node.metadata = metadata.into();
             if node.deleted {
                 node.deleted = false;
                 self.deleted_count = self.deleted_count.saturating_sub(1);
@@ -434,9 +432,9 @@ impl HnswGraph {
                 (
                     c.score,
                     HnswSearchResult {
-                        key: n.key.clone(),
+                        key: n.key.to_vec(),
                         distance: self.public_distance(c.score),
-                        metadata: n.metadata.clone(),
+                        metadata: n.metadata.to_vec(),
                     },
                 )
             })
