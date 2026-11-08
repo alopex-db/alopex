@@ -360,10 +360,9 @@ mod tests {
         let mut actual: PagedVec<_> = (0..PAGE_SIZE * 2 + 1)
             .map(|_| Some(value.clone()))
             .collect();
-        let last_page = Arc::downgrade(actual.pages[2].as_ref().unwrap());
         drop(actual.pop());
         assert!(
-            last_page.upgrade().is_none(),
+            actual.pages[2].is_none(),
             "an empty page must not be retained by the directory"
         );
         assert_eq!(Arc::strong_count(&value), PAGE_SIZE * 2 + 1);
