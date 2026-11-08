@@ -205,6 +205,24 @@ class CiWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("rustsec/audit-check@", audit_job)
 
+    def test_ci_tools_preserve_versions_and_verify_public_asset_bytes(self) -> None:
+        workflow = self.workflow("ci.yml")
+        self.assertIn("uses: ./.github/actions/cargo-deny", workflow)
+        action = REPOSITORY_ROOT / ".github/actions/cargo-deny"
+        dockerfile = (action / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("rust:1.85.0-alpine3.20@sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0", dockerfile)
+        self.assertIn('ENV deny_version="0.20.2"', dockerfile)
+        self.assertIn("releases/assets/471598214", dockerfile)
+        self.assertIn("9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f", dockerfile)
+        self.assertLess(dockerfile.index("sh /download.sh"), dockerfile.index("tar -xzvf"))
+        self.assertIn("releases/assets/184694200", workflow)
+        self.assertIn("936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88", workflow)
+        self.assertIn("bee4a54f3ee3d4afc347c3240ec2d9e93b075104", workflow)
+        for argument in ("command: check bans", "arguments: --all-features --locked",
+                         "--hide-inclusion-graph", "--deny unmatched-skip", "--deny unnecessary-skip"):
+            self.assertIn(argument, workflow)
+        self.assertIn("tlc2.TLC formal/tla/sql/SqlTransactionLifecycle.tla", workflow)
+
     def test_clippy_uses_the_release_msrv_toolchain(self) -> None:
         workflow = self.workflow("ci.yml")
         clippy_job = workflow.split("  clippy:", maxsplit=1)[1].split(

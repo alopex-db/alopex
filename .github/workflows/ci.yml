@@ -41,7 +41,7 @@ jobs:
       - name: Verify change scope classifier
         run: |
           bash scripts/ci/test_classify_change_scope.sh
-          python3 -m unittest scripts.ci.test_check_parser_wire_contract
+          python3 -m unittest scripts.ci.test_check_parser_wire_contract scripts.ci.test_pinned_tool_download
       - name: Verify parser source contract guard
         run: python3 scripts/ci/test_parser_source_contract.py
       - name: Classify production and release-process changes
@@ -90,9 +90,10 @@ jobs:
       - name: Run pinned TLC model checker
         shell: bash
         run: |
-          curl -fsSL \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
-            -o "${RUNNER_TEMP}/tla2tools.jar"
+          bash .github/actions/cargo-deny/download.sh \
+            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/184694200 \
+            936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88 \
+            2274532 "${RUNNER_TEMP}/tla2tools.jar"
           echo "bee4a54f3ee3d4afc347c3240ec2d9e93b075104  ${RUNNER_TEMP}/tla2tools.jar" | sha1sum -c -
           java -XX:+UseParallelGC -cp "${RUNNER_TEMP}/tla2tools.jar" \
             tlc2.TLC formal/tla/sql/SqlTransactionLifecycle.tla
@@ -407,9 +408,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Enforce dependency duplication policy
-        # v2 currently packages cargo-deny 0.20.2. Pin the immutable commit so
-        # dependency policy cannot change underneath an unrelated PR.
-        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        # Preserve the upstream container and arguments; verify fixed asset bytes.
+        uses: ./.github/actions/cargo-deny
         with:
           command: check bans
           arguments: --all-features --locked
