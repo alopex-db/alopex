@@ -665,7 +665,37 @@ impl HnswGraph {
         level: usize,
         ef: usize,
         entry_hints: &[u32],
+        stats: Option<&mut SearchStats>,
+    ) -> Vec<ScoredEntry> {
+        // The metric is fixed for a graph. Select the scoring operation once
+        // per layer, so each visited node uses the same specialized operation.
+        match self.config.metric {
+            Metric::Cosine => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    cosine_similarity(query.values, &node.vector, query.norm, node.norm)
+                })
+            }
+            Metric::L2 => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    f64::from(self.kernel.l2(query.values, &node.vector))
+                })
+            }
+            Metric::InnerProduct => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    f64::from(self.kernel.inner_product(query.values, &node.vector))
+                })
+            }
+        }
+    }
+
+    fn search_layer_with_score(
+        &self,
+        entry_point: u32,
+        level: usize,
+        ef: usize,
+        entry_hints: &[u32],
         mut stats: Option<&mut SearchStats>,
+        score: impl Fn(&HnswNode) -> f64,
     ) -> Vec<ScoredEntry> {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
         // hashing and per-entry allocation on the search hot path.
@@ -678,9 +708,18 @@ impl HnswGraph {
             Some(ref mut s) => s,
             None => &mut scratch,
         };
+        let mut distance = |node: Option<&HnswNode>| {
+            stats_ref.nodes_visited = stats_ref.nodes_visited.saturating_add(1);
+            if let Some(node) = node {
+                stats_ref.distance_computations = stats_ref.distance_computations.saturating_add(1);
+                score(node)
+            } else {
+                f64::NEG_INFINITY
+            }
+        };
 
         let entry_node = self.node(entry_point);
-        let entry_score = self.distance_to_node(query, entry_node, stats_ref);
+        let entry_score = distance(entry_node);
         let entry = ScoredEntry {
             node_id: entry_point,
             score: entry_score,
@@ -701,7 +740,7 @@ impl HnswGraph {
             visited[hint as usize] = true;
             let entry = ScoredEntry {
                 node_id: hint,
-                score: self.distance_to_node(query, hint_node, stats_ref),
+                score: distance(hint_node),
             };
             candidates.push(entry.clone());
             retain_best(&mut best, entry, ef);
@@ -727,7 +766,7 @@ impl HnswGraph {
                         // node. Retain this borrow instead of resolving the
                         // shared directory/page/node chain a second time.
                         let neighbor = self.node(n);
-                        let s = self.distance_to_node(query, neighbor, stats_ref);
+                        let s = distance(neighbor);
                         let should_add =
                             best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
                         if should_add {
@@ -1129,6 +1168,75 @@ impl Ord for ScoredEntry {
         self.score
             .total_cmp(&other.score)
             .then_with(|| self.node_id.cmp(&other.node_id))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scoring_dispatch_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn layer_scoring_matches_dynamic_distance_bits_order_and_statistics(
+            vectors in prop::collection::vec(prop_oneof![prop::array::uniform5(-10i16..=10), Just([0; 5])], 2..8),
+            query in prop_oneof![prop::array::uniform5(-10i16..=10), Just([0; 5])],
+            ef in 1usize..9,
+            initial in prop::sample::select(vec![0u64, u64::MAX - 1, u64::MAX]),
+        ) {
+            let query: Vec<f32> = query.into_iter().map(|value| if value == 0 { -0.0 } else { f32::from(value) }).collect();
+            for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+                let mut graph = HnswGraph::new(HnswConfig {
+                    dimension: 5,
+                    metric,
+                    ..HnswConfig::default()
+                }).unwrap();
+                let missing = vectors.len() as u32;
+                let neighbors: Vec<u32> = (0..=missing).chain([u32::MAX]).collect();
+                for (index, values) in vectors.iter().enumerate() {
+                    let vector: Vec<f32> = values.iter().copied().map(f32::from).collect();
+                    graph.nodes.push(Some(HnswNode {
+                        key: format!("node-{index}").into_bytes().into(),
+                        norm: super::super::vector_norm(&vector),
+                        vector: vector.into(),
+                        metadata: Vec::new().into(),
+                        neighbors: vec![neighbors.clone(), neighbors.clone()].into(),
+                        deleted: index == 1,
+                    }.into()));
+                }
+                graph.nodes.push(None);
+                let prepared = PreparedQuery::new(metric, &query);
+                let hints = [0, 1, 1, 2, 2, missing, u32::MAX];
+                for level in [0, 1] {
+                    let mut actual_stats = SearchStats {
+                        nodes_visited: initial,
+                        distance_computations: initial,
+                        search_time_us: 17,
+                        ..SearchStats::default()
+                    };
+                    let mut expected_stats = actual_stats.clone();
+                    let actual = graph.search_layer(prepared, 0, level, ef, &hints, Some(&mut actual_stats));
+                    // The unchanged dynamic scorer is still used by greedy
+                    // traversal. Compare exact score bits, including signed
+                    // zero, as well as ordering and the public counters.
+                    let expected = graph.search_layer_with_score(0, level, ef, &hints, Some(&mut expected_stats), |node| {
+                        graph.distance_to_node(prepared, Some(node), &mut SearchStats::default())
+                    });
+                    prop_assert_eq!(&actual, &expected);
+                    prop_assert_eq!(actual_stats.nodes_visited, expected_stats.nodes_visited);
+                    prop_assert_eq!(actual_stats.distance_computations, expected_stats.distance_computations);
+                    // Every node is adjacent to every other node. Exactly one
+                    // absent slot is visited without being scored; the deleted
+                    // node is scored as a traversal bridge, but never returned.
+                    prop_assert_eq!(actual_stats.nodes_visited, initial.saturating_add(u64::from(missing) + 1));
+                    prop_assert_eq!(actual_stats.distance_computations, initial.saturating_add(u64::from(missing)));
+                    prop_assert_eq!(actual_stats.search_time_us, 17);
+                    prop_assert!(actual.iter().all(|entry| entry.node_id != 1 && entry.node_id < missing));
+                    prop_assert_eq!(graph.search_layer(prepared, 0, level, ef, &hints, None), actual);
+                }
+            }
+        }
     }
 }
 
