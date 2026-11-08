@@ -98,6 +98,14 @@ class WindowsPhaseTests(unittest.TestCase):
                 self.assertIn("expected native tests did not run", error)
                 self.assertEqual(len(calls), 1)
 
+    def test_spool_codec_cases_must_execute_on_windows(self):
+        output = "\n".join(f"test result: ok. {n} passed; 0 failed; 0 ignored"
+                           for n in range(1, 40) if n != 29)
+        calls, error = self.execute("wal-contracts", output=output)
+        self.assertEqual(calls[-1][0], "spool-codec")
+        self.assertIn("lsm::wal::spool::tests::", calls[-1][1])
+        self.assertIn("spool-codec: expected native tests did not run", error)
+
     def test_unknown_phase_and_uninventoried_host_launch_no_commands(self):
         self.assertEqual(self.execute("unknown"), ([], 2))
         calls, error = self.execute("wal-contracts", hosted=False)

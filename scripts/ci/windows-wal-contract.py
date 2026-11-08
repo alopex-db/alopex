@@ -39,6 +39,8 @@ commands = [
     ("release-build", ["cargo", "build", "--release", "--locked", "--all-features"]),
     ("readonly-recovery", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                            "--lib", "lsm::wal::overflow::recovery_portability_tests::"]),
+    ("spool-codec", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                     "--lib", "lsm::wal::spool::tests::"]),
     ("lowlevel-writer", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                           "--lib", "lsm::wal::overflow::tests::"]),
     ("windows-publication", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
@@ -107,6 +109,7 @@ for name, command in commands:
     if result.returncode:
         raise SystemExit(result.returncode)
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "35 passed; 0 failed",
+                "spool-codec": "29 passed; 0 failed; 0 ignored",
                 "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
                 "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",
