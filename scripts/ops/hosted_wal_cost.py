@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import traceback
 
 from hosted_dataframe_comparison import ROOT, Budget, atomic_json, install_product, require, run_cell, sha
 from wal_cost_contract import plan, summarize, verify_record
@@ -91,7 +92,8 @@ def main():
             require(sha(product['files']['wheel'])==product['producer']['wheel_sha256'],'wheel changed')
         status='passed'
     except BaseException as error:
-        failure=type(error).__name__;atomic_json(work/'failure.json',dict(error=repr(error)))
+        failure=type(error).__name__;atomic_json(work/'failure.json',dict(error=repr(error),
+            detail=getattr(error,'detail',''),traceback=traceback.format_exc()))
     finally:
         signal.alarm(0)
         for name in ('imports','venvs','fixtures','tmp'):
