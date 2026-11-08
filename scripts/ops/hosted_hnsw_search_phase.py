@@ -25,6 +25,7 @@ from hnsw_search_phase_audit import audit_pairs,compare_subjects
 from dataframe_phase_contract import verify_resources
 from hnsw_search_dependencies import install_set,PREPARE
 from hnsw_search_phase_dependencies import install
+from hnsw_search_phase_venv import create_venv
 from hnsw_search_lifecycle import prepare_cell_temp,cleanup_cell_temp
 
 
@@ -79,14 +80,14 @@ def main():
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'HNSW source differs')
         test_env=dict(env,PYTHONPATH=os.pathsep.join(str(ROOT/p) for p in ('scripts/ops','scripts/performance','scripts/test-env')))
         budget.run([sys.executable,'-B','-m','unittest','test_hnsw_search_phase_capture','test_hnsw_search_phase_audit','test_hnsw_search_phase_contract',
-            'test_hnsw_search_phase_dependencies','test_hnsw_search_identity','test_hnsw_search_lifecycle','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
-        products={name:install_product(name,config['products'][name],work,budget,env) for name in ('before','candidate')}
+            'test_hnsw_search_phase_dependencies','test_hnsw_search_phase_venv','test_hnsw_search_identity','test_hnsw_search_lifecycle','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
+        products={name:install_product(name,config['products'][name],work,budget,env,create_environment=create_venv) for name in ('before','candidate')}
         lock=json.loads((ROOT/'scripts/ops/hnsw_search.lock.json').read_bytes())
         paths,records=install(lock,work,budget,env,ROOT)
         interpreters={};identities={}
         for name,names in (('prepare',PREPARE),):
             target=work/'venvs'/name
-            budget.run([sys.executable,'-B','-m','venv',str(target)],timeout=90,log=work/'dependencies.log',env=env)
+            create_venv(target,work,budget,env,work/'dependencies.log')
             interpreters[name]=target/'bin/python'
             identities[name]=install_set(name,interpreters[name],names,paths,records,work,budget,env,ROOT)
         for name,product in products.items():
@@ -145,7 +146,7 @@ def main():
         failure=type(error).__name__;atomic_json(work/'failure.json',error_record(error))
     finally:
         signal.alarm(0)
-        for name in ('imports','venvs','reference-wheels','reference-built','fixtures','tmp'):
+        for name in ('imports','venvs','bootstrap-wheels','reference-wheels','reference-built','fixtures','tmp'):
             path=work/name
             if path.exists():shutil.rmtree(path)
         atomic_json(work/'cleanup.json',dict(imports_venvs_fixtures_removed=True,

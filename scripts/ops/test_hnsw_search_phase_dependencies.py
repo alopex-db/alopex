@@ -26,7 +26,7 @@ class PhaseDependenciesTests(unittest.TestCase):
                     Path(command[-1]).write_text(json.dumps(records))
             budget = Mock()
             budget.run.side_effect = run
-            with patch.object(subject, 'download', side_effect=lambda record, *args: record['filename']) as download:
+            with patch.object(subject, 'create_venv') as create, patch.object(subject, 'download', side_effect=lambda record, *args: record['filename']) as download:
                 if kind != 'bdist_wheel':
                     with self.assertRaises(ValueError): subject.install(lock, root, budget, {}, root)
                     download.assert_not_called()
@@ -35,7 +35,8 @@ class PhaseDependenciesTests(unittest.TestCase):
                     self.assertEqual(set(paths), set(subject.PREPARE))
                     self.assertEqual(selected, records)
                     self.assertEqual(download.call_count, len(subject.PREPARE))
-                self.assertEqual(budget.run.call_count, 2)
+                self.assertEqual(budget.run.call_count, 1)
+                create.assert_called_once()
                 self.assertTrue(all('wheel' not in call.args[0] for call in budget.run.call_args_list))
 
     def test_only_locked_input_wheels_are_downloaded(self): self.exercise('bdist_wheel')

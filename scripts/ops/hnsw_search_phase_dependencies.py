@@ -4,6 +4,7 @@ import sys
 
 from common import atomic_json
 from hnsw_search_dependencies import PREPARE, download
+from hnsw_search_phase_venv import create_venv
 
 
 SELECTOR_CODE = '''import json,sys
@@ -26,8 +27,7 @@ def install(lock, work, budget, env, root):
     wheels = work / 'reference-wheels'
     wheels.mkdir()
     selector = work / 'venvs/dependency-selector'
-    budget.run([sys.executable, '-B', '-m', 'venv', str(selector)], timeout=90,
-               log=work / 'dependencies.log', env=env)
+    create_venv(selector, work, budget, env, work / 'dependencies.log')
     lockpath, selected = work / 'dependency-lock.json', work / 'dependency-selection.json'
     atomic_json(lockpath, selected_lock)
     budget.run([str(selector / 'bin/python'), '-B', '-c', SELECTOR_CODE, str(lockpath), str(selected)],

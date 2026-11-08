@@ -42,7 +42,7 @@ def metadata(endpoint):
     return json.loads(result.stdout)
 
 
-def install_product(subject, producer, work, budget, env):
+def install_product(subject, producer, work, budget, env, create_environment=None):
     directory=work/'imports'/subject
     endpoint='repos/alopex-db/alopex/actions/runs/'+str(producer['run'])
     run=metadata(endpoint)
@@ -64,9 +64,12 @@ def install_product(subject, producer, work, budget, env):
         and receipt['source']['profile']=='release' and receipt['python_wheel_sha256']==sha(files['wheel'])==producer['wheel_sha256'],
         'original build receipt differs')
     target=work/'venvs'/subject
-    budget.run([sys.executable,'-B','-m','venv',str(target)],timeout=90,log=work/(subject+'-install.log'),env=env)
+    if create_environment is None:
+        budget.run([sys.executable,'-B','-m','venv',str(target)],timeout=90,log=work/(subject+'-install.log'),env=env)
+    else:
+        create_environment(target,work,budget,env,work/(subject+'-install.log'))
     python=target/'bin/python'
-    budget.run([str(python),'-B','-m','pip','install','--no-index','--no-deps','--no-cache-dir',str(files['wheel'])],
+    budget.run([str(python),'-B','-m','pip','install','--no-index','--no-deps','--no-cache-dir','--no-compile',str(files['wheel'])],
         timeout=90,log=work/(subject+'-install.log'),env=env)
     saved=work/'identities'/subject;saved.mkdir()
     shutil.copyfile(path,saved/'assets.json');shutil.copyfile(files['receipt'],saved/'build-receipt.json')
