@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.request
 
@@ -107,6 +108,9 @@ def main():
     export = private_dir(repo / "native-assets-export")
     status = "failed"
     config = json.loads(base64.b64decode(os.environ["PUBLIC_BUILD_CONFIG"], validate=True))
+    require(type(config.get("execution_seconds")) is int and
+            600 <= config["execution_seconds"] <= 11400, "INPUT")
+    execution_deadline = time.monotonic() + config["execution_seconds"]
     scratch = Path(os.environ["RUNNER_TEMP"]) / "alopex-native-build-mount"
     disk = work / "build.ext4"
     require(not scratch.exists() and not disk.exists(), "STATE")
@@ -133,6 +137,10 @@ def main():
                         "--remap-path-prefix=" + str(scratch) + "=/alopex-build/work")
     env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     def command(args, phase, name, seconds=120):
+        if phase != "collect":
+            remaining = execution_deadline - time.monotonic()
+            require(remaining > 0, "TIMEOUT")
+            seconds = min(seconds, remaining)
         budget.before(phase)
         budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
     def fetch(url, output, expected, limit):
@@ -217,8 +225,17 @@ def main():
                  "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
         os.chdir(source)
         require(config.get("validation") == "hnsw-inline-pages", "INPUT")
+        command(["cargo", "install", "--locked", "--version", "27.1.0", "cargo-mutants"],
+                "wheel", "mutants-install", 1200)
+        mutants = scratch / "cargo/bin/cargo-mutants"
+        require(mutants.is_file(), "PREREQUISITE")
+        command([str(mutants), "--version"], "tools", "mutants-version")
+        # One shared target, with tool compilation outputs removed before tests.
+        shutil.rmtree(target)
+        private_dir(target)
         validation_tools = {name: shutil.which("cargo-" + name) is not None
                             for name in ("mutants", "coupling", "miri")}
+        validation_tools["mutants"] = "27.1.0"
         atomic_json(work / "validation-tools.json", validation_tools)
         command(["cargo", "test", "--locked", "-p", "alopex-core", "--lib",
                  "vector::hnsw::cow::tests", "--", "--nocapture"],
@@ -229,11 +246,36 @@ def main():
         command(["rustup", "component", "add", "clippy"], "tools", "clippy-install", 300)
         command(["cargo", "clippy", "--locked", "-p", "alopex-core", "--lib", "--", "-D", "warnings"],
                 "wheel", "hnsw-clippy", 900)
+        mutation_root = private_dir(scratch / "mutation-results")
+        try:
+            command([str(mutants), "--no-config", "--in-place", "-p", "alopex-core",
+                     "--file", "crates/alopex-core/src/vector/hnsw/cow.rs", "--re", "PagedVec",
+                     "--jobs", "1", "--jobserver-tasks", "2", "--timeout", "120",
+                     "--build-timeout", "900", "--cargo-arg=--locked", "--output", str(mutation_root),
+                     "--", "--lib", "vector::hnsw::cow::tests"],
+                    "wheel", "hnsw-mutations", 5400)
+        finally:
+            results = mutation_root / "mutants.out"
+            if results.exists():
+                # Keep exact outcomes and nested diagnostic logs in encrypted evidence.
+                for name in ("outcomes.json", "mutants.json", "caught.txt", "missed.txt", "unviable.txt", "timeout.txt"):
+                    path = results / name
+                    if path.is_file():
+                        suffix = ".json" if path.suffix == ".json" else ".log"
+                        shutil.copyfile(path, work / ("mutation-" + path.stem + suffix))
+                with (work / "mutation-diagnostics.log").open("w") as output:
+                    for path in sorted(results.rglob("*.log")):
+                        output.write("\nFILE " + str(path.relative_to(results)) + "\n")
+                        with path.open() as input_file:
+                            shutil.copyfileobj(input_file, output)
+            atomic_json(work / "mutation-source-restoration.json",
+                        {"tracked_diff_empty": git_value("diff", "--name-only") == ""})
+        require(git_value("diff", "--name-only") == "", "IDENTITY")
         atomic_json(work / "validation.json", {"source": identity,
                     "focused": "hnsw-cow-tests.log", "regressions": "hnsw-regressions.log",
                     "clippy": "hnsw-clippy.log", "tools": validation_tools,
-                    "mutation": "pending" if validation_tools["mutants"] else "unavailable",
-                    "coupling": "pending" if validation_tools["coupling"] else "unavailable",
+                    "mutation": "see mutation-outcomes.json",
+                    "coupling": "source-bound local static analysis; see review evidence",
                     "miri": "not applicable; no unsafe path changed"})
         # Development outputs have served their checks; keep logs and use the
         # same target directory for the release artifact within the same cap.
