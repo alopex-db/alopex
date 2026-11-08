@@ -73,9 +73,26 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing"):
             qualify.installed_identity(*args)
 
-    def test_all_34_public_cases_are_required(self):
+    def test_all_38_public_cases_are_required(self):
         root, _ = self.junit()
-        self.assertEqual(len(qualify.verify_cases(self.save(root))), 34)
+        self.assertEqual(len(qualify.verify_cases(self.save(root))), 38)
+
+    def test_vector_only_success_does_not_qualify_scalar_parquet(self):
+        root, suite = self.junit()
+        for case in list(suite):
+            if case.get("name").startswith("test_parquet_"):
+                suite.remove(case)
+        self.assertEqual(len(suite), 34)
+        with self.assertRaisesRegex(RuntimeError, "inventory"):
+            qualify.verify_cases(self.save(root))
+
+    def test_scalar_parquet_failure_or_skip_rejects_qualification(self):
+        for tag in ("skipped", "failure", "error"):
+            root, suite = self.junit()
+            case = next(case for case in suite if case.get("name").startswith("test_parquet_overflow_"))
+            ET.SubElement(case, tag)
+            with self.subTest(tag=tag), self.assertRaisesRegex(RuntimeError, "every case"):
+                qualify.verify_cases(self.save(root))
 
     def test_skipped_failed_and_error_cases_never_qualify(self):
         for tag in ("skipped", "failure", "error"):
@@ -101,13 +118,17 @@ class QualificationTests(unittest.TestCase):
         workspace = self.root / "source"
         tests = workspace / "crates/alopex-py/tests"
         tests.mkdir(parents=True)
-        for name in ("test_vector_parquet.py", "conftest.py"):
+        for name in ("test_vector_parquet.py", "test_parquet_sql.py", "conftest.py"):
             (tests / name).write_text("# synthetic source fixture\n")
         product = ModuleType("alopex"); product.__file__ = str(package)
         native = ModuleType("alopex._alopex"); native.__file__ = str(extension)
         product._alopex = native
         pytest = ModuleType("pytest")
         def execute(args):
+            self.assertEqual(
+                [Path(arg).name for arg in args if arg.endswith(".py")],
+                ["test_vector_parquet.py", "test_parquet_sql.py"],
+            )
             junit = Path(args[args.index("--junitxml") + 1])
             root, _ = self.junit(); ET.ElementTree(root).write(junit)
             if mutate_wheel:
@@ -130,7 +151,11 @@ class QualificationTests(unittest.TestCase):
         code, report = self.exercise_main(False)
         self.assertEqual(code, 0)
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 34)
+        self.assertEqual(len(report["cases"]), 38)
+        self.assertEqual(set(report["sources"]), {
+            "test_vector_parquet.py", "test_parquet_sql.py", "conftest.py",
+            "verify_python_parquet.py",
+        })
 
     def test_archive_change_outside_imported_modules_rejects_qualification(self):
         code, report = self.exercise_main(True)

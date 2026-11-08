@@ -87,7 +87,7 @@ def main():
                    timeout=480, log=work / 'qualification.log', env=env)
         report_path = ROOT / 'artifacts/python-release/vector-parquet.json'
         report = json.loads(report_path.read_bytes())
-        require(report['status'] == 'passed' and len(report['cases']) == 34
+        require(report['status'] == 'passed' and len(report['cases']) == 38
                 and report['wheel_sha256'] == producer['wheel_sha256']
                 and report['source_commit'] == os.environ['GITHUB_SHA'], 'QUALIFICATION')
         shutil.copyfile(report_path, work / 'qualification.json')
@@ -124,7 +124,7 @@ def main():
         atomic_json(export / 'result.json', dict(schema='alopex.wheel-parquet-runtime/v1', status=status,
             error_type=error, controller=os.environ['GITHUB_SHA'], sources=config['sources'],
             product_source=config['producer']['source_commit'], wheel_sha256=config['producer']['wheel_sha256'],
-            qualification_report_sha256=report_digest, cases=34 if status == 'passed' else 0,
+            qualification_report_sha256=report_digest, cases=38 if status == 'passed' else 0,
             owned_resources_removed=True, rc_asset_qualification=False))
         signal.alarm(0)
     return 0 if status == 'passed' else 1
