@@ -120,9 +120,17 @@ class TraceContract(unittest.TestCase):
     def test_error_short_write_unknown_target_or_missing_sync_rejected(self):
         for old,new in [(') = 3',') = 2'),(') = 0 <0.000040>',') = -1 EIO (I/O error) <0.000040>'),
                         ('overflow/pending.tmp','unknown'),('fdatasync(', 'fsync('),
-                        ('write(4<','writev(4<')]:
+                        ('write(4<','pwrite64(4<')]:
             with self.subTest(new=new),self.assertRaises(ValueError):
                 summarize_trace(trace().replace(old,new),'/db.alopex')
+
+    def test_vectored_write_keeps_exact_slice_count_and_bytes(self):
+        call='writev(4</db.alopex.d/overflow/pending.tmp>, [{iov_base="frame", iov_len=5}, {iov_base="payload"..., iov_len=256}], 2) = 261'
+        report=summarize_trace(trace(line(call)),'/db.alopex')
+        self.assertEqual(report['totals']['spool/writev'],dict(count=1,duration_ns=10000))
+        for changed in (call.replace('= 261','= 260'),call.replace('], 2)','], 1)'),
+                        call.replace('iov_len=5','iov_len=-1'),call.replace('iov_base="frame"','iov_base=0xdeadbeef')):
+            with self.assertRaises(ValueError):summarize_trace(trace(line(changed)),'/db.alopex')
 
     def test_unknown_or_oversized_trace_rejected(self):
         for text in ['nonsense\n','x'*1048577]:

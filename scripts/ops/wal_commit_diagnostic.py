@@ -163,8 +163,15 @@ def summarize_trace(text, database):
         elif event["syscall"] == "write":
             requested = re.search(r", (\d+)$", event["args"])
             require(requested and int(event["result"]) == int(requested[1]), "short write")
-        # pwrite/writev are retained but cannot be silently treated as the expected
-        # scalar-write path: a new codec path needs an explicit diagnostic review.
+        elif event["syscall"] == "writev":
+            entry = r'\{iov_base="(?:[^"\\]|\\.)*"(?:\.\.\.)?, iov_len=(\d+)\}'
+            shape = re.fullmatch(r'\d+<[^>]+>, \[(' + entry + r'(?:, ' + entry + r')*)\], (\d+)', event["args"])
+            require(shape, "unparsed vectored write")
+            entries = list(re.finditer(entry, shape[1]))
+            require(1 <= len(entries) <= 2 and len(entries) == int(shape[len(shape.groups())]),
+                    "vectored slice count differs")
+            require(int(event["result"]) == sum(int(item[1]) for item in entries),
+                    "short vectored write")
         else:
             raise ValueError("unexpected write syscall")
         selected.append(dict(event, target=target))
