@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alopex_core::TxnMode;
-use alopex_sql::storage::bridge::manual_hnsw_writer_profile as writer_profile;
 use alopex_embedded::Database;
+use alopex_sql::storage::bridge::manual_hnsw_writer_profile as writer_profile;
 use alopex_sql::{ExecutionResult, SqlValue};
 use serde_json::json;
 
@@ -129,8 +129,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transaction.execute_sql(&sql)?;
         let elapsed_ns = started.elapsed().as_nanos();
         let internal = writer_profile::finish();
-        assert_eq!(internal.stage_calls, 1, "one HNSW flush per INSERT required");
-        assert_eq!(internal.fork_calls, u64::from(offset == 0), "first INSERT forks; second reuses owned graph");
+        assert_eq!(
+            internal.stage_calls, 1,
+            "one HNSW flush per INSERT required"
+        );
+        assert_eq!(
+            internal.fork_calls,
+            u64::from(offset == 0),
+            "first INSERT forks; second reuses owned graph"
+        );
         assert!(u128::from(internal.fork_ns) + u128::from(internal.stage_ns) <= elapsed_ns);
         event(
             phase,

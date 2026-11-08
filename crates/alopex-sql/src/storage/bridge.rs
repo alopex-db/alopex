@@ -924,8 +924,10 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
         let entry = self.hnsw_indices.get_mut(name).expect("loaded above");
         entry.mutable_accessed = true;
         if entry.cached_read {
-            entry.index = manual_hnsw_writer_profile::measure(
-                manual_hnsw_writer_profile::Kind::Fork, || entry.index.fork_owned());
+            entry.index =
+                manual_hnsw_writer_profile::measure(manual_hnsw_writer_profile::Kind::Fork, || {
+                    entry.index.fork_owned()
+                });
             entry.cached_read = false;
         }
         Ok(entry)
@@ -936,7 +938,8 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
             if entry.dirty {
                 manual_hnsw_writer_profile::measure(
                     manual_hnsw_writer_profile::Kind::Stage,
-                    || entry.index.commit_staged(self.inner, &mut entry.state))?;
+                    || entry.index.commit_staged(self.inner, &mut entry.state),
+                )?;
                 entry.dirty = false;
             }
         }
