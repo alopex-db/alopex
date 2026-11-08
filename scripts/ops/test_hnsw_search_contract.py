@@ -64,12 +64,22 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(row['query_latencies_us'], [0.1]*count)
             self.assertEqual([v[0] for v in calls], [i%2 for i in range(count)])
 
-    def test_original_build_and_preparation_unchanged_except_diagnostic_retention(self):
+    def test_original_build_unchanged_except_diagnostics_and_scratch_lifetime(self):
         here=Path(__file__).resolve().parent
         original=ast.parse((here/'hnsw_harness/hnsw_v0811_contract.py').read_text())
         observed=ast.parse((here/'hnsw_search_build.py').read_text())
         def fn(tree,name):return copy.deepcopy(next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name))
         old,new=fn(original,'build_alopex'),fn(observed,'build_alopex')
+        # Permit exactly the scratch ownership change outside all timers.
+        for index, expected in ((1, 'directory = Path(tempfile.mkdtemp(prefix="alopex-index-"))'),
+                                (2, 'database_path = directory / "index"')):
+            self.assertEqual(ast.dump(new.body[index]), ast.dump(ast.parse(expected).body[0]))
+            new.body[index] = copy.deepcopy(old.body[index])
+        old_close=next(n for n in old.body if isinstance(n,ast.FunctionDef) and n.name=='close')
+        new_close=next(n for n in new.body if isinstance(n,ast.FunctionDef) and n.name=='close')
+        self.assertEqual(ast.dump(old_close.body[-1]),ast.dump(ast.parse('directory.cleanup()').body[0]))
+        self.assertEqual([ast.dump(n) for n in new_close.body], [ast.dump(n) for n in old_close.body[:-1]])
+        new_close.body.append(copy.deepcopy(old_close.body[-1]))
         self.assertEqual(len(new.body),len(old.body)+3)
         added=next(n for n in new.body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)
             and n.targets[0].id=='native_observations')

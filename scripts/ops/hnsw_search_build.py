@@ -10,8 +10,10 @@ from hnsw_v0811_contract import (SearchEngine, peak_rss_bytes, recall_at_k,
 def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchEngine:
     import alopex
 
-    directory = tempfile.TemporaryDirectory()
-    database_path = Path(directory.name) / "index"
+    # The parent removes this cell's scratch directory only after wait().
+    # Worker-side rmtree races the strict live storage census.
+    directory = Path(tempfile.mkdtemp(prefix="alopex-index-"))
+    database_path = directory / "index"
     db = alopex.Database.open(str(database_path))
     name = f"products_m{m}_efc{ef_construction}"
     config = alopex.HnswConfig(
@@ -73,7 +75,6 @@ def build_alopex(vectors, *, m: int = 16, ef_construction: int = 200) -> SearchE
     def close() -> None:
         db.drop_hnsw_index(name)
         db.close()
-        directory.cleanup()
 
     engine = SearchEngine(
         "alopex-hnsw",

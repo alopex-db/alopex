@@ -23,6 +23,7 @@ from wal_cost_supervisor import run_cell
 from hnsw_search_contract import plan,verify_point,RESOURCE_SCOPE
 from dataframe_phase_contract import verify_resources
 from hnsw_search_dependencies import install,install_set,PREPARE,REFERENCE
+from hnsw_search_lifecycle import prepare_cell_temp,cleanup_cell_temp
 
 
 def fetch_dataset(directory,budget):
@@ -99,7 +100,7 @@ def main():
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'HNSW source differs')
         test_env=dict(env,PYTHONPATH=os.pathsep.join(str(ROOT/p) for p in ('scripts/ops','scripts/performance','scripts/test-env')))
         budget.run([sys.executable,'-B','-m','unittest','test_hnsw_search_contract','test_hnsw_search_identity','test_hnsw_search_point',
-            'test_hnsw_search_dependencies','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
+            'test_hnsw_search_dependencies','test_hnsw_search_lifecycle','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('published','before','candidate')}
         lock=json.loads((ROOT/'scripts/ops/hnsw_search.lock.json').read_bytes())
         paths,records=install(lock,work,budget,env,ROOT)
@@ -133,12 +134,13 @@ def main():
         for cell in cells:
             require(deadline-time.monotonic()>config['cell_seconds']+60,'insufficient HNSW stage time')
             directory=work/'cells'/cell['id'];directory.mkdir()
+            scratch=prepare_cell_temp(work,cell['id'])
             key=cell['subject'] if cell['engine']=='alopex-hnsw' else 'reference'
             parameters=dict(cell,mode=config['mode'],root=str(ROOT),sources=config['sources'],output=str(directory),
                 data=str(work/'fixtures'),input_sha256=sha(evidence/'input.npz'),truth_sha256=sha(evidence/'truth.json'),
                 affinity=allocation['client'],rss_bytes=config['rss_bytes'],dependency_identity=str(identities[key]),
                 dependency_identity_sha256=sha(identities[key]))
-            child_env=dict(env,PYTHONPATH=str(ROOT/'scripts/performance'))
+            child_env=dict(env,PYTHONPATH=str(ROOT/'scripts/performance'),TMPDIR=str(scratch))
             if cell['engine']=='alopex-hnsw':
                 product=products[key];python=product['python'];manifest=product['subject']
                 parameters['subject_manifest_sha256']=sha(manifest)
@@ -150,6 +152,8 @@ def main():
                 str(ROOT/'scripts/ops/hnsw_search_worker.py'),'--configuration',str(path)],
                 child_env,directory,budget,config['cell_seconds'],config['rss_bytes'])
             checked=verify_cell(cell,directory,truth,config)
+            cleanup=cleanup_cell_temp(work,cell['id'],json.loads((directory/'supervision.json').read_bytes()))
+            atomic_json(directory/'temporary-cleanup.json',cleanup);budget.check()
             completed.append(dict(cell=cell,points=checked,status='passed'));atomic_json(work/'cells.json',completed)
         status='passed'
     except BaseException as error:
