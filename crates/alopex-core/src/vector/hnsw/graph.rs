@@ -3,6 +3,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashSet};
 
+use super::cosine::CosineKernel;
 use super::cow::{KeyMap, PagedVec, SharedNode};
 use super::types::{HnswConfig, HnswNode, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 use crate::vector::simd::{select_kernel, DistanceKernel};
@@ -23,6 +24,7 @@ pub struct HnswGraph {
     pub(crate) max_level: usize,
     pub(crate) config: HnswConfig,
     pub(crate) kernel: Box<dyn DistanceKernel>,
+    pub(super) cosine_kernel: CosineKernel,
     pub(crate) free_list: PagedVec<u32>,
     pub(crate) active_count: u64,
     pub(crate) deleted_count: u64,
@@ -40,6 +42,7 @@ impl Clone for HnswGraph {
             max_level: self.max_level,
             config: self.config.clone(),
             kernel: select_kernel(),
+            cosine_kernel: CosineKernel::select(),
             free_list: self.free_list.clone(),
             active_count: self.active_count,
             deleted_count: self.deleted_count,
@@ -61,6 +64,7 @@ impl HnswGraph {
             entry_point: None,
             max_level: 0,
             kernel: select_kernel(),
+            cosine_kernel: CosineKernel::select(),
             config,
             free_list: PagedVec::default(),
             active_count: 0,
@@ -111,11 +115,11 @@ impl HnswGraph {
         let node_id = self.allocate_node_id();
         let neighbors = vec![Vec::new(); level + 1];
         let node = HnswNode {
-            key: key.to_vec(),
-            vector: vector.to_vec(),
+            key: key.into(),
+            vector: vector.into(),
             norm: super::vector_norm(vector),
-            metadata: metadata.to_vec(),
-            neighbors,
+            metadata: metadata.into(),
+            neighbors: neighbors.into(),
             deleted: false,
         };
 
@@ -254,11 +258,9 @@ impl HnswGraph {
                 // マップに存在しても実体が無い場合は新規挿入扱い。
                 return self.insert(key, vector, metadata);
             };
-            node.vector.clear();
-            node.vector.extend_from_slice(vector);
+            node.vector = vector.into();
             node.norm = super::vector_norm(vector);
-            node.metadata.clear();
-            node.metadata.extend_from_slice(metadata);
+            node.metadata = metadata.into();
             if node.deleted {
                 node.deleted = false;
                 self.deleted_count = self.deleted_count.saturating_sub(1);
@@ -434,9 +436,9 @@ impl HnswGraph {
                 (
                     c.score,
                     HnswSearchResult {
-                        key: n.key.clone(),
+                        key: n.key.to_vec(),
                         distance: self.public_distance(c.score),
-                        metadata: n.metadata.clone(),
+                        metadata: n.metadata.to_vec(),
                     },
                 )
             })
@@ -667,7 +669,38 @@ impl HnswGraph {
         level: usize,
         ef: usize,
         entry_hints: &[u32],
+        stats: Option<&mut SearchStats>,
+    ) -> Vec<ScoredEntry> {
+        // The metric is fixed for a graph. Select the scoring operation once
+        // per layer, so each visited node uses the same specialized operation.
+        match self.config.metric {
+            Metric::Cosine => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    self.cosine_kernel
+                        .score(query.values, &node.vector, query.norm, node.norm)
+                })
+            }
+            Metric::L2 => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    f64::from(self.kernel.l2(query.values, &node.vector))
+                })
+            }
+            Metric::InnerProduct => {
+                self.search_layer_with_score(entry_point, level, ef, entry_hints, stats, |node| {
+                    f64::from(self.kernel.inner_product(query.values, &node.vector))
+                })
+            }
+        }
+    }
+
+    fn search_layer_with_score(
+        &self,
+        entry_point: u32,
+        level: usize,
+        ef: usize,
+        entry_hints: &[u32],
         mut stats: Option<&mut SearchStats>,
+        score: impl Fn(&HnswNode) -> f64,
     ) -> Vec<ScoredEntry> {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
         // hashing and per-entry allocation on the search hot path.
@@ -680,22 +713,31 @@ impl HnswGraph {
             Some(ref mut s) => s,
             None => &mut scratch,
         };
+        let mut distance = |node: Option<&HnswNode>| {
+            stats_ref.nodes_visited = stats_ref.nodes_visited.saturating_add(1);
+            if let Some(node) = node {
+                stats_ref.distance_computations = stats_ref.distance_computations.saturating_add(1);
+                score(node)
+            } else {
+                f64::NEG_INFINITY
+            }
+        };
 
-        let entry_score = self.distance(query, entry_point, stats_ref);
+        let entry_node = self.node(entry_point);
+        let entry_score = distance(entry_node);
         let entry = ScoredEntry {
             node_id: entry_point,
             score: entry_score,
         };
         visited[entry_point as usize] = true;
         candidates.push(entry.clone());
-        if self.node(entry_point).is_some_and(|node| !node.deleted) {
+        if entry_node.is_some_and(|node| !node.deleted) {
             best.push(Reverse(entry));
         }
 
         for &hint in entry_hints {
-            if self
-                .node(hint)
-                .is_none_or(|node| node.deleted || level >= node.neighbors.len())
+            let hint_node = self.node(hint);
+            if hint_node.is_none_or(|node| node.deleted || level >= node.neighbors.len())
                 || visited[hint as usize]
             {
                 continue;
@@ -703,13 +745,10 @@ impl HnswGraph {
             visited[hint as usize] = true;
             let entry = ScoredEntry {
                 node_id: hint,
-                score: self.distance(query, hint, stats_ref),
+                score: distance(hint_node),
             };
             candidates.push(entry.clone());
-            best.push(Reverse(entry));
-            if best.len() > ef {
-                best.pop();
-            }
+            retain_best(&mut best, entry, ef);
         }
 
         while let Some(candidate) = candidates.pop() {
@@ -728,7 +767,11 @@ impl HnswGraph {
                             continue;
                         }
                         *seen = true;
-                        let s = self.distance(query, n, stats_ref);
+                        // Scoring and result admission read the same immutable
+                        // node. Retain this borrow instead of resolving the
+                        // shared directory/page/node chain a second time.
+                        let neighbor = self.node(n);
+                        let s = distance(neighbor);
                         let should_add =
                             best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
                         if should_add {
@@ -739,11 +782,8 @@ impl HnswGraph {
                             candidates.push(entry.clone());
                             // Deleted nodes remain traversal bridges, but must not
                             // consume ef slots reserved for live search results.
-                            if self.node(n).is_some_and(|node| !node.deleted) {
-                                best.push(Reverse(entry));
-                                if best.len() > ef {
-                                    best.pop();
-                                }
+                            if neighbor.is_some_and(|node| !node.deleted) {
+                                retain_best(&mut best, entry, ef);
                             }
                         }
                     }
@@ -997,7 +1037,10 @@ impl HnswGraph {
             return f64::NEG_INFINITY;
         };
         match self.config.metric {
-            Metric::Cosine => cosine_similarity(&left.vector, &right.vector, left.norm, right.norm),
+            Metric::Cosine => {
+                self.cosine_kernel
+                    .score(&left.vector, &right.vector, left.norm, right.norm)
+            }
             Metric::L2 => f64::from(self.kernel.l2(&left.vector, &right.vector)),
             Metric::InnerProduct => {
                 f64::from(self.kernel.inner_product(&left.vector, &right.vector))
@@ -1006,12 +1049,22 @@ impl HnswGraph {
     }
 
     fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f64 {
+        self.distance_to_node(query, self.node(node_id), stats)
+    }
+
+    fn distance_to_node(
+        &self,
+        query: PreparedQuery<'_>,
+        node: Option<&HnswNode>,
+        stats: &mut SearchStats,
+    ) -> f64 {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
-        if let Some(node) = self.node(node_id) {
+        if let Some(node) = node {
             stats.distance_computations = stats.distance_computations.saturating_add(1);
             return match self.config.metric {
                 Metric::Cosine => {
-                    cosine_similarity(query.values, &node.vector, query.norm, node.norm)
+                    self.cosine_kernel
+                        .score(query.values, &node.vector, query.norm, node.norm)
                 }
                 Metric::L2 => f64::from(self.kernel.l2(query.values, &node.vector)),
                 Metric::InnerProduct => {
@@ -1029,27 +1082,6 @@ impl HnswGraph {
             Metric::L2 | Metric::InnerProduct => -score as f32,
         }
     }
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32], left_norm: f64, right_norm: f64) -> f64 {
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return 0.0;
-    }
-    let length = left.len().min(right.len());
-    let (left_chunks, left_remainder) = left[..length].as_chunks::<4>();
-    let (right_chunks, right_remainder) = right[..length].as_chunks::<4>();
-    let (mut dot0, mut dot1, mut dot2, mut dot3) = (0.0, 0.0, 0.0, 0.0);
-    for (left, right) in left_chunks.iter().zip(right_chunks) {
-        dot0 += f64::from(left[0]) * f64::from(right[0]);
-        dot1 += f64::from(left[1]) * f64::from(right[1]);
-        dot2 += f64::from(left[2]) * f64::from(right[2]);
-        dot3 += f64::from(left[3]) * f64::from(right[3]);
-    }
-    let mut dot = dot0 + dot1 + dot2 + dot3;
-    for (&a, &b) in left_remainder.iter().zip(right_remainder) {
-        dot += f64::from(a) * f64::from(b);
-    }
-    (dot / (left_norm * right_norm)).clamp(-1.0, 1.0)
 }
 
 #[derive(Clone, Copy)]
@@ -1092,6 +1124,19 @@ struct ScoredEntry {
     score: f64,
 }
 
+/// Keep the same highest-ranked entries as push followed by a bounded pop.
+/// Once full, replacing the root avoids growing the heap and repairing it twice.
+#[inline]
+fn retain_best(best: &mut BinaryHeap<Reverse<ScoredEntry>>, entry: ScoredEntry, limit: usize) {
+    if best.len() < limit {
+        best.push(Reverse(entry));
+    } else if let Some(mut worst) = best.peek_mut() {
+        if entry > worst.0 {
+            *worst = Reverse(entry);
+        }
+    }
+}
+
 impl PartialEq for ScoredEntry {
     fn eq(&self, other: &Self) -> bool {
         self.node_id == other.node_id && self.score.to_bits() == other.score.to_bits()
@@ -1111,5 +1156,110 @@ impl Ord for ScoredEntry {
         self.score
             .total_cmp(&other.score)
             .then_with(|| self.node_id.cmp(&other.node_id))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scoring_dispatch_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn layer_scoring_matches_dynamic_distance_bits_order_and_statistics(
+            vectors in prop::collection::vec(prop_oneof![prop::array::uniform5(-10i16..=10), Just([0; 5])], 2..8),
+            query in prop_oneof![prop::array::uniform5(-10i16..=10), Just([0; 5])],
+            ef in 1usize..9,
+            initial in prop::sample::select(vec![0u64, u64::MAX - 1, u64::MAX]),
+        ) {
+            let query: Vec<f32> = query.into_iter().map(|value| if value == 0 { -0.0 } else { f32::from(value) }).collect();
+            for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+                let mut graph = HnswGraph::new(HnswConfig {
+                    dimension: 5,
+                    metric,
+                    ..HnswConfig::default()
+                }).unwrap();
+                let missing = vectors.len() as u32;
+                let neighbors: Vec<u32> = (0..=missing).chain([u32::MAX]).collect();
+                for (index, values) in vectors.iter().enumerate() {
+                    let vector: Vec<f32> = values.iter().copied().map(f32::from).collect();
+                    graph.nodes.push(Some(HnswNode {
+                        key: format!("node-{index}").into_bytes().into(),
+                        norm: super::super::vector_norm(&vector),
+                        vector: vector.into(),
+                        metadata: Vec::new().into(),
+                        neighbors: vec![neighbors.clone(), neighbors.clone()].into(),
+                        deleted: index == 1,
+                    }.into()));
+                }
+                graph.nodes.push(None);
+                let prepared = PreparedQuery::new(metric, &query);
+                let hints = [0, 1, 1, 2, 2, missing, u32::MAX];
+                for level in [0, 1] {
+                    let mut actual_stats = SearchStats {
+                        nodes_visited: initial,
+                        distance_computations: initial,
+                        search_time_us: 17,
+                        ..SearchStats::default()
+                    };
+                    let mut expected_stats = actual_stats.clone();
+                    let actual = graph.search_layer(prepared, 0, level, ef, &hints, Some(&mut actual_stats));
+                    // Compare Cosine against the original scalar arithmetic,
+                    // and other metrics against the dynamic greedy scorer.
+                    // Include exact score bits, ordering and public counters.
+                    let expected = graph.search_layer_with_score(0, level, ef, &hints, Some(&mut expected_stats), |node| {
+                        if metric == Metric::Cosine {
+                            super::super::cosine::scalar(prepared.values, &node.vector, prepared.norm, node.norm)
+                        } else {
+                            graph.distance_to_node(prepared, Some(node), &mut SearchStats::default())
+                        }
+                    });
+                    prop_assert_eq!(&actual, &expected);
+                    prop_assert_eq!(actual_stats.nodes_visited, expected_stats.nodes_visited);
+                    prop_assert_eq!(actual_stats.distance_computations, expected_stats.distance_computations);
+                    // Every node is adjacent to every other node. Exactly one
+                    // absent slot is visited without being scored; the deleted
+                    // node is scored as a traversal bridge, but never returned.
+                    prop_assert_eq!(actual_stats.nodes_visited, initial.saturating_add(u64::from(missing) + 1));
+                    prop_assert_eq!(actual_stats.distance_computations, initial.saturating_add(u64::from(missing)));
+                    prop_assert_eq!(actual_stats.search_time_us, 17);
+                    prop_assert!(actual.iter().all(|entry| entry.node_id != 1 && entry.node_id < missing));
+                    prop_assert_eq!(graph.search_layer(prepared, 0, level, ef, &hints, None), actual);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod bounded_heap_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn retains_reference_top_entries_without_full_heap_growth(
+            limit in 0usize..9,
+            entries in prop::collection::vec((0u32..8, prop_oneof![
+                any::<u64>(), Just(0u64), Just((-0.0f64).to_bits()),
+                Just(f64::INFINITY.to_bits()), Just(f64::NEG_INFINITY.to_bits()),
+                Just(f64::NAN.to_bits()),
+            ]), 0..25),
+        ) {
+            let mut best = BinaryHeap::with_capacity(limit);
+            let capacity = best.capacity();
+            let mut expected = Vec::new();
+            for (node_id, bits) in entries {
+                let entry = ScoredEntry { node_id, score: f64::from_bits(bits) };
+                expected.push(entry.clone());
+                expected.sort_by(|a, b| b.cmp(a));
+                expected.truncate(limit);
+                retain_best(&mut best, entry, limit);
+                let actual: Vec<_> = best.clone().into_sorted_vec().into_iter().map(|r| r.0).collect();
+                prop_assert_eq!(&actual, &expected);
+                prop_assert_eq!(best.capacity(), capacity);
+            }
+        }
     }
 }

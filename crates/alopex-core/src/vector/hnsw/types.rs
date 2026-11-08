@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::cow::SharedSlice;
 use crate::vector::Metric;
 use crate::{Error, Result};
 
@@ -141,21 +142,24 @@ pub struct InsertStats {
 }
 
 /// In-memory representation of an HNSW node.
+/// Keep fields read during graph traversal together, before result payloads.
+/// The serialized representation is defined separately by `HnswNodeData`.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub(crate) struct HnswNode {
-    /// External key for the vector.
-    pub key: Vec<u8>,
     /// Vector payload.
-    pub vector: Vec<f32>,
+    pub vector: SharedSlice<f32>,
     /// Cached L2 norm for cosine scoring.
     pub norm: f64,
-    /// Metadata blob associated with the vector.
-    pub metadata: Vec<u8>,
     /// Adjacency lists per level (level -> node IDs).
-    pub neighbors: Vec<Vec<u32>>,
+    pub neighbors: SharedSlice<Vec<u32>>,
     /// Logical deletion marker.
     pub deleted: bool,
+    /// External key for the vector.
+    pub key: SharedSlice<u8>,
+    /// Metadata blob associated with the vector.
+    pub metadata: SharedSlice<u8>,
 }
 
 /// Serializable representation of an HNSW node.

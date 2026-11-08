@@ -422,14 +422,21 @@ fn deleted_bridges_do_not_consume_live_ef_slots() {
     graph.insert(b"c", &[2.0, 0.0], b"mc").unwrap();
     graph.delete(b"b").unwrap();
     // A deterministic layer requires traversal through the deleted middle node.
-    graph.nodes[0].as_mut().unwrap().neighbors = vec![vec![1]];
-    graph.nodes[1].as_mut().unwrap().neighbors = vec![vec![0, 2]];
-    graph.nodes[2].as_mut().unwrap().neighbors = vec![vec![1]];
+    graph.nodes[0].as_mut().unwrap().neighbors = (vec![vec![1]]).into();
+    graph.nodes[1].as_mut().unwrap().neighbors = (vec![vec![0, 2]]).into();
+    graph.nodes[2].as_mut().unwrap().neighbors = (vec![vec![1]]).into();
     graph.entry_point = Some(0);
     graph.max_level = 0;
 
+    // An absent slot is visited without a distance calculation; an out-of-range
+    // neighbor is ignored. Neither can enter the live result heap.
+    graph.nodes.push(None);
+    graph.nodes[1].as_mut().unwrap().neighbors[0].extend([3, u32::MAX]);
+
     let (results, stats) = graph.search(&[0.0, 0.0], 3, MAX_HNSW_EF_SEARCH).unwrap();
     assert_eq!(stats.effective_ef_search, 2);
+    assert_eq!(stats.nodes_visited, 4);
+    assert_eq!(stats.distance_computations, 3);
     assert_eq!(
         results
             .iter()
@@ -472,10 +479,11 @@ fn search_retains_original_entry_base_layer_route() {
     let nearest = graph.insert(b"nearest", &[0.0, 0.0], b"").unwrap();
     graph.entry_point = Some(root);
     graph.max_level = 1;
-    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![bridge], vec![local]];
-    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![root], vec![root]];
-    graph.nodes[bridge as usize].as_mut().unwrap().neighbors = vec![vec![nearest]];
-    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+    graph.nodes[root as usize].as_mut().unwrap().neighbors =
+        (vec![vec![bridge], vec![local]]).into();
+    graph.nodes[local as usize].as_mut().unwrap().neighbors = (vec![vec![root], vec![root]]).into();
+    graph.nodes[bridge as usize].as_mut().unwrap().neighbors = (vec![vec![nearest]]).into();
+    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = (vec![vec![]]).into();
 
     let (hits, stats, ef) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 1).unwrap();
     assert_eq!(hits[0].key, b"nearest");
@@ -496,10 +504,12 @@ fn additional_base_route_does_not_discard_original_search_results() {
     let nearest = graph.insert(b"nearest", &[0.0, 0.0], b"").unwrap();
     graph.entry_point = Some(root);
     graph.max_level = 1;
-    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![auxiliary], vec![local]];
-    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![nearest], vec![root]];
-    graph.nodes[auxiliary as usize].as_mut().unwrap().neighbors = vec![vec![]];
-    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+    graph.nodes[root as usize].as_mut().unwrap().neighbors =
+        (vec![vec![auxiliary], vec![local]]).into();
+    graph.nodes[local as usize].as_mut().unwrap().neighbors =
+        (vec![vec![nearest], vec![root]]).into();
+    graph.nodes[auxiliary as usize].as_mut().unwrap().neighbors = (vec![vec![]]).into();
+    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = (vec![vec![]]).into();
 
     let (hits, _, ef) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 1).unwrap();
     assert_eq!(hits[0].key, b"nearest");
@@ -535,11 +545,12 @@ fn root_probe_abandons_slow_ladder_that_never_beats_cutoff() {
         .collect();
     graph.entry_point = Some(root);
     graph.max_level = 1;
-    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![chain[0]], vec![local]];
-    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![root], vec![root]];
+    graph.nodes[root as usize].as_mut().unwrap().neighbors =
+        (vec![vec![chain[0]], vec![local]]).into();
+    graph.nodes[local as usize].as_mut().unwrap().neighbors = (vec![vec![root], vec![root]]).into();
     for (i, &id) in chain.iter().enumerate() {
         let next = chain.get(i + 1).map_or(vec![], |&n| vec![n]);
-        graph.nodes[id as usize].as_mut().unwrap().neighbors = vec![next];
+        graph.nodes[id as usize].as_mut().unwrap().neighbors = (vec![next]).into();
     }
 
     // ef=1, max_level=1: the probe may take 2 hops. The ladder stays far below
@@ -562,10 +573,10 @@ fn root_probe_finds_distinct_basin_that_crosses_cutoff_within_bound() {
     let nearest = graph.insert(b"nearest", &[0.0, 0.0], b"").unwrap();
     graph.entry_point = Some(root);
     graph.max_level = 1;
-    graph.nodes[root as usize].as_mut().unwrap().neighbors = vec![vec![a], vec![local]];
-    graph.nodes[local as usize].as_mut().unwrap().neighbors = vec![vec![], vec![root]];
-    graph.nodes[a as usize].as_mut().unwrap().neighbors = vec![vec![nearest]];
-    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+    graph.nodes[root as usize].as_mut().unwrap().neighbors = (vec![vec![a], vec![local]]).into();
+    graph.nodes[local as usize].as_mut().unwrap().neighbors = (vec![vec![], vec![root]]).into();
+    graph.nodes[a as usize].as_mut().unwrap().neighbors = (vec![vec![nearest]]).into();
+    graph.nodes[nearest as usize].as_mut().unwrap().neighbors = (vec![vec![]]).into();
 
     let (hits, _, _) = graph.search_with_effective_ef(&[0.0, 0.0], 1, 3).unwrap();
     assert_eq!(hits[0].key, b"nearest");
@@ -646,10 +657,10 @@ fn upper_layer_routes_reach_nearest_in_another_basin() {
                         .collect(),
                 );
             }
-            graph.nodes[id as usize].as_mut().unwrap().neighbors = layers;
+            graph.nodes[id as usize].as_mut().unwrap().neighbors = (layers).into();
         }
         graph.nodes[alternate as usize].as_mut().unwrap().neighbors[0] = vec![nearest];
-        graph.nodes[nearest as usize].as_mut().unwrap().neighbors = vec![vec![]];
+        graph.nodes[nearest as usize].as_mut().unwrap().neighbors = (vec![vec![]]).into();
         // The nearest upper-layer node has no base route to the answer. The
         // slightly farther upper candidate is the only route, and must survive
         // every layer transition. The original root's base route is empty.

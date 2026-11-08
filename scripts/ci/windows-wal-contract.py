@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from windows_wal_console import print_log_tail
@@ -88,6 +89,11 @@ commands = [
                               "--test", "hnsw_savepoint_cache"]),
     ("hnsw-begin-cache", ["cargo", "test", "--release", "--locked", "-p", "alopex-embedded",
                           "--lib", "hnsw_begin_tests"]),
+    ("hnsw-scoring-dispatch", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                               "--lib", "vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics",
+                               "--", "--exact"]),
+    ("hnsw-cosine-kernel", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                           "--lib", "vector::hnsw::cosine::tests", "--", "--show-output"]),
     ("hnsw-copy-on-write", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                             "--lib", "vector::hnsw::cow::tests"]),
     ("hnsw-dirty-writes", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
@@ -108,6 +114,25 @@ for name, command in commands:
     print_log_tail(contents)
     if result.returncode:
         raise SystemExit(result.returncode)
+    named_tests = {
+        "hnsw-scoring-dispatch": ["vector::hnsw::graph::scoring_dispatch_tests::layer_scoring_matches_dynamic_distance_bits_order_and_statistics"],
+        "hnsw-cosine-kernel": ["vector::hnsw::cosine::tests::" + suffix for suffix in (
+            "finite_vectors_match_scalar_bits",
+            "known_scores_preserve_reduction_order_tails_and_clamping",
+            "tails_unaligned_slices_and_zero_norm_preserve_bits",
+        )],
+    }
+    if name in named_tests:
+        expected = named_tests[name]
+        summaries = re.findall(
+            r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;",
+            contents, re.M,
+        )
+        passed = re.findall(r"^test (\S+) \.\.\. ok\s*$", contents, re.M)
+        if summaries != [("ok", str(len(expected)), "0", "0", "0")] or sorted(passed) != sorted(expected):
+            raise SystemExit(f"{name}: expected native tests did not run")
+        if name == "hnsw-cosine-kernel" and re.findall(r"^HNSW_COSINE_KERNEL=(avx|scalar)$", contents, re.M) not in (["avx"], ["scalar"]):
+            raise SystemExit(f"{name}: runtime kernel evidence missing")
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "35 passed; 0 failed",
                 "spool-codec": "29 passed; 0 failed; 0 ignored",
                 "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
@@ -128,7 +153,7 @@ for name, command in commands:
                 "hnsw-two-index-eviction": "6 passed; 0 failed; 0 ignored",
                 "hnsw-savepoint-cache": "13 passed; 0 failed; 0 ignored",
                 "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
-                "hnsw-copy-on-write": "7 passed; 0 failed; 0 ignored",
+                "hnsw-copy-on-write": "10 passed; 0 failed; 0 ignored",
                 "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

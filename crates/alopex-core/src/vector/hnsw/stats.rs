@@ -22,7 +22,8 @@ impl Contribution {
                 .iter()
                 .map(|level| (level.len() * 4 + 24) as u64)
                 .sum::<u64>()
-            + std::mem::size_of::<HnswNode>() as u64;
+            // Four shared payload allocations, each with strong/weak counters.
+            + (8 * std::mem::size_of::<usize>()) as u64;
         Self {
             level: Some(node.neighbors.len().saturating_sub(1)),
             edges,
@@ -120,7 +121,9 @@ impl HnswGraph {
             deleted_count: self.deleted_count,
             level_distribution: levels,
             memory_bytes: totals.bytes
-                + (self.nodes.capacity() * 8 + self.free_list.capacity() * 4) as u64,
+                + (self.nodes.capacity() * std::mem::size_of::<Option<super::cow::SharedNode>>()
+                    + self.free_list.capacity() * std::mem::size_of::<u32>())
+                    as u64,
             avg_edges_per_node: if totals.nodes == 0 {
                 0.0
             } else {
