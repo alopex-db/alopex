@@ -108,8 +108,11 @@ def traced_child(path, surface, stage, trace_path, log_path, injection=None):
                                start_new_session=True)
     try:
         log, _ = process.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+    except BaseException:
+        # strace owns a separate session. Reap it on supervisor interruption too,
+        # so killing the outer harness cannot leave its tracee running.
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
         log, _ = process.communicate(timeout=10)
         log_path.write_bytes(log)
         raise
@@ -220,4 +223,8 @@ def main():
 
 
 if __name__ == "__main__":
+    def interrupted(signum, frame):
+        raise InterruptedError("sync acceptance interrupted")
+
+    signal.signal(signal.SIGTERM, interrupted)
     main()
