@@ -76,6 +76,8 @@ def main():
         'ALOPEX_PERF_RAW_PATH','ALOPEX_PROFILE_HNSW','ALOPEX_HNSW_PHASE_PROBE','NIM_SQL_PARSER_LIB_DIR','ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD',
         'HNSWLIB_NO_NATIVE','CFLAGS','CXXFLAGS','LDFLAGS','LD_PRELOAD','GPROFNG_PRELOAD_LIBDIRS','EXPECTED_COLLECTOR'):
         env.pop(key,None)
+    for key in list(env):
+        if key.startswith('SP_COLLECTOR_'):env.pop(key)
     for key in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','RAYON_NUM_THREADS','TOKIO_WORKER_THREADS'):
         env[key]='1'
     deadline=time.monotonic()+config['stage_seconds'];signal.alarm(config['stage_seconds'])

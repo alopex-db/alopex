@@ -1,6 +1,6 @@
 import copy
 import unittest
-from hnsw_search_sampling import measure_wrapper
+from hnsw_search_sampling import measure_wrapper,verify_start_parameters
 from hnsw_search_sampling_contract import plan,verify_sampling,collector_command
 
 class SamplingTests(unittest.TestCase):
@@ -36,9 +36,9 @@ class SamplingTests(unittest.TestCase):
         cell=next(c for c in plan('full') if c['sampling_mode']=='sampled');digest='a'*64
         record=dict(mode='sampled',status='passed',collector_sha256=digest,
             calls=[dict(ef_search=ef,sampling=ef in (128,256),completed=True) for ef in [16,32,64,128,256]],
-            product_worker_modified=False,query_loop_modified=False,performance_acceptance=False)
+            initial_paused=True,product_worker_modified=False,query_loop_modified=False,performance_acceptance=False)
         verify_sampling(record,cell,digest)
-        for key,value in [('calls',record['calls'][:-1]),('collector_sha256','b'*64),('query_loop_modified',True)]:
+        for key,value in [('calls',record['calls'][:-1]),('collector_sha256','b'*64),('query_loop_modified',True),('initial_paused',False)]:
             bad=copy.deepcopy(record);bad[key]=value
             with self.assertRaises(ValueError):verify_sampling(bad,cell,digest)
         bad=copy.deepcopy(record);bad['calls'][0]['sampling']=True
@@ -46,10 +46,23 @@ class SamplingTests(unittest.TestCase):
 
     def test_collector_starts_paused_without_tracing_or_child_follow(self):
         command=collector_command('gprofng','sample.er',['python','worker.py'])
-        self.assertIn('-y',command);self.assertNotIn(',r',command[command.index('-y')+1])
+        self.assertEqual(command[command.index('-y')+1],'SIGUSR2')
         self.assertEqual(command[command.index('-F')+1],'off')
         self.assertEqual(command[command.index('-a')+1],'off')
         self.assertEqual(command[-2:],['python','worker.py'])
+
+    def test_driver_must_send_a_single_paused_start_descriptor(self):
+        import signal
+        valid='p:10000;d:'+str(int(signal.SIGUSR2))+'p;'
+        for mode in ('paused','sampled'):
+            self.assertTrue(verify_start_parameters(mode,valid))
+            for invalid in (None,'p:10000;',valid.replace('p;',';',1),
+                            valid+'d:0;',valid.replace('p;','r;'),valid.replace('d:','x:')):
+                with self.assertRaises(ValueError):verify_start_parameters(mode,invalid)
+
+    def test_baseline_rejects_inherited_collector_parameters(self):
+        self.assertFalse(verify_start_parameters('baseline',None))
+        with self.assertRaises(ValueError):verify_start_parameters('baseline','p:10000;')
 
     def test_missing_full_profile_is_not_zero_or_success(self):
         from hnsw_search_sampling_contract import verify_profile

@@ -22,14 +22,15 @@ def verify_sampling(record,cell,collector_sha):
     require(record['collector_sha256']==(None if mode=='baseline' else collector_sha),'sampling collector identity')
     expected=[dict(ef_search=ef,sampling=(mode=='sampled' and ef in (128,256)),completed=True)
               for ef in cell['normal']['ef_values']]
+    require(record['initial_paused'] is (mode!='baseline'),'startup pause not verified')
     require(record['calls']==expected,'sampling windows differ')
     require(record['product_worker_modified'] is False and record['query_loop_modified'] is False
             and record['performance_acceptance'] is False,'sampling scope differs')
 
 
 def collector_command(tool,experiment,command):
-    import signal
-    return [str(tool),'collect','app','-p','10','-y',str(signal.SIGUSR2),'-F','off','-a','off',
+    # gprofng 2.42 resolves signal names; numeric arguments can disable this option.
+    return [str(tool),'collect','app','-p','10','-y','SIGUSR2','-F','off','-a','off',
             '-S','off','-j','off','-s','off','-H','off','-i','off','-o',str(experiment),*command]
 
 
