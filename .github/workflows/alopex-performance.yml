@@ -1,4 +1,4 @@
-name: Fixed HNSW search phase diagnosis
+name: HNSW profiler capability probe
 on:
   workflow_dispatch:
     inputs:
@@ -6,8 +6,8 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      hnsw_search_phase_config:
-        description: Fixed comparison configuration
+      profiler_probe_config:
+        description: Source-pinned capability configuration
         required: true
         type: string
 permissions:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 100
+    timeout-minutes: 5
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -83,21 +83,19 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Run source-pinned comparison
+      - name: Verify capability probe contracts
+        run: PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_hnsw_profiler_probe -v
+      - name: Probe existing normal-user profiling permissions
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ALOPEX_MANUAL_HNSW_SEARCH: "1"
-          ALOPEX_MANUAL_HNSW_SEARCH_PHASE: "1"
-          HNSW_SEARCH_PHASE_CONFIG: ${{ inputs.hnsw_search_phase_config }}
+          PROFILER_PROBE_CONFIG: ${{ inputs.profiler_probe_config }}
           RUNNER_KIND: ${{ runner.environment }}
-        shell: bash
-        run: python3 -B scripts/ops/hosted_hnsw_search_phase.py
-      - name: Preserve encrypted evidence
+        run: python3 -B scripts/ops/hnsw_profiler_probe.py
+      - name: Preserve encrypted capability evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-search-phase-diagnosis
-          path: hnsw-search-phase-export/
+          name: hnsw-profiler-capability
+          path: profiler-probe-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
