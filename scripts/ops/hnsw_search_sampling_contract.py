@@ -31,3 +31,19 @@ def collector_command(tool,experiment,command):
     import signal
     return [str(tool),'collect','app','-p','10','-y',str(signal.SIGUSR2),'-F','off','-a','off',
             '-S','off','-j','off','-s','off','-H','off','-i','off','-o',str(experiment),*command]
+
+
+def verify_profile(mode,stage,log,profile_bytes,report):
+    import re
+    require(mode in ('paused','sampled') and stage in ('preflight','full'),'profile scope')
+    require('kind="cerror"' not in log,'collector reported error')
+    require(log.count('kind="resume"')==(2 if mode=='sampled' else 0),'unexpected sampling interval')
+    require(type(profile_bytes) is int and profile_bytes>=0,'profile size')
+    if profile_bytes==0:
+        require(report is None,'report without samples')
+        require(mode=='paused' or stage=='preflight','no full-loop samples')
+        return dict(sample_status='disabled' if mode=='paused' else 'no_sample_at_minimal_duration',observed_cpu_seconds=None)
+    require(mode=='sampled' and type(report) is str,'samples outside selected loop')
+    values=re.findall(r'^\s*<Total>\s+([0-9]+(?:\.[0-9]*)?)\s*$',report,re.M)
+    require(len(values)==1 and float(values[0])>0,'sampling total missing')
+    return dict(sample_status='observed',observed_cpu_seconds=float(values[0]))

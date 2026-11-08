@@ -20,7 +20,7 @@ from common import atomic_json
 from hosted_dataframe_comparison import install_product,require,sha
 from private_failure import error_record
 from wal_cost_supervisor import run_cell
-from hnsw_search_sampling_contract import plan,verify_sampling,collector_command
+from hnsw_search_sampling_contract import plan,verify_sampling,collector_command,verify_profile
 from hnsw_search_phase_contract import verify_input
 from hosted_hnsw_search import verify_cell
 from gprofng_collector_build import build_collector
@@ -162,18 +162,16 @@ def main():
             verify_sampling(json.loads((directory/'sampling.json').read_bytes()),probe,collector['sha256'])
             if mode!='baseline':
                 log=(directory/'search.er/log.xml').read_text()
-                require('kind="cerror"' not in log,'collector reported error')
-                require(log.count('kind="resume"')==(2 if mode=='sampled' else 0),'unexpected sampling interval')
-                report=directory/'profile-report.log'
-                budget.run([str(tool),'display','text','-header','-metrics','name:e.totalcpu','-limit','100',
-                    '-functions',str(directory/'search.er')],timeout=60,log=report,env=env)
-                raw=report.read_text();values=re.findall(r'^\s*<Total>\s+([0-9]+(?:\.[0-9]*)?)\s*$',raw,re.M)
-                require(len(values)==1 and float(values[0])>=0,'sampling total missing')
-                cpu=float(values[0])
-                require(mode!='paused' or cpu==0,'samples outside selected loop')
-                require(config['mode']!='full' or mode!='sampled' or cpu>0,'no full-loop samples')
-                atomic_json(directory/'profile-receipt.json',dict(mode=mode,observed_cpu_seconds=cpu,
-                    report_sha256=sha(report),collector_sha256=collector['sha256'],performance_acceptance=False))
+                profile=directory/'search.er/profile'
+                profile_bytes=profile.stat().st_size if profile.exists() else 0
+                report=directory/'profile-report.log';raw=None
+                if profile_bytes:
+                    budget.run([str(tool),'display','text','-header','-metrics','name:e.totalcpu','-limit','100',
+                        '-functions',str(directory/'search.er')],timeout=60,log=report,env=env)
+                    raw=report.read_text()
+                receipt=verify_profile(mode,config['mode'],log,profile_bytes,raw)
+                atomic_json(directory/'profile-receipt.json',dict(receipt,mode=mode,profile_bytes=profile_bytes,
+                    report_sha256=sha(report) if raw is not None else None,collector_sha256=collector['sha256'],performance_acceptance=False))
             cleanup=cleanup_cell_temp(work,cell['id'],json.loads((directory/'supervision.json').read_bytes()))
             atomic_json(directory/'temporary-cleanup.json',cleanup);budget.check()
             completed.append(dict(probe=probe,points=checked,status='passed'));atomic_json(work/'cells.json',completed)

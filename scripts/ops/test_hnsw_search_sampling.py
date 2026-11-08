@@ -51,4 +51,18 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(command[command.index('-a')+1],'off')
         self.assertEqual(command[-2:],['python','worker.py'])
 
+    def test_missing_full_profile_is_not_zero_or_success(self):
+        from hnsw_search_sampling_contract import verify_profile
+        log='<event kind="resume"/><event kind="resume"/>'
+        with self.assertRaises(ValueError):verify_profile('sampled','full',log,0,None)
+        self.assertIsNone(verify_profile('sampled','preflight',log,0,None)['observed_cpu_seconds'])
+        with self.assertRaises(ValueError):verify_profile('sampled','full',log,12,'no data')
+        self.assertEqual(verify_profile('sampled','full',log,12,'<Total> 1.23')['observed_cpu_seconds'],1.23)
+
+    def test_paused_experiment_rejects_unexpected_samples(self):
+        from hnsw_search_sampling_contract import verify_profile
+        self.assertEqual(verify_profile('paused','full','',0,None)['sample_status'],'disabled')
+        with self.assertRaises(ValueError):verify_profile('paused','full','',12,'<Total> 1.23')
+        with self.assertRaises(ValueError):verify_profile('paused','full','<event kind="resume"/>',0,None)
+
 if __name__=='__main__':unittest.main()
