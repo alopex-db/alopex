@@ -1,4 +1,4 @@
-name: Run one bounded HNSW completion comparison stage
+name: Measure matched HNSW writer diagnostic overhead
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 350
+    timeout-minutes: 50
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -83,25 +83,26 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Verify completion comparison contracts
+      - name: Verify writer overhead contracts
         shell: bash
         run: |
-          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_completion_stage.py
-          python3 -B -m unittest discover -s scripts/ops -p test_audit_hnsw_completion_stage.py
-          python3 -B -m unittest discover -s scripts/ops -p test_verify_hnsw_completion_stage_run.py
+          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_writer_overhead.py
+          python3 -B -m unittest discover -s scripts/ops -p test_audit_hnsw_writer_overhead.py
+          python3 -B -m unittest discover -s scripts/ops -p test_verify_hnsw_writer_overhead_run.py
       - name: Run the selected five-sample comparison stage
         env:
           RUNNER_KIND: ${{ runner.environment }}
-          HNSW_COMPLETION_STAGE_CONFIG: ${{ inputs.stage_config }}
+          ALOPEX_MANUAL_HNSW_OVERHEAD: "1"
+          HNSW_WRITER_OVERHEAD_CONFIG: ${{ inputs.stage_config }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_hnsw_completion_stage.py
+        run: python3 -B scripts/ops/hosted_hnsw_writer_overhead.py
       - name: Preserve stage result and encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-hnsw-completion-stage
-          path: hnsw-completion-stage-export/
+          name: native-hnsw-writer-overhead
+          path: hnsw-writer-overhead-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
