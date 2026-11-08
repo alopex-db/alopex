@@ -1,4 +1,4 @@
-name: Tiny WAL public API costs
+name: Ordinary WAL sync EIO acceptance
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +6,7 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      wal_cost_config:
+      wal_sync_config:
         description: Fixed comparison configuration
         required: true
         type: string
@@ -14,12 +14,12 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-wal-cost
+  group: alopex-v0817-wal-sync
   cancel-in-progress: false
 jobs:
   construct:
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 95
+    timeout-minutes: 25
     steps:
       - name: Prepare source within the measured VM work budget
         env:
@@ -83,19 +83,19 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Run source-pinned comparison
+      - name: Run six source-pinned EIO cases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WAL_COST_CONFIG: ${{ inputs.wal_cost_config }}
+          WAL_SYNC_CONFIG: ${{ inputs.wal_sync_config }}
           RUNNER_KIND: ${{ runner.environment }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_wal_cost.py
+        run: python3 -B scripts/ops/hosted_wal_sync.py
       - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wal-public-cost
-          path: wal-cost-export/
+          name: wal-sync-acceptance
+          path: wal-sync-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
