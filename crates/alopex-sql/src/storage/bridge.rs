@@ -18,6 +18,9 @@ use crate::catalog::TableMetadata;
 use super::error::Result;
 use super::{IndexStorage, TableStorage};
 
+#[doc(hidden)]
+pub mod manual_hnsw_writer_profile;
+
 const SQL_DATA_START: &[u8] = &[0x01];
 const SQL_DATA_END: &[u8] = &[0x03];
 const JOURNAL_EPOCH_PREFIX: &[u8] = b"\x00alopex/range-change/epoch/";
@@ -921,7 +924,10 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
         let entry = self.hnsw_indices.get_mut(name).expect("loaded above");
         entry.mutable_accessed = true;
         if entry.cached_read {
-            entry.index = entry.index.fork_owned();
+            entry.index =
+                manual_hnsw_writer_profile::measure(manual_hnsw_writer_profile::Kind::Fork, || {
+                    entry.index.fork_owned()
+                });
             entry.cached_read = false;
         }
         Ok(entry)
@@ -930,7 +936,10 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
     fn flush_hnsw(&mut self) -> Result<()> {
         for entry in self.hnsw_indices.values_mut() {
             if entry.dirty {
-                entry.index.commit_staged(self.inner, &mut entry.state)?;
+                manual_hnsw_writer_profile::measure(
+                    manual_hnsw_writer_profile::Kind::Stage,
+                    || entry.index.commit_staged(self.inner, &mut entry.state),
+                )?;
                 entry.dirty = false;
             }
         }
