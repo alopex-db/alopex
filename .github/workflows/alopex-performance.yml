@@ -1,4 +1,4 @@
-name: Fixed HNSW search comparison
+name: Fixed HNSW search phase diagnosis
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +6,7 @@ on:
         description: Managed VM label from the execution profile
         required: true
         type: string
-      hnsw_search_config:
+      hnsw_search_phase_config:
         description: Fixed comparison configuration
         required: true
         type: string
@@ -87,16 +87,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALOPEX_MANUAL_HNSW_SEARCH: "1"
-          HNSW_SEARCH_CONFIG: ${{ inputs.hnsw_search_config }}
+          ALOPEX_MANUAL_HNSW_SEARCH_PHASE: "1"
+          HNSW_SEARCH_PHASE_CONFIG: ${{ inputs.hnsw_search_phase_config }}
           RUNNER_KIND: ${{ runner.environment }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_hnsw_search.py
+        run: python3 -B scripts/ops/hosted_hnsw_search_phase.py
       - name: Preserve encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-search-comparison
-          path: hnsw-search-export/
+          name: hnsw-search-phase-diagnosis
+          path: hnsw-search-phase-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
