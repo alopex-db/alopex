@@ -428,8 +428,15 @@ fn deleted_bridges_do_not_consume_live_ef_slots() {
     graph.entry_point = Some(0);
     graph.max_level = 0;
 
+    // An absent slot is visited without a distance calculation; an out-of-range
+    // neighbor is ignored. Neither can enter the live result heap.
+    graph.nodes.push(None);
+    graph.nodes[1].as_mut().unwrap().neighbors[0].extend([3, u32::MAX]);
+
     let (results, stats) = graph.search(&[0.0, 0.0], 3, MAX_HNSW_EF_SEARCH).unwrap();
     assert_eq!(stats.effective_ef_search, 2);
+    assert_eq!(stats.nodes_visited, 4);
+    assert_eq!(stats.distance_computations, 3);
     assert_eq!(
         results
             .iter()
