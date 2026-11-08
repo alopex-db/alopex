@@ -704,10 +704,7 @@ impl HnswGraph {
                 score: self.distance_to_node(query, hint_node, stats_ref),
             };
             candidates.push(entry.clone());
-            best.push(Reverse(entry));
-            if best.len() > ef {
-                best.pop();
-            }
+            retain_best(&mut best, entry, ef);
         }
 
         while let Some(candidate) = candidates.pop() {
@@ -742,10 +739,7 @@ impl HnswGraph {
                             // Deleted nodes remain traversal bridges, but must not
                             // consume ef slots reserved for live search results.
                             if neighbor.is_some_and(|node| !node.deleted) {
-                                best.push(Reverse(entry));
-                                if best.len() > ef {
-                                    best.pop();
-                                }
+                                retain_best(&mut best, entry, ef);
                             }
                         }
                     }
@@ -1103,6 +1097,19 @@ struct ScoredEntry {
     score: f64,
 }
 
+/// Keep the same highest-ranked entries as push followed by a bounded pop.
+/// Once full, replacing the root avoids growing the heap and repairing it twice.
+#[inline]
+fn retain_best(best: &mut BinaryHeap<Reverse<ScoredEntry>>, entry: ScoredEntry, limit: usize) {
+    if best.len() < limit {
+        best.push(Reverse(entry));
+    } else if let Some(mut worst) = best.peek_mut() {
+        if entry > worst.0 {
+            *worst = Reverse(entry);
+        }
+    }
+}
+
 impl PartialEq for ScoredEntry {
     fn eq(&self, other: &Self) -> bool {
         self.node_id == other.node_id && self.score.to_bits() == other.score.to_bits()
@@ -1122,5 +1129,37 @@ impl Ord for ScoredEntry {
         self.score
             .total_cmp(&other.score)
             .then_with(|| self.node_id.cmp(&other.node_id))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod bounded_heap_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn retains_reference_top_entries_without_full_heap_growth(
+            limit in 0usize..9,
+            entries in prop::collection::vec((0u32..8, prop_oneof![
+                any::<u64>(), Just(0u64), Just((-0.0f64).to_bits()),
+                Just(f64::INFINITY.to_bits()), Just(f64::NEG_INFINITY.to_bits()),
+                Just(f64::NAN.to_bits()),
+            ]), 0..25),
+        ) {
+            let mut best = BinaryHeap::with_capacity(limit);
+            let capacity = best.capacity();
+            let mut expected = Vec::new();
+            for (node_id, bits) in entries {
+                let entry = ScoredEntry { node_id, score: f64::from_bits(bits) };
+                expected.push(entry.clone());
+                expected.sort_by(|a, b| b.cmp(a));
+                expected.truncate(limit);
+                retain_best(&mut best, entry, limit);
+                let actual: Vec<_> = best.clone().into_sorted_vec().into_iter().map(|r| r.0).collect();
+                prop_assert_eq!(&actual, &expected);
+                prop_assert_eq!(best.capacity(), capacity);
+            }
+        }
     }
 }
