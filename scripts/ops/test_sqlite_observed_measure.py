@@ -71,3 +71,43 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'cleanup'):verify_cell(cell,result,[],{},1024)
 
 if __name__=='__main__':unittest.main()
+
+class SetupContracts(unittest.TestCase):
+    def test_plan_disposal_and_observations_stay_outside_boundaries(self):
+        events=[]
+        class Result:
+            def __del__(self):events.append('dispose')
+        def clock():events.append('clock');return len(events)
+        def operation():events.append('operation');return Result()
+        records=observed.measure_plan(operation,Observer(events),warmups=0,samples=1,clock=clock)
+        self.assertEqual(events,['begin','clock','operation','dispose','clock','finish'])
+        self.assertEqual(len(records),1)
+
+    def reference(self,corrupt=False):
+        import hashlib,json,tempfile,io
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import sqlite_reference as reference
+        data=b'tiny wheel bytes';url='https://files.pythonhosted.org/tiny.whl'
+        record=dict(name='pysqlite3-binary',version='0.5.4',filename='tiny.whl',url=url,size=len(data),
+            sha256='0'*64 if corrupt else hashlib.sha256(data).hexdigest())
+        commands=[]
+        class Budget:
+            def run(self,command,**kwargs):
+                commands.append(command)
+                if len(commands)==2:Path(command[-1]).write_text(json.dumps([record]))
+            def check(self):pass
+        with tempfile.TemporaryDirectory() as directory:
+            work=Path(directory);response=io.BytesIO(data);response.url=url
+            with patch.object(reference.urllib.request,'urlopen',return_value=response):
+                result=reference.install_reference({'pysqlite3-binary':[record]},work,Budget(),{})
+            identity=json.loads(result[1].read_bytes())
+            self.assertEqual(identity['engine'],'sqlite')
+            self.assertEqual(len(commands),3)
+            self.assertIn('--no-index',commands[-1]);self.assertIn('--no-deps',commands[-1])
+            self.assertEqual(identity['wheels'][0]['sha256'],record['sha256'])
+
+    def test_reference_install_validates_and_installs_offline(self):self.reference()
+    def test_reference_hash_mismatch_stops_before_install(self):
+        with self.assertRaisesRegex(RuntimeError,'reference wheel differs'):self.reference(corrupt=True)

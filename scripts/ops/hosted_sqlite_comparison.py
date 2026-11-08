@@ -20,6 +20,7 @@ from hosted_dataframe_comparison import install_product, require, sha
 from sqlite_reference import install_reference
 from wal_cost_supervisor import run_cell
 from sqlite_phase_contract import plan, verify_cell
+from dataframe_phase_contract import verify_cell as verify_plan
 
 
 def main():
@@ -100,9 +101,13 @@ def main():
             raw = [json.loads(line) for line in (directory/'raw.ndjson').read_text().splitlines()]
             observed = json.loads((directory/'observations.json').read_bytes())
             checked = verify_cell(cell, result, raw, observed, config['rss_bytes'])
+            plan_raw=[json.loads(line) for line in (directory/'plan.ndjson').read_text().splitlines()]
+            plan_observed=json.loads((directory/'plan-observations.json').read_bytes())
+            require(result['plan_raw_sha256']==sha(directory/'plan.ndjson'),'plan raw identity differs')
+            checked_plan=verify_plan(cell,result,plan_raw,plan_observed,config['rss_bytes'])
             pair = (checked['input_sha256'], checked['result_sha256'])
             require(oracles.setdefault((cell['rows'],cell['case']), pair) == pair, 'SQLite cross-subject oracle differs')
-            rows.append(dict(cell=cell, checked=checked, status='passed'));atomic_json(work/'cells.json', rows)
+            rows.append(dict(cell=cell, checked=checked, checked_plan=checked_plan,status='passed'));atomic_json(work/'cells.json', rows)
         status = 'passed'
     except BaseException as error:
         failure = type(error).__name__;atomic_json(work/'failure.json', dict(error=repr(error)))

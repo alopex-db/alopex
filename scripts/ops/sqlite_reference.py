@@ -1,5 +1,5 @@
 """Pinned SQLite reference installation and installed-file identity."""
-import json,subprocess,urllib.request
+import json,subprocess,sys,urllib.request
 from pathlib import Path
 from common import atomic_json
 from hosted_dataframe_comparison import require,sha

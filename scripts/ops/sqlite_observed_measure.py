@@ -22,3 +22,16 @@ def measure(operation, validate, state, *, warmups=3, samples=21,
                     operation_output_blocks=after.ru_oublock - usage.ru_oublock))
         actual = None
     return warmups + samples
+
+
+def measure_plan(operation,observer,*,warmups=3,samples=21,clock=time.perf_counter_ns):
+    records=[]
+    for index in range(warmups+samples):
+        observer.begin(index)
+        started=clock()
+        operation()
+        elapsed=clock()-started
+        observation=observer.finish(index)
+        if index>=warmups:
+            records.append(dict(phase='measure',index=index-warmups,seconds=elapsed/1e9,resources=observation))
+    return records

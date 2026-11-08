@@ -17,7 +17,7 @@ def main():
     for name,expected in config['sources'].items():assert sha(root/name)==expected
     sys.path.insert(0,str(root/'scripts/ops/dataframe_harness'))
     import sqlite_composite_profile as workload
-    from sqlite_observed_measure import measure
+    from sqlite_observed_measure import measure,measure_plan
     from sqlite_reference_identity import reference_identity
     from sqlite_phase_contract import CASES
     from dataframe_phase_observer import DataFrameObserver
@@ -56,6 +56,14 @@ def main():
             else:assert actual is None
         operation=(lambda:workload.checked_composite(connection,engine,n)[0]) if checked else (
             lambda:workload.original._sql_workload(connection,engine,'sql-sqlite-curated',n))
+        query=workload.original.SQL_AGGREGATE_QUERY.replace('true','1') if engine=='sqlite' else workload.original.SQL_AGGREGATE_QUERY
+        plan_operation=lambda:workload.original._execute(connection,engine,
+            ('EXPLAIN QUERY PLAN ' if engine=='sqlite' else 'EXPLAIN (FORMAT JSON) ')+query)
+        observer=DataFrameObserver(rss_limit=config['rss_bytes'])
+        plan_raw=measure_plan(plan_operation,observer,warmups=config['warmups'],samples=config['samples'])
+        (output/'plan.ndjson').write_text(''.join(json.dumps(r,allow_nan=False)+'\n' for r in plan_raw))
+        save(output/'plan-observations.json',dict(completed=observer.completed,pending=observer.pending))
+        observer.close();observer=None
         observer=DataFrameObserver(rss_limit=config['rss_bytes'])
         with (output/'raw.ndjson').open('x') as raw:
             def record(row):
@@ -74,7 +82,7 @@ def main():
             input_sha256=workload.digest([(i,float(i),i%2==0) for i in range(n)]),result_sha256=initial,
             state_checks=state_checks,connection_closed=True,checked_contracts=checked,sqlite_version=version,foreign_keys=foreign_keys,
             subject_identity=identity,resource_observations=len(observer.completed),worker_sha256=sha(Path(__file__)),
-            sources=config['sources'],raw_sha256=sha(output/'raw.ndjson'))
+            sources=config['sources'],raw_sha256=sha(output/'raw.ndjson'),plan_raw_sha256=sha(output/'plan.ndjson'))
         save(output/'measurement.json',result);status='passed'
     finally:
         if connection is not None:connection.close()
