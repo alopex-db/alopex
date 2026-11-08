@@ -88,14 +88,14 @@ jobs:
           PUBLIC_BUILD_CONFIG: ${{ inputs.build_config }}
         shell: bash
         run: |
-          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_completion_before_transport.py
-          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_completion_stage.py
-          python3 -B scripts/ops/hosted_hnsw_completion_before_assets.py
+          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_writer_diagnostic_transport.py
+          python3 -B -m unittest discover -s scripts/ops -p test_hnsw_writer_diagnostic_contract.py
+          python3 -B scripts/ops/hosted_hnsw_writer_diagnostic_assets.py
       - name: Preserve software assets and encrypted build evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-hnsw-example-assets
+          name: native-hnsw-writer-diagnostic-assets
           path: native-assets-export/
           if-no-files-found: error
           compression-level: 0
