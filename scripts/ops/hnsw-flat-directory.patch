@@ -1,0 +1,238 @@
+diff --git a/crates/alopex-core/src/vector/hnsw/cow.rs b/crates/alopex-core/src/vector/hnsw/cow.rs
+index 59923291..555845bd 100644
+--- a/crates/alopex-core/src/vector/hnsw/cow.rs
++++ b/crates/alopex-core/src/vector/hnsw/cow.rs
+@@ -10,6 +10,8 @@ use super::types::HnswNode;
+ 
+ const PAGE_SIZE: usize = 128;
+ const KEY_SHARDS: usize = 256;
++type Page<T> = Arc<[T; PAGE_SIZE]>;
++type PageSlot<T> = Option<Page<T>>;
+ 
+ #[derive(Clone, Debug)]
+ pub(crate) struct SharedNode(Arc<HnswNode>);
+@@ -35,15 +37,18 @@ impl DerefMut for SharedNode {
+ /// Values live inside each shared page, avoiding a separate Vec allocation and
+ /// data-pointer lookup on every graph read. Unused tail slots contain defaults
+ /// and are excluded from indexed access and iteration by the logical length.
++/// The shared directory is a slice so reads do not follow a Vec data pointer.
++/// Spare directory slots are empty; doubling preserves amortized page growth
++/// without allocating payload pages until they are needed.
+ #[derive(Clone, Debug)]
+ pub(crate) struct PagedVec<T> {
+-    pages: Arc<Vec<Arc<[T; PAGE_SIZE]>>>,
++    pages: Arc<[PageSlot<T>]>,
+     len: usize,
+ }
+ impl<T> Default for PagedVec<T> {
+     fn default() -> Self {
+         Self {
+-            pages: Arc::new(Vec::new()),
++            pages: Arc::from([]),
+             len: 0,
+         }
+     }
+@@ -53,19 +58,19 @@ impl<T> PagedVec<T> {
+         self.len
+     }
+     pub(crate) fn capacity(&self) -> usize {
+-        self.pages.len() * PAGE_SIZE
++        self.len.div_ceil(PAGE_SIZE) * PAGE_SIZE
+     }
+     pub(crate) fn get(&self, index: usize) -> Option<&T> {
+         if index >= self.len {
+             return None;
+         }
+-        self.pages.get(index / PAGE_SIZE)?.get(index % PAGE_SIZE)
++        self.pages
++            .get(index / PAGE_SIZE)?
++            .as_ref()?
++            .get(index % PAGE_SIZE)
+     }
+     pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+-        self.pages
+-            .iter()
+-            .flat_map(|page| page.iter())
+-            .take(self.len)
++        self.into_iter()
+     }
+     #[cfg(all(test, not(target_arch = "wasm32")))]
+     pub(crate) fn contains(&self, value: &T) -> bool
+@@ -81,28 +86,45 @@ impl<T: Clone> PagedVec<T> {
+             return None;
+         }
+         let pages = Arc::make_mut(&mut self.pages);
+-        Arc::make_mut(&mut pages[index / PAGE_SIZE]).get_mut(index % PAGE_SIZE)
++        Arc::make_mut(pages[index / PAGE_SIZE].as_mut()?).get_mut(index % PAGE_SIZE)
+     }
+ }
+ impl<T: Clone + Default> PagedVec<T> {
+     pub(crate) fn push(&mut self, value: T) {
++        let page_index = self.len / PAGE_SIZE;
++        if page_index == self.pages.len() {
++            let directory_len = self
++                .pages
++                .len()
++                .checked_mul(2)
++                .expect("directory capacity")
++                .max(1);
++            let mut pages = self.pages.to_vec();
++            pages.resize_with(directory_len, || None);
++            self.pages = pages.into();
++        }
+         let pages = Arc::make_mut(&mut self.pages);
+         if self.len.is_multiple_of(PAGE_SIZE) {
+-            pages.push(Arc::new(std::array::from_fn(|_| T::default())));
++            pages[page_index] = Some(Arc::new(std::array::from_fn(|_| T::default())));
+         }
+-        Arc::make_mut(pages.last_mut().expect("page allocated"))[self.len % PAGE_SIZE] = value;
++        Arc::make_mut(pages[page_index].as_mut().expect("page allocated"))[self.len % PAGE_SIZE] =
++            value;
+         self.len += 1;
+     }
+     pub(crate) fn pop(&mut self) -> Option<T> {
+         if self.len == 0 {
+             return None;
+         }
++        let page_index = (self.len - 1) / PAGE_SIZE;
+         let pages = Arc::make_mut(&mut self.pages);
+-        let page = Arc::make_mut(pages.last_mut().expect("nonempty pages"));
++        let page = Arc::make_mut(pages[page_index].as_mut().expect("nonempty pages"));
+         self.len -= 1;
+         let value = std::mem::take(&mut page[self.len % PAGE_SIZE]);
+         if self.len.is_multiple_of(PAGE_SIZE) {
+-            pages.pop();
++            pages[page_index] = None;
++        }
++        if self.len == 0 {
++            self.pages = Arc::from([]);
+         }
+         Some(value)
+     }
+@@ -131,13 +153,17 @@ impl<'a, T> IntoIterator for &'a PagedVec<T> {
+     type Item = &'a T;
+     type IntoIter = std::iter::Take<
+         std::iter::FlatMap<
+-            std::slice::Iter<'a, Arc<[T; PAGE_SIZE]>>,
++            std::slice::Iter<'a, PageSlot<T>>,
+             std::slice::Iter<'a, T>,
+-            fn(&'a Arc<[T; PAGE_SIZE]>) -> std::slice::Iter<'a, T>,
++            fn(&'a PageSlot<T>) -> std::slice::Iter<'a, T>,
+         >,
+     >;
+     fn into_iter(self) -> Self::IntoIter {
+-        let page_iter: fn(&'a Arc<[T; PAGE_SIZE]>) -> std::slice::Iter<'a, T> = |page| page.iter();
++        let page_iter: fn(&'a PageSlot<T>) -> std::slice::Iter<'a, T> = |page| {
++            page.as_deref()
++                .map_or([].as_slice(), |page| page.as_slice())
++                .iter()
++        };
+         self.pages.iter().flat_map(page_iter).take(self.len)
+     }
+ }
+@@ -211,6 +237,7 @@ mod tests {
+             .map(|i| Counted(clones.clone(), i))
+             .collect();
+         let mut snapshot = original.clone();
++        assert!(Arc::ptr_eq(&original.pages, &snapshot.pages));
+         assert_eq!(clones.get(), 0);
+         snapshot[PAGE_SIZE].1 = 999;
+         assert_eq!(clones.get(), PAGE_SIZE);
+@@ -249,26 +276,31 @@ mod tests {
+ 
+     #[test]
+     fn pop_and_reappend_at_page_boundaries_preserve_snapshots() {
+-        let original: PagedVec<_> = (0..PAGE_SIZE + 1).collect();
+-        let mut copy = original.clone();
+-        assert_eq!(copy.pop(), Some(PAGE_SIZE));
+-        assert_eq!(copy.capacity(), PAGE_SIZE);
+-        copy.push(999);
+-        assert_eq!(copy[PAGE_SIZE], 999);
+-        assert_eq!(original[PAGE_SIZE], PAGE_SIZE);
+-        for expected in (0..PAGE_SIZE).rev() {
+-            if expected == PAGE_SIZE - 1 {
+-                assert_eq!(copy.pop(), Some(999));
++        for length in [PAGE_SIZE + 1, PAGE_SIZE * 2 + 1, PAGE_SIZE * 4 + 1] {
++            let original: PagedVec<_> = (0..length).collect();
++            let mut copy = original.clone();
++            assert_eq!(copy.pop(), Some(length - 1));
++            assert_eq!(copy.capacity(), length - 1);
++            copy.push(999);
++            assert_eq!(copy[length - 1], 999);
++            assert_eq!(original[length - 1], length - 1);
++            for expected in (0..length - 1).rev() {
++                if expected == length - 2 {
++                    assert_eq!(copy.pop(), Some(999));
++                }
++                assert_eq!(copy.pop(), Some(expected));
+             }
+-            assert_eq!(copy.pop(), Some(expected));
++            assert_eq!(copy.pop(), None);
++            assert_eq!(copy.len(), 0);
++            assert_eq!(copy.capacity(), 0);
++            assert!(copy.get(0).is_none());
++            copy.push(7);
++            assert_eq!(copy[0], 7);
++            assert_eq!(
++                original.iter().copied().collect::<Vec<_>>(),
++                (0..length).collect::<Vec<_>>()
++            );
+         }
+-        assert_eq!(copy.pop(), None);
+-        assert_eq!(copy.len(), 0);
+-        assert_eq!(copy.capacity(), 0);
+-        assert!(copy.get(0).is_none());
+-        copy.push(7);
+-        assert_eq!(copy[0], 7);
+-        assert_eq!(original.len(), PAGE_SIZE + 1);
+     }
+ 
+     #[test]
+@@ -324,6 +356,22 @@ mod tests {
+         drop(actual.pop());
+         assert_eq!(Arc::strong_count(&value), 1);
+         assert!(actual.iter().next().is_none());
++
++        let mut actual: PagedVec<_> = (0..PAGE_SIZE * 2 + 1)
++            .map(|_| Some(value.clone()))
++            .collect();
++        let last_page = Arc::downgrade(actual.pages[2].as_ref().unwrap());
++        drop(actual.pop());
++        assert!(
++            last_page.upgrade().is_none(),
++            "an empty page must not be retained by the directory"
++        );
++        assert_eq!(Arc::strong_count(&value), PAGE_SIZE * 2 + 1);
++        actual.push(Some(value.clone()));
++        assert_eq!(actual.len(), PAGE_SIZE * 2 + 1);
++        assert!(actual[PAGE_SIZE * 2].is_some());
++        drop(actual);
++        assert_eq!(Arc::strong_count(&value), 1);
+     }
+ 
+     #[test]
+@@ -409,9 +457,12 @@ mod tests {
+     proptest! {
+         #![proptest_config(ProptestConfig::with_cases(32))]
+         #[test]
+-        fn paged_edits_match_vec_and_preserve_snapshots(ops in prop::collection::vec((0u8..4, 0usize..(PAGE_SIZE + 3)), 1..32)) {
+-            let mut actual: PagedVec<_> = (0..PAGE_SIZE + 2).collect();
+-            let mut expected: Vec<_> = (0..PAGE_SIZE + 2).collect();
++        fn paged_edits_match_vec_and_preserve_snapshots(
++            initial in prop::sample::select(vec![0, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 1, PAGE_SIZE * 2, PAGE_SIZE * 2 + 1]),
++            ops in prop::collection::vec((0u8..4, 0usize..(PAGE_SIZE * 2 + 3)), 1..32)
++        ) {
++            let mut actual: PagedVec<_> = (0..initial).collect();
++            let mut expected: Vec<_> = (0..initial).collect();
+             for (operation, value) in ops {
+                 let before = actual.clone();
+                 let before_values = expected.clone();
+@@ -426,6 +477,8 @@ mod tests {
+                 prop_assert_eq!(actual.iter().copied().collect::<Vec<_>>(), expected.clone());
+                 prop_assert_eq!(before.iter().copied().collect::<Vec<_>>(), before_values);
+                 prop_assert_eq!(actual.len(), expected.len());
++                prop_assert_eq!(actual.capacity(), expected.len().div_ceil(PAGE_SIZE) * PAGE_SIZE);
++                prop_assert!(actual.get(actual.len()).is_none());
+             }
+         }
+         #[test]
