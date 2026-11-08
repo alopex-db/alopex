@@ -249,7 +249,7 @@ def main():
         try:
             command([str(mutants), "--no-config", "--in-place", "-p", "alopex-core",
                      "--file", "crates/alopex-core/src/vector/hnsw/cow.rs", "--re", "PagedVec",
-                     "--jobs", "1", "--jobserver-tasks", "2", "--timeout", "120",
+                     "--jobserver-tasks", "2", "--timeout", "120",
                      "--build-timeout", "900", "--cargo-arg=--locked", "--output", str(mutation_root),
                      "--", "--lib", "vector::hnsw::cow::tests"],
                     "wheel", "hnsw-mutations", 5400)
