@@ -1,0 +1,81 @@
+diff --git a/crates/alopex-core/src/vector/hnsw/graph.rs b/crates/alopex-core/src/vector/hnsw/graph.rs
+index 89af112a..56232e61 100644
+--- a/crates/alopex-core/src/vector/hnsw/graph.rs
++++ b/crates/alopex-core/src/vector/hnsw/graph.rs
+@@ -681,21 +681,21 @@ impl HnswGraph {
+             None => &mut scratch,
+         };
+ 
+-        let entry_score = self.distance(query, entry_point, stats_ref);
++        let entry_node = self.node(entry_point);
++        let entry_score = self.distance_to_node(query, entry_node, stats_ref);
+         let entry = ScoredEntry {
+             node_id: entry_point,
+             score: entry_score,
+         };
+         visited[entry_point as usize] = true;
+         candidates.push(entry.clone());
+-        if self.node(entry_point).is_some_and(|node| !node.deleted) {
++        if entry_node.is_some_and(|node| !node.deleted) {
+             best.push(Reverse(entry));
+         }
+ 
+         for &hint in entry_hints {
+-            if self
+-                .node(hint)
+-                .is_none_or(|node| node.deleted || level >= node.neighbors.len())
++            let hint_node = self.node(hint);
++            if hint_node.is_none_or(|node| node.deleted || level >= node.neighbors.len())
+                 || visited[hint as usize]
+             {
+                 continue;
+@@ -703,7 +703,7 @@ impl HnswGraph {
+             visited[hint as usize] = true;
+             let entry = ScoredEntry {
+                 node_id: hint,
+-                score: self.distance(query, hint, stats_ref),
++                score: self.distance_to_node(query, hint_node, stats_ref),
+             };
+             candidates.push(entry.clone());
+             best.push(Reverse(entry));
+@@ -728,7 +728,11 @@ impl HnswGraph {
+                             continue;
+                         }
+                         *seen = true;
+-                        let s = self.distance(query, n, stats_ref);
++                        // Scoring and result admission read the same immutable
++                        // node. Retain this borrow instead of resolving the
++                        // shared directory/page/node chain a second time.
++                        let neighbor = self.node(n);
++                        let s = self.distance_to_node(query, neighbor, stats_ref);
+                         let should_add =
+                             best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score);
+                         if should_add {
+@@ -739,7 +743,7 @@ impl HnswGraph {
+                             candidates.push(entry.clone());
+                             // Deleted nodes remain traversal bridges, but must not
+                             // consume ef slots reserved for live search results.
+-                            if self.node(n).is_some_and(|node| !node.deleted) {
++                            if neighbor.is_some_and(|node| !node.deleted) {
+                                 best.push(Reverse(entry));
+                                 if best.len() > ef {
+                                     best.pop();
+@@ -1006,8 +1010,17 @@ impl HnswGraph {
+     }
+ 
+     fn distance(&self, query: PreparedQuery<'_>, node_id: u32, stats: &mut SearchStats) -> f64 {
++        self.distance_to_node(query, self.node(node_id), stats)
++    }
++
++    fn distance_to_node(
++        &self,
++        query: PreparedQuery<'_>,
++        node: Option<&HnswNode>,
++        stats: &mut SearchStats,
++    ) -> f64 {
+         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
+-        if let Some(node) = self.node(node_id) {
++        if let Some(node) = node {
+             stats.distance_computations = stats.distance_computations.saturating_add(1);
+             return match self.config.metric {
+                 Metric::Cosine => {
