@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: python -m unittest scripts.release.tests.test_parser_asset_manifest
       - name: Verify bounded Python release orchestration
-        run: python -m unittest scripts.release.tests.test_python_rc_storage
+        run: python -m unittest scripts.release.tests.test_python_rc_storage scripts.release.tests.test_python_parquet_qualification
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build real native parser assets

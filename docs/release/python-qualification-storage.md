@@ -39,6 +39,20 @@ available. Existing vector/streaming scenarios, macOS SQL tests, archive
 inspection and strict parser identity checks remain required. Every native
 subprocess exit is checked, including Windows installation and smoke failures.
 
+Every primary wheel also runs the existing 34 VECTOR/Parquet cases from
+`test_vector_parquet.py`, with pinned NumPy, PyArrow and pytest dependencies.
+The isolated interpreter must load both the package and native extension from
+its fresh venv; their bytes must match the selected wheel before and after the
+cases. Missing, duplicated, skipped or failed cases reject qualification. The
+cases contain at most three rows, close each DB, and reclaim each fixture before
+the next case. Pytest scratch files are removed before success is recorded.
+
+`artifacts/python-release/vector-parquet.json` records the wheel digest, loaded
+module digests, test/controller source hashes, versions and all successful case
+names. It omits local paths and host specifications. The existing 2 GB smoke
+allowance and host watchdog cover installation and these cases. This check uses
+the built wheel without rebuilding it; source CI results do not replace it.
+
 Tiny process/container fixtures validate orchestration on the existing host
 contract matrix. They do not qualify a real wheel, certify an image pull, or
 prove a native product build. Those results still belong to the immutable RC
