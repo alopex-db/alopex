@@ -140,6 +140,21 @@ mod tests {
         assert!(text.starts_with("{\"schema\":\"alopex.hnsw-search-phase/v1\""));
         assert!(text.contains("\"nodes_visited\":5,\"distance_computations\":4"));
         assert!(text.ends_with("}}}\n"));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["level"], 0);
+        assert_eq!(value["ef"], 16);
+        assert_eq!(value["phases"]["node_read"]["calls"], 1);
+        assert_eq!(value["phases"]["result_heap"]["calls"], 2);
+        let classified: u64 = value["phases"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|phase| phase["ns"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            value["total_ns"].as_u64().unwrap(),
+            classified + value["residual_ns"].as_u64().unwrap()
+        );
         for name in NAMES {
             assert_eq!(text.matches(&format!("\"{name}\":")).count(), 1);
         }
@@ -168,5 +183,59 @@ mod tests {
         Probe::new(true)
             .write(&mut Vec::new(), 0, 1, (2, 1), (1, 1))
             .unwrap();
+    }
+
+    #[test]
+    fn elapsed_time_accumulates_the_measured_operations() {
+        let mut probe = Probe::new(true);
+        let mut minimum_ns = 0;
+        for _ in 0..2 {
+            probe.measure(Phase::ResolveScore, || {
+                let start = Instant::now();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                minimum_ns += start.elapsed().as_nanos();
+            });
+            assert!(minimum_ns > 0);
+            assert!(probe.elapsed[Phase::ResolveScore as usize] >= minimum_ns);
+        }
+        assert_eq!(probe.calls[Phase::ResolveScore as usize], 2);
+    }
+
+    #[test]
+    fn environment_switch_and_emission_are_checked_in_subprocesses() {
+        if let Ok(expected) = std::env::var("ALOPEX_TEST_EXPECT_PHASE_PROBE") {
+            let probe = Probe::from_env();
+            assert_eq!(probe.start.is_some(), expected == "enabled");
+            probe.emit(2, 16, (1, 1), (3, 4));
+            return;
+        }
+        for setting in [Some("1"), Some("0"), Some("2"), Some(""), None] {
+            let enabled = setting == Some("1");
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact",
+                "vector::hnsw::search_phase_probe::tests::environment_switch_and_emission_are_checked_in_subprocesses",
+                "--nocapture"]);
+            command.env(
+                "ALOPEX_TEST_EXPECT_PHASE_PROBE",
+                if enabled { "enabled" } else { "disabled" },
+            );
+            if let Some(value) = setting {
+                command.env("ALOPEX_HNSW_PHASE_PROBE", value);
+            } else {
+                command.env_remove("ALOPEX_HNSW_PHASE_PROBE");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "child probe failed");
+            if enabled {
+                let row: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+                assert_eq!(row["schema"], "alopex.hnsw-search-phase/v1");
+                assert_eq!(row["level"], 2);
+                assert_eq!(row["ef"], 16);
+                assert_eq!(row["nodes_visited"], 2);
+                assert_eq!(row["distance_computations"], 3);
+            } else {
+                assert!(output.stderr.is_empty());
+            }
+        }
     }
 }
