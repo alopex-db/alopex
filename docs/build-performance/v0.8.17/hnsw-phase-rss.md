@@ -16,6 +16,32 @@ The runner records its hash, source identity and observer-module hash. The
 existing manual execution, storage, time and RSS limits still apply. No load
 workload is added to normal CI.
 
+## SQL transaction completion
+
+Pass `--finish commit` or `--finish rollback` to time the final SQL transaction
+operation after the two INSERTs. Use a fresh process and database for each mode.
+The selected mode is recorded in the run identity. Its ninth phase must report
+a positive `elapsed_ns`, followed by a verified `complete` event. A binary that
+only implements the earlier rollback protocol cannot satisfy this contract.
+
+```sh
+python3 scripts/performance/issue681_manual.py "$BINARY" \
+  --output "$PRIVATE_OUTPUT" --rows "$ROWS" --dimensions "$DIMENSIONS" \
+  --timeout "$TIMEOUT_SECONDS" --rss-limit "$RSS_LIMIT_BYTES" \
+  --phase-kernel-rss --finish commit
+```
+
+The example verifies the two inserted IDs and complete vector values through a
+new reader after commit, or their absence after rollback. Verification occurs
+after the completion timer and kernel RSS phase have ended. This measures
+in-memory SQL transaction completion; it does not establish filesystem
+durability or separate the INSERT's internal fork and staging costs.
+
+Omitting `--finish` retains the earlier nine-phase rollback protocol, including
+its untimed rollback event. Existing binaries and recorded comparisons keep
+their original interpretation. Qualify the new modes with two rows and four
+dimensions before using them in a separately budgeted manual scale comparison.
+
 ## Measurement contract
 
 - The observer opens the child process directory once and checks its start

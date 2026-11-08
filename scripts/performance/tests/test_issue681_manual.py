@@ -52,10 +52,15 @@ class Counter:
 @unittest.skipUnless(os.name == "posix", "runner uses POSIX process groups")
 class RunnerTests(unittest.TestCase):
     def run_fixture(self, events=None, *, kernel=True, fail=None, peak=1024,
-                    tail="", timeout=5, status=0, raw=None, storage_failure=False):
+                    tail="", timeout=5, status=0, raw=None, storage_failure=False,
+                    finish=None):
         if events is None:
             events = [{"phase": phase, "data": {"event": kind} if kind else {"stats": {}}}
                       for phase, kind in runner.EXPECTED_EVENTS]
+            if finish is not None:
+                events[-3]["phase"] = events[-2]["phase"] = finish
+                events[-2]["data"]["elapsed_ns"] = 100
+                events[-1]["data"].update(finish=finish, result_validated=True)
         Counter.instances = []
         Counter.fail = fail
         Counter.peak = peak
@@ -86,6 +91,8 @@ class RunnerTests(unittest.TestCase):
                     "--rows", "1", "--dimensions", "1", "--timeout", str(timeout)]
             if kernel:
                 argv.append("--phase-kernel-rss")
+            if finish is not None:
+                argv.extend(["--finish", finish])
             inventory = {"allocated_bytes": 0}
             with mock.patch.dict(os.environ, {}, clear=False), \
                     mock.patch.object(sys, "argv", argv), \
@@ -107,6 +114,7 @@ class RunnerTests(unittest.TestCase):
             identity = json.loads((output / "identity.json").read_text())
             self.assertEqual(len(children), 1)
             child = children[0]
+            self.assertEqual(child.args[1:], ["1", "1"] + ([finish] if finish else []))
             self.assertIsNotNone(child.returncode)
             self.assertTrue(child.stdin.closed)
             self.assertTrue(child.stdout.closed)
@@ -129,6 +137,37 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["phase_kernel_rss"], [])
         self.assertFalse(identity["phase_kernel_rss"])
+
+    def test_explicit_completion_records_time_and_requires_verified_result(self):
+        for finish in ("commit", "rollback"):
+            with self.subTest(finish=finish):
+                code, report, logged, identity = self.run_fixture(finish=finish)
+                self.assertEqual(code, 0)
+                self.assertEqual(identity["finish"], finish)
+                self.assertEqual(report["phase_kernel_rss"][-1]["phase"], finish)
+                self.assertGreater(json.loads(logged[-2])["data"]["elapsed_ns"], 0)
+                self.assertIs(json.loads(logged[-1])["data"]["result_validated"], True)
+
+    def test_explicit_completion_rejects_old_or_invalid_result_events(self):
+        for finish in ("commit", "rollback"):
+            for fault in ("old_phase", "missing_time", "zero_time", "boolean_time",
+                          "missing_verification", "false_verification", "wrong_finish"):
+                events = [{"phase": phase, "data": {"event": kind} if kind else {}}
+                          for phase, kind in runner.EXPECTED_EVENTS]
+                events[-3]["phase"] = events[-2]["phase"] = finish
+                events[-2]["data"]["elapsed_ns"] = 100
+                events[-1]["data"].update(finish=finish, result_validated=True)
+                if fault == "old_phase": events[-3]["phase"] = "warm"
+                if fault == "missing_time": events[-2]["data"].pop("elapsed_ns")
+                if fault == "zero_time": events[-2]["data"]["elapsed_ns"] = 0
+                if fault == "boolean_time": events[-2]["data"]["elapsed_ns"] = True
+                if fault == "missing_verification": events[-1]["data"].pop("result_validated")
+                if fault == "false_verification": events[-1]["data"]["result_validated"] = False
+                if fault == "wrong_finish": events[-1]["data"]["finish"] = "other"
+                with self.subTest(finish=finish, fault=fault):
+                    code, report, _, _ = self.run_fixture(events, finish=finish)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(report["outcome"], "failed")
 
     def test_missing_complete_is_not_success_in_either_mode(self):
         events = [{"phase": phase, "data": {"event": kind}}
