@@ -637,6 +637,161 @@ impl HnswGraph {
         level: usize,
         ef: usize,
         entry_hints: &[u32],
+        stats: Option<&mut SearchStats>,
+    ) -> Vec<ScoredEntry> {
+        self.search_layer_diagnostic(
+            query,
+            entry_point,
+            level,
+            ef,
+            entry_hints,
+            stats,
+            super::search_phase_probe::Probe::from_env(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_layer_diagnostic(
+        &self,
+        query: PreparedQuery<'_>,
+        entry_point: u32,
+        level: usize,
+        ef: usize,
+        entry_hints: &[u32],
+        mut stats: Option<&mut SearchStats>,
+        mut probe: super::search_phase_probe::Probe,
+    ) -> Vec<ScoredEntry> {
+        use super::search_phase_probe::Phase;
+        // HNSW traversals address nodes by a dense internal id.  A marker array avoids
+        // hashing and per-entry allocation on the search hot path.
+        let (mut visited, mut candidates, mut best) = probe.measure(Phase::Setup, || {
+            (
+                vec![false; self.nodes.len()],
+                BinaryHeap::with_capacity(ef),
+                BinaryHeap::<Reverse<ScoredEntry>>::with_capacity(ef),
+            )
+        });
+
+        let mut scratch = SearchStats::default();
+        let stats_ref: &mut SearchStats = match stats {
+            Some(ref mut s) => s,
+            None => &mut scratch,
+        };
+        let stats_before = (stats_ref.nodes_visited, stats_ref.distance_computations);
+
+        let entry_score = probe.measure(Phase::ResolveScore, || {
+            self.distance(query, entry_point, stats_ref)
+        });
+        let entry = ScoredEntry {
+            node_id: entry_point,
+            score: entry_score,
+        };
+        visited[entry_point as usize] = true;
+        probe.measure(Phase::Frontier, || candidates.push(entry.clone()));
+        if probe
+            .measure(Phase::NodeRead, || self.node(entry_point))
+            .is_some_and(|node| !node.deleted)
+        {
+            probe.measure(Phase::ResultHeap, || best.push(Reverse(entry)));
+        }
+
+        for &hint in entry_hints {
+            if probe
+                .measure(Phase::NodeRead, || self.node(hint))
+                .is_none_or(|node| node.deleted || level >= node.neighbors.len())
+                || visited[hint as usize]
+            {
+                continue;
+            }
+            visited[hint as usize] = true;
+            let entry = ScoredEntry {
+                node_id: hint,
+                score: probe.measure(Phase::ResolveScore, || {
+                    self.distance(query, hint, stats_ref)
+                }),
+            };
+            probe.measure(Phase::Frontier, || candidates.push(entry.clone()));
+            probe.measure(Phase::ResultHeap, || best.push(Reverse(entry)));
+            if best.len() > ef {
+                probe.measure(Phase::ResultHeap, || best.pop());
+            }
+        }
+
+        while let Some(candidate) = probe.measure(Phase::Frontier, || candidates.pop()) {
+            let worst_best = probe.measure(Phase::ResultHeap, || {
+                best.peek().map(|r| r.0.score).unwrap_or(f64::NEG_INFINITY)
+            });
+            if best.len() >= ef && candidate.score < worst_best {
+                break;
+            }
+
+            if let Some(node) = probe.measure(Phase::NodeRead, || self.node(candidate.node_id)) {
+                if let Some(neighbors) =
+                    probe.measure(Phase::NodeRead, || node.neighbors.get(level))
+                {
+                    for &n in neighbors {
+                        let Some(seen) = visited.get_mut(n as usize) else {
+                            continue;
+                        };
+                        if *seen {
+                            continue;
+                        }
+                        *seen = true;
+                        let s = probe
+                            .measure(Phase::ResolveScore, || self.distance(query, n, stats_ref));
+                        let should_add = probe.measure(Phase::ResultHeap, || {
+                            best.len() < ef || best.peek().is_none_or(|worst| s > worst.0.score)
+                        });
+                        if should_add {
+                            let entry = ScoredEntry {
+                                node_id: n,
+                                score: s,
+                            };
+                            probe.measure(Phase::Frontier, || candidates.push(entry.clone()));
+                            // Deleted nodes remain traversal bridges, but must not
+                            // consume ef slots reserved for live search results.
+                            if probe
+                                .measure(Phase::NodeRead, || self.node(n))
+                                .is_some_and(|node| !node.deleted)
+                            {
+                                probe.measure(Phase::ResultHeap, || best.push(Reverse(entry)));
+                                if best.len() > ef {
+                                    probe.measure(Phase::ResultHeap, || best.pop());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut results: Vec<ScoredEntry> = probe.measure(Phase::Materialize, || {
+            best.into_iter().map(|r| r.0).collect()
+        });
+        probe.measure(Phase::Ordering, || {
+            results.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| self.node_key(a.node_id).cmp(self.node_key(b.node_id)))
+            });
+        });
+        probe.emit(
+            level,
+            ef,
+            stats_before,
+            (stats_ref.nodes_visited, stats_ref.distance_computations),
+        );
+        results
+    }
+
+    #[cfg(test)]
+    fn search_layer_reference(
+        &self,
+        query: PreparedQuery<'_>,
+        entry_point: u32,
+        level: usize,
+        ef: usize,
+        entry_hints: &[u32],
         mut stats: Option<&mut SearchStats>,
     ) -> Vec<ScoredEntry> {
         // HNSW traversals address nodes by a dense internal id.  A marker array avoids
@@ -1052,5 +1207,56 @@ impl Ord for ScoredEntry {
         self.score
             .total_cmp(&other.score)
             .then_with(|| self.node_id.cmp(&other.node_id))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod search_phase_diagnostic_tests {
+    use super::super::search_phase_probe::Probe;
+    use super::*;
+
+    #[test]
+    fn observed_and_disabled_layers_match_original_results_and_traversal() {
+        for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+            let mut graph =
+                HnswGraph::new(HnswConfig::default().with_dimension(2).with_metric(metric))
+                    .unwrap();
+            for id in 0u8..6 {
+                graph.insert(&[id], &[f32::from(id), 1.0], &[id]).unwrap();
+            }
+            graph.delete(&[2]).unwrap();
+            for ef in [1, 2, 4, 8] {
+                for hints in [&[][..], &[0, 2, u32::MAX][..]] {
+                    let query = PreparedQuery::new(metric, &[1.0, 0.5]);
+                    let mut expected_stats = SearchStats::default();
+                    let expected = graph.search_layer_reference(
+                        query,
+                        0,
+                        0,
+                        ef,
+                        hints,
+                        Some(&mut expected_stats),
+                    );
+                    for enabled in [false, true] {
+                        let mut actual_stats = SearchStats::default();
+                        let actual = graph.search_layer_diagnostic(
+                            query,
+                            0,
+                            0,
+                            ef,
+                            hints,
+                            Some(&mut actual_stats),
+                            Probe::enabled_for_test(enabled),
+                        );
+                        assert_eq!(actual, expected);
+                        assert_eq!(actual_stats.nodes_visited, expected_stats.nodes_visited);
+                        assert_eq!(
+                            actual_stats.distance_computations,
+                            expected_stats.distance_computations
+                        );
+                    }
+                }
+            }
+        }
     }
 }

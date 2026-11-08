@@ -1,6 +1,7 @@
 //! Hierarchical Navigable Small World (HNSW) vector index module.
 
 mod graph;
+mod search_phase_probe;
 mod storage;
 mod types;
 
