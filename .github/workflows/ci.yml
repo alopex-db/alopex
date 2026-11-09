@@ -423,7 +423,8 @@ jobs:
         run: |
           set -euo pipefail
           tree_file="${RUNNER_TEMP}/alopex-security-dependency-tree.txt"
-          cargo tree --locked --workspace --all-features --target all > "${tree_file}"
+          # Remove tree drawing prefixes so an indented reachable crate cannot evade the check.
+          cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}' > "${tree_file}"
           if grep -Eq '^rkyv v0\.7\.46([[:space:]]|$)' "${tree_file}"; then
             echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
             exit 1

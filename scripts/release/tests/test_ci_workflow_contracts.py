@@ -194,6 +194,9 @@ class CiWorkflowContractTests(unittest.TestCase):
         tree_guard = audit_job.index(
             "cargo tree --locked --workspace --all-features --target all"
         )
+        # The following anchored grep can inspect every dependency only when
+        # Cargo omits the usual tree drawing prefixes.
+        self.assertIn("--prefix none --format '{p}'", audit_job)
         audit_step = audit_job.index("name: Run RustSec audit")
         self.assertLess(tree_guard, audit_step)
         self.assertIn("RUSTSEC-2026-0235 is reachable", audit_job)
