@@ -21,6 +21,7 @@ def main():
     assert os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     assert os.environ.get('RUNNER_KIND') == 'github-hosted' and os.getuid() != 0
     config = json.loads(args.configuration.read_bytes())
+    assert config['diagnostic'] == 'wal-phase-memory/v1'
     assert sorted(os.sched_getaffinity(0)) == config['affinity']
     root = Path(__file__).resolve().parents[2]
     for name, expected in config['sources'].items():
@@ -28,17 +29,28 @@ def main():
     sys.path[:0] = [str(root/'scripts/compatibility'), str(root/'scripts/ops/dataframe_harness')]
     import public_api_cost as workload
     from subject_identity import verify_subject
+    from wal_phase_memory import Observer
+    observer = Observer() if config['phase'] == 'write' else None
+    def capture(phase):
+        assert observer is not None
+        observer.capture(phase)
+        if phase == 'after_pending_commit':
+            observer.save(Path(config['output']) / 'phase-memory.json')
+    workload._wal_phase_capture = capture
     from alopex import _alopex
+    if observer is not None: capture('after_wrapper_import')
     from phase_rss import parse_status
     boundary_before_identity=parse_status(Path('/proc/self/status').read_text())
     identity = verify_subject()
     assert identity['manifest_sha256'] == config['subject_manifest_sha256']
+    if observer is not None: capture('after_identity')
     assert workload.OPTIONS == config['options']
     assert (config['surface'], config['value_bytes']) in workload.SHAPES
     assert config['phase'] in ('write', 'verify')
     output = Path(config['output'])
     (output/'identity.json').write_text(json.dumps(identity, allow_nan=False)+'\n')
     native_digest=sha(Path(_alopex.__file__))
+    if observer is not None: capture('after_wrapper_native_digest')
     (output/'memory-before-workload.json').write_text(json.dumps(dict(
         before_identity=boundary_before_identity,
         after_identity_and_native_digest=parse_status(Path('/proc/self/status').read_text()),

@@ -14,6 +14,7 @@ import traceback
 from hosted_dataframe_comparison import ROOT, Budget, atomic_json, install_product, require, sha
 from wal_cost_contract import plan, summarize, verify_record
 from wal_cost_supervisor import run_cell
+from wal_phase_memory import validate_report
 
 
 def main():
@@ -22,6 +23,7 @@ def main():
         and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch','manual execution boundary required')
     os.umask(0o077)
     config=json.loads(base64.b64decode(os.environ['WAL_COST_CONFIG'],validate=True))
+    require(config['diagnostic']=='wal-phase-memory/v1','diagnostic configuration required')
     cells=plan(config['mode'])
     require(config['cpu_selection']=='first_allowed' and config['cell_seconds']==30
         and config['rss_bytes']==1_073_741_824,'execution limits differ')
@@ -45,7 +47,8 @@ def main():
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'controller source differs')
         test_env=dict(env,PYTHONPATH=os.pathsep.join((str(ROOT/'scripts/ops'),str(ROOT/'scripts/test-env/tests'))))
         budget.run([sys.executable,'-B','-m','unittest','test_wal_cost_contract','test_wal_cost_supervisor',
-            'test_wal_cost_worker','test_wal_cost_commit_observer','test_capacity_snapshot','-v'],timeout=30,log=work/'contracts.log',env=test_env)
+            'test_wal_cost_worker','test_wal_cost_commit_observer','test_capacity_snapshot',
+            'test_wal_phase_memory','test_wal_commit_diagnostic','-v'],timeout=30,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('before','candidate')}
         before=products['before']['receipt'];after=products['candidate']['receipt']
         for key in ('tools','parser_record_sha256','parser_contract'):
@@ -72,7 +75,7 @@ def main():
                 for index,phase in enumerate(('write','verify','verify')):
                     output=directory/str(index);output.mkdir()
                     parameters=dict(cell,phase=phase,fixture=str(fixture),output=str(output),affinity=allocation['client'],
-                        options=config['options'],sources=config['sources'],subject_manifest_sha256=sha(manifest))
+                        options=config['options'],sources=config['sources'],subject_manifest_sha256=sha(manifest),diagnostic=config['diagnostic'])
                     path=output/'configuration.json';atomic_json(path,parameters)
                     run_cell(['taskset','--cpu-list',','.join(map(str,allocation['client'])),str(product['python']),'-B',
                         str(ROOT/'scripts/ops/wal_cost_worker.py'),'--configuration',str(path)],child_env,output,budget,
@@ -81,6 +84,8 @@ def main():
                     identity=json.loads((output/'identity.json').read_bytes())
                     require(identity['manifest_sha256']==sha(manifest),'worker subject differs')
                     verify_record(record,cell,phase,config['products'][cell['subject']]['native_sha256'])
+                    if phase=='write':
+                        validate_report(json.loads((output/'phase-memory.json').read_bytes()))
                     results.append(record)
                 rows.append(dict(cell=cell,writer=results[0],readers=results[1:]))
                 atomic_json(work/'rows.json',rows)
@@ -113,7 +118,7 @@ def main():
             '-out',str(export/'private-evidence.cms'),str(ROOT/'.github/ops/native-evidence-cert.pem')],
             capture_output=True,check=True,timeout=30)
         evidence_hash=sha(archive);shutil.rmtree(work);budget.check()
-        atomic_json(export/'result.json',dict(schema='alopex.wal-public-cost/v1',status=status,error_type=failure,
+        atomic_json(export/'result.json',dict(schema='alopex.wal-phase-memory-result/v1',status=status,error_type=failure,
             controller=os.environ['GITHUB_SHA'],sources=config['sources'],mode=config['mode'],
             complete_cells=len(rows),planned_cells=len(cells),evidence_sha256=evidence_hash,
             encrypted_sha256=sha(export/'private-evidence.cms'),work_removed=not work.exists(),performance_acceptance=False))
