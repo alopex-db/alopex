@@ -74,7 +74,7 @@ sha2 = "0.10"
 alopex-core = { workspace = true, features = ["test-utils"] }
 proptest = "1.4"
 criterion = "0.5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 tempfile = "3.10"
 serde_json.workspace = true
 
