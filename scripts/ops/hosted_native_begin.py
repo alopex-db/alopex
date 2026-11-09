@@ -10,14 +10,28 @@ import time
 
 import hosted_native_performance as shared
 
+CANDIDATE_COMMIT = "1ceaf881dfc0e38a80ab88113032bbcbcbc831cc"
+CANDIDATE_TREE = "e996099a852903b1e436167ddd9805cdcf223cdf"
+BEFORE_COMMIT = "b5ad28540edcd8aacb91ff0d2d3dae8f4fd873bf"
+BEFORE_TREE = "6be68b764fb9cc90ba9f2a0854dd4fbb5577af25"
+
 
 def settings():
     value = json.loads(base64.b64decode(os.environ["PUBLIC_PERFORMANCE_CONFIG"], validate=True))
+    candidate = value["subjects"]["candidate"]
     if (set(value["subjects"]) != {"before", "candidate"} or
-            type(value["matrix_seconds"]) is not int or not 0 < value["matrix_seconds"] <= 7200 or
+            any(value["subjects"][role]["source_commit"] != commit or
+                value["subjects"][role]["source_tree"] != tree for role, commit, tree in
+                (("candidate", CANDIDATE_COMMIT, CANDIDATE_TREE),
+                 ("before", BEFORE_COMMIT, BEFORE_TREE))) or
+            type(value["matrix_seconds"]) is not int or not 10080 <= value["matrix_seconds"] <= 12000 or
+            type(candidate.get("run")) is not int or candidate["run"] <= 0 or
+            not all(isinstance(candidate.get(key), str) and len(candidate[key]) == length
+                    for key, length in (("controller", 40), ("assets_digest", 64),
+                                        ("extension_sha256", 64))) or
             value["limits"]["case_seconds"] != 300 or value["limits"]["run_seconds"] != 420 or
-            value["schema"] != "alopex.native-begin-matrix-input/v1"):
-        raise ValueError("unexpected fixed begin comparison configuration")
+            value["schema"] != "alopex.pr819-targeted-input/v1"):
+        raise ValueError("unexpected targeted comparison configuration")
     return value
 
 
@@ -65,13 +79,13 @@ def operation(repo, config):
         atomic_json(work / "begin-results.json", rows)
         # No timings or private process identity escape the encrypted evidence.
         # A separate auditor will recompute comparisons from the collected raw.
-        summary = dict(schema="alopex.native-begin-matrix/v1",
+        summary = dict(schema="alopex.pr819-targeted-matrix/v1",
                        cells=[{key: row[key] for key in ("id", "rows", "indexes", "trial", "subject", "status")}
                               for row in rows],
                        complete=all(row["status"] == "passed" for row in rows),
                        performance_acceptance=False)
         atomic_json(export / "begin-comparison.json", summary)
-        public.update(schema="alopex.native-begin-matrix/v1", measurement_cells=len(rows),
+        public.update(schema="alopex.pr819-targeted-matrix/v1", measurement_cells=len(rows),
                       completed_cells=sum(row["status"] == "passed" for row in rows),
                       matrix_complete=summary["complete"], comparison_sha256=digest(export / "begin-comparison.json"),
                       performance_qualification=False)

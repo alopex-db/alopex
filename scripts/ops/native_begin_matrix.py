@@ -7,14 +7,16 @@ import shutil
 from native_begin_supervisor import extension_digest, probes, require, verify_events
 
 
+TARGET_FIXTURES = ((0, 0), (0, 1), (100, 2), (0, 2))
+
+
 def plan():
     cells = []
-    for rows in (0, 100, 1000):
-        for indexes in (0, 1, 2):
-            for trial in range(3):
-                for subject in (("before", "candidate") if trial % 2 == 0 else ("candidate", "before")):
-                    cells.append(dict(id=f"begin-{rows}-i{indexes}-{trial}-{subject}",
-                                      rows=rows, indexes=indexes, trial=trial, subject=subject))
+    for rows, indexes in TARGET_FIXTURES:
+        for trial in range(3):
+            for subject in (("before", "candidate") if trial % 2 == 0 else ("candidate", "before")):
+                cells.append(dict(id=f"pr819-targeted-{rows}-i{indexes}-{trial}-{subject}",
+                                  rows=rows, indexes=indexes, trial=trial, subject=subject))
     return cells
 
 
@@ -43,7 +45,7 @@ def prepare_cell(product_manifest, destination, cell, operators):
     receipt_entry = next(item for item in source["files"] if item["role"] == "receipt")
     receipt = json.loads(contained(product_manifest.parent, receipt_entry["path"]).read_text())
     wheel = next(item for item in source["files"] if item["role"] == "wheel")
-    config = dict(cell, schema="alopex.native-begin-supervisor/v1", source=receipt["source"],
+    config = dict(cell, schema="alopex.pr819-targeted-supervisor/v1", source=receipt["source"],
                   extension_sha256=extension_digest(contained(product_manifest.parent, wheel["path"])))
     def add(role, name):
         path = destination / name
@@ -69,7 +71,7 @@ def report(run, config, assets_digest):
     run.verify_collection()
     root = run.root / "collected"
     value = read_json(root / "result.json")
-    require(value["schema"] == "alopex.native-begin-measurement/v1" and
+    require(value["schema"] == "alopex.pr819-targeted-measurement/v1" and
             value["assets_digest"] == assets_digest and value["source"] == config["source"] and
             value["extension_sha256"] == config["extension_sha256"] and
             all(value[key] == config[key] for key in ("rows", "indexes", "trial")), "result identity differs")
@@ -84,7 +86,7 @@ def verify_collected(run, config, assets_digest):
             value["finalization_error"] is None and not (root / "cleanup-errors.json").exists(),
             "fixture failed")
     records = read_json(root / "cell/processes.json")
-    specs = [None, *probes(config["rows"])]
+    specs = [None, *probes(config["rows"], config["indexes"])]
     require(len(records) == len(specs), "missing fixture processes")
     for index, (record, spec) in enumerate(zip(records, specs)):
         require(record["ordinal"] == index and record["spec"] == spec and record["status"] == "passed",
