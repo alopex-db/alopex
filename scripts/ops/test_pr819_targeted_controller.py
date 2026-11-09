@@ -71,6 +71,7 @@ class TargetedControllerTests(unittest.TestCase):
                          source_commit=source["commit"], source_tree=source["tree"], files=files)
             manifest.write_text(json.dumps(value))
             self.assertEqual(supervisor.verify_begin_assets(manifest), value)
+            self.assertEqual(supervisor.verify_begin_assets(str(manifest), "linux/amd64"), value)
             harness = root / "source-harness.tar"
             harness.write_bytes(b"fixed harness")
             operators = {role: {"path": path, "sha256": digest(path)} for role, path in
@@ -81,6 +82,8 @@ class TargetedControllerTests(unittest.TestCase):
             self.assertEqual({item["role"] for item in supervisor.verify_begin_assets(prepared)["files"]},
                              {"wheel", "library", "receipt", "harness", "measurement_controller",
                               "measurement_worker", "measurement_config"})
+            self.assertEqual(supervisor.verify_begin_assets(str(prepared), "linux/amd64")["schema"],
+                             "alopex.native-wheel-assets/v1")
             library.write_bytes(b"substitution")
             with self.assertRaises(ValueError):
                 supervisor.verify_begin_assets(manifest)

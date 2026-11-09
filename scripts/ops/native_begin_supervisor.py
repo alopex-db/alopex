@@ -45,6 +45,7 @@ def verify_begin_assets(manifest_path, platform=None):
     """Accept the normal product or an exact-source wheel-only begin input."""
     from common import contained, digest, verify_assets
 
+    manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("schema") == "alopex.test-env-assets/v1":
         return verify_assets(manifest_path, platform or manifest["platform"])
