@@ -1,4 +1,4 @@
-name: Candidate CSV and columnar contracts
+name: Candidate migration contract
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 jobs:
-  csv-columnar-contract:
+  candidate-migration:
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 20
     steps:
@@ -25,18 +25,17 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify public CSV and columnar COPY contracts
-        id: verify
+      - name: Verify old database and logical export against candidate wheel
         env:
           GH_TOKEN: ${{ github.token }}
           RUNNER_KIND: github-hosted
           E2E_CONFIG: ${{ inputs.e2e_config }}
-        run: python3 scripts/ops/hosted_sequence_e2e.py
+        run: python3 scripts/ops/run_candidate_migration.py
       - name: Preserve allowlisted result and encrypted evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: candidate-csv-columnar-contract
-          path: csv-columnar-export/
+          name: candidate-migration-contract
+          path: migration-export/
           if-no-files-found: error
           retention-days: 7
