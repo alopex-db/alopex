@@ -80,6 +80,20 @@ class MatrixStopTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_product_artifact_name_is_allowlisted(self):
+        self.assertEqual(controller.product_artifact_name({}), "native-product-assets")
+        self.assertEqual(controller.product_artifact_name(
+            {"artifact_name": "native-product-assets-no-mount"}),
+            "native-product-assets-no-mount")
+        with self.assertRaisesRegex(ValueError, "unqualified"):
+            controller.product_artifact_name({"artifact_name": "arbitrary"})
+
+    def test_seccomp_policy_is_pinned_before_construction(self):
+        controller.verify_boundary_inputs(
+            {"seccomp_sha256": controller.EXPECTED_SECCOMP_SHA256})
+        with self.assertRaisesRegex(ValueError, "unreviewed"):
+            controller.verify_boundary_inputs({"seccomp_sha256": "0" * 64})
+
     def test_requires_exact_subjects_and_bounded_duration(self):
         good = {"subjects": {name: {} for name in ("published", "before", "candidate")},
                 "matrix_seconds": 7200, "limits": {"case_seconds": 300, "run_seconds": 420}}
@@ -92,7 +106,9 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError): read(value)
 
     def test_outer_timer_is_removed_even_when_construction_fails(self):
-        inputs = base64.b64encode(gzip.compress(json.dumps({"bounds": {}, "limits": {}}).encode())).decode()
+        inputs = base64.b64encode(gzip.compress(json.dumps(
+            {"bounds": {}, "limits": {}, "seccomp_sha256": controller.EXPECTED_SECCOMP_SHA256}
+        ).encode())).decode()
         config = {"image": {}, "bounds": {}, "limits": {}, "matrix_seconds": 7200}
         with patch.dict(os.environ, RUNNER_KIND="github-hosted", GITHUB_WORKSPACE="/fixture",
                         RUNNER_TEMP="/temporary-fixture", NATIVE_IMAGE_INPUTS=inputs), \

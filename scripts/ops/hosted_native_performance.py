@@ -16,6 +16,20 @@ from hosted_native_image import construct
 from hosted_native_transfer import verify_run
 from hosted_native_sql import verify_products
 
+EXPECTED_SECCOMP_SHA256 = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
+
+
+def product_artifact_name(subject):
+    name = subject.get("artifact_name", "native-product-assets")
+    if name not in ("native-product-assets", "native-product-assets-no-mount"):
+        raise ValueError("unqualified product artifact name")
+    return name
+
+
+def verify_boundary_inputs(inputs):
+    if inputs.get("seccomp_sha256") != EXPECTED_SECCOMP_SHA256:
+        raise ValueError("unreviewed seccomp policy")
+
 
 def settings():
     value = json.loads(base64.b64decode(os.environ["PUBLIC_PERFORMANCE_CONFIG"], validate=True))
@@ -73,7 +87,7 @@ def fetch(repo, config):
         for role, subject in config["subjects"].items():
             require(subject["platform"] == config["platform"], "IDENTITY")
             directory = "native-" + role + "-import"
-            download(subject["run"], subject["controller"], "native-product-assets", directory)
+            download(subject["run"], subject["controller"], product_artifact_name(subject), directory)
             imported = repo / directory
             manifest = verify_products(imported / "assets/assets.json", imported / "result.json", subject)
             require(digest(imported / "assets/assets.json") == subject["assets_digest"], "IDENTITY")
@@ -183,6 +197,7 @@ def main():
     if sys.argv[1:] != ["run"] or os.geteuid() != 0:
         return 78
     inputs = json.loads(gzip.decompress(base64.b64decode(os.environ.pop("NATIVE_IMAGE_INPUTS"), validate=True)))
+    verify_boundary_inputs(inputs)
     inputs.update(config["image"])
     inputs["bounds"].update(config["bounds"])
     inputs["limits"].update(config["limits"])

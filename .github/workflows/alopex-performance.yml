@@ -83,6 +83,11 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
+      - name: Verify fixed SQL matrix and product provenance contracts
+        shell: bash
+        run: |
+          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_hosted_native_performance test_native_sql_matrix test_composed_sql_products -q
+          python3 -B -m unittest discover -s scripts/test-env/tests -p test_capacity_snapshot.py
       - name: Retrieve source-built products and verified environment image
         env:
           RUNNER_KIND: ${{ runner.environment }}
