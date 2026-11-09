@@ -48,7 +48,7 @@ def run():
     config = json.loads(base64.b64decode(os.environ.pop("E2E_CONFIG"), validate=True))
     require(config["source_commit"] == "a537c8beb5c0d3a135e329ab344942243487f55e" and
             config["controller"] == os.environ["GITHUB_SHA"] and
-            config["mode"] == "parquet_hnsw_path", "IDENTITY")
+            config["mode"] == "csv_columnar_contract", "IDENTITY")
     for name, expected in config["test_sources"].items():
         require(digest(ROOT / name) == expected, "IDENTITY")
     require(subprocess.run(["git", "diff", "--quiet", config["source_commit"], "HEAD", "--",
@@ -56,14 +56,14 @@ def run():
                            cwd=ROOT, timeout=10).returncode == 0, "IDENTITY")
 
     temporary = Path(os.environ["RUNNER_TEMP"])
-    work, export = temporary / "alopex-parquet-hnsw-path", ROOT / "parquet-hnsw-path-export"
+    work, export = temporary / "alopex-csv-columnar", ROOT / "csv-columnar-export"
     require(not work.exists() and not export.exists(), "STATE")
     roots = [ROOT.parent, temporary]
     for item in (ROOT.parent.parent / "_actions", Path.home() / ".cargo", Path.home() / ".cache"):
         if item.exists():
             roots.append(item)
-    phases = {"fetch": 500_000_000, "prepare": 1_000_000_000,
-              "test": 1_200_000_000, "collect": 100_000_000}
+    phases = {"fetch": 500_000_000, "prepare": 500_000_000,
+              "test": 2_000_000_000, "collect": 100_000_000}
     reserve = 1_000_000_000
     budget = Budget({"roots": list(map(str, roots)), "stop_bytes": 40_000_000_000,
                      "reserve_bytes": reserve, "poll_seconds": 2, "planned_bytes": phases})
@@ -98,7 +98,7 @@ def run():
         python = venv / "bin/python"
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--only-binary=:all:",
-                    "numpy==2.2.1", "pyarrow==26.0.0"], timeout=300,
+                    "pytest==9.1.1"], timeout=180,
                    log=work / "dependencies-install.log", env=env)
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(files["wheel"])],
@@ -106,16 +106,16 @@ def run():
         for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
                     "NIM_SQL_PARSER_LIB_DIR", "ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD"):
             env.pop(key, None)
-        env["ALOPEX_HNSW_WORK"] = str(work)
+        env["ALOPEX_COPY_WORK"] = str(work)
         budget.before("test")
-        budget.run([str(python), "-I", "scripts/ops/verify_parquet_hnsw_path.py"],
-                   timeout=180, log=work / "hnsw-path.log", env=env)
-        report = json.loads((work / "hnsw-path.json").read_bytes())
-        require(report == {"schema": "alopex.parquet-hnsw-path/v1", "status": "passed",
-                "rows": 3, "parquet_reopened": True, "index_rebuilt": True,
-                "explain_hnsw_selected": True, "analyze_visited_nodes": True,
-                "nearest_id": 1}, "CASE")
-        atomic_json(work / "test-summary.json", {"rows": 3, "hnsw_selected": True,
+        budget.run([str(python), "-I", "scripts/ops/run_csv_columnar_contract.py"],
+                   timeout=600, log=work / "copy-contract.log", env=env)
+        report = json.loads((work / "copy-contract.json").read_bytes())
+        require(report["schema"] == "alopex.csv-columnar-contract/v1" and
+                report["status"] == "passed" and report["csv_cases"] == 30 and
+                report["columnar_cases"] == 12 and len(report["case_ids"]) == 42 and
+                len(set(report["case_ids"])) == 42 and report["owned_case_directories_removed"], "CASE")
+        atomic_json(work / "test-summary.json", {"csv_cases": 30, "columnar_cases": 12,
                     "source": config["source_commit"], "assets_digest": config["assets_digest"],
                     "wheel_sha256": config["wheel_sha256"]})
         status = "passed"
@@ -142,9 +142,9 @@ def run():
         evidence_hash = digest(archive)
         shutil.rmtree(work)
         budget.check()
-        atomic_json(export / "result.json", {"schema": "alopex.parquet-hnsw-path/v1", "status": status,
+        atomic_json(export / "result.json", {"schema": "alopex.csv-columnar-contract/v1", "status": status,
                   "source_commit": config["source_commit"], "assets_digest": config["assets_digest"],
-                  "rows": 3 if status == "passed" else 0, "evidence_sha256": evidence_hash,
+                  "cases": 42 if status == "passed" else 0, "evidence_sha256": evidence_hash,
                   "encrypted_sha256": digest(encrypted), "owned_resources_removed": not work.exists(),
                   "performance_qualification": False,
                   "error_code": None if status == "passed" else failure["code"]})
