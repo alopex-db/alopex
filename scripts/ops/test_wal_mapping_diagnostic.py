@@ -42,6 +42,15 @@ class SmapsParserTests(unittest.TestCase):
             "bytes": {"Rss": 4096, "Pss": 2048, "count": 1},
         }])
 
+    def test_anonymous_header_with_trailing_whitespace(self):
+        for suffix in ("   ", "\t "):
+            with self.subTest(suffix=repr(suffix)):
+                result = diagnostic.parse_smaps(block(HEADER_ANON + suffix, 4, 2))
+                self.assertEqual(result["groups"], [{
+                    "category": "anonymous", "pathname": None,
+                    "bytes": {"Rss": 4096, "Pss": 2048, "count": 1},
+                }])
+
     def test_missing_duplicate_and_invalid_metrics_fail(self):
         good = block(HEADER_FILE, 4, 2)
         for raw in (

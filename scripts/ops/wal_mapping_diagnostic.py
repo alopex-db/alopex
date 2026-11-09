@@ -27,10 +27,10 @@ MAX_COMPRESSED_BYTES = 128_000
 
 
 def _identity(pathname):
-    if pathname is None:
+    # A valid anonymous header may end in whitespace. The optional pathname
+    # capture then yields either None or an empty/whitespace-only string.
+    if pathname is None or not pathname.strip():
         return "anonymous", None
-    if not pathname.strip():
-        raise ValueError("empty smaps pathname")
     if pathname.startswith("[") and pathname.endswith("]"):
         return "special", pathname
     if pathname.startswith("/"):
