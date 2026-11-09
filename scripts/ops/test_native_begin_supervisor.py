@@ -37,6 +37,17 @@ def events(spec):
 
 
 class BeginSupervisorTests(unittest.TestCase):
+    def test_exact_eight_trial_ids_are_accepted(self):
+        config = {"schema": "alopex.native-begin-supervisor/v1", "rows": 100,
+                  "indexes": 1, "trial": 0}
+        for trial in range(8):
+            subject.verify_fixture_config(dict(config, trial=trial))
+        for trial in (-1, 8, True, 1.5):
+            with self.assertRaises(ValueError):
+                subject.verify_fixture_config(dict(config, trial=trial))
+        with self.assertRaises(ValueError):
+            subject.verify_fixture_config(dict(config, schema="other"))
+
     def test_all_phase_variants_and_extra_first_begin_readers(self):
         self.assertEqual(len(subject.probes(0)), 5)
         self.assertEqual(len(subject.probes(100)), 5)

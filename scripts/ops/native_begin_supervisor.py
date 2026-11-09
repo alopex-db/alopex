@@ -26,6 +26,14 @@ def probes(rows):
     return result
 
 
+def verify_fixture_config(config):
+    require(config["schema"] == "alopex.native-begin-supervisor/v1" and
+            type(config["indexes"]) is int and config["indexes"] in (0, 1, 2) and
+            type(config["trial"]) is int and config["trial"] in range(8),
+            "invalid fixture configuration")
+    probes(config["rows"])
+
+
 def extension_digest(wheel):
     with zipfile.ZipFile(wheel) as archive:
         entries = [item for item in archive.infolist()
@@ -184,10 +192,7 @@ def main():
     require(sys.platform == "linux" and os.getuid() != 0, "normal Linux user required")
     request = read_json(INPUT / "request.json")
     config = read_json(INPUT / "measurement.json")
-    require(config["schema"] == "alopex.native-begin-supervisor/v1" and
-            type(config["indexes"]) is int and config["indexes"] in (0, 1, 2) and
-            type(config["trial"]) is int and config["trial"] in (0, 1, 2), "invalid fixture configuration")
-    probes(config["rows"])
+    verify_fixture_config(config)
     manifest = read_json(INPUT / "assets.json")
     assets = verify_begin_assets(INPUT / "assets.json")
     entries = {}

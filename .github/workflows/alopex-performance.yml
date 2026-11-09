@@ -86,7 +86,7 @@ jobs:
       - name: Verify source-bound receipts and focused begin plan
         shell: bash
         run: |
-          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_pr819_regression_recheck_controller test_native_begin_matrix test_hosted_native_begin test_audit_native_begin test_composed_begin_receipts test_composed_sql_products -v
+          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_pr819_regression_recheck_controller test_native_begin_matrix test_native_begin_supervisor test_hosted_native_begin test_audit_native_begin test_composed_begin_receipts test_composed_sql_products -v
           python3 -B -m unittest discover -s scripts/test-env/tests -p test_capacity_snapshot.py
       - name: Retrieve source-built products and verified environment image
         env:
