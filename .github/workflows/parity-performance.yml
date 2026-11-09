@@ -29,7 +29,170 @@ env:
   NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
 
 jobs:
+  runner-preflight:
+    if: inputs.issue_number == '712-runner-preflight'
+    name: v0.8.17 HNSW runner capability preflight
+    runs-on: [self-hosted, Linux, X64, alopex-performance]
+    timeout-minutes: 15
+    steps:
+      - name: Measure without checking out or building
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import platform
+          import shutil
+          import stat
+          import subprocess
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          private = temp / "v0817-hnsw-runner-preflight.private.json"
+          public_dir = temp / "v0817-hnsw-runner-preflight-public"
+          public_dir.mkdir(mode=0o700, exist_ok=True)
+          errors = []
+          report = {"schema": "alopex.hnsw-runner-preflight.private/v1",
+                    "source_sha": os.environ["GITHUB_SHA"],
+                    "qualification": "capability_probe_only"}
+          try:
+              release = platform.release()
+              report["system"] = {
+                  "machine": platform.machine(), "release": release,
+                  "uid": os.geteuid(), "cpu_model": next(
+                      (line.split(":", 1)[1].strip()
+                       for line in Path("/proc/cpuinfo").read_text().splitlines()
+                       if line.startswith("model name")), None),
+                  "allowed_cpus": sorted(os.sched_getaffinity(0)),
+              }
+              if platform.system() != "Linux" or platform.machine() != "x86_64":
+                  errors.append("incompatible_kernel_or_arch")
+              if "microsoft" in release.lower():
+                  errors.append("combined_wsl_windows_storage_unmeasured")
+              if os.geteuid() == 0:
+                  errors.append("runner_is_root")
+              if len(report["system"]["allowed_cpus"]) < 2:
+                  errors.append("insufficient_cpu_affinity")
+              for name, path in {
+                  "self_io": Path("/proc/self/io"),
+                  "self_status": Path("/proc/self/status"),
+                  "cgroup": Path("/proc/self/cgroup"),
+                  "mountinfo": Path("/proc/self/mountinfo"),
+                  "perf_event_paranoid": Path("/proc/sys/kernel/perf_event_paranoid"),
+                  "lsm": Path("/sys/kernel/security/lsm"),
+              }.items():
+                  try:
+                      report[name] = path.read_text()
+                  except OSError:
+                      report[name] = None
+              if report["self_io"] is None or report["self_status"] is None:
+                  errors.append("self_process_counters_unavailable")
+              child = subprocess.Popen(["sleep", "0.2"])
+              try:
+                  report["owned_child_io"] = Path(f"/proc/{child.pid}/io").read_text()
+                  report["owned_child_status"] = Path(f"/proc/{child.pid}/status").read_text()
+              except OSError:
+                  errors.append("owned_process_observation_unavailable")
+              finally:
+                  try:
+                      child.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      child.kill()
+                      child.wait()
+                      errors.append("owned_process_cleanup_timeout")
+              roots = [Path(os.environ["RUNNER_WORKSPACE"]), temp,
+                       Path.home(), Path("/tmp"), Path("/var/tmp")]
+              if os.environ.get("CARGO_TARGET_DIR"):
+                  roots.append(Path(os.environ["CARGO_TARGET_DIR"]))
+              roots = [path.resolve() for path in roots if path.exists()]
+              seen = set()
+              total = 0
+              for root in roots:
+                  pending = [root]
+                  while pending:
+                      path = pending.pop()
+                      try:
+                          info = path.lstat()
+                      except FileNotFoundError:
+                          continue
+                      key = (info.st_dev, info.st_ino)
+                      if key in seen or stat.S_ISLNK(info.st_mode):
+                          continue
+                      seen.add(key)
+                      total += info.st_blocks * 512
+                      if stat.S_ISDIR(info.st_mode):
+                          with os.scandir(path) as entries:
+                              pending.extend(Path(entry.path) for entry in entries)
+              report["storage"] = {
+                  "conservative_roots": [str(path) for path in roots],
+                  "allocated_bytes": total,
+                  "workspace_free_bytes": shutil.disk_usage(
+                      os.environ["RUNNER_WORKSPACE"]).free,
+              }
+              if total >= 40_000_000_000:
+                  errors.append("storage_stop_reached")
+              if total + 8_000_000_000 >= 40_000_000_000:
+                  errors.append("measurement_headroom_unproven")
+              if report["storage"]["workspace_free_bytes"] < 8_000_000_000:
+                  errors.append("filesystem_free_space_insufficient")
+          except Exception as exc:
+              errors.append("preflight_measurement_error")
+              report["private_error"] = repr(exc)
+          report["error_codes"] = sorted(set(errors))
+          private.write_text(json.dumps(report, sort_keys=True))
+          private.chmod(0o600)
+          (public_dir / "result.json").write_text(json.dumps({
+              "schema": "alopex.hnsw-runner-preflight-public/v1",
+              "case_id": "hnsw_runner_capability",
+              "outcome": "ready_for_private_review" if not errors else "failed",
+              "error_codes": sorted(set(errors)),
+              "performance_qualified": False,
+          }, sort_keys=True))
+          print("PREFLIGHT_RECORDED")
+          PY
+      - name: Encrypt private diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cert="$RUNNER_TEMP/v0817-hnsw-runner-preflight-cert.pem"
+          public_dir="$RUNNER_TEMP/v0817-hnsw-runner-preflight-public"
+          trap 'rm -f "$cert" "$RUNNER_TEMP/v0817-hnsw-runner-preflight.private.json"' EXIT
+          curl -fsSL --max-time 30 \
+            https://raw.githubusercontent.com/alopex-db/alopex/2911b9201d54233ebdcb63ed27322509624f7140/.github/ops/native-evidence-cert.pem \
+            -o "$cert"
+          echo "d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2  $cert" | sha256sum --check --status
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER \
+            -in "$RUNNER_TEMP/v0817-hnsw-runner-preflight.private.json" \
+            -out "$public_dir/private-evidence.cms" "$cert"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v0817-hnsw-runner-preflight
+          path: ${{ runner.temp }}/v0817-hnsw-runner-preflight-public/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Enforce preflight outcome
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          result = json.loads((Path(os.environ["RUNNER_TEMP"]) /
+                               "v0817-hnsw-runner-preflight-public/result.json").read_text())
+          if result["outcome"] != "ready_for_private_review":
+              raise SystemExit("preflight failed; inspect fixed error codes in result.json")
+          PY
+      - name: Remove owned preflight files
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/v0817-hnsw-runner-preflight.private.json" \
+            "$RUNNER_TEMP/v0817-hnsw-runner-preflight-cert.pem"
+          rm -rf "$RUNNER_TEMP/v0817-hnsw-runner-preflight-public"
+
   performance:
+    if: inputs.issue_number != '712-runner-preflight'
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
@@ -225,7 +388,7 @@ jobs:
   retain-run-outcome:
     name: retain immutable performance run outcome
     needs: performance
-    if: ${{ always() }}
+    if: ${{ always() && inputs.issue_number != '712-runner-preflight' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
