@@ -156,7 +156,7 @@ def run():
 if __name__ == "__main__":
     try:
         result = run()
-    except Exception:
-        print('{"status":"failed","error_code":"CONSTRUCTION"}')
+    except Exception as error:
+        print(json.dumps({"status": "failed", "error_code": getattr(error, "code", "CONSTRUCTION")}))
         raise SystemExit(1)
     raise SystemExit(result)
