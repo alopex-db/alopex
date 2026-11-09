@@ -85,6 +85,9 @@ jobs:
                   "docker_images": ["docker", "image", "ls", "--format", "{{json .}}"],
                   "podman_storage": ["podman", "system", "df", "--format", "json"],
                   "podman_images": ["podman", "images", "--format", "json"],
+                  "podman_containers": ["podman", "ps", "-a", "--size",
+                                        "--format", "json"],
+                  "podman_volumes": ["podman", "volume", "ls", "--format", "json"],
               }.items():
                   if not report["runtime_tools"][command[0]]:
                       report["runtime_probes"][name] = {"available": False}
@@ -94,7 +97,8 @@ jobs:
                                               text=True, timeout=20)
                       report["runtime_probes"][name] = {
                           "available": True, "returncode": result.returncode,
-                          "stdout": result.stdout[:20000],
+                          "stdout": result.stdout[:200000],
+                          "stdout_truncated": len(result.stdout) > 200000,
                           "stderr": result.stderr[:2000],
                       }
                   except subprocess.TimeoutExpired:
