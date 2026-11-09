@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/test-env"))
@@ -120,6 +121,12 @@ def run():
             identities[label] = json.loads((work / (label + "-identity.log")).read_text())
         require(identities["old"] == {"version": "0.8.15", "native_sha256": config["old_native_sha256"]} and
                 identities["new"]["version"] == "0.8.17", "IDENTITY")
+        with zipfile.ZipFile(files["wheel"]) as archive:
+            native_members = [name for name in archive.namelist() if name.endswith(".so") and
+                              name.split("/")[-1].startswith("_alopex.")]
+            require(len(native_members) == 1, "IDENTITY")
+            expected_native_sha256 = hashlib.sha256(archive.read(native_members[0])).hexdigest()
+        require(identities["new"]["native_sha256"] == expected_native_sha256, "IDENTITY")
         env["ALOPEX_COMPAT_OUTPUT"] = str(cases)
         env["ALOPEX_COMPAT_TARGET_VERSION"] = "0.8.17"
         script = ROOT / "scripts/compatibility/logical.py"
@@ -138,12 +145,31 @@ def run():
                 shutil.rmtree(cases / "python15-source-db")
         direct = json.loads((cases / "python15-python-direct-result.json").read_text())
         logical = json.loads((cases / "python-from-python-result.json").read_text())
+        bundle = json.loads((cases / "python15-bundle.json").read_text())
         require(direct["direct_open_pass"] and direct["second_reopen_pass"] and
                 direct["index_recreated"] is False and
                 logical["logical_roundtrip_pass"] and logical["new_write_update_pass"], "CASE")
+        require(direct["source"] == logical["source"] == bundle["source"] == "Python 0.8.15" and
+                direct["destination"] == logical["destination"] == "Python 0.8.17" and
+                "HnswSearch" in json.dumps(direct["hnsw_plan"]) and
+                logical["post_reopen_snapshot"] == bundle["expected"], "CASE")
         require(logical["stock_scalar_parquet_probe"]["preserved"] and
-                logical["limitations"]["columnar_parquet_export_count"] == 0, "CASE")
+                logical["limitations"] == bundle["limitations"] and
+                logical["limitations"]["columnar_parquet_export_count"] == 0 and
+                "unsupported format" in logical["limitations"]["vector_parquet"] and
+                logical["stock_csv_probe"]["preserved"] is False, "CASE")
         require(not any(cases.glob("*-db")), "CLEANUP")
+        atomic_json(work / "case-evidence.json", {
+            "schema": "alopex.candidate-migration-cases/v1",
+            "source": bundle["source"],
+            "expected": bundle["expected"],
+            "direct": direct,
+            "logical": logical,
+            "old_limitations": bundle["limitations"],
+            "source_script_sha256": digest(script),
+            "loaded_native_sha256": identities["new"]["native_sha256"],
+            "wheel_native_sha256": expected_native_sha256,
+        })
         atomic_json(work / "test-summary.json", {"schema": "alopex.candidate-migration/v1",
                    "status": "passed", "identities": identities,
                    "direct_open_pass": True, "second_reopen_pass": True,
