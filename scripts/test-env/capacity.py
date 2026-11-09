@@ -12,6 +12,24 @@ from common import Failure, record_cleanup_error, require
 
 
 def allocated_bytes(roots):
+    """Return a complete traversal, retrying descendant disappearance at most twice.
+
+    Every retry discards the partial total and revisits all inventory roots.
+    Missing roots, permission/I/O errors and persistent churn remain failures.
+    This is not an atomic filesystem snapshot.
+    """
+    roots = tuple(Path(root) for root in roots)
+    for attempt in range(3):
+        try:
+            return _allocated_bytes_once(roots)
+        except FileNotFoundError:
+            if attempt == 2:
+                raise
+            for root in roots:
+                require(root.is_absolute() and root.exists(), "MEASUREMENT")
+
+
+def _allocated_bytes_once(roots):
     seen, total = set(), 0
     for root in roots:
         root = Path(root)
