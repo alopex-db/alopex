@@ -73,11 +73,28 @@ def fetch(repo, config):
         for role, subject in config["subjects"].items():
             require(subject["platform"] == config["platform"], "IDENTITY")
             directory = "native-" + role + "-import"
-            download(subject["run"], subject["controller"], "native-product-assets", directory)
+            wheel_only = role == "before" and subject["source_commit"] == "ce88bbfadd8030ff5cd67262a72f915e50e5b8da"
+            download(subject["run"], subject["controller"],
+                     "native-wheel-assets" if wheel_only else "native-product-assets", directory)
             imported = repo / directory
-            manifest = verify_products(imported / "assets/assets.json", imported / "result.json", subject)
+            if wheel_only:
+                from native_begin_supervisor import extension_digest, verify_begin_assets
+                manifest = verify_begin_assets(imported / "assets/assets.json")
+                result = json.loads((imported / "result.json").read_text())
+                require(result["schema"] == "alopex.native-wheel-assets-result/v1" and
+                        result["status"] == "passed" and result["source"] ==
+                        {"commit": subject["source_commit"], "tree": subject["source_tree"],
+                         "profile": "release"} and
+                        result["assets_digest"] == subject["assets_digest"] and
+                        manifest["source_commit"] == subject["source_commit"] and
+                        manifest["source_tree"] == subject["source_tree"], "IDENTITY")
+                wheel = next(item for item in manifest["files"] if item["role"] == "wheel")
+                require(extension_digest(imported / "assets" / wheel["path"]) ==
+                        subject["extension_sha256"], "IDENTITY")
+            else:
+                manifest = verify_products(imported / "assets/assets.json", imported / "result.json", subject)
+                harnesses.add(next(f["sha256"] for f in manifest["files"] if f["role"] == "harness"))
             require(digest(imported / "assets/assets.json") == subject["assets_digest"], "IDENTITY")
-            harnesses.add(next(f["sha256"] for f in manifest["files"] if f["role"] == "harness"))
             if role == "published":
                 wheel = next(f for f in manifest["files"] if f["role"] == "wheel")
                 require(wheel["sha256"] == subject["published_wheel_sha256"], "IDENTITY")

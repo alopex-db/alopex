@@ -41,6 +41,70 @@ def extension_digest(wheel):
             return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def verify_begin_assets(manifest_path):
+    """Accept the normal product or an exact-source wheel-only begin input."""
+    from common import contained, digest, verify_assets
+
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") == "alopex.test-env-assets/v1":
+        return verify_assets(manifest_path, manifest["platform"])
+    require(manifest.get("schema") == "alopex.native-wheel-assets/v1" and
+            manifest.get("platform") == "linux/amd64" and
+            isinstance(manifest.get("source_commit"), str) and
+            isinstance(manifest.get("source_tree"), str), "wheel-only identity differs")
+    files = manifest.get("files")
+    require(isinstance(files, list) and len(files) in (3, 6), "wheel-only roles differ")
+    roles = {item["role"] for item in files}
+    expected = {"wheel", "library", "receipt"}
+    if len(files) == 6:
+        expected |= {"measurement_controller", "measurement_worker", "measurement_config"}
+    require(roles == expected and len({item["path"] for item in files}) == len(files),
+            "wheel-only roles differ")
+    require(sum(item["size"] for item in files) < 100_000_000,
+            "wheel-only input exceeds bound")
+    for item in files:
+        path = contained(manifest_path.parent, item["path"])
+        require(path.is_file() and not path.is_symlink() and
+                path.stat().st_size == item["size"] and digest(path) == item["sha256"],
+                "wheel-only asset differs")
+    by_role = {item["role"]: item for item in files}
+    receipt = json.loads(contained(manifest_path.parent, by_role["receipt"]["path"]).read_text())
+    source = {"commit": manifest["source_commit"], "tree": manifest["source_tree"],
+              "profile": "release"}
+    require(receipt.get("schema") == "alopex.performance-wheel-build/v1" and
+            receipt.get("source") == source and
+            receipt.get("python_wheel_sha256") == by_role["wheel"]["sha256"] and
+            receipt.get("parser_sha256") == by_role["library"]["sha256"],
+            "wheel-only receipt differs")
+    extension_digest(contained(manifest_path.parent, by_role["wheel"]["path"]))
+    return manifest
+
+
+def prepare_wheel_only(assets, request):
+    """Install the verified wheel without the SQL server or harness inputs."""
+    from common import atomic_json, contained, private_dir
+    from entrypoint import INPUT, WORK, command
+    from permissions import private_tree
+
+    for name in ("home", "tmp", "cache", "results"):
+        private_dir(WORK / name)
+    venv = WORK / "venv"
+    command([sys.executable, "-m", "venv", str(venv)],
+            WORK / "results/prepare.log", request["limits"]["case_seconds"])
+    python = venv / "bin/python"
+    wheel = next(item for item in assets["files"] if item["role"] == "wheel")
+    command([str(python), "-m", "pip", "install", "--no-index", "--find-links=/tool/wheelhouse",
+             "--no-cache-dir", "psycopg==3.2.10", str(contained(INPUT, wheel["path"]))],
+            WORK / "results/prepare.log", request["limits"]["case_seconds"])
+    env = dict(os.environ)
+    libraries = {str(contained(INPUT, item["path"]).parent)
+                 for item in assets["files"] if item["role"] == "library"}
+    env["LD_LIBRARY_PATH"] = ":".join(sorted(libraries))
+    atomic_json(WORK / "results/prepared-permissions.json",
+                {"venv": private_tree(venv, configure=True, external_targets=[sys.executable])})
+    return python, env
+
+
 def number(value, positive=False):
     return (type(value) in (int, float) and math.isfinite(value) and
             (value > 0 if positive else value >= 0))
@@ -114,7 +178,7 @@ def run_fixture(config, execute, output, expected_extension):
 
 def main():
     sys.path.insert(0, "/tool")
-    from common import atomic_json, contained, digest, private_dir, read_json, verify_assets
+    from common import atomic_json, contained, digest, private_dir, read_json
     from entrypoint import INPUT, WORK, command, prepare
     from permissions import private_tree
     from verify_environment import privileges, files, resource_limits
@@ -128,7 +192,7 @@ def main():
             type(config["trial"]) is int and config["trial"] in (0, 1, 2), "invalid fixture configuration")
     probes(config["rows"], config["indexes"])
     manifest = read_json(INPUT / "assets.json")
-    assets = verify_assets(INPUT / "assets.json", manifest["platform"])
+    assets = verify_begin_assets(INPUT / "assets.json")
     entries = {}
     for role in ("wheel", "receipt", "measurement_controller", "measurement_worker", "measurement_config"):
         matches = [item for item in assets["files"] if item["role"] == role]
@@ -151,7 +215,9 @@ def main():
         private_dir(WORK / name)
     atomic_json(WORK / "results/environment.json", {
         "privileges": privileges(request), "files": files(WORK), "limits": resource_limits(request)})
-    python, env = prepare(assets, request)
+    python, env = (prepare_wheel_only(assets, request)
+                   if assets["schema"] == "alopex.native-wheel-assets/v1"
+                   else prepare(assets, request))
     os.sched_setaffinity(0, request["cpu"]["client"])
     require(os.sched_getaffinity(0) == set(request["cpu"]["client"]), "CPU affinity differs")
     output = private_dir(WORK / "results/cell")

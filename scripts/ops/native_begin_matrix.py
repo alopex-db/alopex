@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import shutil
 
-from native_begin_supervisor import extension_digest, probes, require, verify_events
+from native_begin_supervisor import extension_digest, probes, require, verify_begin_assets, verify_events
 
 
 TARGET_FIXTURES = ((0, 0), (0, 1), (100, 2), (0, 2))
@@ -21,10 +21,10 @@ def plan():
 
 
 def prepare_cell(product_manifest, destination, cell, operators):
-    from common import atomic_json, contained, digest, private_dir, verify_assets
+    from common import atomic_json, contained, digest, private_dir
     require(cell in plan() and not destination.exists(), "invalid or existing fixture")
     source = json.loads(product_manifest.read_text())
-    source = verify_assets(product_manifest, source["platform"])
+    source = verify_begin_assets(product_manifest)
     roles = {item["role"] for item in source["files"]}
     require(roles.issubset({"server", "wheel", "receipt", "library", "harness", "wheel_receipt"}),
             "unexpected product asset role")
@@ -62,7 +62,7 @@ def prepare_cell(product_manifest, destination, cell, operators):
         add(role, name)
     path = destination / "assets.json"
     atomic_json(path, manifest)
-    verify_assets(path, source["platform"])
+    verify_begin_assets(path)
     return path, config
 
 
