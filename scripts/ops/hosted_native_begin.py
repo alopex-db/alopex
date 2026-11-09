@@ -30,8 +30,8 @@ def settings():
                     for key, length in (("controller", 40), ("assets_digest", 64),
                                         ("extension_sha256", 64))) or
             value["limits"]["case_seconds"] != 300 or value["limits"]["run_seconds"] != 420 or
-            value["schema"] != "alopex.pr819-base-head-full54-input/v1"):
-        raise ValueError("unexpected full comparison configuration")
+            value["schema"] != "alopex.pr819-regression-recheck-input/v1"):
+        raise ValueError("unexpected regression recheck configuration")
     return value
 
 

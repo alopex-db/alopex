@@ -28,11 +28,11 @@ class BeginMatrixTests(unittest.TestCase):
 
     def test_plan_has_all_fixture_subject_trial_combinations_once(self):
         plan = matrix.plan()
-        self.assertEqual(len(plan), 54)
-        self.assertEqual(len({row["id"] for row in plan}), 54)
+        self.assertEqual(len(plan), 32)
+        self.assertEqual(len({row["id"] for row in plan}), 32)
         self.assertEqual({(r["rows"], r["indexes"], r["trial"], r["subject"]) for r in plan},
-                         {(rows, indexes, trial, subject) for rows in (0, 100, 1000)
-                          for indexes in (0, 1, 2) for trial in range(3) for subject in ("before", "candidate")})
+                         {(rows, indexes, trial, subject) for rows, indexes in ((0, 1), (100, 1))
+                          for trial in range(8) for subject in ("before", "candidate")})
         self.assertEqual([row["subject"] for row in plan[:6]],
                          ["before", "candidate", "candidate", "before", "before", "candidate"])
 

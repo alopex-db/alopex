@@ -6,15 +6,17 @@ import shutil
 
 from native_begin_supervisor import extension_digest, probes, require, verify_begin_assets, verify_events
 
+REGRESSION_FIXTURES = ((0, 1), (100, 1))
+TRIALS = 8
+
 
 def plan():
     cells = []
-    for rows in (0, 100, 1000):
-        for indexes in (0, 1, 2):
-            for trial in range(3):
-                for subject in (("before", "candidate") if trial % 2 == 0 else ("candidate", "before")):
-                    cells.append(dict(id=f"begin-{rows}-i{indexes}-{trial}-{subject}",
-                                      rows=rows, indexes=indexes, trial=trial, subject=subject))
+    for rows, indexes in REGRESSION_FIXTURES:
+        for trial in range(TRIALS):
+            for subject in (("before", "candidate") if trial % 2 == 0 else ("candidate", "before")):
+                cells.append(dict(id=f"begin-{rows}-i{indexes}-{trial}-{subject}",
+                                  rows=rows, indexes=indexes, trial=trial, subject=subject))
     return cells
 
 

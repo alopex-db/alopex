@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,13 @@ class HostedBeginTests(unittest.TestCase):
         self.repo = Path(self.temporary.name)
         self.work, self.export = self.repo / "work", self.repo / "export"
         self.work.mkdir(); self.export.mkdir()
-        self.config = dict(operators={}, matrix_seconds=1000, limits={"run_seconds": 420})
+        candidate = self.repo / "native-candidate-import/assets"
+        candidate.mkdir(parents=True)
+        harness = candidate / "harness.tar"
+        harness.write_bytes(b"test harness")
+        (candidate / "assets.json").write_text(json.dumps({"files": [{"role": "harness", "path": harness.name}]}))
+        self.config = dict(operators={}, matrix_seconds=1000, limits={"run_seconds": 420},
+                           docs_harness_digest=hashlib.sha256(harness.read_bytes()).hexdigest())
         self.profile = dict(cpu={}, private_output=str(self.work))
         self.cells = matrix.plan()[:2]
 
@@ -75,7 +82,14 @@ class HostedBeginTests(unittest.TestCase):
         self.assertFalse(public["matrix_complete"])
 
     def test_fixed_subject_and_duration_validation(self):
-        good = dict(schema="alopex.native-begin-matrix-input/v1", subjects={"before": {}, "candidate": {}},
+        good = dict(schema="alopex.pr819-regression-recheck-input/v1",
+                    subjects={"before": {"source_commit": controller.BEFORE_COMMIT,
+                                         "source_tree": controller.BEFORE_TREE},
+                              "candidate": {"source_commit": controller.CANDIDATE_COMMIT,
+                                            "source_tree": controller.CANDIDATE_TREE,
+                                            "run": 1, "controller": "a" * 40,
+                                            "assets_digest": "b" * 64,
+                                            "extension_sha256": "c" * 64}},
                     matrix_seconds=7200, limits={"run_seconds": 420, "case_seconds": 300})
         def read(value):
             encoded = base64.b64encode(json.dumps(value).encode()).decode()

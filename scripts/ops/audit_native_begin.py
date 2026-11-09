@@ -15,7 +15,7 @@ def middle(values, positive=False):
 
 
 def compare(before, after, metric, rows):
-    require(len(before) == len(after) == 3, "three trial medians required")
+    require(len(before) == len(after) == 8, "eight trial medians required")
     latency = metric.endswith("_ns")
     b, db = middle(before, positive=latency)
     c, dc = middle(after, positive=latency)
@@ -134,7 +134,7 @@ def audit(export, evidence_path, config):
         public = json.loads((export / "result.json").read_text())
         require(public["schema"] == "alopex.native-begin-matrix/v1" and public["status"] == "passed" and
                 public["matrix_complete"] is True and public["performance_qualification"] is False and
-                public["owned_resources_cleaned"] is True and public["measurement_cells"] == public["completed_cells"] == 54 and
+                public["owned_resources_cleaned"] is True and public["measurement_cells"] == public["completed_cells"] == 32 and
                 public["image_digest"] == config["image"]["image_record"]["id"].removeprefix("sha256:"), "public completion differs")
         require("cleanup-errors.json" not in evidence.members, "VM cleanup failed")
         plan = evidence.json("begin-plan.json")
@@ -142,9 +142,9 @@ def audit(export, evidence_path, config):
         rows = evidence.json("begin-results.json")
         expected = [dict(id=f"begin-{size}-i{indexes}-{trial}-{subject}", rows=size, indexes=indexes,
                          trial=trial, subject=subject)
-                    for size in (0, 100, 1000) for indexes in (0, 1, 2) for trial in range(3)
+                    for size, indexes in ((0, 1), (100, 1)) for trial in range(8)
                     for subject in (("before", "candidate") if trial % 2 == 0 else ("candidate", "before"))]
-        require(plan["cells"] == expected and len(rows) == 54, "matrix coverage differs")
+        require(plan["cells"] == expected and len(rows) == 32, "matrix coverage differs")
         for row, cell in zip(rows, expected):
             require(all(row[key] == value for key, value in cell.items()) and row["status"] == "passed", "cell coverage/status differs")
         summary_bytes = (export / "begin-comparison.json").read_bytes()
@@ -155,18 +155,17 @@ def audit(export, evidence_path, config):
         measurements = {(row["rows"], row["indexes"], row["trial"], row["subject"]): audit_cell(evidence, row, config)
                         for row in rows}
         comparisons = []
-        for size in (0, 100, 1000):
-            for indexes in (0, 1, 2):
-                keys = set(measurements[size, indexes, 0, "before"])
-                require(all(set(measurements[size, indexes, trial, subject]) == keys
-                            for trial in range(3) for subject in ("before", "candidate")), "phase coverage differs")
-                for mode, operation, state, metric in sorted(keys):
-                    trials = {subject: [measurements[size, indexes, trial, subject][mode, operation, state, metric]
-                                        for trial in range(3)] for subject in ("before", "candidate")}
-                    comparisons.append(dict(rows=size, indexes=indexes, mode=mode, operation=operation,
-                                            cache_state=state, metric=metric, trials=trials,
-                                            comparison=compare(trials["before"], trials["candidate"], metric, size)))
-        return dict(artifact_integrity="verified", verified_cells=54, comparisons=comparisons,
+        for size, indexes in ((0, 1), (100, 1)):
+            keys = set(measurements[size, indexes, 0, "before"])
+            require(all(set(measurements[size, indexes, trial, subject]) == keys
+                        for trial in range(8) for subject in ("before", "candidate")), "phase coverage differs")
+            for mode, operation, state, metric in sorted(keys):
+                trials = {subject: [measurements[size, indexes, trial, subject][mode, operation, state, metric]
+                                    for trial in range(8)] for subject in ("before", "candidate")}
+                comparisons.append(dict(rows=size, indexes=indexes, mode=mode, operation=operation,
+                                        cache_state=state, metric=metric, trials=trials,
+                                        comparison=compare(trials["before"], trials["candidate"], metric, size)))
+        return dict(artifact_integrity="verified", verified_cells=32, comparisons=comparisons,
                     performance_acceptance=False,
                     limitations=["Fresh reader is not OS-cold.", "Phase RSS observations are not operation peaks.",
                                  "Query improvement does not establish whole-transaction improvement."])

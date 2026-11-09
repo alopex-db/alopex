@@ -58,8 +58,8 @@ class BeginAuditTests(unittest.TestCase):
         summary_file = self.root / "begin-comparison.json"
         summary_file.write_text(json.dumps(summary))
         self.public = dict(schema="alopex.native-begin-matrix/v1", status="passed", matrix_complete=True,
-                           performance_qualification=False, owned_resources_cleaned=True, measurement_cells=54,
-                           completed_cells=54, image_digest="f" * 64, comparison_sha256=audit.sha(summary_file.read_bytes()))
+                           performance_qualification=False, owned_resources_cleaned=True, measurement_cells=32,
+                           completed_cells=32, image_digest="f" * 64, comparison_sha256=audit.sha(summary_file.read_bytes()))
 
     def check(self):
         (self.root / "result.json").write_text(json.dumps(self.public))
@@ -73,7 +73,7 @@ class BeginAuditTests(unittest.TestCase):
 
     def test_complete_matrix_is_independently_recomputed(self):
         result = self.check()
-        self.assertEqual(result["verified_cells"], 54)
+        self.assertEqual(result["verified_cells"], 32)
         self.assertFalse(result["performance_acceptance"])
         comparisons = result["comparisons"]
         self.assertTrue(all(not row["comparison"]["improvement_proven"] for row in comparisons if row["rows"] == 0))
@@ -102,13 +102,13 @@ class BeginAuditTests(unittest.TestCase):
             self.public[key] = original
 
     def test_predeclared_time_and_memory_thresholds(self):
-        self.assertTrue(audit.compare([100] * 3, [90] * 3, "begin_ns", 1000)["improvement_proven"])
-        self.assertFalse(audit.compare([100] * 3, [91] * 3, "begin_ns", 1000)["improvement_proven"])
-        self.assertFalse(audit.compare([70, 100, 130], [90] * 3, "begin_ns", 1000)["improvement_proven"])
-        self.assertFalse(audit.compare([100] * 3, [50] * 3, "begin_ns", 0)["improvement_proven"])
-        self.assertTrue(audit.compare([1024] * 3, [512] * 3, "begin_retained_rss_bytes", 1000)["improvement_proven"])
-        self.assertFalse(audit.compare([0] * 3, [-512] * 3, "begin_retained_rss_bytes", 1000)["improvement_proven"])
-        self.assertTrue(audit.compare([100] * 3, [120] * 3, "begin_ns", 1000)["increased"])
+        self.assertTrue(audit.compare([100] * 8, [90] * 8, "begin_ns", 1000)["improvement_proven"])
+        self.assertFalse(audit.compare([100] * 8, [91] * 8, "begin_ns", 1000)["improvement_proven"])
+        self.assertFalse(audit.compare([70, 70, 70, 100, 100, 130, 130, 130], [90] * 8, "begin_ns", 1000)["improvement_proven"])
+        self.assertFalse(audit.compare([100] * 8, [50] * 8, "begin_ns", 0)["improvement_proven"])
+        self.assertTrue(audit.compare([1024] * 8, [512] * 8, "begin_retained_rss_bytes", 1000)["improvement_proven"])
+        self.assertFalse(audit.compare([0] * 8, [-512] * 8, "begin_retained_rss_bytes", 1000)["improvement_proven"])
+        self.assertTrue(audit.compare([100] * 8, [120] * 8, "begin_ns", 1000)["increased"])
 
     def test_missing_cache_and_phase_observations_rejected(self):
         spec = audit.expected_specs(1000)[1]

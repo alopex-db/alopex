@@ -1,4 +1,4 @@
-"""Preflight the frozen PR 819 full comparison plan before remote measurement."""
+"""Preflight the frozen PR 819 focused regression plan before remote measurement."""
 
 import unittest
 import hashlib
@@ -13,7 +13,7 @@ import native_begin_matrix as matrix
 import native_begin_supervisor as supervisor
 
 
-class Full54ControllerTests(unittest.TestCase):
+class RegressionRecheckControllerTests(unittest.TestCase):
     def test_source_and_schema_are_fixed(self):
         self.assertEqual(hosted.BEFORE_COMMIT,
                          "ce88bbfadd8030ff5cd67262a72f915e50e5b8da")
@@ -26,18 +26,20 @@ class Full54ControllerTests(unittest.TestCase):
 
     def test_frozen_plan_and_probe_inventory(self):
         cells = matrix.plan()
-        fixtures = {(rows, indexes) for rows in (0, 100, 1000) for indexes in (0, 1, 2)}
-        self.assertEqual(len(cells), 54)
-        self.assertEqual(len({cell["id"] for cell in cells}), 54)
+        fixtures = {(0, 1), (100, 1)}
+        self.assertEqual(len(cells), 32)
+        self.assertEqual(len({cell["id"] for cell in cells}), 32)
         self.assertEqual({(cell["rows"], cell["indexes"], cell["trial"], cell["subject"])
                           for cell in cells},
                          {(rows, indexes, trial, subject)
                           for rows, indexes in fixtures
-                          for trial in range(3)
+                          for trial in range(8)
                           for subject in ("before", "candidate")})
         self.assertEqual([cell["subject"] for cell in cells[:6]],
                          ["before", "candidate", "candidate", "before", "before", "candidate"])
-        self.assertEqual(sum(len(supervisor.probes(cell["rows"])) for cell in cells), 306)
+        self.assertEqual(sum(len(supervisor.probes(cell["rows"])) for cell in cells), 160)
+        self.assertEqual([cell["subject"] for cell in cells[12:16]],
+                         ["before", "candidate", "candidate", "before"])
         self.assertEqual(len(supervisor.probes(0)), 5)
         self.assertEqual(len(supervisor.probes(100)), 5)
         self.assertEqual(len(supervisor.probes(1000)), 7)
