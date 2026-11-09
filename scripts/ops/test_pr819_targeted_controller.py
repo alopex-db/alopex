@@ -9,6 +9,10 @@ import native_begin_supervisor as supervisor
 
 class TargetedControllerTests(unittest.TestCase):
     def test_source_and_schema_are_fixed(self):
+        self.assertEqual(hosted.BEFORE_COMMIT,
+                         "ce88bbfadd8030ff5cd67262a72f915e50e5b8da")
+        self.assertEqual(hosted.BEFORE_TREE,
+                         "8cc4513c4654c95cfe8c0dd7ea8162f4ce6345a5")
         self.assertEqual(hosted.CANDIDATE_COMMIT,
                          "1ceaf881dfc0e38a80ab88113032bbcbcbc831cc")
         self.assertEqual(hosted.CANDIDATE_TREE,

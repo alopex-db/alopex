@@ -1,4 +1,4 @@
-name: PR 819 targeted begin diagnostic
+name: PR 819 base-head targeted begin comparison
 on:
   workflow_dispatch:
     inputs:

@@ -12,8 +12,8 @@ import hosted_native_performance as shared
 
 CANDIDATE_COMMIT = "1ceaf881dfc0e38a80ab88113032bbcbcbc831cc"
 CANDIDATE_TREE = "e996099a852903b1e436167ddd9805cdcf223cdf"
-BEFORE_COMMIT = "b5ad28540edcd8aacb91ff0d2d3dae8f4fd873bf"
-BEFORE_TREE = "6be68b764fb9cc90ba9f2a0854dd4fbb5577af25"
+BEFORE_COMMIT = "ce88bbfadd8030ff5cd67262a72f915e50e5b8da"
+BEFORE_TREE = "8cc4513c4654c95cfe8c0dd7ea8162f4ce6345a5"
 
 
 def settings():
