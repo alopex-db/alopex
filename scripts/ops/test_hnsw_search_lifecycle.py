@@ -17,6 +17,17 @@ PASSED = dict(reaped=True, returncode=0, failure=None)
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_stability_trials_keep_scratch_within_owned_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary); (work/'tmp').mkdir()
+            scratch = prepare_cell_temp(work, 'trial9-candidate')
+            self.assertEqual(scratch.parent, work/'tmp')
+            cleanup_cell_temp(work, 'trial9-candidate', PASSED)
+            with self.assertRaises(RuntimeError):
+                prepare_cell_temp(work, 'trial10-candidate')
+            with self.assertRaises(RuntimeError):
+                prepare_cell_temp(work, 'trial9-../candidate')
+
     def test_cleanup_after_real_worker_exit_preserves_other_cells(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary); (work/'tmp').mkdir()

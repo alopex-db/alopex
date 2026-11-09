@@ -4,7 +4,7 @@ import shutil
 
 
 def cell_temp(work, cell_id):
-    if not re.fullmatch(r'trial[0-2]-(published|before|candidate|hnswlib|faiss-hnsw)', cell_id):
+    if not re.fullmatch(r'trial[0-9]-(published|before|candidate|hnswlib|faiss-hnsw)', cell_id):
         raise RuntimeError('invalid cell scratch identity')
     parent = work / 'tmp'
     path = parent / cell_id
