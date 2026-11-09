@@ -74,6 +74,7 @@ jobs:
                   errors.append("runner_is_root")
               if len(report["system"]["allowed_cpus"]) < 2:
                   errors.append("insufficient_cpu_affinity")
+              report["observation_errors"] = {}
               for name, path in {
                   "self_io": Path("/proc/self/io"),
                   "self_status": Path("/proc/self/status"),
@@ -84,16 +85,27 @@ jobs:
               }.items():
                   try:
                       report[name] = path.read_text()
-                  except OSError:
+                  except OSError as exc:
                       report[name] = None
+                      report["observation_errors"][name] = {
+                          "errno": exc.errno, "path": str(path),
+                      }
               if report["self_io"] is None or report["self_status"] is None:
                   errors.append("self_process_counters_unavailable")
-              child = subprocess.Popen(["sleep", "0.2"])
+              child = subprocess.Popen(["sleep", "2"])
               try:
-                  report["owned_child_io"] = Path(f"/proc/{child.pid}/io").read_text()
-                  report["owned_child_status"] = Path(f"/proc/{child.pid}/status").read_text()
-              except OSError:
-                  errors.append("owned_process_observation_unavailable")
+                  for name, path in {
+                      "owned_child_io": Path(f"/proc/{child.pid}/io"),
+                      "owned_child_status": Path(f"/proc/{child.pid}/status"),
+                  }.items():
+                      try:
+                          report[name] = path.read_text()
+                      except OSError as exc:
+                          report[name] = None
+                          report["observation_errors"][name] = {
+                              "errno": exc.errno, "path": str(path),
+                          }
+                          errors.append("owned_process_observation_unavailable")
               finally:
                   try:
                       child.wait(timeout=5)
@@ -108,11 +120,14 @@ jobs:
               roots = [path.resolve() for path in roots if path.exists()]
               seen = set()
               total = 0
+              scan_context = {}
               for root in roots:
                   pending = [root]
                   while pending:
                       path = pending.pop()
                       try:
+                          scan_context = {"root": str(root), "path": str(path),
+                                          "operation": "lstat"}
                           info = path.lstat()
                       except FileNotFoundError:
                           continue
@@ -122,6 +137,7 @@ jobs:
                       seen.add(key)
                       total += info.st_blocks * 512
                       if stat.S_ISDIR(info.st_mode):
+                          scan_context["operation"] = "scandir"
                           with os.scandir(path) as entries:
                               pending.extend(Path(entry.path) for entry in entries)
               report["storage"] = {
@@ -139,6 +155,7 @@ jobs:
           except Exception as exc:
               errors.append("preflight_measurement_error")
               report["private_error"] = repr(exc)
+              report["storage_scan_error"] = scan_context if "scan_context" in locals() else None
           report["error_codes"] = sorted(set(errors))
           private.write_text(json.dumps(report, sort_keys=True))
           private.chmod(0o600)
