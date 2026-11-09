@@ -11,6 +11,13 @@ import sys
 
 from hosted_native_image import construct
 
+EXPECTED_SECCOMP_SHA256 = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
+
+
+def verify_boundary_inputs(inputs):
+    if inputs.get("seccomp_sha256") != EXPECTED_SECCOMP_SHA256:
+        raise ValueError("unreviewed seccomp policy")
+
 
 def verify_products(manifest_path, result_path, expected):
     from common import digest, require, verify_assets
@@ -120,6 +127,7 @@ def main():
         temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
         inputs = json.loads(gzip.decompress(base64.b64decode(os.environ.pop("NATIVE_IMAGE_INPUTS"), validate=True)))
         config = json.loads(base64.b64decode(os.environ.pop("PUBLIC_SQL_CONFIG"), validate=True))
+        verify_boundary_inputs(inputs)
         inputs.update(config["image"])
         inputs["bounds"].update(config["bounds"])
         inputs["limits"].update(config["limits"])
