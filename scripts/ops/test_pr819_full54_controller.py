@@ -1,4 +1,4 @@
-"""Preflight the frozen PR 819 diagnostic plan before remote measurement."""
+"""Preflight the frozen PR 819 full comparison plan before remote measurement."""
 
 import unittest
 import hashlib
@@ -13,7 +13,7 @@ import native_begin_matrix as matrix
 import native_begin_supervisor as supervisor
 
 
-class TargetedControllerTests(unittest.TestCase):
+class Full54ControllerTests(unittest.TestCase):
     def test_source_and_schema_are_fixed(self):
         self.assertEqual(hosted.BEFORE_COMMIT,
                          "ce88bbfadd8030ff5cd67262a72f915e50e5b8da")
@@ -26,9 +26,9 @@ class TargetedControllerTests(unittest.TestCase):
 
     def test_frozen_plan_and_probe_inventory(self):
         cells = matrix.plan()
-        fixtures = ((0, 0), (0, 1), (100, 2), (0, 2))
-        self.assertEqual(len(cells), 24)
-        self.assertEqual(len({cell["id"] for cell in cells}), 24)
+        fixtures = {(rows, indexes) for rows in (0, 100, 1000) for indexes in (0, 1, 2)}
+        self.assertEqual(len(cells), 54)
+        self.assertEqual(len({cell["id"] for cell in cells}), 54)
         self.assertEqual({(cell["rows"], cell["indexes"], cell["trial"], cell["subject"])
                           for cell in cells},
                          {(rows, indexes, trial, subject)
@@ -37,16 +37,13 @@ class TargetedControllerTests(unittest.TestCase):
                           for subject in ("before", "candidate")})
         self.assertEqual([cell["subject"] for cell in cells[:6]],
                          ["before", "candidate", "candidate", "before", "before", "candidate"])
-        self.assertEqual(sum(len(supervisor.probes(cell["rows"], cell["indexes"]))
-                             for cell in cells), 30)
-        self.assertEqual(supervisor.TARGET_PROBES,
-                         {(0, 0): (("ro", "noop"), ("rw", "query")),
-                          (0, 1): (("ro", "query"),),
-                          (100, 2): (("ro", "query"),),
-                          (0, 2): (("rw", "query"),)})
-        for rows, indexes in ((0, 3), (100, 1), (1000, 2)):
+        self.assertEqual(sum(len(supervisor.probes(cell["rows"])) for cell in cells), 306)
+        self.assertEqual(len(supervisor.probes(0)), 5)
+        self.assertEqual(len(supervisor.probes(100)), 5)
+        self.assertEqual(len(supervisor.probes(1000)), 7)
+        for rows in (-1, 1, 10000):
             with self.assertRaises(ValueError):
-                supervisor.probes(rows, indexes)
+                supervisor.probes(rows)
 
     def test_wheel_only_source_and_bytes_are_verified(self):
         with tempfile.TemporaryDirectory() as temporary:

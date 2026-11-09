@@ -16,19 +16,14 @@ def require(value, message):
         raise ValueError(message)
 
 
-TARGET_PROBES = {
-    (0, 0): (("ro", "noop"), ("rw", "query")),
-    (0, 1): (("ro", "query"),),
-    (100, 2): (("ro", "query"),),
-    (0, 2): (("rw", "query"),),
-}
-
-
-def probes(rows, indexes):
-    require(type(rows) is int and type(indexes) is int and
-            (rows, indexes) in TARGET_PROBES, "unsupported targeted fixture")
-    return [dict(mode=mode, operation=operation, samples=6, repeat=0)
-            for mode, operation in TARGET_PROBES[(rows, indexes)]]
+def probes(rows):
+    require(type(rows) is int and rows in (0, 100, 1000), "unsupported row count")
+    result = [dict(mode=mode, operation=operation, samples=6, repeat=0)
+              for mode in ("ro", "rw") for operation in ("noop", "query")]
+    result.append(dict(mode="auto", operation="query", samples=6, repeat=0))
+    if rows == 1000:
+        result.extend(dict(mode="rw", operation="noop", samples=1, repeat=n) for n in (1, 2))
+    return result
 
 
 def extension_digest(wheel):
@@ -159,7 +154,7 @@ def run_fixture(config, execute, output, expected_extension):
     """Persist every attempted process, including its original failure, before returning."""
     records = []
     try:
-        specs = [None, *probes(config["rows"], config["indexes"])]
+        specs = [None, *probes(config["rows"])]
         for index, spec in enumerate(specs):
             record = {"ordinal": index, "spec": spec, "status": "failed"}
             records.append(record)
@@ -189,10 +184,10 @@ def main():
     require(sys.platform == "linux" and os.getuid() != 0, "normal Linux user required")
     request = read_json(INPUT / "request.json")
     config = read_json(INPUT / "measurement.json")
-    require(config["schema"] == "alopex.pr819-targeted-supervisor/v1" and
+    require(config["schema"] == "alopex.native-begin-supervisor/v1" and
             type(config["indexes"]) is int and config["indexes"] in (0, 1, 2) and
             type(config["trial"]) is int and config["trial"] in (0, 1, 2), "invalid fixture configuration")
-    probes(config["rows"], config["indexes"])
+    probes(config["rows"])
     manifest = read_json(INPUT / "assets.json")
     assets = verify_begin_assets(INPUT / "assets.json")
     entries = {}
@@ -242,7 +237,7 @@ def main():
                      "--samples", str(spec["samples"])]
         command(args, raw, request["limits"]["case_seconds"], env)
         return raw
-    report = dict(schema="alopex.pr819-targeted-measurement/v1", status="failed", source=config["source"],
+    report = dict(schema="alopex.native-begin-measurement/v1", status="failed", source=config["source"],
                   rows=config["rows"], indexes=config["indexes"], trial=config["trial"],
                   assets_digest=digest(INPUT / "assets.json"), extension_sha256=expected_extension,
                   worker_error=None, finalization_error=None)
