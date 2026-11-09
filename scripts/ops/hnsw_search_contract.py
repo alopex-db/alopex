@@ -19,7 +19,8 @@ def finite(value):
 
 
 def plan(mode):
-    require(mode in ('preflight', 'full'), 'unknown HNSW mode')
+    require(mode in ('preflight', 'full', 'stability'), 'unknown HNSW mode')
+    ef_values = (16, 32, 64) if mode == 'stability' else EF_VALUES
     cells = []
     for trial in range(1 if mode == 'preflight' else 3):
         subjects = SUBJECTS[trial:] + SUBJECTS[:trial]
@@ -28,7 +29,7 @@ def plan(mode):
                 engine=subject if subject in ('hnswlib', 'faiss-hnsw') else 'alopex-hnsw',
                 rows=32 if mode == 'preflight' else 9171, dimension=128,
                 query_vectors=4 if mode == 'preflight' else 200, k=10,
-                seed=42, m=16, ef_construction=200, ef_values=list(EF_VALUES),
+                seed=42, m=16, ef_construction=200, ef_values=list(ef_values),
                 min_queries=4 if mode == 'preflight' else 10000,
                 min_seconds=0.0 if mode == 'preflight' else 2.0))
     return cells

@@ -1,4 +1,4 @@
-name: Fixed HNSW search comparison
+name: HNSW host stability diagnostic
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-hnsw_search-comparison
+  group: alopex-v0817-hnsw-host-stability
   cancel-in-progress: false
 jobs:
   construct:
@@ -83,7 +83,7 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Run source-pinned comparison
+      - name: Run source-pinned host stability diagnostic
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALOPEX_MANUAL_HNSW_SEARCH: "1"
@@ -95,7 +95,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hnsw-search-comparison
+          name: hnsw-host-stability-diagnostic
           path: hnsw-search-export/
           if-no-files-found: error
           compression-level: 0

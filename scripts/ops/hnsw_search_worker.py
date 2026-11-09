@@ -42,6 +42,7 @@ def main():
     from hnsw_v0811_contract import build_hnswlib, build_faiss_hnsw
     from hnsw_search_build import build_alopex, _prepare_setting
     from hnsw_search_measure import _measure_prepared_run
+    from hnsw_host_stability import snapshot
     from dataframe_phase_observer import DataFrameObserver
     from subject_identity import verify_subject, _verify
     from hnsw_search_identity import verify_identity
@@ -72,9 +73,11 @@ def main():
             note='Original build/update/delete/reopen boundaries; not cross-product build performance.'))
         observer=DataFrameObserver(rss_limit=config['rss_bytes'])
         from hnsw_search_point import run_point
+        stability_snapshot=(lambda: snapshot(config['affinity'][0])) if config['mode']=='stability' else None
         for index in range(len(cell['ef_values'])):
             point=run_point(engine,queries,truth,cell,index,observer,output,
-                prepare=_prepare_setting,measure=_measure_prepared_run)
+                prepare=_prepare_setting,measure=_measure_prepared_run,
+                stability_snapshot=stability_snapshot)
             points.append(point)
             save(output/'points.json',points)
         engine.close();engine=None

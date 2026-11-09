@@ -24,6 +24,7 @@ from hnsw_search_contract import plan,verify_point,RESOURCE_SCOPE
 from dataframe_phase_contract import verify_resources
 from hnsw_search_dependencies import install,install_set,PREPARE,REFERENCE
 from hnsw_search_lifecycle import prepare_cell_temp,cleanup_cell_temp
+from hnsw_host_stability import snapshot
 
 
 def fetch_dataset(directory,budget):
@@ -61,6 +62,20 @@ def verify_cell(cell,directory,truth,config):
         require(row['query_count']==point['query_count'] and record['trial']==cell['trial'],'search sequence differs')
         resources=record['resources'];verify_resources(resources,index,config['rss_bytes'])
         require(resources==observed['completed'][index] and resources['scope']==RESOURCE_SCOPE,'search resource scope differs')
+        if config['mode']=='stability':
+            telemetry=record.get('host_stability')
+            require(isinstance(telemetry,dict) and set(telemetry)=={'before','after'},
+                'stability telemetry missing')
+            first,last=telemetry['before'],telemetry['after']
+            require(first['pinned_cpu']==last['pinned_cpu'] and
+                first['monotonic_ns']<last['monotonic_ns'] and
+                first['cpu_ticks'] is not None and last['cpu_ticks'] is not None and
+                len(first['cpu_ticks'])>=8 and len(first['cpu_ticks'])==len(last['cpu_ticks']) and
+                all(a<=b for a,b in zip(first['cpu_ticks'],last['cpu_ticks'])) and
+                first['context_switches'] is not None and last['context_switches'] is not None,
+                'stability telemetry invalid')
+        else:
+            require('host_stability' not in record,'stability telemetry in acceptance run')
         if cell['engine']=='alopex-hnsw':
             require(len(record['native_diagnostics'])==cell['query_vectors'] and
                 all(r['nodes_visited']>0 and r['distance_computations']>0 for r in record['native_diagnostics']),
@@ -76,9 +91,14 @@ def main():
         and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch'
         and os.environ.get('ALOPEX_MANUAL_HNSW_SEARCH')=='1','unexpected HNSW boundary')
     os.umask(0o077);config=json.loads(base64.b64decode(os.environ['HNSW_SEARCH_CONFIG'],validate=True))
+    require(config['mode']=='stability','diagnostic branch requires stability mode')
     cells=plan(config['mode']);allowed=sorted(os.sched_getaffinity(0))
     require(config['cpu_selection']=='first_allowed' and len(allowed)>=2,'CPU assignment unavailable')
     allocation=dict(client=allowed[:1],server=allowed[1:2])
+    if config['mode']=='stability':
+        telemetry=snapshot(allocation['client'][0])
+        require(telemetry['cpu_ticks'] is not None and len(telemetry['cpu_ticks'])>=8 and
+            telemetry['context_switches'] is not None,'host stability counters unavailable')
     roots=[ROOT.parent,Path(os.environ['RUNNER_TEMP'])]
     roots.extend(p for p in (ROOT.parent.parent/'_actions',Path.home()/'.cargo',Path.home()/'.cache') if p.exists())
     budget=Budget(dict(roots=list(map(str,roots)),stop_bytes=40_000_000_000,reserve_bytes=512_000_000,
@@ -118,7 +138,7 @@ def main():
             path=work/'identities'/name/'subject.json';atomic_json(path,subject);product['subject']=path
         atomic_json(work/'identity.json',dict(controller=os.environ['GITHUB_SHA'],configuration=config,allocation=allocation,
             python_version=sys.version,cells=cells))
-        if config['mode']=='full':fetch_dataset(work/'fixtures',budget)
+        if config['mode'] in ('full','stability'):fetch_dataset(work/'fixtures',budget)
         fixture=work/'fixture-process';fixture.mkdir()
         parameters=dict(mode=config['mode'],root=str(ROOT),sources=config['sources'],data=str(work/'fixtures'),
             affinity=allocation['client'],dependency_identity=str(identities['prepare']),

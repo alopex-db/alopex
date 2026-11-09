@@ -20,7 +20,7 @@ def main():
     require(sys.platform=='linux' and os.getuid()!=0 and not sys.flags.optimize
         and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch'
         and os.environ.get('ALOPEX_MANUAL_HNSW_SEARCH')=='1','manual fixture boundary required')
-    require(config['mode'] in ('preflight','full') and set(os.sched_getaffinity(0))==set(config['affinity']),
+    require(config['mode'] in ('preflight','full','stability') and set(os.sched_getaffinity(0))==set(config['affinity']),
         'fixture mode/affinity differs')
     root=Path(config['root']);directory=Path(config['data'])
     for name,expected in config['sources'].items():require(digest(root/name)==expected,'fixture source differs')
@@ -30,7 +30,7 @@ def main():
     import numpy as np
     require(np.__version__=='2.4.6','fixture NumPy differs')
     variance=None;csv_hash=None
-    if config['mode']=='full':
+    if config['mode'] in ('full','stability'):
         csv=directory/'amazon.csv';csv_hash=digest(csv)
         require(csv_hash=='ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291',
             'Amazon input differs')

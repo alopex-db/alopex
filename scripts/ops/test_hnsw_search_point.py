@@ -60,5 +60,23 @@ class PointTests(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()),[])
         self.assertEqual(self.events,[('begin',0)])
 
+    def test_stability_snapshot_brackets_observation_outside_timer(self):
+        self.events=[]
+        def snapshot():
+            self.events.append(('snapshot',0))
+            return {'monotonic_ns':len(self.events)}
+        def measure(*args,**kwargs):
+            self.events.append(('measure',0))
+            return self.measure_original(*args,**kwargs)
+        self.measure_original=self.measure
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt=run_point(self.engine,list(range(4)),self.truth,self.cell,0,self.observer,Path(tmp),
+                prepare=self.prepare,measure=measure,stability_snapshot=snapshot)
+            with gzip.open(Path(tmp)/receipt['file'],'rt') as stream:saved=json.load(stream)
+            self.assertEqual(saved['host_stability'],{'before':{'monotonic_ns':1},
+                                                        'after':{'monotonic_ns':5}})
+        self.assertEqual(self.events,[('snapshot',0),('begin',0),('measure',0),
+                                      ('finish',0),('snapshot',0)])
+
 
 if __name__=='__main__':unittest.main()
