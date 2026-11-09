@@ -1,4 +1,4 @@
-name: Native empty indexed query diagnostic
+name: Native empty indexed query page composition
 on:
   workflow_dispatch:
     inputs:
@@ -86,7 +86,7 @@ jobs:
       - name: Verify composed receipt and begin contracts
         shell: bash
         run: |
-          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_native_empty_query test_empty_query_receipts test_hosted_native_empty_query test_audit_native_empty_query test_composed_sql_products -v
+          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_native_empty_query_pages test_empty_query_pages_receipts test_hosted_native_empty_query_pages test_audit_native_empty_query_pages test_query_page_observer test_composed_sql_products -v
           python3 -B -m unittest discover -s scripts/test-env/tests -p test_capacity_snapshot.py
       - name: Retrieve source-built products and verified environment image
         env:
@@ -94,7 +94,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PUBLIC_PERFORMANCE_CONFIG: ${{ inputs.performance_config }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_empty_query.py fetch
+        run: python3 -B scripts/ops/hosted_native_empty_query_pages.py fetch
       - name: Measure fixed begin fixtures and collect owned resources
         env:
           RUNNER_KIND: ${{ runner.environment }}
@@ -108,7 +108,7 @@ jobs:
               assert os.environ.get('RUNNER_KIND') == 'github-hosted'
               env = dict(os.environ, OPERATOR_HOME=os.environ['HOME'], OPERATOR_UID=str(os.getuid()), OPERATOR_GID=str(os.getgid()))
               names = 'RUNNER_KIND,GITHUB_ACTIONS,GITHUB_WORKSPACE,GITHUB_SHA,RUNNER_TEMP,NATIVE_IMAGE_INPUTS,PUBLIC_PERFORMANCE_CONFIG,OPERATOR_HOME,OPERATOR_UID,OPERATOR_GID'
-              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_empty_query.py','run']
+              command = ['sudo','-n','--preserve-env='+names,'python3','scripts/ops/hosted_native_empty_query_pages.py','run']
               result = subprocess.run(command,env=env,capture_output=True,text=True,timeout=4800)
               for line in result.stdout.splitlines():
                   value = json.loads(line)
