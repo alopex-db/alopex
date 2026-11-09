@@ -41,23 +41,24 @@ def extension_digest(wheel):
             return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_begin_assets(manifest_path):
+def verify_begin_assets(manifest_path, platform=None):
     """Accept the normal product or an exact-source wheel-only begin input."""
     from common import contained, digest, verify_assets
 
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("schema") == "alopex.test-env-assets/v1":
-        return verify_assets(manifest_path, manifest["platform"])
+        return verify_assets(manifest_path, platform or manifest["platform"])
     require(manifest.get("schema") == "alopex.native-wheel-assets/v1" and
             manifest.get("platform") == "linux/amd64" and
+            (platform is None or platform == manifest["platform"]) and
             isinstance(manifest.get("source_commit"), str) and
             isinstance(manifest.get("source_tree"), str), "wheel-only identity differs")
     files = manifest.get("files")
-    require(isinstance(files, list) and len(files) in (3, 6), "wheel-only roles differ")
+    require(isinstance(files, list) and len(files) in (3, 7), "wheel-only roles differ")
     roles = {item["role"] for item in files}
     expected = {"wheel", "library", "receipt"}
-    if len(files) == 6:
-        expected |= {"measurement_controller", "measurement_worker", "measurement_config"}
+    if len(files) == 7:
+        expected |= {"harness", "measurement_controller", "measurement_worker", "measurement_config"}
     require(roles == expected and len({item["path"] for item in files}) == len(files),
             "wheel-only roles differ")
     require(sum(item["size"] for item in files) < 100_000_000,

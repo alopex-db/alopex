@@ -20,7 +20,7 @@ def plan():
     return cells
 
 
-def prepare_cell(product_manifest, destination, cell, operators):
+def prepare_cell(product_manifest, destination, cell, operators, harness_path=None):
     from common import atomic_json, contained, digest, private_dir
     require(cell in plan() and not destination.exists(), "invalid or existing fixture")
     source = json.loads(product_manifest.read_text())
@@ -50,6 +50,10 @@ def prepare_cell(product_manifest, destination, cell, operators):
     def add(role, name):
         path = destination / name
         manifest["files"].append(dict(role=role, path=name, size=path.stat().st_size, sha256=digest(path)))
+    if source["schema"] == "alopex.native-wheel-assets/v1":
+        require(harness_path is not None and harness_path.is_file(), "wheel-only harness missing")
+        shutil.copyfile(harness_path, destination / "harness.tar")
+        add("harness", "harness.tar")
     require(not (destination / "measurement.json").exists(), "configuration collides with product asset")
     atomic_json(destination / "measurement.json", config)
     add("measurement_config", "measurement.json")
@@ -108,5 +112,11 @@ def recovered(run, config, assets_digest):
 
 
 def execute_cell(profile, budget, config):
+    import envctl
     from native_sql_measure_container import execute_cell as execute
-    return execute(profile, budget, config, verify=verify_collected, recovered=recovered)
+    original = envctl.verify_assets
+    envctl.verify_assets = verify_begin_assets
+    try:
+        return execute(profile, budget, config, verify=verify_collected, recovered=recovered)
+    finally:
+        envctl.verify_assets = original

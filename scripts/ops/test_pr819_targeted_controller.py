@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 import zipfile
 
 import hosted_native_begin as hosted
@@ -70,9 +71,32 @@ class TargetedControllerTests(unittest.TestCase):
                          source_commit=source["commit"], source_tree=source["tree"], files=files)
             manifest.write_text(json.dumps(value))
             self.assertEqual(supervisor.verify_begin_assets(manifest), value)
+            harness = root / "source-harness.tar"
+            harness.write_bytes(b"fixed harness")
+            operators = {role: {"path": path, "sha256": digest(path)} for role, path in
+                         (("measurement_controller", Path(supervisor.__file__)),
+                          ("measurement_worker", Path(__file__).with_name("native_begin_probe.py")))}
+            prepared, _ = matrix.prepare_cell(manifest, root / "prepared", matrix.plan()[0],
+                                              operators, harness)
+            self.assertEqual({item["role"] for item in supervisor.verify_begin_assets(prepared)["files"]},
+                             {"wheel", "library", "receipt", "harness", "measurement_controller",
+                              "measurement_worker", "measurement_config"})
             library.write_bytes(b"substitution")
             with self.assertRaises(ValueError):
                 supervisor.verify_begin_assets(manifest)
+
+    def test_begin_only_asset_adapter_is_restored(self):
+        import envctl
+        original = envctl.verify_assets
+
+        def inspect(profile, budget, config, **checks):
+            self.assertIs(envctl.verify_assets, supervisor.verify_begin_assets)
+            self.assertEqual(set(checks), {"verify", "recovered"})
+            return "inspected"
+
+        with patch("native_sql_measure_container.execute_cell", side_effect=inspect):
+            self.assertEqual(matrix.execute_cell({}, None, {}), "inspected")
+        self.assertIs(envctl.verify_assets, original)
 
 
 if __name__ == "__main__":

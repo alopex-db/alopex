@@ -44,6 +44,11 @@ def operation(repo, config):
         budget.before("accept")
         operators = {role: {"path": repo / "scripts/ops" / item["filename"], "sha256": item["sha256"]}
                      for role, item in config["operators"].items()}
+        candidate_root = repo / "native-candidate-import/assets"
+        candidate_assets = json.loads((candidate_root / "assets.json").read_text())
+        harness_item = next(item for item in candidate_assets["files"] if item["role"] == "harness")
+        harness_path = candidate_root / harness_item["path"]
+        require(digest(harness_path) == config["docs_harness_digest"], "IDENTITY")
         cells = plan()
         atomic_json(work / "begin-plan.json", dict(cells=cells, configuration=config,
                                                    image=public["image_digest"], cpu=profile["cpu"]))
@@ -59,7 +64,8 @@ def operation(repo, config):
             try:
                 budget.before("accept")
                 manifest = repo / ("native-" + cell["subject"] + "-import") / "assets/assets.json"
-                path, worker = prepare_cell(manifest, inputs, cell, operators)
+                path, worker = prepare_cell(manifest, inputs, cell, operators,
+                                            harness_path if cell["subject"] == "before" else None)
                 selected["assets"] = str(path)
                 result = execute_cell(selected, budget, worker)
                 owned = Run(selected["private_output"], cell["id"]).load()
