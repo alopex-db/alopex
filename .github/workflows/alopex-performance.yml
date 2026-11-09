@@ -1,4 +1,4 @@
-name: Build native comparison assets
+name: Build native server assets without mount
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: alopex-v0817-native-build
+  group: alopex-v0817-native-server-no-mount
   cancel-in-progress: false
 jobs:
   construct:
@@ -83,23 +83,23 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
-      - name: Verify wheel reuse and capacity contracts
+      - name: Verify wheel reuse and no-mount capacity contracts
         shell: bash
         run: |
-          PYTHONPATH=scripts/ops python3 -B -m unittest test_hosted_native_wheel_assets test_reused_native_wheel -v
+          PYTHONPATH=scripts/ops python3 -B -m unittest test_hosted_native_wheel_assets test_reused_native_wheel test_hosted_native_assets_no_mount -v
           python3 -B -m unittest discover -s scripts/test-env/tests -p test_capacity_snapshot.py
-      - name: Build server and reuse verified wheel
+      - name: Build server without mount and reuse verified wheel
         env:
           RUNNER_KIND: ${{ runner.environment }}
           PUBLIC_BUILD_CONFIG: ${{ inputs.build_config }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: python3 -B scripts/ops/hosted_native_assets.py
+        run: python3 -B scripts/ops/hosted_native_assets_no_mount.py
       - name: Preserve software assets and encrypted build evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-product-assets
+          name: native-product-assets-no-mount
           path: native-assets-export/
           if-no-files-found: error
           compression-level: 0
