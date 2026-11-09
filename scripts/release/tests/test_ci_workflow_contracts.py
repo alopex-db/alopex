@@ -256,6 +256,16 @@ class CiWorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, approval)
 
+    def test_primary_parser_contract_does_not_wait_for_optional_intel(self) -> None:
+        process = self.workflow("release-process.yml")
+        parser_host = process.split("  parser-host:", 1)[1].split("  parser-manifest:", 1)[0]
+        parser_manifest = process.split("  parser-manifest:", 1)[1].split("  state-model:", 1)[0]
+        self.assertNotIn("macos-15-intel", parser_host)
+        for target in ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin",
+                       "x86_64-pc-windows-msvc"):
+            self.assertIn(target, parser_host)
+        self.assertIn('test "${#records[@]}" -eq 3', parser_manifest)
+
     def test_release_process_changes_have_a_short_dedicated_lane(self) -> None:
         process = self.workflow("release-process.yml")
         parity = self.workflow("parity-harness.yml")
