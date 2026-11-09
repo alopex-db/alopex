@@ -67,6 +67,11 @@ print(json.dumps(result, sort_keys=True))
 '''
 
 
+from derive_native_image import PROBE_VALIDATION
+import textwrap
+PROBE = PROBE.replace("os.umask(0o077)\n", "if \"image_source_files\" in request:\n" + textwrap.indent(PROBE_VALIDATION, "    ") + "\nos.umask(0o077)\n")
+PROBE = PROBE.replace("print(json.dumps(result, sort_keys=True))", "if \"image_source_files\" in request:\n    result.update(image_code_verified=True, package_inventory_verified=True)\nprint(json.dumps(result, sort_keys=True))")
+
 def construct(repo, work, export, inputs, recipient, operation=None):
     sys.path.insert(0, str(repo / "scripts/test-env"))
     from capacity import Budget, allocated_bytes
@@ -184,7 +189,11 @@ def construct(repo, work, export, inputs, recipient, operation=None):
         docker = Docker(profile)
         docker.prerequisites()
         controller = [sys.executable, str(repo / "scripts/test-env/envctl.py")]
-        if "image_archive" in inputs:
+        image_source_files = None
+        if "derived_image" in inputs:
+            from derive_native_image import prepare
+            image_source_files = prepare(repo, profile, docker, budget, work, inputs)
+        elif "image_archive" in inputs:
             archive = repo / inputs["image_archive"]
             require(archive.resolve().is_relative_to(repo) and archive.is_file(), "IDENTITY")
             require(digest(archive) == inputs["image_archive_sha256"], "IDENTITY")
@@ -206,6 +215,10 @@ def construct(repo, work, export, inputs, recipient, operation=None):
         run.intent("container", name)
         args = docker.arguments(run.run_id, image["id"], input_volume, work_volume, run.record["ownership_token"])
         request = {k: profile[k] for k in ("cpu", "limits", "security")}
+        if image_source_files is not None:
+            request["image_source_files"] = image_source_files
+            request["image_manifest_digest"] = hashlib.sha256(json.dumps(
+                inputs["image_lock"]["platforms"][profile["platform"]], sort_keys=True).encode()).hexdigest()
         args[-1:-1] = ["--entrypoint", "python3", "--env", "ALOPEX_IMAGE_PROBE=" + json.dumps(request)]
         args += ["-c", PROBE]
         identity = docker.call(*args)
@@ -216,6 +229,8 @@ def construct(repo, work, export, inputs, recipient, operation=None):
                    log=run.root / "probe.log", cancel=lambda: docker.stop(name))
         details = json.loads((run.root / "probe.log").read_text())
         require(details["volume_io"]["reaped"] and details["volume_io"]["write_bytes"] >= 4096, "CASE")
+        if image_source_files is not None:
+            require(details["image_code_verified"] and details["package_inventory_verified"], "IDENTITY")
         atomic_json(run.root / "probe-result.json", {"status": "passed", "evidence": details})
         public.update(image_digest=image["id"][7:], controller_commit=image["controller_commit"],
                       controller_digest=image["controller_digest"], status="passed",
