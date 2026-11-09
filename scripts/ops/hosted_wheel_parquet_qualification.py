@@ -73,9 +73,14 @@ def main():
         atomic_json(work / 'storage-before.json', dict(allocated_bytes=initial))
         for name, expected in config['sources'].items():
             require(sha(ROOT / name) == expected, 'IDENTITY')
-        parent = subprocess.run(['git', 'rev-parse', 'HEAD^'], cwd=ROOT,
-            capture_output=True, text=True, check=True).stdout.strip()
-        require(parent == config['producer']['source_commit'], 'IDENTITY')
+        source = config['producer']['source_commit']
+        ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', source, 'HEAD'],
+            cwd=ROOT, capture_output=True)
+        changed = subprocess.run(['git', 'diff', '--name-only', source, 'HEAD'],
+            cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
+        require(ancestry.returncode == 0 and set(changed) == {
+            '.github/workflows/alopex-performance.yml',
+            'scripts/ops/hosted_wheel_parquet_qualification.py'}, 'IDENTITY')
         def metadata(endpoint):
             result = subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True, check=True, timeout=30)
             return json.loads(result.stdout)
@@ -165,6 +170,13 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGALRM, interrupted)
     try: code = main()
-    except BaseException: code = 1
-    print(json.dumps(dict(status='passed' if code == 0 else 'failed')))
+    except BaseException as error:
+        code = 1
+        last = error.__traceback__
+        while last and last.tb_next:
+            last = last.tb_next
+        print(json.dumps(dict(status='failed', error_type=type(error).__name__,
+                              source_line=last.tb_lineno if last else None)))
+    else:
+        print(json.dumps(dict(status='passed' if code == 0 else 'failed')))
     raise SystemExit(code)
