@@ -1,4 +1,4 @@
-name: Candidate SQL functional preflight
+name: Candidate Parquet prequalification
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 jobs:
-  sql-preflight:
+  parquet-prequalification:
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 20
     steps:
@@ -25,7 +25,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify the fixed 20-row SQL server preflight
+      - name: Verify candidate wheel Parquet cases
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,7 +36,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: candidate-sql-preflight
-          path: sequence-e2e-export/
+          name: candidate-parquet-prequalification
+          path: parquet-prequalification-export/
           if-no-files-found: error
           retention-days: 7

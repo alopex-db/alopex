@@ -48,8 +48,7 @@ def run():
     config = json.loads(base64.b64decode(os.environ.pop("E2E_CONFIG"), validate=True))
     require(config["source_commit"] == "a537c8beb5c0d3a135e329ab344942243487f55e" and
             config["controller"] == os.environ["GITHUB_SHA"] and
-            config["mode"] == "sql_preflight" and
-            config["expected_checksum"] == "b97a1fb499381d8690840092283a59ad92d042a30cf2e52400ecb9147d422fc2", "IDENTITY")
+            config["mode"] == "parquet_prequalification", "IDENTITY")
     for name, expected in config["test_sources"].items():
         require(digest(ROOT / name) == expected, "IDENTITY")
     require(subprocess.run(["git", "diff", "--quiet", config["source_commit"], "HEAD", "--",
@@ -57,7 +56,7 @@ def run():
                            cwd=ROOT, timeout=10).returncode == 0, "IDENTITY")
 
     temporary = Path(os.environ["RUNNER_TEMP"])
-    work, export = temporary / "alopex-sequence-e2e", ROOT / "sequence-e2e-export"
+    work, export = temporary / "alopex-parquet-prequalification", ROOT / "parquet-prequalification-export"
     require(not work.exists() and not export.exists(), "STATE")
     roots = [ROOT.parent, temporary]
     for item in (ROOT.parent.parent / "_actions", Path.home() / ".cargo", Path.home() / ".cache"):
@@ -89,11 +88,8 @@ def run():
                     "--name", "native-product-assets-no-mount", "--dir", str(import_dir)],
                    timeout=180, log=work / "download.log")
         files = verify_product(import_dir, config)
-        files["server"].chmod(0o700)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PIP_NO_CACHE_DIR="1",
-                   PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", ALOPEX_REQUIRE_SERVER_E2E="1",
-                   ALOPEX_SERVER_BIN=str(files["server"]),
-                   LD_LIBRARY_PATH=str(files["library"].parent), TMPDIR=str(work))
+                   PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(work))
         for key in ("GH_TOKEN", "GITHUB_TOKEN", "PYTHONPATH", "PYTHONHOME"):
             env.pop(key, None)
         budget.before("prepare")
@@ -101,23 +97,33 @@ def run():
                    log=work / "venv.log", env=env)
         python = venv / "bin/python"
         budget.before("prepare")
-        budget.run([str(python), "-m", "pip", "install", "pytest==8.4.2"], timeout=180,
-                   log=work / "pytest-install.log", env=env)
+        budget.run([str(python), "-m", "pip", "install", "--only-binary=:all:",
+                    "numpy==2.2.1", "pyarrow==26.0.0", "pytest==9.1.1"], timeout=300,
+                   log=work / "dependencies-install.log", env=env)
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(files["wheel"])],
                    timeout=90, log=work / "wheel-install.log", env=env)
-        env.update(ALOPEX_PREFLIGHT_WORK=str(work),
-                   ALOPEX_PREFLIGHT_EXPECTED=config["expected_checksum"])
+        for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                    "NIM_SQL_PARSER_LIB_DIR", "ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD"):
+            env.pop(key, None)
         budget.before("test")
-        budget.run([str(python), "-B", "scripts/ops/run_sql_preflight.py"],
-                   timeout=180, log=work / "preflight.log", env=env)
-        preflight = json.loads((work / "preflight-result.json").read_bytes())
-        require(preflight["rows"] == 20 and preflight["timing_samples"] == 0 and
-                len(preflight["checks"]) == 6 and preflight["server_stopped"] and
-                preflight["result_sha256"] == config["expected_checksum"], "CASE")
-        atomic_json(work / "test-summary.json", {"checks": 6, "rows": 20,
-                    "timing_samples": 0, "checksum": preflight["result_sha256"],
-                    "source": config["source_commit"], "assets_digest": config["assets_digest"]})
+        budget.run([str(python), "-I", "scripts/release/verify_python_parquet.py",
+                    "--wheel", str(files["wheel"]), "--workspace", str(ROOT),
+                    "--report", str(work / "vector-parquet.json")],
+                   timeout=600, log=work / "parquet.log", env=env)
+        report = json.loads((work / "vector-parquet.json").read_bytes())
+        require(report["status"] == "passed" and len(report["cases"]) == 38 and
+                report["wheel_sha256"] == config["wheel_sha256"] and
+                report["source_commit"] == config["controller"] and
+                report["versions"] == {"alopex": "0.8.17", "numpy": "2.2.1",
+                                       "pyarrow": "26.0.0", "pytest": "9.1.1"} and
+                {"package", "extension"} == set(report["installed_modules"]) and
+                report["sources"] == {Path(name).name: value for name, value in
+                                      config["test_sources"].items() if name.startswith((
+                                      "crates/alopex-py/tests/", "scripts/release/verify_python_parquet.py"))}, "CASE")
+        atomic_json(work / "test-summary.json", {"cases": 38,
+                    "source": config["source_commit"], "assets_digest": config["assets_digest"],
+                    "wheel_sha256": config["wheel_sha256"]})
         status = "passed"
     except Exception as error:
         failure = {"type": type(error).__name__, "code": getattr(error, "code", "INTERNAL")}
@@ -142,9 +148,9 @@ def run():
         evidence_hash = digest(archive)
         shutil.rmtree(work)
         budget.check()
-        atomic_json(export / "result.json", {"schema": "alopex.sql-preflight/v1", "status": status,
+        atomic_json(export / "result.json", {"schema": "alopex.parquet-prequalification/v1", "status": status,
                   "source_commit": config["source_commit"], "assets_digest": config["assets_digest"],
-                  "checks": 6 if status == "passed" else 0, "evidence_sha256": evidence_hash,
+                  "cases": 38 if status == "passed" else 0, "evidence_sha256": evidence_hash,
                   "encrypted_sha256": digest(encrypted), "owned_resources_removed": not work.exists(),
                   "performance_qualification": False,
                   "error_code": None if status == "passed" else failure["code"]})
