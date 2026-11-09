@@ -79,6 +79,7 @@ def main():
         changed = subprocess.run(['git', 'diff', '--name-only', source, 'HEAD'],
             cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
         require(ancestry.returncode == 0 and set(changed) == {
+            '.github/ops/native-evidence-cert.pem',
             '.github/workflows/alopex-performance.yml',
             'scripts/ops/hosted_wheel_parquet_qualification.py'}, 'IDENTITY')
         def metadata(endpoint):
