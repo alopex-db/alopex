@@ -79,6 +79,28 @@ jobs:
                   name: shutil.which(name) is not None
                   for name in ("docker", "podman", "powershell.exe", "wslpath")
               }
+              report["runtime_probes"] = {}
+              for name, command in {
+                  "docker_info": ["docker", "info", "--format", "{{json .}}"],
+                  "docker_images": ["docker", "image", "ls", "--format", "{{json .}}"],
+                  "podman_storage": ["podman", "system", "df", "--format", "json"],
+                  "podman_images": ["podman", "images", "--format", "json"],
+              }.items():
+                  if not report["runtime_tools"][command[0]]:
+                      report["runtime_probes"][name] = {"available": False}
+                      continue
+                  try:
+                      result = subprocess.run(command, capture_output=True,
+                                              text=True, timeout=20)
+                      report["runtime_probes"][name] = {
+                          "available": True, "returncode": result.returncode,
+                          "stdout": result.stdout[:20000],
+                          "stderr": result.stderr[:2000],
+                      }
+                  except subprocess.TimeoutExpired:
+                      report["runtime_probes"][name] = {
+                          "available": True, "timeout": True,
+                      }
               report["proc_io_presence"] = {
                   name: (Path("/proc") / name / "io").exists()
                   for name in ("self", "1")
