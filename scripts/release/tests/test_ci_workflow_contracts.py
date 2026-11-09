@@ -189,6 +189,8 @@ class CiWorkflowContractTests(unittest.TestCase):
         )[0]
 
         self.assertNotIn("continue-on-error", audit_job)
+        self.assertIn("security: ${{ steps.classify.outputs.security }}", workflow)
+        self.assertIn("if: needs.scope.outputs.security == 'true'", audit_job)
         self.assertNotIn("RUSTSEC-2026-0194", audit_job)
         self.assertNotIn("RUSTSEC-2026-0195", audit_job)
         tree_guard = audit_job.index(
@@ -207,6 +209,9 @@ class CiWorkflowContractTests(unittest.TestCase):
             "cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235", audit_job
         )
         self.assertNotIn("rustsec/audit-check@", audit_job)
+        join = workflow.split("  ci-success:", maxsplit=1)[1]
+        self.assertIn("expected_security=success", join)
+        self.assertIn("needs['security-audit'].result }}\" != \"${expected_security}", join)
 
     def test_ci_tools_preserve_versions_and_verify_public_asset_bytes(self) -> None:
         workflow = self.workflow("ci.yml")
