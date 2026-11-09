@@ -15,6 +15,8 @@ import tarfile
 import tomllib
 import urllib.request
 
+from reused_native_wheel import fetch_reuse, preserve_receipt, verify_reuse, verify_composed_receipts
+
 
 def validate_storage_boundary(scratch, disk, roots, disk_bytes):
     counted = [path.resolve() for path in roots]
@@ -171,7 +173,10 @@ def main():
         require(git_value("rev-parse", "HEAD") == config["source_commit"], "IDENTITY")
         identity = {"commit": config["source_commit"], "tree": git_value("rev-parse", "HEAD^{tree}"), "profile": "release"}
         version = tomllib.loads((source / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-        published_wheel = config.get("published_wheel")
+        require(identity["tree"] == config["source_tree"], "IDENTITY")
+        reuse_config = config["reuse_wheel"]
+        require(config.get("published_wheel") is None, "INPUT")
+        published_wheel = None
         if published_wheel is not None:
             validate_published_wheel(published_wheel, version, config["source_commit"])
         record_file = work / "parser-record.json"
@@ -193,6 +198,11 @@ def main():
         shutil.copyfile(library, native / library.name)
         (native / "CONTRACT_VERSION").write_text(record["contract_version"] + "\n")
         (native / "SHA256SUMS").write_text(digest(library) + "  " + library.name + "\n")
+        reuse_root = work / "reused-wheel-input"
+        fetch_reuse(reuse_root, reuse_config, budget)
+        reused_paths, original_wheel_receipt = verify_reuse(reuse_root, reuse_config, config,
+            version=version, cargo_lock_sha256=digest(source / "Cargo.lock"),
+            parser_sha256=digest(library), parser_contract=record["contract_version"])
         command(["rustup", "toolchain", "install", config["rust_version"], "--profile", "minimal"], "tools", "rust-install", 600)
         command(["rustc", "-Vv"], "tools", "rust-version")
         rust_version = (work / "rust-version.log").read_text()
@@ -200,9 +210,6 @@ def main():
                 "host: " + record["target"] + "\n" in rust_version, "IDENTITY")
         command([sys.executable, "-m", "venv", str(scratch / "venv")], "tools", "venv")
         python = scratch / "venv/bin/python"
-        if published_wheel is None:
-            command([str(python), "-m", "pip", "install", "--only-binary=:all:", "--report", str(work / "tool-install.json"),
-                     "maturin==" + config["maturin_version"]], "tools", "maturin-install", 300)
         os.chdir(source)
         command(["cargo", "build", "--locked", "--release", "-p", "alopex-server", "--bin", "alopex-server"],
                 "server", "server-build", config["build_seconds"])
@@ -210,13 +217,9 @@ def main():
         server = private_dir(assets / "bin") / "alopex-server"
         shutil.copyfile(target / "release/alopex-server", server); server.chmod(0o700)
         wheel_directory = private_dir(assets / "wheels")
-        if published_wheel is None:
-            command([str(scratch / "venv/bin/maturin"), "build", "--locked", "--release", "--compatibility", "linux",
-                     "--manifest-path", "crates/alopex-py/Cargo.toml", "--interpreter", str(python),
-                     "--out", str(wheel_directory)], "wheel", "wheel-build", config["build_seconds"])
-        else:
-            fetch(published_wheel["url"], wheel_directory / published_wheel["filename"],
-                  published_wheel["sha256"], published_wheel["size"])
+        shutil.copyfile(reused_paths["wheel"], wheel_directory / reused_paths["wheel"].name)
+        original_receipt = assets / "receipts/original-wheel-build.json"
+        original_receipt_hash = preserve_receipt(reused_paths["receipt"], original_receipt)
         wheels = list((assets / "wheels").glob("*.whl")); require(len(wheels) == 1, "IDENTITY")
         wheel = wheels[0]
         command([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], "collect", "wheel-install")
@@ -237,15 +240,19 @@ def main():
                    "build": {"incremental": False, "release_debug": False,
                              "path_remap": {"control": "/alopex-build/control", "work": "/alopex-build/work"},
                              "server": ["cargo", "build", "--locked", "--release", "-p", "alopex-server", "--bin", "alopex-server"],
-                             "wheel": "maturin build --locked --release --compatibility linux" if published_wheel is None else
-                             {"mode": "published_distribution", **published_wheel}},
+                             "wheel": {"mode": "reused_development_asset",
+                                       "producer_run": reuse_config["run"], "producer_controller": reuse_config["controller"],
+                                       "artifact_id": reuse_config["artifact_id"], "artifact_digest": reuse_config["artifact_digest"],
+                                       "receipt_path": str(original_receipt.relative_to(assets)),
+                                       "receipt_sha256": original_receipt_hash}},
                    "qualification": "development comparison asset; not RC qualification"}
         receipt_file = private_dir(assets / "receipts") / "build.json"; atomic_json(receipt_file, receipt)
         files = [{"role": role, "path": str(path.relative_to(assets)), "size": path.stat().st_size, "sha256": digest(path)}
-                 for role, path in (("server", server), ("wheel", wheel), ("library", lib_out), ("receipt", receipt_file), ("harness", harness))]
+                 for role, path in (("server", server), ("wheel", wheel), ("library", lib_out), ("receipt", receipt_file), ("wheel_receipt", original_receipt), ("harness", harness))]
         manifest = {"schema": "alopex.test-env-assets/v1", "platform": config["platform"], "source_commit": identity["commit"],
                     "harness_commit": config["harness_commit"], "expanded_limit_bytes": config["asset_expanded_bytes"], "files": files}
         atomic_json(assets / "assets.json", manifest); verify_assets(assets / "assets.json", config["platform"])
+        verify_composed_receipts(assets, manifest)
         public = {"schema": "alopex.native-assets/v1", "status": "passed", "source": identity,
                   "assets_digest": digest(assets / "assets.json"), "performance_qualification": False}
         status = "passed"
@@ -253,7 +260,7 @@ def main():
         atomic_json(work / "failure.json", {"error": repr(error), "detail": getattr(error, "detail", None)})
     finally:
         os.chdir(repo)
-        for path in (target, scratch / "cargo", scratch / "rustup", scratch / "venv", source, scratch / "docs", scratch / "tmp"):
+        for path in (target, scratch / "cargo", scratch / "rustup", scratch / "venv", source, scratch / "docs", scratch / "tmp", work / "reused-wheel-input"):
             if path.exists(): shutil.rmtree(path)
         cleanup_error = None
         if os.path.ismount(scratch):
