@@ -40,6 +40,53 @@ def validate_storage_boundary(scratch, roots, planned_bytes, reserve_bytes):
         raise ValueError("invalid build storage accounting boundary")
 
 
+class HostUsageMeter:
+    """Conservatively track the peak disk use of a dedicated hosted runner.
+
+    An idle allocated-byte inventory establishes the baseline. During a build,
+    filesystem free-space counters avoid racing Cargo's temporary-file removal.
+    Count the largest observed free-space drop on every involved filesystem;
+    a later deletion never reduces the recorded peak.
+    """
+
+    def __init__(self, roots, allocated=None, usage=None, device=None):
+        if allocated is None:
+            from capacity import allocated_bytes
+            allocated = allocated_bytes
+        self.roots = tuple(map(Path, roots))
+        self.allocated = allocated
+        self.usage = usage or shutil.disk_usage
+        self.device = device or (lambda path: path.stat().st_dev)
+        self.baseline = self.allocated(self.roots)
+        self.volumes = {}
+        for root in self.roots:
+            identity = self.device(root)
+            if identity not in self.volumes:
+                space = self.usage(root)
+                self.volumes[identity] = (root, space.total, space.free)
+        self.peak = {identity: 0 for identity in self.volumes}
+        self.samples = 0
+
+    def used(self, roots):
+        if tuple(map(Path, roots)) != self.roots:
+            raise ValueError("storage roots changed")
+        for identity, (root, total, initial_free) in self.volumes.items():
+            if self.device(root) != identity:
+                raise ValueError("storage device changed")
+            space = self.usage(root)
+            if space.total != total or not 0 <= space.free <= total:
+                raise ValueError("filesystem counter changed")
+            self.peak[identity] = max(self.peak[identity], initial_free - space.free)
+        self.samples += 1
+        return self.baseline + sum(self.peak.values())
+
+    def summary(self):
+        return {"method": "idle allocated bytes plus peak free-space drops",
+                "baseline_bytes": self.baseline,
+                "observed_peak_additional_bytes": sum(self.peak.values()),
+                "samples": self.samples, "filesystems": len(self.volumes)}
+
+
 def extract_regular(archive, destination, maximum):
     with tarfile.open(archive) as source:
         members = source.getmembers()
@@ -135,9 +182,10 @@ def main():
         if path.exists(): roots.append(path)
     planned = config["planned_bytes"]
     validate_storage_boundary(scratch, roots, planned, config["reserve_bytes"])
+    meter = HostUsageMeter(roots)
     budget = Budget({"roots": list(map(str, roots)), "stop_bytes": 40_000_000_000,
                      "reserve_bytes": config["reserve_bytes"], "poll_seconds": 2,
-                     "planned_bytes": planned})
+                     "planned_bytes": planned}, measure=meter.used)
     source = scratch / "source"
     target = scratch / "target"
     env = dict(os.environ, CARGO_HOME=str(scratch / "cargo"), RUSTUP_HOME=str(scratch / "rustup"),
@@ -157,6 +205,11 @@ def main():
             seconds = min(seconds, remaining)
         budget.before(phase)
         budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
+        # Child processes have exited; reconcile the stable allocated-byte
+        # inventory with the conservative counter before another phase.
+        direct = allocated_bytes(roots)
+        require(direct <= meter.used(roots) and direct < 40_000_000_000,
+                "MEASUREMENT")
     def fetch(url, output, expected, limit):
         request = parser_request(url)
         budget.before("prepare")
@@ -272,6 +325,7 @@ def main():
         atomic_json(work / "filesystem-cleanup.json",
                     {"scratch_removed": not scratch.exists(), "mount_changed": False,
                      "error": cleanup_error})
+        atomic_json(work / "storage-meter.json", meter.summary())
         atomic_json(work / "storage-after.json", {"allocated_bytes": allocated_bytes(roots)})
         archive = work / "evidence.tar.gz"
         budget.before("collect")
