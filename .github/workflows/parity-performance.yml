@@ -41,6 +41,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import gzip
           import os
           import platform
           import shutil
@@ -74,6 +75,44 @@ jobs:
                   errors.append("runner_is_root")
               if len(report["system"]["allowed_cpus"]) < 2:
                   errors.append("insufficient_cpu_affinity")
+              report["runtime_tools"] = {
+                  name: shutil.which(name) is not None
+                  for name in ("docker", "podman", "powershell.exe", "wslpath")
+              }
+              report["proc_io_presence"] = {
+                  name: (Path("/proc") / name / "io").exists()
+                  for name in ("self", "1")
+              }
+              config = Path("/proc/config.gz")
+              try:
+                  if config.exists():
+                      with gzip.open(config, "rt") as source:
+                          report["task_io_config"] = [
+                              line.strip() for line in source
+                              if "CONFIG_TASK_IO_ACCOUNTING" in line
+                          ]
+                  else:
+                      config = Path("/boot") / ("config-" + release)
+                      report["task_io_config"] = [
+                          line.strip() for line in config.read_text().splitlines()
+                          if "CONFIG_TASK_IO_ACCOUNTING" in line
+                      ] if config.exists() else None
+              except OSError as config_error:
+                  report["task_io_config_error"] = config_error.errno
+              report["filesystem_usage"] = {}
+              for name, path in {"wsl_root": Path("/"),
+                                 "windows_c": Path("/mnt/c"),
+                                 "windows_d": Path("/mnt/d")}.items():
+                  if path.is_mount():
+                      try:
+                          usage = shutil.disk_usage(path)
+                          report["filesystem_usage"][name] = {
+                              "used": usage.used, "free": usage.free,
+                          }
+                      except OSError as usage_error:
+                          report["filesystem_usage"][name] = {
+                              "errno": usage_error.errno,
+                          }
               report["observation_errors"] = {}
               for name, path in {
                   "self_io": Path("/proc/self/io"),
@@ -156,6 +195,21 @@ jobs:
               errors.append("preflight_measurement_error")
               report["private_error"] = repr(exc)
               report["storage_scan_error"] = scan_context if "scan_context" in locals() else None
+              if "scan_context" in locals() and scan_context:
+                  path = Path(scan_context["path"])
+                  report["storage_scan_ancestors"] = []
+                  for ancestor in (path, *path.parents):
+                      try:
+                          info = ancestor.lstat()
+                          report["storage_scan_ancestors"].append({
+                              "path": str(ancestor), "mode": stat.S_IMODE(info.st_mode),
+                              "uid": info.st_uid, "gid": info.st_gid,
+                              "blocks": info.st_blocks,
+                          })
+                      except OSError as ancestor_error:
+                          report["storage_scan_ancestors"].append({
+                              "path": str(ancestor), "errno": ancestor_error.errno,
+                          })
           report["error_codes"] = sorted(set(errors))
           private.write_text(json.dumps(report, sort_keys=True))
           private.chmod(0o600)
