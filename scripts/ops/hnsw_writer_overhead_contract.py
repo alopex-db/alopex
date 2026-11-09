@@ -10,10 +10,10 @@ PHASES = ('seed', 'index_build', 'cold_transaction_1', 'cold_transaction_2', 'wa
 TIMED_PHASES = tuple(p for p in PHASES if p not in ('warm', 'rollback'))
 STAGES = (1000, 10000, 100000)
 BASELINE_ENGINE = '5e05f0149e93e92455e59fe8c3a4cdfbec19e578'
-CANDIDATE_ENGINE = '635d217d7dda9d42aafcce24aa8076463fa873b3'
+CANDIDATE_ENGINE = '57ee99cf7b7fe660f74f3401cfa96d01804f70bd'
 CANDIDATE_SOURCES = {
-    False: '41a9f466587213a91b21c2033ee631d4045cd1c2',
-    True: '02bcc6e69821a44bfafb94c4b8c293c0fc5d1671',
+    False: '6a793e152c9eea8621bd93fbc3102ac81ee43568',
+    True: '7b7cdcd6178879d03da518e756a653f74c986ac0',
 }
 
 

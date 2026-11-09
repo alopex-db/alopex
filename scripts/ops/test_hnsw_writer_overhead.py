@@ -193,6 +193,20 @@ def candidate_fixture(finish='commit', subject='normal'):
 
 
 class CandidateOverheadTests(unittest.TestCase):
+    def test_previous_candidate_cannot_be_relabelled_as_composed_candidate(self):
+        previous_engine = '635d217d7dda9d42aafcce24aa8076463fa873b3'
+        previous_sources = ('41a9f466587213a91b21c2033ee631d4045cd1c2',
+                            '02bcc6e69821a44bfafb94c4b8c293c0fc5d1671')
+        for role in ('normal', 'diagnostic'):
+            for fault in ('previous_engine', 'previous_source', 'previous_pair'):
+                args = candidate_fixture(subject=role)
+                if fault in ('previous_engine', 'previous_pair'):
+                    args[4]['engine_base'] = previous_engine
+                if fault in ('previous_source', 'previous_pair'):
+                    args[4]['source_commit'] = previous_sources[role == 'diagnostic']
+                with self.subTest(role=role, fault=fault), self.assertRaises(ValueError):
+                    contract.verify_sample(*args)
+
     def test_both_modes_and_roles_require_cache_reuse_without_losing_internal_times(self):
         for finish in ('commit', 'rollback'):
             for role in ('normal', 'diagnostic'):
