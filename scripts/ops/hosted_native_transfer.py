@@ -14,6 +14,13 @@ def verify_run(run, expected_source):
         raise ValueError('unqualified artifact producer')
 
 
+def product_artifact_name(config):
+    name = config.get('product_artifact_name', 'native-product-assets')
+    if name not in ('native-product-assets', 'native-product-assets-no-mount'):
+        raise ValueError('unqualified product artifact name')
+    return name
+
+
 def main():
     if os.environ.get('RUNNER_KIND') != 'github-hosted' or os.geteuid() == 0:
         print('{"status":"failed","error_code":"VM_SCOPE"}')
@@ -42,7 +49,7 @@ def main():
         api = 'repos/alopex-db/alopex/actions/runs/'
         for name, expected_source, number, directory in (
             ('native-test-environment', config['image_run_source'], config['image_run'], 'native-image-import'),
-            ('native-product-assets', config['product_run_source'], config['product_run'], 'native-product-import'),
+            (product_artifact_name(config), config['product_run_source'], config['product_run'], 'native-product-import'),
         ):
             verify_run(metadata(api + str(number)), expected_source)
             records = metadata(api + str(number) + '/artifacts')['artifacts']
