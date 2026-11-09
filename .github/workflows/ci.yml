@@ -520,7 +520,8 @@ jobs:
       - name: Clean Windows validation outputs
         if: always() && runner.os == 'Windows'
         run: |
-          if (Test-Path target) { Remove-Item -Recurse -Force target }
+          if (Test-Path target) { Remove-Item -Recurse -Force -ErrorAction Stop target }
+          if (Test-Path target) { throw "Windows validation target remains after cleanup" }
           python scripts/compatibility/storage.py --log artifacts/windows-wal/storage-cleanup.jsonl
 
       - name: Upload Windows WAL source and storage evidence
