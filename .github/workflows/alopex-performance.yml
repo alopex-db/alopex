@@ -57,7 +57,7 @@ jobs:
               assert initial + allowance < 40_000_000_000
               assert root.is_dir() and not (root / '.git').exists()
               for args in (['git','init','--quiet'],
-                           ['git','fetch','--quiet','--depth=1','https://github.com/alopex-db/alopex.git',os.environ['GITHUB_SHA']],
+                           ['git','fetch','--quiet','--depth=8','https://github.com/alopex-db/alopex.git',os.environ['GITHUB_SHA']],
                            ['git','checkout','--quiet','--detach','FETCH_HEAD']):
                   with (temporary / 'alopex-source.log').open('ab') as output:
                       process = subprocess.Popen(args,cwd=root,stdout=output,stderr=output,start_new_session=True)
