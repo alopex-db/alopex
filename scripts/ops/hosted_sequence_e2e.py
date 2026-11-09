@@ -157,6 +157,10 @@ if __name__ == "__main__":
     try:
         result = run()
     except Exception as error:
-        print(json.dumps({"status": "failed", "error_code": getattr(error, "code", "CONSTRUCTION")}))
+        location = error.__traceback__
+        while location and location.tb_next:
+            location = location.tb_next
+        print(json.dumps({"status": "failed", "error_code": getattr(error, "code", "CONSTRUCTION"),
+                          "exception": type(error).__name__, "line": location.tb_lineno if location else 0}))
         raise SystemExit(1)
     raise SystemExit(result)
