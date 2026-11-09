@@ -1,4 +1,4 @@
-"""Verify the candidate's public remote DROP SEQUENCE contract with audited assets."""
+"""Verify the candidate's public remote SQL contracts with audited assets."""
 from __future__ import annotations
 
 import base64
@@ -108,16 +108,16 @@ def run():
         budget.before("test")
         budget.run([str(python), "-m", "pytest", "-q", "-o", "junit_family=xunit2",
                     "--junitxml=" + str(work / "junit.xml"),
-                    "crates/alopex-py/tests/test_remote_e2e.py::test_sequence_drop_matches_embedded_contract",
-                    "crates/alopex-py/tests/test_remote_e2e.py::test_sequence_drop_rollback_matches_embedded_state"],
-                   timeout=240, log=work / "pytest.log", env=env)
+                    "crates/alopex-py/tests/test_remote_e2e.py",
+                    "crates/alopex-py/tests/test_remote_schema_e2e.py"],
+                   timeout=600, log=work / "pytest.log", env=env)
         suites = ET.parse(work / "junit.xml").getroot()
         tests = suites.findall(".//testcase")
-        require(len(tests) == 4 and all(not list(test) for test in tests) and
+        require(len(tests) == 44 and all(not list(test) for test in tests) and
                 sum("test_sequence_drop_matches_embedded_contract" in test.attrib["name"] for test in tests) == 3 and
                 sum(test.attrib["name"] == "test_sequence_drop_rollback_matches_embedded_state" for test in tests) == 1,
                 "CASE")
-        atomic_json(work / "test-summary.json", {"tests": 4, "passed": 4, "source": config["source_commit"],
+        atomic_json(work / "test-summary.json", {"tests": 44, "passed": 44, "source": config["source_commit"],
                                                  "assets_digest": config["assets_digest"]})
         status = "passed"
     except Exception as error:
@@ -143,9 +143,9 @@ def run():
         evidence_hash = digest(archive)
         shutil.rmtree(work)
         budget.check()
-        atomic_json(export / "result.json", {"schema": "alopex.sequence-e2e/v1", "status": status,
+        atomic_json(export / "result.json", {"schema": "alopex.remote-e2e/v1", "status": status,
                   "source_commit": config["source_commit"], "assets_digest": config["assets_digest"],
-                  "tests": 4 if status == "passed" else 0, "evidence_sha256": evidence_hash,
+                  "tests": 44 if status == "passed" else 0, "evidence_sha256": evidence_hash,
                   "encrypted_sha256": digest(encrypted), "owned_resources_removed": not work.exists(),
                   "performance_qualification": False,
                   "error_code": None if status == "passed" else failure["code"]})
