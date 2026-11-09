@@ -10,6 +10,7 @@ HEADER_FILE = "00400000-00401000 r-xp 00000000 08:01 42 /fixture/native module.s
 HEADER_FILE_2 = "00401000-00402000 r--p 00001000 08:30d 42 /fixture/native module.so"
 HEADER_ANON = "70000000-70001000 rw-p 00000000 00:00 0"
 HEADER_SPECIAL = "7fff0000-7fff1000 r-xp 00000000 00:00 0 [vdso]"
+HEADER_NAMED = "7ffe0000-7ffe1000 rw-s 00000000 00:01 17 SYSV00000000 (deleted)"
 
 
 def block(header, rss, pss):
@@ -34,6 +35,13 @@ class SmapsParserTests(unittest.TestCase):
         self.assertEqual(groups[("anonymous", None)]["Pss"], 4 * 1024)
         self.assertEqual(groups[("special", "[vdso]")]["Pss"], 1024)
 
+    def test_valid_non_path_named_mapping_stays_separate(self):
+        result = diagnostic.parse_smaps(block(HEADER_NAMED, 4, 2))
+        self.assertEqual(result["groups"], [{
+            "category": "named", "pathname": "SYSV00000000 (deleted)",
+            "bytes": {"Rss": 4096, "Pss": 2048, "count": 1},
+        }])
+
     def test_missing_duplicate_and_invalid_metrics_fail(self):
         good = block(HEADER_FILE, 4, 2)
         for raw in (
@@ -52,6 +60,7 @@ class SmapsParserTests(unittest.TestCase):
     def test_invalid_header_and_input_fail(self):
         for raw in ("", "Rss: 4 kB\n", "bad header\n" + block(HEADER_FILE, 4, 2),
                     block(HEADER_FILE.replace("00401000", "00400000"), 4, 2),
+                    block(HEADER_FILE.replace("r-xp", "r-zp"), 4, 2),
                     block(HEADER_FILE, 4, 2) + "not a smaps field\n"):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 diagnostic.parse_smaps(raw)

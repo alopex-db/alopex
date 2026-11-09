@@ -29,11 +29,15 @@ MAX_COMPRESSED_BYTES = 128_000
 def _identity(pathname):
     if pathname is None:
         return "anonymous", None
+    if not pathname.strip():
+        raise ValueError("empty smaps pathname")
     if pathname.startswith("[") and pathname.endswith("]"):
         return "special", pathname
     if pathname.startswith("/"):
         return "file", pathname
-    raise ValueError("unrecognized smaps pathname form")
+    # Linux can report other named mappings (for example SYSV segments).
+    # Keep their identity without treating them as file-backed or anonymous.
+    return "named", pathname
 
 
 def parse_smaps(raw):
