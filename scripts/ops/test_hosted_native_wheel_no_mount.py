@@ -1,34 +1,50 @@
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
-from hosted_native_wheel_no_mount import HostUsageMeter, parser_request, validate_storage_boundary
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "test-env"))
+from capacity import Budget, allocated_bytes
+from hosted_native_wheel_no_mount import (
+    StableAllocatedMeasure, parser_request, run_counted_command, validate_storage_boundary,
+)
 
 
 class StorageBoundaryTests(unittest.TestCase):
-    def test_counter_tracks_peak_and_rejects_changed_volume(self):
-        spaces = iter((SimpleNamespace(total=1000, free=1000),
-                       SimpleNamespace(total=1000, free=900),
-                       SimpleNamespace(total=1000, free=950),
-                       SimpleNamespace(total=999, free=850)))
-        meter = HostUsageMeter([Path("/tmp")], allocated=lambda _: 100,
-                               usage=lambda _: next(spaces), device=lambda _: 1)
-        self.assertEqual(meter.used([Path("/tmp")]), 200)
-        self.assertEqual(meter.used([Path("/tmp")]), 200)
-        self.assertEqual(meter.summary()["observed_peak_additional_bytes"], 100)
-        with self.assertRaises(ValueError):
-            meter.used([Path("/tmp")])
+    def test_transient_disappearance_retries_and_persistent_failure_stops(self):
+        values = iter((FileNotFoundError(), FileNotFoundError(), 500))
+        def measure(_):
+            value = next(values)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        meter = StableAllocatedMeasure(measure)
+        self.assertEqual(meter([Path("/tmp")]), 500)
+        self.assertEqual(meter.summary()["transient_retries"], 2)
+        self.assertEqual(meter.summary()["samples"], 1)
+        with self.assertRaises(FileNotFoundError):
+            StableAllocatedMeasure(lambda _: (_ for _ in ()).throw(FileNotFoundError()))(
+                [Path("/tmp")])
 
-    def test_counter_sums_distinct_filesystems_and_rejects_root_change(self):
-        roots = [Path("/first"), Path("/second")]
-        spaces = {roots[0]: iter((1000, 900)), roots[1]: iter((1000, 850))}
-        meter = HostUsageMeter(roots, allocated=lambda _: 200,
-                               usage=lambda root: SimpleNamespace(total=1000, free=next(spaces[root])),
-                               device=lambda root: roots.index(root))
-        self.assertEqual(meter.used(roots), 450)
-        with self.assertRaises(ValueError):
-            meter.used(roots[::-1])
+    @unittest.skipIf(os.name == "nt", "process groups require POSIX signals")
+    def test_owned_churning_child_is_paused_for_storage_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            meter = StableAllocatedMeasure(allocated_bytes)
+            budget = Budget({"roots": [str(root)], "stop_bytes": 40_000_000,
+                             "reserve_bytes": 1_000_000, "poll_seconds": 0.03,
+                             "planned_bytes": {"wheel": 10_000_000}}, measure=meter)
+            budget.before("wheel")
+            script = ("from pathlib import Path\nimport time, sys\nroot=Path(sys.argv[1])\n"
+                      "for _ in range(50):\n"
+                      "    (root/'scratch').write_bytes(b'x'*4096)\n"
+                      "    time.sleep(0.01)\n")
+            run_counted_command([sys.executable, "-c", script, str(root)], budget=budget,
+                                meter=meter, seconds=5, log=root / "child.log",
+                                env=dict(os.environ), poll_seconds=0.03)
+            self.assertGreater(meter.paused_checks, 0)
+            self.assertLess(meter.maximum, 40_000_000)
 
     def test_hash_pinned_public_parser_asset_url_policy(self):
         request = parser_request(

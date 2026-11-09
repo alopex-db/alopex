@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -40,51 +41,86 @@ def validate_storage_boundary(scratch, roots, planned_bytes, reserve_bytes):
         raise ValueError("invalid build storage accounting boundary")
 
 
-class HostUsageMeter:
-    """Conservatively track the peak disk use of a dedicated hosted runner.
+class StableAllocatedMeasure:
+    """Retry a transient disappearance; never count a missing path as zero."""
 
-    An idle allocated-byte inventory establishes the baseline. During a build,
-    filesystem free-space counters avoid racing Cargo's temporary-file removal.
-    Count the largest observed free-space drop on every involved filesystem;
-    a later deletion never reduces the recorded peak.
-    """
-
-    def __init__(self, roots, allocated=None, usage=None, device=None):
-        if allocated is None:
-            from capacity import allocated_bytes
-            allocated = allocated_bytes
-        self.roots = tuple(map(Path, roots))
-        self.allocated = allocated
-        self.usage = usage or shutil.disk_usage
-        self.device = device or (lambda path: path.stat().st_dev)
-        self.baseline = self.allocated(self.roots)
-        self.volumes = {}
-        for root in self.roots:
-            identity = self.device(root)
-            if identity not in self.volumes:
-                space = self.usage(root)
-                self.volumes[identity] = (root, space.total, space.free)
-        self.peak = {identity: 0 for identity in self.volumes}
+    def __init__(self, measure):
+        self.measure = measure
         self.samples = 0
+        self.retries = 0
+        self.paused_checks = 0
+        self.maximum = 0
 
-    def used(self, roots):
-        if tuple(map(Path, roots)) != self.roots:
-            raise ValueError("storage roots changed")
-        for identity, (root, total, initial_free) in self.volumes.items():
-            if self.device(root) != identity:
-                raise ValueError("storage device changed")
-            space = self.usage(root)
-            if space.total != total or not 0 <= space.free <= total:
-                raise ValueError("filesystem counter changed")
-            self.peak[identity] = max(self.peak[identity], initial_free - space.free)
-        self.samples += 1
-        return self.baseline + sum(self.peak.values())
+    def __call__(self, roots):
+        for attempt in range(3):
+            try:
+                value = self.measure(roots)
+                self.samples += 1
+                self.maximum = max(self.maximum, value)
+                return value
+            except FileNotFoundError:
+                self.retries += 1
+                if attempt == 2:
+                    raise
+                time.sleep(0.05)
 
     def summary(self):
-        return {"method": "idle allocated bytes plus peak free-space drops",
-                "baseline_bytes": self.baseline,
-                "observed_peak_additional_bytes": sum(self.peak.values()),
-                "samples": self.samples, "filesystems": len(self.volumes)}
+        return {"method": "allocated-byte inventory while owned build group is paused",
+                "samples": self.samples, "transient_retries": self.retries,
+                "paused_checks": self.paused_checks,
+                "maximum_allocated_bytes": self.maximum}
+
+
+def run_counted_command(args, *, budget, meter, seconds, log, env, poll_seconds=2):
+    """Pause only the owned command group for a stable storage snapshot."""
+    from common import Failure, require
+
+    budget.check()
+    with Path(log).open("ab") as output:
+        os.chmod(log, 0o600)
+        child = subprocess.Popen(args, stdout=output, stderr=output,
+                                 env=env, start_new_session=True)
+        deadline = time.monotonic() + seconds
+        try:
+            while child.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Failure("TIMEOUT")
+                try:
+                    child.wait(timeout=min(remaining, poll_seconds))
+                except subprocess.TimeoutExpired:
+                    if child.poll() is not None:
+                        continue
+                    paused = False
+                    try:
+                        os.killpg(child.pid, signal.SIGSTOP)
+                        paused = True
+                        time.sleep(0.05)
+                        budget.check()
+                        meter.paused_checks += 1
+                    except ProcessLookupError:
+                        budget.check()
+                    finally:
+                        if paused:
+                            try:
+                                os.killpg(child.pid, signal.SIGCONT)
+                            except ProcessLookupError:
+                                pass
+            budget.check()
+            require(child.returncode == 0, "COMMAND")
+        except BaseException:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=5)
+            raise
 
 
 def extract_regular(archive, destination, maximum):
@@ -182,10 +218,10 @@ def main():
         if path.exists(): roots.append(path)
     planned = config["planned_bytes"]
     validate_storage_boundary(scratch, roots, planned, config["reserve_bytes"])
-    meter = HostUsageMeter(roots)
+    meter = StableAllocatedMeasure(allocated_bytes)
     budget = Budget({"roots": list(map(str, roots)), "stop_bytes": 40_000_000_000,
                      "reserve_bytes": config["reserve_bytes"], "poll_seconds": 2,
-                     "planned_bytes": planned}, measure=meter.used)
+                     "planned_bytes": planned}, measure=meter)
     source = scratch / "source"
     target = scratch / "target"
     env = dict(os.environ, CARGO_HOME=str(scratch / "cargo"), RUSTUP_HOME=str(scratch / "rustup"),
@@ -204,12 +240,8 @@ def main():
             require(remaining > 0, "TIMEOUT")
             seconds = min(seconds, remaining)
         budget.before(phase)
-        budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
-        # Child processes have exited; reconcile the stable allocated-byte
-        # inventory with the conservative counter before another phase.
-        direct = allocated_bytes(roots)
-        require(direct <= meter.used(roots) and direct < 40_000_000_000,
-                "MEASUREMENT")
+        run_counted_command(args, budget=budget, meter=meter, seconds=seconds,
+                            log=work / (name + ".log"), env=env)
     def fetch(url, output, expected, limit):
         request = parser_request(url)
         budget.before("prepare")
