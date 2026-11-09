@@ -36,6 +36,36 @@ failure, or a mismatch remains a publication failure rather than an assumed
 success. Read-only/local contract checks are not evidence of live v0.8.17
 publication.
 
+## Release-day receiver procedure
+
+After the producer has pushed its `report/verify-release-v0.8.17-*` branch,
+dispatch the docs receiver for this version if no receiver run is already
+processing it. Do not rely on the scheduled run arriving within the publisher's
+bounded wait:
+
+```bash
+gh workflow run publish-release-verification.yml \
+  --repo alopex-db/docs --ref main -f version=0.8.17
+```
+
+Confirm the receiver run succeeded, then fetch the versioned JSON and Markdown
+from docs main both through the authenticated GitHub API and without
+authentication. Compare the complete bytes of each file with the producer's
+run/attempt-bound artifact and, while it remains, its immutable report branch.
+A successful dispatch or a matching canonical report alone does not establish
+that the versioned pair was published. The producer may remove its branch only
+after it confirms both files. If its wait has already timed out, retain the
+branch until the same byte checks succeed. Once the
+publisher run is terminal, remove only that confirmed branch.
+
+If the producer creates a separate `report/verify-release-failure-v0.8.17-*`
+branch, run the same version-scoped receiver again. Check its failure JSON and
+Markdown independently from the original verification pair, using both
+authenticated and unauthenticated byte checks. When the original pair was
+available, confirm all four versioned files before removing the failure branch.
+Missing files, rejected bytes, or a receiver failure leave the branches and
+Actions artifacts available for diagnosis and retry.
+
 ## Independent publication failure evidence
 
 If primary publication fails, `publication_failure.py` creates a separate
