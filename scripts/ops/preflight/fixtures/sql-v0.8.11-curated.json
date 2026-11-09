@@ -1,0 +1,13 @@
+{
+  "schema": "alopex.sql-performance-fixture/v1",
+  "rows": 34250,
+  "columns": [
+    {"name": "id", "type": "int64", "generator": "range(0, rows)", "null_ratio": 0.0},
+    {"name": "value", "type": "float64", "generator": "float(id)", "null_ratio": 0.0},
+    {"name": "enabled", "type": "boolean", "generator": "id % 2 == 0", "null_ratio": 0.0}
+  ],
+  "queries": {
+    "aggregate": "SELECT COUNT(*) AS count FROM bench WHERE enabled = true",
+    "stream": "SELECT id, value FROM bench WHERE enabled = true"
+  }
+}

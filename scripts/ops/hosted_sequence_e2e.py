@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/test-env"))
@@ -48,7 +47,9 @@ def run():
             os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "POLICY")
     config = json.loads(base64.b64decode(os.environ.pop("E2E_CONFIG"), validate=True))
     require(config["source_commit"] == "a537c8beb5c0d3a135e329ab344942243487f55e" and
-            config["controller"] == os.environ["GITHUB_SHA"], "IDENTITY")
+            config["controller"] == os.environ["GITHUB_SHA"] and
+            config["mode"] == "sql_preflight" and
+            config["expected_checksum"] == "b97a1fb499381d8690840092283a59ad92d042a30cf2e52400ecb9147d422fc2", "IDENTITY")
     for name, expected in config["test_sources"].items():
         require(digest(ROOT / name) == expected, "IDENTITY")
     require(subprocess.run(["git", "diff", "--quiet", config["source_commit"], "HEAD", "--",
@@ -105,20 +106,18 @@ def run():
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(files["wheel"])],
                    timeout=90, log=work / "wheel-install.log", env=env)
+        env.update(ALOPEX_PREFLIGHT_WORK=str(work),
+                   ALOPEX_PREFLIGHT_EXPECTED=config["expected_checksum"])
         budget.before("test")
-        budget.run([str(python), "-m", "pytest", "-q", "-o", "junit_family=xunit2",
-                    "--junitxml=" + str(work / "junit.xml"),
-                    "crates/alopex-py/tests/test_remote_e2e.py",
-                    "crates/alopex-py/tests/test_remote_schema_e2e.py"],
-                   timeout=600, log=work / "pytest.log", env=env)
-        suites = ET.parse(work / "junit.xml").getroot()
-        tests = suites.findall(".//testcase")
-        require(len(tests) == 44 and all(not list(test) for test in tests) and
-                sum("test_sequence_drop_matches_embedded_contract" in test.attrib["name"] for test in tests) == 3 and
-                sum(test.attrib["name"] == "test_sequence_drop_rollback_matches_embedded_state" for test in tests) == 1,
-                "CASE")
-        atomic_json(work / "test-summary.json", {"tests": 44, "passed": 44, "source": config["source_commit"],
-                                                 "assets_digest": config["assets_digest"]})
+        budget.run([str(python), "-B", "scripts/ops/run_sql_preflight.py"],
+                   timeout=180, log=work / "preflight.log", env=env)
+        preflight = json.loads((work / "preflight-result.json").read_bytes())
+        require(preflight["rows"] == 20 and preflight["timing_samples"] == 0 and
+                len(preflight["checks"]) == 6 and preflight["server_stopped"] and
+                preflight["result_sha256"] == config["expected_checksum"], "CASE")
+        atomic_json(work / "test-summary.json", {"checks": 6, "rows": 20,
+                    "timing_samples": 0, "checksum": preflight["result_sha256"],
+                    "source": config["source_commit"], "assets_digest": config["assets_digest"]})
         status = "passed"
     except Exception as error:
         failure = {"type": type(error).__name__, "code": getattr(error, "code", "INTERNAL")}
@@ -143,9 +142,9 @@ def run():
         evidence_hash = digest(archive)
         shutil.rmtree(work)
         budget.check()
-        atomic_json(export / "result.json", {"schema": "alopex.remote-e2e/v1", "status": status,
+        atomic_json(export / "result.json", {"schema": "alopex.sql-preflight/v1", "status": status,
                   "source_commit": config["source_commit"], "assets_digest": config["assets_digest"],
-                  "tests": 44 if status == "passed" else 0, "evidence_sha256": evidence_hash,
+                  "checks": 6 if status == "passed" else 0, "evidence_sha256": evidence_hash,
                   "encrypted_sha256": digest(encrypted), "owned_resources_removed": not work.exists(),
                   "performance_qualification": False,
                   "error_code": None if status == "passed" else failure["code"]})
