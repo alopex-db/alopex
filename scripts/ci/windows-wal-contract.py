@@ -153,7 +153,7 @@ for name, command in commands:
                 "hnsw-two-index-eviction": "6 passed; 0 failed; 0 ignored",
                 "hnsw-savepoint-cache": "13 passed; 0 failed; 0 ignored",
                 "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
-                "hnsw-copy-on-write": "10 passed; 0 failed; 0 ignored",
+                "hnsw-copy-on-write": "11 passed; 0 failed; 0 ignored",
                 "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")
