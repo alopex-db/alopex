@@ -48,7 +48,7 @@ def run():
     config = json.loads(base64.b64decode(os.environ.pop("E2E_CONFIG"), validate=True))
     require(config["source_commit"] == "a537c8beb5c0d3a135e329ab344942243487f55e" and
             config["controller"] == os.environ["GITHUB_SHA"] and
-            config["mode"] == "parquet_prequalification", "IDENTITY")
+            config["mode"] == "parquet_hnsw_path", "IDENTITY")
     for name, expected in config["test_sources"].items():
         require(digest(ROOT / name) == expected, "IDENTITY")
     require(subprocess.run(["git", "diff", "--quiet", config["source_commit"], "HEAD", "--",
@@ -56,14 +56,14 @@ def run():
                            cwd=ROOT, timeout=10).returncode == 0, "IDENTITY")
 
     temporary = Path(os.environ["RUNNER_TEMP"])
-    work, export = temporary / "alopex-parquet-prequalification", ROOT / "parquet-prequalification-export"
+    work, export = temporary / "alopex-parquet-hnsw-path", ROOT / "parquet-hnsw-path-export"
     require(not work.exists() and not export.exists(), "STATE")
     roots = [ROOT.parent, temporary]
     for item in (ROOT.parent.parent / "_actions", Path.home() / ".cargo", Path.home() / ".cache"):
         if item.exists():
             roots.append(item)
     phases = {"fetch": 500_000_000, "prepare": 1_000_000_000,
-              "test": 500_000_000, "collect": 100_000_000}
+              "test": 1_200_000_000, "collect": 100_000_000}
     reserve = 1_000_000_000
     budget = Budget({"roots": list(map(str, roots)), "stop_bytes": 40_000_000_000,
                      "reserve_bytes": reserve, "poll_seconds": 2, "planned_bytes": phases})
@@ -98,7 +98,7 @@ def run():
         python = venv / "bin/python"
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--only-binary=:all:",
-                    "numpy==2.2.1", "pyarrow==26.0.0", "pytest==9.1.1"], timeout=300,
+                    "numpy==2.2.1", "pyarrow==26.0.0"], timeout=300,
                    log=work / "dependencies-install.log", env=env)
         budget.before("prepare")
         budget.run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(files["wheel"])],
@@ -106,22 +106,16 @@ def run():
         for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
                     "NIM_SQL_PARSER_LIB_DIR", "ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD"):
             env.pop(key, None)
+        env["ALOPEX_HNSW_WORK"] = str(work)
         budget.before("test")
-        budget.run([str(python), "-I", "scripts/release/verify_python_parquet.py",
-                    "--wheel", str(files["wheel"]), "--workspace", str(ROOT),
-                    "--report", str(work / "vector-parquet.json")],
-                   timeout=600, log=work / "parquet.log", env=env)
-        report = json.loads((work / "vector-parquet.json").read_bytes())
-        require(report["status"] == "passed" and len(report["cases"]) == 38 and
-                report["wheel_sha256"] == config["wheel_sha256"] and
-                report["source_commit"] == config["controller"] and
-                report["versions"] == {"alopex": "0.8.17", "numpy": "2.2.1",
-                                       "pyarrow": "26.0.0", "pytest": "9.1.1"} and
-                {"package", "extension"} == set(report["installed_modules"]) and
-                report["sources"] == {Path(name).name: value for name, value in
-                                      config["test_sources"].items() if name.startswith((
-                                      "crates/alopex-py/tests/", "scripts/release/verify_python_parquet.py"))}, "CASE")
-        atomic_json(work / "test-summary.json", {"cases": 38,
+        budget.run([str(python), "-I", "scripts/ops/verify_parquet_hnsw_path.py"],
+                   timeout=180, log=work / "hnsw-path.log", env=env)
+        report = json.loads((work / "hnsw-path.json").read_bytes())
+        require(report == {"schema": "alopex.parquet-hnsw-path/v1", "status": "passed",
+                "rows": 3, "parquet_reopened": True, "index_rebuilt": True,
+                "explain_hnsw_selected": True, "analyze_visited_nodes": True,
+                "nearest_id": 1}, "CASE")
+        atomic_json(work / "test-summary.json", {"rows": 3, "hnsw_selected": True,
                     "source": config["source_commit"], "assets_digest": config["assets_digest"],
                     "wheel_sha256": config["wheel_sha256"]})
         status = "passed"
@@ -148,9 +142,9 @@ def run():
         evidence_hash = digest(archive)
         shutil.rmtree(work)
         budget.check()
-        atomic_json(export / "result.json", {"schema": "alopex.parquet-prequalification/v1", "status": status,
+        atomic_json(export / "result.json", {"schema": "alopex.parquet-hnsw-path/v1", "status": status,
                   "source_commit": config["source_commit"], "assets_digest": config["assets_digest"],
-                  "cases": 38 if status == "passed" else 0, "evidence_sha256": evidence_hash,
+                  "rows": 3 if status == "passed" else 0, "evidence_sha256": evidence_hash,
                   "encrypted_sha256": digest(encrypted), "owned_resources_removed": not work.exists(),
                   "performance_qualification": False,
                   "error_code": None if status == "passed" else failure["code"]})

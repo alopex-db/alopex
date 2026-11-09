@@ -1,4 +1,4 @@
-name: Candidate Parquet prequalification
+name: Candidate Parquet HNSW path
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 jobs:
-  parquet-prequalification:
+  parquet-hnsw-path:
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 20
     steps:
@@ -25,7 +25,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify candidate wheel Parquet cases
+      - name: Verify HNSW path after Parquet import
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,7 +36,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: candidate-parquet-prequalification
-          path: parquet-prequalification-export/
+          name: candidate-parquet-hnsw-path
+          path: parquet-hnsw-path-export/
           if-no-files-found: error
           retention-days: 7
