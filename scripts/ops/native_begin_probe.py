@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Manual native #684 phase probe. Preparation runs in a separate process."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import resource
 import subprocess
 import sys
 from time import perf_counter_ns
+import zlib
 
 QUERY = "SELECT id FROM items ORDER BY vector_distance(e, [0,0], 'l2') LIMIT 1 WITH (enable_hnsw = true)"
 
@@ -24,6 +26,17 @@ def peak_rss_bytes():
     raise RuntimeError('unsupported RSS counter unit')
 
 
+def encode_smaps(raw):
+    if not 0 < len(raw) <= 2_000_000:
+        raise RuntimeError('self smaps missing or over capture bound')
+    raw.decode('ascii')
+    compressed = zlib.compress(raw, level=9)
+    if not 0 < len(compressed) <= 128_000:
+        raise RuntimeError('compressed self smaps over evidence bound')
+    return {'smaps_sha256': hashlib.sha256(raw).hexdigest(),
+            'smaps_zlib_base64': base64.b64encode(compressed).decode('ascii')}
+
+
 def snapshot(path):
     result = subprocess.run(['ps', '-o', 'rss=', '-p', str(os.getpid())],
                             check=True, capture_output=True, text=True)
@@ -31,8 +44,13 @@ def snapshot(path):
     if rss <= 0 or rss >= 2 * 1024**3:
         raise RuntimeError('RSS unavailable or at 2 GiB stop')
     files = [p for p in path.parent.rglob('*') if p.is_file()]
-    return dict(rss_bytes=rss, allocated_bytes=sum(p.stat().st_blocks * 512 for p in files),
-                logical_bytes=sum(p.stat().st_size for p in files))
+    observation = dict(rss_bytes=rss, allocated_bytes=sum(p.stat().st_blocks * 512 for p in files),
+                       logical_bytes=sum(p.stat().st_size for p in files))
+    if sys.platform != 'linux':
+        raise RuntimeError('self smaps mapping diagnostic requires Linux')
+    raw = Path('/proc/self/smaps').read_bytes()
+    observation.update(encode_smaps(raw))
+    return observation
 
 
 def validate_rows(db, count):
@@ -101,7 +119,7 @@ def main():
              rows=args.rows, indexes=args.indexes, mode=args.mode, operation=args.operation,
              query=query,
              initial_cache=initial_cache,
-             cache_note='fresh reader; not OS-cold; sample0 shared cache empty, samples1..5 explicitly warmed')
+             cache_note='mapping diagnostic: one first-after-open sample; observers run outside API timers')
         mode = TxnMode.READ_ONLY if args.mode == 'ro' else TxnMode.READ_WRITE
         for iteration in range(args.samples):
             if iteration == 1:

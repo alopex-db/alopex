@@ -16,18 +16,13 @@ def require(value, message):
         raise ValueError(message)
 
 
-TARGET_PROBES = {
-    (0, 0): (("ro", "noop"), ("rw", "query")),
-    (0, 1): (("ro", "query"),),
-    (100, 2): (("ro", "query"),),
-    (0, 2): (("rw", "query"),),
-}
+TARGET_PROBES = {(0, 2): (("rw", "query"),)}
 
 
 def probes(rows, indexes):
     require(type(rows) is int and type(indexes) is int and
             (rows, indexes) in TARGET_PROBES, "unsupported targeted fixture")
-    return [dict(mode=mode, operation=operation, samples=6, repeat=0)
+    return [dict(mode=mode, operation=operation, samples=1, repeat=0)
             for mode, operation in TARGET_PROBES[(rows, indexes)]]
 
 
@@ -76,6 +71,11 @@ def verify_events(events, config, expected_extension, spec=None):
                     snapshot["rss_bytes"] < 2 * 1024**3 and
                     all(number(snapshot[name]) for name in ("allocated_bytes", "logical_bytes")),
                     "invalid RSS or storage observation")
+            require(isinstance(snapshot.get("smaps_sha256"), str) and
+                    len(snapshot["smaps_sha256"]) == 64 and
+                    isinstance(snapshot.get("smaps_zlib_base64"), str) and
+                    0 < len(snapshot["smaps_zlib_base64"]) <= 180_000,
+                    "missing or over-bound self smaps capture")
         require(all(sample.get(key) is None for key in
                     {"after_begin", "after_query"} - snapshots), "unexpected phase snapshot")
         if iteration:
@@ -123,7 +123,7 @@ def main():
     require(sys.platform == "linux" and os.getuid() != 0, "normal Linux user required")
     request = read_json(INPUT / "request.json")
     config = read_json(INPUT / "measurement.json")
-    require(config["schema"] == "alopex.pr819-targeted-supervisor/v1" and
+    require(config["schema"] == "alopex.pr819-mapping-supervisor/v1" and
             type(config["indexes"]) is int and config["indexes"] in (0, 1, 2) and
             type(config["trial"]) is int and config["trial"] in (0, 1, 2), "invalid fixture configuration")
     probes(config["rows"], config["indexes"])
@@ -174,7 +174,7 @@ def main():
                      "--samples", str(spec["samples"])]
         command(args, raw, request["limits"]["case_seconds"], env)
         return raw
-    report = dict(schema="alopex.pr819-targeted-measurement/v1", status="failed", source=config["source"],
+    report = dict(schema="alopex.pr819-mapping-measurement/v1", status="failed", source=config["source"],
                   rows=config["rows"], indexes=config["indexes"], trial=config["trial"],
                   assets_digest=digest(INPUT / "assets.json"), extension_sha256=expected_extension,
                   worker_error=None, finalization_error=None)
