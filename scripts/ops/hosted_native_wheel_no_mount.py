@@ -12,8 +12,20 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.request
+
+
+def parser_request(url):
+    """Fetch only the digest-pinned public parser release assets."""
+    if re.fullmatch(r"https://api\.github\.com/repos/alopex-db/alopex/releases/assets/[1-9][0-9]*", url):
+        return urllib.request.Request(url, headers={
+            "Accept": "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28"})
+    if re.fullmatch(r"https://github\.com/alopex-db/alopex/releases/download/"
+                    r"(?:v0\.8\.16|alopex-py-v0\.8\.16)/[A-Za-z0-9._-]+", url):
+        return urllib.request.Request(url)
+    raise ValueError("parser asset URL outside release policy")
 
 
 def validate_storage_boundary(scratch, roots, planned_bytes, reserve_bytes):
@@ -111,6 +123,9 @@ def main():
     export = private_dir(repo / "native-assets-export")
     status = "failed"
     config = json.loads(base64.b64decode(os.environ["PUBLIC_BUILD_CONFIG"], validate=True))
+    require(type(config.get("execution_seconds")) is int and
+            600 <= config["execution_seconds"] <= 11400, "INPUT")
+    execution_deadline = time.monotonic() + config["execution_seconds"]
     scratch = Path(os.environ["RUNNER_TEMP"]) / "alopex-native-build"
     require(not scratch.exists(), "STATE")
     # Count the ordinary runner workspace and temporary storage, including
@@ -136,15 +151,17 @@ def main():
                         "--remap-path-prefix=" + str(scratch) + "=/alopex-build/work")
     env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     def command(args, phase, name, seconds=120):
+        if phase != "collect":
+            remaining = execution_deadline - time.monotonic()
+            require(remaining > 0, "TIMEOUT")
+            seconds = min(seconds, remaining)
         budget.before(phase)
         budget.run(args, timeout=seconds, log=work / (name + ".log"), env=env)
     def fetch(url, output, expected, limit):
-        require(any(url.startswith(prefix) for prefix in (
-            "https://github.com/alopex-db/alopex/releases/download/v0.8.16/",
-            "https://github.com/alopex-db/alopex/releases/download/alopex-py-v0.8.16/")), "POLICY")
+        request = parser_request(url)
         budget.before("prepare")
         received = 0
-        with urllib.request.urlopen(url, timeout=30) as response, output.open("xb") as stream:
+        with urllib.request.urlopen(request, timeout=30) as response, output.open("xb") as stream:
             while chunk := response.read(65536):
                 received += len(chunk)
                 require(received <= limit, "CAPACITY")
