@@ -100,7 +100,8 @@ def main():
         for name,expected in config['sources'].items():require(sha(ROOT/name)==expected,'HNSW source differs')
         test_env=dict(env,PYTHONPATH=os.pathsep.join(str(ROOT/p) for p in ('scripts/ops','scripts/performance','scripts/test-env')))
         budget.run([sys.executable,'-B','-m','unittest','test_hnsw_search_contract','test_hnsw_search_identity','test_hnsw_search_point',
-            'test_hnsw_search_dependencies','test_hnsw_search_lifecycle','test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
+            'test_hnsw_search_dependencies','test_hnsw_search_lifecycle','test_hnsw_search_stability',
+            'test_private_failure','-v'],timeout=60,log=work/'contracts.log',env=test_env)
         products={name:install_product(name,config['products'][name],work,budget,env) for name in ('published','before','candidate')}
         lock=json.loads((ROOT/'scripts/ops/hnsw_search.lock.json').read_bytes())
         paths,records=install(lock,work,budget,env,ROOT)
@@ -118,7 +119,7 @@ def main():
             path=work/'identities'/name/'subject.json';atomic_json(path,subject);product['subject']=path
         atomic_json(work/'identity.json',dict(controller=os.environ['GITHUB_SHA'],configuration=config,allocation=allocation,
             python_version=sys.version,cells=cells))
-        if config['mode']=='full':fetch_dataset(work/'fixtures',budget)
+        if config['mode']!='preflight':fetch_dataset(work/'fixtures',budget)
         fixture=work/'fixture-process';fixture.mkdir()
         parameters=dict(mode=config['mode'],root=str(ROOT),sources=config['sources'],data=str(work/'fixtures'),
             affinity=allocation['client'],dependency_identity=str(identities['prepare']),

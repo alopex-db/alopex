@@ -30,6 +30,16 @@ class ContractTests(unittest.TestCase):
             self.assertEqual((row['min_queries'], row['min_seconds']), (10000,2.0))
             self.assertEqual(row['ef_values'], [16,32,64,128,256])
         self.assertEqual(len(c.plan('preflight')), 5)
+        stability = c.plan('stability')
+        self.assertEqual(len(stability), 50)
+        self.assertEqual(len({r['id'] for r in stability}), 50)
+        for trial in range(10):
+            block = stability[trial*5:(trial+1)*5]
+            self.assertEqual({r['subject'] for r in block}, set(c.SUBJECTS))
+            self.assertEqual([r['subject'] for r in block],
+                list(c.SUBJECTS[trial % 5:] + c.SUBJECTS[:trial % 5]))
+            self.assertTrue(all(r['rows'] == 9171 and r['min_queries'] == 10000
+                and r['min_seconds'] == 2.0 for r in block))
         with self.assertRaises(RuntimeError): c.plan('fast')
 
     def test_only_raw_return_field_differs_from_original_timer(self):

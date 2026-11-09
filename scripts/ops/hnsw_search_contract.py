@@ -19,10 +19,12 @@ def finite(value):
 
 
 def plan(mode):
-    require(mode in ('preflight', 'full'), 'unknown HNSW mode')
+    require(mode in ('preflight', 'full', 'stability'), 'unknown HNSW mode')
     cells = []
-    for trial in range(1 if mode == 'preflight' else 3):
-        subjects = SUBJECTS[trial:] + SUBJECTS[:trial]
+    trial_count = {'preflight': 1, 'full': 3, 'stability': 10}[mode]
+    for trial in range(trial_count):
+        offset = trial % len(SUBJECTS)
+        subjects = SUBJECTS[offset:] + SUBJECTS[:offset]
         for subject in subjects:
             cells.append(dict(id=f'trial{trial}-{subject}', trial=trial, subject=subject,
                 engine=subject if subject in ('hnswlib', 'faiss-hnsw') else 'alopex-hnsw',
