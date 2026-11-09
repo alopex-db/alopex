@@ -67,7 +67,11 @@ def child(phase, directory, surface, size, expected_native):
         sql = "INSERT INTO items VALUES (2, 'a', '" + 'x' * size + "'), (3, 'b', '" + 'y' * size + "')"
         record['prepare_ns'] = time.perf_counter_ns() - start
         _wal_phase_capture('after_prepare')
+        _wal_mapping_capture('calibration_before')
+        _wal_mapping_capture('calibration_after')
+        _wal_mapping_capture('before_open')
         db, record['open_ns'] = measure(lambda: Database.open(str(path), wal_overflow=options))
+        _wal_mapping_capture('after_open')
         _wal_phase_capture('after_open')
         record.update(schema_ns=0, index_ns=0)
         if surface == 'sql':
@@ -83,7 +87,9 @@ def child(phase, directory, surface, size, expected_native):
         tx.commit()
         record['prior_ns'] = time.perf_counter_ns() - start
         _wal_phase_capture('after_prior_commit')
+        _wal_mapping_capture('before_begin')
         tx, record['begin_ns'] = measure(lambda: db.begin(TxnMode.READ_WRITE))
+        _wal_mapping_capture('after_begin')
         _wal_phase_capture('after_begin')
         start = time.perf_counter_ns()
         if surface == 'kv':

@@ -21,7 +21,7 @@ def main():
     assert os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     assert os.environ.get('RUNNER_KIND') == 'github-hosted' and os.getuid() != 0
     config = json.loads(args.configuration.read_bytes())
-    assert config['diagnostic'] == 'wal-phase-memory/v1'
+    assert config['diagnostic'] == 'wal-mapping/v1'
     assert sorted(os.sched_getaffinity(0)) == config['affinity']
     root = Path(__file__).resolve().parents[2]
     for name, expected in config['sources'].items():
@@ -30,6 +30,14 @@ def main():
     import public_api_cost as workload
     from subject_identity import verify_subject
     from wal_phase_memory import Observer
+    from wal_mapping_diagnostic import BoundaryObserver
+    mapping = BoundaryObserver() if config['phase'] == 'write' else None
+    def mapping_capture(phase):
+        assert mapping is not None
+        mapping.capture(phase)
+        if phase == 'after_begin':
+            mapping.save(Path(config['output']) / 'mapping-boundaries.json')
+    workload._wal_mapping_capture = mapping_capture
     observer = Observer() if config['phase'] == 'write' else None
     def capture(phase):
         assert observer is not None
