@@ -23,8 +23,17 @@ def prepare_cell(product_manifest, destination, cell, operators):
     require(cell in plan() and not destination.exists(), "invalid or existing fixture")
     source = json.loads(product_manifest.read_text())
     source = verify_assets(product_manifest, source["platform"])
-    require({item["role"] for item in source["files"]}.issubset(
-        {"server", "wheel", "receipt", "library", "harness"}), "unexpected product asset role")
+    roles = {item["role"] for item in source["files"]}
+    require(roles.issubset({"server", "wheel", "receipt", "library", "harness", "wheel_receipt"}),
+            "unexpected product asset role")
+    receipt_entry = next(item for item in source["files"] if item["role"] == "receipt")
+    receipt = json.loads(contained(product_manifest.parent, receipt_entry["path"]).read_text())
+    wheel_build = receipt.get("build", {}).get("wheel")
+    reused = isinstance(wheel_build, dict) and wheel_build.get("mode") == "reused_development_asset"
+    if reused or "wheel_receipt" in roles:
+        from reused_native_wheel import verify_composed_receipts
+        require(reused and "wheel_receipt" in roles, "original wheel receipt is required")
+        verify_composed_receipts(product_manifest.parent, source)
     private_dir(destination)
     manifest = copy.deepcopy(source)
     for item in source["files"]:

@@ -24,6 +24,15 @@ def verify_products(manifest_path, result_path, expected):
     receipt_entry = next(item for item in manifest["files"] if item["role"] == "receipt")
     receipt = json.loads((manifest_path.parent / receipt_entry["path"]).read_text())
     require(receipt["source"] == result["source"] and receipt["version"] == expected["version"], "IDENTITY")
+    if "assets_digest" in expected:
+        require(digest(manifest_path) == expected["assets_digest"], "IDENTITY")
+    wheel_build = receipt.get("build", {}).get("wheel")
+    reused = isinstance(wheel_build, dict) and wheel_build.get("mode") == "reused_development_asset"
+    has_original = any(item["role"] == "wheel_receipt" for item in manifest["files"])
+    if reused or has_original:
+        from reused_native_wheel import verify_composed_receipts
+        require(reused and has_original and "assets_digest" in expected, "IDENTITY")
+        verify_composed_receipts(manifest_path.parent, manifest)
     return manifest
 
 

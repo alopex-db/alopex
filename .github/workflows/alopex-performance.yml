@@ -83,6 +83,11 @@ jobs:
               print('{"source_preparation":"failed"}')
               raise SystemExit(1)
           PYCODE
+      - name: Verify composed receipt and begin contracts
+        shell: bash
+        run: |
+          PYTHONPATH=scripts/ops:scripts/test-env python3 -B -m unittest test_native_begin_matrix test_composed_begin_receipts test_hosted_native_begin test_composed_sql_products -v
+          python3 -B -m unittest discover -s scripts/test-env/tests -p test_capacity_snapshot.py
       - name: Retrieve source-built products and verified environment image
         env:
           RUNNER_KIND: ${{ runner.environment }}
