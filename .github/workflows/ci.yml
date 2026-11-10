@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       production: ${{ steps.classify.outputs.production }}
+      security: ${{ steps.classify.outputs.security }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -401,7 +402,7 @@ jobs:
   security-audit:
     name: Security Audit
     needs: [scope]
-    if: needs.scope.outputs.production == 'true'
+    if: needs.scope.outputs.security == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -423,7 +424,8 @@ jobs:
         run: |
           set -euo pipefail
           tree_file="${RUNNER_TEMP}/alopex-security-dependency-tree.txt"
-          cargo tree --locked --workspace --all-features --target all > "${tree_file}"
+          # Remove tree drawing prefixes so an indented reachable crate cannot evade the check.
+          cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}' > "${tree_file}"
           if grep -Eq '^rkyv v0\.7\.46([[:space:]]|$)' "${tree_file}"; then
             echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
             exit 1
@@ -690,19 +692,23 @@ jobs:
             exit 1
           fi
           if [[ "${{ needs.scope.outputs.production }}" == "false" ]]; then
+            expected_security=skipped
+            if [[ "${{ needs.scope.outputs.security }}" == "true" ]]; then
+              expected_security=success
+            fi
             if [[ "${{ needs.fmt.result }}" != "skipped" ]] || \
                [[ "${{ needs.formal.result }}" != "skipped" ]] || \
                [[ "${{ needs.clippy.result }}" != "skipped" ]] || \
                [[ "${{ needs.clippy-beta.result }}" != "skipped" ]] || \
                [[ "${{ needs.test.result }}" != "skipped" ]] || \
                [[ "${{ needs.coverage.result }}" != "skipped" ]] || \
-               [[ "${{ needs['security-audit'].result }}" != "skipped" ]] || \
+               [[ "${{ needs['security-audit'].result }}" != "${expected_security}" ]] || \
                [[ "${{ needs.build.result }}" != "skipped" ]] || \
                [[ "${{ needs['v08-release-gate'].result }}" != "skipped" ]]; then
-              echo "release-process-only change unexpectedly ran production verification"
+              echo "non-product change ran an unexpected CI job or missed Security Audit"
               exit 1
             fi
-            echo "Release-process-only change: production verification delegated to its owners"
+            echo "Release-process-only change: required scoped verification passed"
             exit 0
           fi
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
