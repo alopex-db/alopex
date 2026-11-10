@@ -2726,6 +2726,34 @@ mod tests {
     }
 
     #[test]
+    fn owned_rollback_reuses_unmodified_cold_hnsw_load() {
+        let db = Arc::new(Database::new());
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, e VECTOR(2, L2));
+             CREATE INDEX ih ON items (e) USING HNSW;
+             INSERT INTO items VALUES (1, [0,0]);",
+        )
+        .unwrap();
+        db.set_hnsw_cache_limit(0);
+        db.set_hnsw_cache_limit(256 * 1024 * 1024);
+        assert_eq!(db.hnsw_cache_stats().entries, 0);
+
+        let mut tx = db
+            .clone()
+            .begin_owned_embedded_transaction(TxnMode::ReadOnly)
+            .unwrap();
+        tx.execute_sql(
+            "SELECT id FROM items ORDER BY vector_distance(e,[0,0],'l2') LIMIT 1 \
+             WITH (enable_hnsw=true,ef_search=16)",
+        )
+        .unwrap();
+        assert!(tx.sql_hnsw.contains_key("ih"), "query must load HNSW graph");
+        assert_eq!(db.hnsw_cache_stats().entries, 0);
+        tx.rollback().unwrap();
+        assert_eq!(db.hnsw_cache_stats().entries, 1);
+    }
+
+    #[test]
     fn hnsw_cache_lru_keeps_recent_large_graph_and_accounts_bytes() {
         let db = Database::new();
         db.set_hnsw_cache_limits(u64::MAX, Some(3)).unwrap();
