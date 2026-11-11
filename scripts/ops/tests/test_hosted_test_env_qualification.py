@@ -466,6 +466,9 @@ class Sequence(unittest.TestCase):
                  patch("builtins.print"):
                 self.assertEqual(qualification.main(["--admission-only"]), 1)
             self.assertEqual(events, ["controller", "checkout", "admission"])
+            failure = json.loads((root / "alopex-804-qualification" /
+                                  "failure.private.json").read_text())
+            self.assertEqual(failure["stage"], "admission_facts")
             make_profile.assert_not_called()
             execute.assert_not_called()
             encrypt.assert_called_once()

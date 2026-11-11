@@ -48,6 +48,7 @@ CERT = REPO / ".github/ops/native-evidence-cert.pem"
 INPUT = REPO / ".github/ops/qualification"
 EXPORT = REPO / "native-qualification-export"
 EXPECTED_TEMP_SNAPSHOT = None
+PRIVATE_STAGE = "initial"
 
 
 def checked_command(args, *, timeout=30):
@@ -147,13 +148,17 @@ def verify_temp_snapshot(expected):
 
 
 def checkout_growth(private):
+    global PRIVATE_STAGE
+    PRIVATE_STAGE = "checkout_receipt"
     receipt = read_json(private / "checkout-preflight.private.json", private=True)
     require(receipt.get("expected_controller_sha") == os.environ.get("EXPECTED_CONTROLLER_SHA"),
             "IDENTITY")
     root = Path(receipt["workspace_root"])
     require(root == Path(os.environ["GITHUB_WORKSPACE"]).parent and root.is_absolute() and
             not root.is_symlink(), "MEASUREMENT")
+    PRIVATE_STAGE = "checkout_temp_snapshot"
     verify_temp_snapshot(receipt["temp_snapshot"])
+    PRIVATE_STAGE = "checkout_roots"
     trusted_executable(DU_BINARY)
     trusted_executable(SUDO_BINARY)
     roots = [Path(name) for name in receipt["roots"]]
@@ -177,8 +182,11 @@ def checkout_growth(private):
                 fields[0].isascii() and fields[0].isdecimal() and fields[1] == str(path),
                 "MEASUREMENT")
         return int(fields[0]) * 1024
+    PRIVATE_STAGE = "checkout_workspace_measurement"
     workspace_bytes = measure(root)
+    PRIVATE_STAGE = "checkout_aggregate_measurement"
     aggregate = sum(measure(path) for path in roots)
+    PRIVATE_STAGE = "checkout_capacity"
     require(0 <= workspace_bytes - receipt["allocated_bytes"] <= 1_000_000_000 and
             0 <= aggregate - receipt["aggregate_allocated_bytes"] <= 1_000_000_000 and
             aggregate + 7_500_000_000 < 40_000_000_000, "CAPACITY")
@@ -503,7 +511,7 @@ def encrypt_evidence(private, public, budget=None):
 
 
 def main(argv=None):
-    global EXPECTED_TEMP_SNAPSHOT
+    global EXPECTED_TEMP_SNAPSHOT, PRIVATE_STAGE
     argv = sys.argv[1:] if argv is None else argv
     if argv not in (["--admission-only"], ["--acquire-assets"], ["--execute"]):
         print('{"case":"HOST_QUALIFICATION","outcome":"invalid_phase"}')
@@ -514,9 +522,11 @@ def main(argv=None):
               "case": "HOST_QUALIFICATION", "outcome": "failed", "error_code": "INCOMPLETE"}
     try:
         assets_root = Path(os.environ["ALOPEX_804_ASSETS"])
+        PRIVATE_STAGE = "controller_identity"
         verified_controller()
         if admission_only:
             checkout_growth(private)
+            PRIVATE_STAGE = "admission_facts"
             facts = admission_facts()
             EXPECTED_TEMP_SNAPSHOT = facts["temp_snapshot"]
             atomic_json(private / "admission.private.json", facts)
@@ -571,7 +581,8 @@ def main(argv=None):
         code = error.code if isinstance(error, Failure) else "INTERNAL"
         public["error_code"] = code
         atomic_json(private / "failure.private.json", {"error_code": code,
-                                                        "detail": repr(error)})
+                                                        "detail": repr(error),
+                                                        "stage": PRIVATE_STAGE})
         return_code = 1
     try:
         encrypt_evidence(private, public,
