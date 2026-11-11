@@ -400,18 +400,37 @@ impl<R: Read> BoundedCsvFramer<R> {
                 break;
             }
 
-            // Inspect the buffered slice once, then copy only this frame's prefix.
+            // Inspect the buffered slice, then copy only this frame's prefix.
             // Leave subsequent records buffered for the next call.
             let limit = available.len().min(self.byte_cap - bytes.len());
+            let slice = &available[..limit];
             let mut consumed = 0;
             let mut frame_complete = false;
-            for &byte in &available[..limit] {
-                consumed += 1;
-                if tracker.observe(byte) {
+            // Find quote-free record boundaries in bulk while retaining the
+            // byte-wise tracker for quoted spans.
+            if !tracker.in_quotes
+                && self
+                    .quote_char
+                    .is_none_or(|quote| memchr::memchr(quote, slice).is_none())
+            {
+                consumed = limit;
+                for offset in memchr::memchr_iter(b'\n', slice) {
                     rows = rows.saturating_add(1);
                     if rows == max_rows {
+                        consumed = offset + 1;
                         frame_complete = true;
                         break;
+                    }
+                }
+            } else {
+                for &byte in slice {
+                    consumed += 1;
+                    if tracker.observe(byte) {
+                        rows = rows.saturating_add(1);
+                        if rows == max_rows {
+                            frame_complete = true;
+                            break;
+                        }
                     }
                 }
             }

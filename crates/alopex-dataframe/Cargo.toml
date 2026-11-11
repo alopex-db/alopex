@@ -16,6 +16,7 @@ lane_fuzz = []
 alopex-core.workspace = true
 arrow = "60.1"
 arrow-csv = "60.1"
+memchr = "2"
 parquet.workspace = true
 regex = "1"
 thiserror = { workspace = true }
