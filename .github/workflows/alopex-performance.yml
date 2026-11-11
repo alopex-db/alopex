@@ -51,10 +51,6 @@ jobs:
     if: inputs.qualification_mode && inputs.issue_number == '804'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    env:
-      TMPDIR: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
     steps:
       - name: Bound checkout before source acquisition
         env:
@@ -71,6 +67,21 @@ jobs:
               workspace.mkdir(parents=True, exist_ok=True)
               assert workspace.is_absolute() and not workspace.is_symlink()
               runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+              assert runner_temp.is_absolute() and runner_temp.is_dir()
+              assert not any(character in str(runner_temp) for character in ('\r', '\n', '\0'))
+              env_file = pathlib.Path(os.environ['GITHUB_ENV'])
+              assert env_file.is_absolute()
+              for key in ('TMPDIR', 'TMP', 'TEMP'):
+                  os.environ[key] = str(runner_temp)
+              lines = ''.join(f'{key}={runner_temp}\n' for key in ('TMPDIR', 'TMP', 'TEMP'))
+              fd = os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+              try:
+                  info = os.fstat(fd)
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                  payload = lines.encode('utf-8')
+                  assert os.write(fd, payload) == len(payload)
+              finally:
+                  os.close(fd)
               assert all(pathlib.Path(os.environ[key]).resolve(strict=True) == runner_temp
                          for key in ('TMPDIR', 'TMP', 'TEMP'))
               assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp

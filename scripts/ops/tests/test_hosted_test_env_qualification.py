@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "hosted_test_env_qualification.py"
@@ -17,17 +19,67 @@ SPEC.loader.exec_module(qualification)
 
 
 class Inputs(unittest.TestCase):
+    @staticmethod
+    def precheckout_temp_code():
+        workflow = (SCRIPT.parents[2] / ".github/workflows/alopex-performance.yml").read_text()
+        qualification_job = workflow.split("  qualification:\n", 1)[1]
+        precheckout = qualification_job.split("      - uses: actions/checkout@v4", 1)[0]
+        start = precheckout.index("              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP'])")
+        end = precheckout.index("              phase, error_code = 'BINARY'", start)
+        return textwrap.dedent(precheckout[start:end])
+
     def test_precheckout_routes_temp_and_scans_entries_instead_of_full_tmp(self):
         workflow = (SCRIPT.parents[2] / ".github/workflows/alopex-performance.yml").read_text()
         qualification_job = workflow.split("  qualification:\n", 1)[1]
         precheckout = qualification_job.split("      - uses: actions/checkout@v4", 1)[0]
-        for variable in ("TMPDIR", "TMP", "TEMP"):
-            self.assertIn(f"      {variable}: ${{{{ runner.temp }}}}", qualification_job)
+        inline_python = precheckout.split("          python3 - <<'PY'\n", 1)[1].split(
+            "\n          PY", 1)[0]
+        ast.parse(textwrap.dedent(inline_python))
+        self.assertNotIn("${{ runner.temp }}", qualification_job.split("    steps:\n", 1)[0])
+        self.assertIn("os.environ[key] = str(runner_temp)", precheckout)
+        self.assertIn("os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)",
+                      precheckout)
+        self.assertIn("'GITHUB_ENV'", precheckout)
+        self.assertLess(precheckout.index("runner_temp ="), precheckout.index("'GITHUB_ENV'"))
+        self.assertLess(precheckout.index("'GITHUB_ENV'"),
+                        precheckout.index("pathlib.Path(tempfile.gettempdir())"))
         self.assertIn("with os.scandir(area) as entries:", precheckout)
         self.assertIn("if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():",
                       precheckout)
         self.assertNotIn("('TMP', pathlib.Path('/tmp'))", precheckout)
         self.assertNotIn("('VARTMP', pathlib.Path('/var/tmp'))", precheckout)
+
+    def test_precheckout_temp_propagates_to_later_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runner_temp = base / "runner-temp"
+            runner_temp.mkdir()
+            env_file = base / "github-env"
+            env_file.write_text("")
+            code = "import os, pathlib, stat, tempfile\n" + self.precheckout_temp_code()
+            process = subprocess.run([sys.executable, "-c", code],
+                                     env=dict(os.environ, RUNNER_TEMP=str(runner_temp),
+                                              GITHUB_ENV=str(env_file)),
+                                     capture_output=True, text=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(env_file.read_text(),
+                             "".join(f"{key}={runner_temp.resolve()}\n"
+                                     for key in ("TMPDIR", "TMP", "TEMP")))
+
+    def test_precheckout_rejects_newline_temp_without_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runner_temp = base / "runner\ntemp"
+            runner_temp.mkdir()
+            env_file = base / "github-env"
+            env_file.write_text("")
+            code = "import os, pathlib, stat, tempfile\n" + self.precheckout_temp_code()
+            process = subprocess.run([sys.executable, "-c", code],
+                                     env=dict(os.environ, RUNNER_TEMP=str(runner_temp),
+                                              GITHUB_ENV=str(env_file)),
+                                     capture_output=True, text=True)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertEqual(env_file.read_text(), "")
 
     def test_temp_inventory_counts_runner_owned_entries_without_walking_contents(self):
         with tempfile.TemporaryDirectory() as directory:
