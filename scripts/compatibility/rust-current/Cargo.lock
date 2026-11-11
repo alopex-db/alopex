@@ -112,6 +112,7 @@ dependencies = [
  "alopex-core",
  "arrow",
  "arrow-csv",
+ "memchr",
  "parquet",
  "regex",
  "thiserror 1.0.69",

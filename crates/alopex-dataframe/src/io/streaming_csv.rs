@@ -400,18 +400,40 @@ impl<R: Read> BoundedCsvFramer<R> {
                 break;
             }
 
-            // Inspect the buffered slice once, then copy only this frame's prefix.
+            // Inspect the buffered slice, then copy only this frame's prefix.
             // Leave subsequent records buffered for the next call.
             let limit = available.len().min(self.byte_cap - bytes.len());
+            let slice = &available[..limit];
             let mut consumed = 0;
             let mut frame_complete = false;
-            for &byte in &available[..limit] {
-                consumed += 1;
-                if tracker.observe(byte) {
+            // Find quote-free record boundaries in bulk while retaining the
+            // byte-wise tracker for quoted spans.
+            // Tiny frames are faster through the existing byte-wise path than
+            // through two separate bulk searches.
+            if slice.len() >= 64
+                && !tracker.in_quotes
+                && self
+                    .quote_char
+                    .is_none_or(|quote| memchr::memchr(quote, slice).is_none())
+            {
+                consumed = limit;
+                for offset in memchr::memchr_iter(b'\n', slice) {
                     rows = rows.saturating_add(1);
                     if rows == max_rows {
+                        consumed = offset + 1;
                         frame_complete = true;
                         break;
+                    }
+                }
+            } else {
+                for &byte in slice {
+                    consumed += 1;
+                    if tracker.observe(byte) {
+                        rows = rows.saturating_add(1);
+                        if rows == max_rows {
+                            frame_complete = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -710,6 +732,30 @@ mod tests {
             assert!(framer.next_frame(1, &context).unwrap().is_none());
             assert!(framer.next_frame(1, &context).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn quoted_newline_in_later_full_buffer_stays_in_one_record() {
+        let mut first = b"1,\"".to_vec();
+        first.extend_from_slice(&[b'a'; 61]);
+        first.extend_from_slice(&[b'b'; 20]);
+        first.push(b'\n');
+        first.extend_from_slice(&[b'c'; 43]);
+        first.extend_from_slice(b"tail\"\n");
+        let mut data = first.clone();
+        data.extend_from_slice(b"2,ok\n");
+
+        let context = BatchOpenContext::new(options(4096, 1));
+        let mut framer = fragmented(&data, 64, 256, Some(b'"'), None);
+        assert_eq!(
+            frame_snapshot(framer.next_frame(1, &context), &context, 256).unwrap(),
+            Some((first, 1))
+        );
+        assert_eq!(
+            frame_snapshot(framer.next_frame(1, &context), &context, 256).unwrap(),
+            Some((b"2,ok\n".to_vec(), 1))
+        );
+        assert!(framer.next_frame(1, &context).unwrap().is_none());
     }
 
     #[test]
