@@ -58,12 +58,15 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, pathlib, re, stat, subprocess, sys
+          phase, error_code = 'SHA', 'IDENTITY'
           try:
               expected = os.environ['EXPECTED_CONTROLLER_SHA']
               assert re.fullmatch(r'[a-f0-9]{40}', expected) and expected == os.environ['GITHUB_SHA']
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
               workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
               workspace.mkdir(parents=True, exist_ok=True)
               assert workspace.is_absolute() and not workspace.is_symlink()
+              phase, error_code = 'BINARY', 'POLICY'
               binaries = [pathlib.Path('/usr/bin/du'), pathlib.Path('/usr/bin/sudo'),
                           pathlib.Path('/usr/bin/docker')]
               for path in (pathlib.Path('/'), pathlib.Path('/usr'), pathlib.Path('/usr/bin')):
@@ -73,6 +76,7 @@ jobs:
                   info = binary.lstat()
                   assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
                   assert not info.st_mode & 0o022 and info.st_mode & 0o111
+              phase, error_code = 'DOCKER', 'PREREQUISITE'
               def run(args):
                   result = subprocess.run(args, stdin=subprocess.DEVNULL,
                                           capture_output=True, text=True, timeout=10)
@@ -83,6 +87,7 @@ jobs:
               assert inspection['Endpoints']['docker']['Host'].startswith('unix://')
               docker = pathlib.Path(json.loads(run(['/usr/bin/docker', 'info', '--format',
                                                     '{{json .}}']))['DockerRootDir'])
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
               assert docker.is_absolute() and docker.resolve(strict=True) == docker
               home = pathlib.Path.home()
               temp = pathlib.Path(os.environ['RUNNER_TEMP'])
@@ -95,6 +100,7 @@ jobs:
                                              for root in roots if root != docker)
               selected = [root for root in roots if not any(root != other and
                           root.is_relative_to(other) for other in roots)]
+              phase, error_code = 'DU', 'MEASUREMENT'
               def allocation(root, privileged=False):
                   args = (['/usr/bin/sudo', '-n'] if privileged else []) + [
                       '/usr/bin/du', '-skL' if not privileged else '-sk', '--', str(root)]
@@ -105,9 +111,11 @@ jobs:
                   return int(fields[0]) * 1024
               aggregate = sum(allocation(root, root == docker) for root in selected)
               workspace_bytes = allocation(workspace)
+              phase, error_code = 'CAPACITY', 'CAPACITY'
               assert aggregate + 1_000_000_000 + 7_500_000_000 < 40_000_000_000
               assert os.statvfs(workspace).f_bavail * os.statvfs(workspace).f_frsize > 1_000_000_000
               assert os.statvfs(docker).f_bavail * os.statvfs(docker).f_frsize > 7_500_000_000
+              phase, error_code = 'RECEIPT', 'COMMAND'
               private = pathlib.Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
               private.mkdir(mode=0o700, exist_ok=True)
               private.chmod(0o700)
@@ -121,7 +129,17 @@ jobs:
               receipt.chmod(0o600)
               print('{"case":"CHECKOUT_PREFLIGHT","outcome":"passed"}')
           except BaseException:
-              print('{"case":"CHECKOUT_PREFLIGHT","outcome":"failed"}')
+              public = {'schema': 'alopex.checkout-preflight-public/v1',
+                        'case': 'CHECKOUT_PREFLIGHT', 'outcome': 'failed',
+                        'phase': phase, 'error_code': error_code}
+              try:
+                  export = pathlib.Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'native-qualification-export'
+                  export.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  (export / 'public.json').write_text(json.dumps(public, sort_keys=True) + '\n')
+              except BaseException:
+                  print('{"case":"CHECKOUT_PREFLIGHT","outcome":"evidence_failed"}')
+                  sys.exit(1)
+              print(json.dumps(public, sort_keys=True))
               sys.exit(1)
           PY
       - uses: actions/checkout@v4

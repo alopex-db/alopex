@@ -1,6 +1,7 @@
 """Focused admission and orchestration checks; never starts Docker."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -163,6 +164,50 @@ class Inputs(unittest.TestCase):
 
 
 class Sequence(unittest.TestCase):
+    def precheckout_script(self):
+        workflow = Path(__file__).resolve().parents[3] / (
+            ".github/workflows/alopex-performance.yml")
+        source = workflow.read_text()
+        begin = source.index("      - name: Bound checkout before source acquisition")
+        start = source.index("          python3 - <<'PY'", begin)
+        end = source.index("          PY", start) + len("          PY")
+        return "\n".join(line[10:] for line in source[start:end].splitlines()) + "\n"
+
+    def test_precheckout_failures_have_fixed_phase_and_uploaded_public_artifact(self):
+        script = self.precheckout_script()
+        self.assertTrue(all(f"'{phase}', '{code}'" in script for phase, code in (
+            ("SHA", "IDENTITY"), ("ROOTS", "MEASUREMENT"),
+            ("BINARY", "POLICY"), ("DOCKER", "PREREQUISITE"),
+            ("DU", "MEASUREMENT"), ("CAPACITY", "CAPACITY"),
+            ("RECEIPT", "COMMAND"))))
+        for mode in ("sha", "roots"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                target = base / "target"
+                target.mkdir()
+                if mode == "roots":
+                    parent = base / "link"
+                    parent.symlink_to(target, target_is_directory=True)
+                else:
+                    parent = target
+                workspace = parent / "checkout"
+                workspace.mkdir()
+                env = os.environ.copy()
+                env.update({"EXPECTED_CONTROLLER_SHA": "a" * 40,
+                            "GITHUB_SHA": ("b" if mode == "sha" else "a") * 40,
+                            "GITHUB_WORKSPACE": str(workspace),
+                            "RUNNER_TEMP": str(base)})
+                result = subprocess.run(["bash", "-c", script], cwd=workspace,
+                                        env=env, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                public = json.loads((workspace / "native-qualification-export/public.json").read_text())
+                self.assertEqual(public, {
+                    "schema": "alopex.checkout-preflight-public/v1",
+                    "case": "CHECKOUT_PREFLIGHT", "outcome": "failed",
+                    "phase": "SHA" if mode == "sha" else "ROOTS",
+                    "error_code": "IDENTITY" if mode == "sha" else "MEASUREMENT"})
+                self.assertNotIn(str(base), result.stdout + json.dumps(public))
+
     def test_checkout_growth_must_stay_within_one_gigabyte(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
