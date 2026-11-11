@@ -147,6 +147,19 @@ def verify_temp_snapshot(expected):
     require(observed == expected, "MEASUREMENT")
 
 
+def admissible_root(path, temporary_roots):
+    """Include snapshotted temporary FIFOs/sockets without opening their streams."""
+    try:
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            return False
+        mode = path.lstat().st_mode
+        return (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or
+                (str(path) in temporary_roots and
+                 (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode))))
+    except (OSError, RuntimeError):
+        return False
+
+
 def checkout_growth(private):
     global PRIVATE_STAGE
     PRIVATE_STAGE = "checkout_receipt"
@@ -164,9 +177,9 @@ def checkout_growth(private):
     PRIVATE_STAGE = "checkout_root_shape"
     roots = [Path(name) for name in receipt["roots"]]
     docker_root = Path(receipt["docker_root"])
-    require(docker_root in roots and all(item.is_absolute() and
-            item.resolve(strict=True) == item and (item.is_dir() or item.is_file())
-            for item in roots),
+    temporary_roots = {row[-1] for row in receipt["temp_snapshot"]}
+    require(docker_root in roots and all(admissible_root(item, temporary_roots)
+                                         for item in roots),
             "MEASUREMENT")
     PRIVATE_STAGE = "checkout_workspace_coverage"
     require(any(root == item or root.is_relative_to(item) for item in roots), "MEASUREMENT")
@@ -341,6 +354,7 @@ def admission_facts():
     memory_limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
     require(memory_limit == "max" or int(memory_limit) >= 1_610_612_736, "PREREQUISITE")
     temp_roots, temp_snapshot = temp_scope()
+    temporary_roots = {str(root) for root in temp_roots}
     roots = [Path(os.environ["GITHUB_WORKSPACE"]).parent, Path.home(),
              Path(os.environ["RUNNER_TEMP"]), docker_root, *temp_roots]
     roots = list(dict.fromkeys(str(root.resolve(strict=True)) for root in roots))
@@ -349,8 +363,7 @@ def admission_facts():
     for root in roots:
         entry = Path(root)
         metadata = entry.lstat()
-        require((stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)) and
-                not entry.is_symlink(), "MEASUREMENT")
+        require(admissible_root(entry, temporary_roots), "MEASUREMENT")
         root_metadata.append({"path": root, "uid": metadata.st_uid, "gid": metadata.st_gid,
                               "mode": stat.S_IMODE(metadata.st_mode), "dev": metadata.st_dev,
                               "ino": metadata.st_ino})

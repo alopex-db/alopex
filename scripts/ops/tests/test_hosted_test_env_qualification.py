@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -294,6 +295,38 @@ class Inputs(unittest.TestCase):
 
 
 class Sequence(unittest.TestCase):
+    def test_storage_roots_include_only_snapshotted_temporary_special_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            fifo = root / "fixture.fifo"
+            os.mkfifo(fifo)
+            self.assertFalse(qualification.admissible_root(fifo, set()))
+            self.assertTrue(qualification.admissible_root(fifo, {str(fifo)}))
+            measured = subprocess.run(["du", "-skL", "--", str(fifo)],
+                                      capture_output=True, text=True, check=True)
+            self.assertEqual(len(measured.stdout.strip().split("\t")), 2)
+            class SocketPath:
+                def is_absolute(self):
+                    return True
+
+                def resolve(self, strict=False):
+                    return self
+
+                def lstat(self):
+                    return SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600)
+
+                def __str__(self):
+                    return "/tmp/fixture.sock"
+
+            sock = SocketPath()
+            self.assertFalse(qualification.admissible_root(sock, set()))
+            self.assertTrue(qualification.admissible_root(sock, {str(sock)}))
+            self.assertFalse(qualification.admissible_root(Path("/dev/null"),
+                                                            {"/dev/null"}))
+            link = root / "fixture.link"
+            link.symlink_to(fifo)
+            self.assertFalse(qualification.admissible_root(link, {str(link)}))
+
     def test_precheckout_du_failure_codes_are_allowlisted(self):
         script = self.precheckout_script()
         python_source = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
@@ -366,15 +399,18 @@ class Sequence(unittest.TestCase):
             workspace.mkdir()
             docker = base / "docker"
             docker.mkdir()
+            fifo = base / "temporary.fifo"
+            os.mkfifo(fifo)
             private = base / "private"
             private.mkdir()
             receipt = private / "checkout-preflight.private.json"
             receipt.write_text(json.dumps({"workspace_root": str(root),
                                            "allocated_bytes": 1024,
                                            "aggregate_allocated_bytes": 2048,
-                                           "roots": [str(root), str(docker)],
+                                           "roots": [str(root), str(docker), str(fifo)],
                                            "docker_root": str(docker),
-                                           "temp_snapshot": [],
+                                           "temp_snapshot": [["/tmp", fifo.name, 1, 2, 3,
+                                                              str(fifo)]],
                                            "expected_controller_sha": "a" * 40}))
             receipt.chmod(0o600)
             def allocation(kib):
@@ -393,7 +429,8 @@ class Sequence(unittest.TestCase):
                 qualification.checkout_growth(private)
             self.assertEqual([(call.args[0][-1], call.kwargs["timeout"])
                               for call in run.call_args_list],
-                             [(str(root), 10), (str(root), 10), (str(docker), 60)])
+                             [(str(root), 10), (str(root), 10), (str(docker), 60),
+                              (str(fifo), 10)])
             with patch.dict("os.environ", {"GITHUB_WORKSPACE": str(workspace),
                                         "EXPECTED_CONTROLLER_SHA": "a" * 40}), \
                  patch.object(qualification, "trusted_executable"), \
