@@ -91,26 +91,43 @@ jobs:
               assert docker.is_absolute() and docker.resolve(strict=True) == docker
               home = pathlib.Path.home()
               temp = pathlib.Path(os.environ['RUNNER_TEMP'])
-              candidates = [workspace, home, temp, pathlib.Path('/tmp'), docker]
+              candidates = [('WORK', workspace), ('HOME', home), ('TEMP', temp),
+                            ('TMP', pathlib.Path('/tmp')), ('DOCKER', docker)]
               if pathlib.Path('/var/tmp').exists():
-                  candidates.append(pathlib.Path('/var/tmp'))
-              roots = list(dict.fromkeys(path.resolve(strict=True) for path in candidates))
+                  candidates.append(('VARTMP', pathlib.Path('/var/tmp')))
+              categories = {}
+              for label, path in candidates:
+                  categories.setdefault(path.resolve(strict=True), label)
+              roots = list(categories)
               assert docker in roots and all(not docker.is_relative_to(root) and
                                              not root.is_relative_to(docker)
                                              for root in roots if root != docker)
               selected = [root for root in roots if not any(root != other and
                           root.is_relative_to(other) for other in roots)]
               phase, error_code = 'DU', 'MEASUREMENT'
-              def allocation(root, privileged=False):
+              def du_code(category, failure):
+                  assert category in {'WORK', 'HOME', 'TEMP', 'TMP', 'VARTMP', 'DOCKER'}
+                  assert failure in {'TIMEOUT', 'EXIT', 'PARSE'}
+                  return 'DU_' + category + '_' + failure
+              def allocation(root, category, privileged=False):
+                  global error_code
                   args = (['/usr/bin/sudo', '-n'] if privileged else []) + [
                       '/usr/bin/du', '-skL' if not privileged else '-sk', '--', str(root)]
-                  result = run(args)
-                  fields = result.split('\t')
+                  error_code = du_code(category, 'EXIT')
+                  try:
+                      result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                              capture_output=True, text=True, timeout=10)
+                  except subprocess.TimeoutExpired:
+                      error_code = du_code(category, 'TIMEOUT')
+                      raise
+                  assert result.returncode == 0 and not result.stderr
+                  error_code = du_code(category, 'PARSE')
+                  fields = result.stdout.strip().split('\t')
                   assert len(fields) == 2 and fields[0].isascii()
                   assert fields[0].isdecimal() and fields[1] == str(root)
                   return int(fields[0]) * 1024
-              aggregate = sum(allocation(root, root == docker) for root in selected)
-              workspace_bytes = allocation(workspace)
+              aggregate = sum(allocation(root, categories[root], root == docker) for root in selected)
+              workspace_bytes = allocation(workspace, 'WORK')
               phase, error_code = 'CAPACITY', 'CAPACITY'
               assert aggregate + 1_000_000_000 + 7_500_000_000 < 40_000_000_000
               assert os.statvfs(workspace).f_bavail * os.statvfs(workspace).f_frsize > 1_000_000_000

@@ -1,4 +1,5 @@
 """Focused admission and orchestration checks; never starts Docker."""
+import ast
 import importlib.util
 import json
 import os
@@ -164,6 +165,25 @@ class Inputs(unittest.TestCase):
 
 
 class Sequence(unittest.TestCase):
+    def test_precheckout_du_failure_codes_are_allowlisted(self):
+        script = self.precheckout_script()
+        python_source = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        tree = ast.parse(python_source)
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == "du_code")
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "<du-code>", "exec"), namespace)
+        du_code = namespace["du_code"]
+        for category in ("WORK", "HOME", "TEMP", "TMP", "VARTMP", "DOCKER"):
+            for failure in ("TIMEOUT", "EXIT", "PARSE"):
+                self.assertEqual(du_code(category, failure),
+                                 f"DU_{category}_{failure}")
+        with self.assertRaises(AssertionError):
+            du_code("private-path", "EXIT")
+        self.assertIn("error_code = du_code(category, 'TIMEOUT')", script)
+        self.assertIn("error_code = du_code(category, 'EXIT')", script)
+        self.assertIn("error_code = du_code(category, 'PARSE')", script)
+
     def precheckout_script(self):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
