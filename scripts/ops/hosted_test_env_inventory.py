@@ -139,7 +139,30 @@ def main() -> int:
         if docker_root:
             roots.append(Path(docker_root))
         facts["storage_roots"] = list(map(str, roots))
-        facts["storage"] = storage(roots, time.monotonic() + 120)
+        direct_storage = storage(roots, time.monotonic() + 120)
+        facts["storage_direct"] = direct_storage
+        facts["storage"] = direct_storage
+        if (docker_root and direct_storage["status"] == "incomplete"
+                and direct_storage["failures"] == [{"path": docker_root, "error_type": "PermissionError"}]):
+            try:
+                measured = subprocess.run(
+                    ["sudo", "-n", "du", "-sk", "--", docker_root],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
+                )
+                facts["docker_backing_readonly_sudo"] = {"exit": measured.returncode}
+                if measured.returncode == 0:
+                    fields = measured.stdout.strip().split(None, 1)
+                    if len(fields) == 2 and fields[1] == docker_root and fields[0].isdigit():
+                        size = int(fields[0]) * 1024
+                        metadata = Path(docker_root).lstat().st_blocks * 512
+                        facts["docker_backing_readonly_sudo"]["allocated_bytes"] = size
+                        facts["storage"] = {
+                            "status": "measured_with_readonly_host_sudo",
+                            "allocated_bytes": direct_storage["allocated_bytes"] - metadata + size,
+                            "failures": [],
+                        }
+            except (OSError, subprocess.TimeoutExpired) as error:
+                facts["docker_backing_readonly_sudo"] = {"error_type": type(error).__name__}
         facts["docker_root_observed"] = bool(docker_root)
         private.write_text(json.dumps(facts, sort_keys=True) + "\n")
         private.chmod(0o600)
