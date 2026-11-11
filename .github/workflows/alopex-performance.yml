@@ -4,12 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: Owning issue for read-only host inventory
+        description: Owning issue for read-only host inventory or qualification
         required: true
+        type: string
+      qualification_mode:
+        description: Run the bounded #804 qualification job
+        required: false
+        type: boolean
+        default: false
+      expected_controller_sha:
+        description: Exact controller commit for qualification mode
+        required: false
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: alopex-v0817-host-preflight
@@ -17,6 +27,7 @@ concurrency:
 
 jobs:
   inventory:
+    if: ${{ !inputs.qualification_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -33,6 +44,114 @@ jobs:
         with:
           name: host-preflight-inventory
           path: native-inventory-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  qualification:
+    if: inputs.qualification_mode && inputs.issue_number == '804'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Bound checkout before source acquisition
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, stat, subprocess, sys
+          try:
+              expected = os.environ['EXPECTED_CONTROLLER_SHA']
+              assert re.fullmatch(r'[a-f0-9]{40}', expected) and expected == os.environ['GITHUB_SHA']
+              workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
+              workspace.mkdir(parents=True, exist_ok=True)
+              assert workspace.is_absolute() and not workspace.is_symlink()
+              binaries = [pathlib.Path('/usr/bin/du'), pathlib.Path('/usr/bin/sudo'),
+                          pathlib.Path('/usr/bin/docker')]
+              for path in (pathlib.Path('/'), pathlib.Path('/usr'), pathlib.Path('/usr/bin')):
+                  info = path.lstat()
+                  assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+              for binary in binaries:
+                  info = binary.lstat()
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                  assert not info.st_mode & 0o022 and info.st_mode & 0o111
+              def run(args):
+                  result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                          capture_output=True, text=True, timeout=10)
+                  assert result.returncode == 0 and not result.stderr
+                  return result.stdout.strip()
+              context = run(['/usr/bin/docker', 'context', 'show'])
+              inspection = json.loads(run(['/usr/bin/docker', 'context', 'inspect', context]))[0]
+              assert inspection['Endpoints']['docker']['Host'].startswith('unix://')
+              docker = pathlib.Path(json.loads(run(['/usr/bin/docker', 'info', '--format',
+                                                    '{{json .}}']))['DockerRootDir'])
+              assert docker.is_absolute() and docker.resolve(strict=True) == docker
+              home = pathlib.Path.home()
+              temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+              candidates = [workspace, home, temp, pathlib.Path('/tmp'), docker]
+              if pathlib.Path('/var/tmp').exists():
+                  candidates.append(pathlib.Path('/var/tmp'))
+              roots = list(dict.fromkeys(path.resolve(strict=True) for path in candidates))
+              assert docker in roots and all(not docker.is_relative_to(root) and
+                                             not root.is_relative_to(docker)
+                                             for root in roots if root != docker)
+              selected = [root for root in roots if not any(root != other and
+                          root.is_relative_to(other) for other in roots)]
+              def allocation(root, privileged=False):
+                  args = (['/usr/bin/sudo', '-n'] if privileged else []) + [
+                      '/usr/bin/du', '-skL' if not privileged else '-sk', '--', str(root)]
+                  result = run(args)
+                  fields = result.split('\t')
+                  assert len(fields) == 2 and fields[0].isascii()
+                  assert fields[0].isdecimal() and fields[1] == str(root)
+                  return int(fields[0]) * 1024
+              aggregate = sum(allocation(root, root == docker) for root in selected)
+              workspace_bytes = allocation(workspace)
+              assert aggregate + 1_000_000_000 + 7_500_000_000 < 40_000_000_000
+              assert os.statvfs(workspace).f_bavail * os.statvfs(workspace).f_frsize > 1_000_000_000
+              assert os.statvfs(docker).f_bavail * os.statvfs(docker).f_frsize > 7_500_000_000
+              private = pathlib.Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
+              private.mkdir(mode=0o700, exist_ok=True)
+              private.chmod(0o700)
+              receipt = private / 'checkout-preflight.private.json'
+              receipt.write_text(json.dumps({'workspace_root': str(workspace),
+                                             'allocated_bytes': workspace_bytes,
+                                             'aggregate_allocated_bytes': aggregate,
+                                             'roots': list(map(str, selected)),
+                                             'docker_root': str(docker),
+                                             'expected_controller_sha': expected}) + '\n')
+              receipt.chmod(0o600)
+              print('{"case":"CHECKOUT_PREFLIGHT","outcome":"passed"}')
+          except BaseException:
+              print('{"case":"CHECKOUT_PREFLIGHT","outcome":"failed"}')
+              sys.exit(1)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Admit this runner before candidate acquisition
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
+      - name: Retrieve exact candidate assets
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
+      - name: Qualify on this runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --execute
+      - name: Preserve encrypted qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-test-env-qualification
+          path: native-qualification-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
