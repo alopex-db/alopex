@@ -124,5 +124,13 @@ retained in `artifacts/python-release/vector-parquet.json`, including the hashes
 of both test files. VECTOR fixtures remain limited to three rows and are removed
 after each case. The scalar overflow tests use 1,025 integer rows to check the
 first row after the 1,024-row batch boundary; the other scalar cases use at most
-three rows. Actual RC execution and
-the separate published-old-version interchange evidence are still required.
+three rows.
+
+For the `b2e7da` development candidate, an [installed wheel](https://github.com/alopex-db/alopex/actions/runs/43032728792)
+passed all 38 VECTOR/scalar Parquet cases. The independent audit matched the
+loaded modules to that wheel and verified fixture cleanup. Separately, the
+published 0.8.16 wheel exported three rows through SELECT and PyArrow; a
+`b2e7da` development wheel imported them into a new database, verified values
+after reopen, and recreated HNSW. [#693](https://github.com/alopex-db/alopex/issues/693)
+records this source-bound interchange evidence. These development checks do not
+qualify an immutable v0.8.17 RC wheel; its asset checks remain open.
