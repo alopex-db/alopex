@@ -124,7 +124,13 @@ def run_cell(command, env, directory, budget, timeout, rss_limit):
                     observed=parse_status(Path(f'/proc/{child.pid}/status').read_text())['rss_bytes']
                     peak=max(peak,observed);require(observed<=rss_limit,'live process RSS bound exceeded')
                 except (FileNotFoundError,PhaseRssError):
-                    require(child.poll() is not None,'live process counters disappeared')
+                    # /proc can lose RSS fields as the worker exits before poll()
+                    # observes it. Allow one bounded exit transition, but fail if
+                    # counters remain unavailable while the worker is live.
+                    try:
+                        child.wait(timeout=.25)
+                    except subprocess.TimeoutExpired:
+                        raise RuntimeError('live process counters disappeared') from None
                 try:child.wait(timeout=.25)
                 except subprocess.TimeoutExpired:pass
             require(child.returncode==0,'worker failed')

@@ -17,7 +17,9 @@ class Child:
     pid=123
     def __init__(self,code=0):self.returncode=None;self.code=code
     def poll(self):return self.returncode
-    def wait(self,timeout):self.returncode=self.code;return self.code
+    def wait(self,timeout):
+        if self.returncode is None and getattr(self,'counter_missing_live',False):raise runner.subprocess.TimeoutExpired('fixture',timeout)
+        self.returncode=self.code;return self.code
 
 
 class Budget:
@@ -28,13 +30,13 @@ class Budget:
 
 
 class SupervisionTests(unittest.TestCase):
-    def execute(self,*,code=0,rss=8192,limit=16384,timeout=30,capacity_failure=False,counter_failure=False):
-        child=Child(code);signals=[]
+    def execute(self,*,code=0,rss=8192,limit=16384,timeout=30,capacity_failure=False,counter_failure=False,counter_exit=False):
+        child=Child(code);child.counter_missing_live=counter_failure;signals=[]
         def terminate(pid,signum):
             self.assertEqual(pid,child.pid);signals.append(signum);child.returncode=-signum
         def read(path,*args,**kwargs):
             if str(path).startswith('/proc/'):
-                if counter_failure:raise FileNotFoundError('counter unavailable')
+                if counter_failure or counter_exit:raise FileNotFoundError('counter unavailable')
                 return f'VmRSS: {rss//1024} kB\nVmHWM: {rss//1024} kB\n'
             return original(path,*args,**kwargs)
         original=Path.read_text
@@ -57,6 +59,19 @@ class SupervisionTests(unittest.TestCase):
     def test_nonzero_exit_is_failure(self):
         error,signals,_=self.execute(code=7)
         self.assertEqual(error,'worker failed');self.assertEqual(signals,[])
+
+    def test_counter_disappears_during_successful_exit(self):
+        error,signals,report=self.execute(counter_exit=True)
+        self.assertIsNone(error)
+        self.assertEqual(signals,[])
+        self.assertEqual(report['returncode'],0)
+        self.assertTrue(report['reaped'])
+
+    def test_counter_disappears_during_failed_exit(self):
+        error,signals,report=self.execute(code=7,counter_exit=True)
+        self.assertEqual(error,'worker failed')
+        self.assertEqual(signals,[])
+        self.assertEqual(report['returncode'],7)
 
     def test_timeout_capacity_rss_and_counter_failure_stop_owned_process(self):
         for kwargs,expected in [({'timeout':0},'cell deadline exceeded'),({'capacity_failure':True},'capacity failure'),
