@@ -54,6 +54,7 @@ def main():
     deadline = time.monotonic() + config['stage_seconds']
     signal.alarm(config['stage_seconds'])
     rows, status, failure = [], 'failed', None
+    phase = 'source_and_contracts'
     try:
         for name, expected in config['sources'].items():
             require(sha(ROOT/name) == expected, 'CSV source differs')
@@ -61,9 +62,12 @@ def main():
             ('scripts/ops', 'scripts/performance', 'scripts/performance/tests', 'scripts/test-env')))
         budget.run([sys.executable, '-B', '-m', 'unittest', 'test_csv_phase_measure',
             'test_csv_phase_contract', 'test_csv_stream_profile', '-v'], timeout=60, log=work/'contracts.log', env=test_env)
+        phase = 'product_install'
         products = {name:install_product(name, config['products'][name], work, budget, env)
                     for name in ('published', 'before', 'candidate')}
+        phase = 'reference_install'
         reference_python, reference_identity = install_reference(config['reference_lock'], work, budget, env)
+        phase = 'subject_identities'
         for name, product in products.items():
             subject = dict(schema='alopex.performance-subject/v1', version=product['receipt']['version'],
                 source=product['receipt']['source'], cpu=allocation,
@@ -71,6 +75,7 @@ def main():
                 build_receipt=dict(path=str(product['files']['receipt']), sha256=sha(product['files']['receipt'])))
             path = work/'identities'/name/'subject.json'
             atomic_json(path, subject);product['subject'] = path
+        phase = 'fixtures'
         # Use the pinned original fixture writer, not a replacement generator.
         write_csv = runpy.run_path(str(ROOT/'scripts/performance/workloads/csv_streaming_v0816.py'),
                                   init_globals=dict(Path=Path, csv=csv))['_write_csv']
@@ -83,7 +88,9 @@ def main():
             fixtures[size] = path
         atomic_json(work/'identity.json', dict(controller=os.environ['GITHUB_SHA'], configuration=config,
             allocation=allocation, python_version=sys.version, cells=cells))
+        phase = 'measure_budget'
         budget.before('measure')
+        phase = 'cells'
         oracles = {}
         for cell in cells:
             require(deadline-time.monotonic() > config['cell_seconds']+60, 'insufficient CSV stage time')
@@ -115,7 +122,9 @@ def main():
             rows.append(dict(cell=cell, checked=checked, status='passed'));atomic_json(work/'cells.json', rows)
         status = 'passed'
     except BaseException as error:
-        failure = type(error).__name__;atomic_json(work/'failure.json', dict(error=repr(error)))
+        failure = type(error).__name__
+        atomic_json(work/'failure.json', dict(error=repr(error), phase=phase,
+            detail=str(getattr(error, 'detail', ''))[:2000]))
     finally:
         signal.alarm(0)
         for name in ('imports', 'venvs', 'reference-wheels', 'fixtures', 'tmp'):
