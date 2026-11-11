@@ -735,6 +735,30 @@ mod tests {
     }
 
     #[test]
+    fn quoted_newline_in_later_full_buffer_stays_in_one_record() {
+        let mut first = b"1,\"".to_vec();
+        first.extend_from_slice(&[b'a'; 61]);
+        first.extend_from_slice(&[b'b'; 20]);
+        first.push(b'\n');
+        first.extend_from_slice(&[b'c'; 43]);
+        first.extend_from_slice(b"tail\"\n");
+        let mut data = first.clone();
+        data.extend_from_slice(b"2,ok\n");
+
+        let context = BatchOpenContext::new(options(4096, 1));
+        let mut framer = fragmented(&data, 64, 256, Some(b'"'), None);
+        assert_eq!(
+            frame_snapshot(framer.next_frame(1, &context), &context, 256).unwrap(),
+            Some((first, 1))
+        );
+        assert_eq!(
+            frame_snapshot(framer.next_frame(1, &context), &context, 256).unwrap(),
+            Some((b"2,ok\n".to_vec(), 1))
+        );
+        assert!(framer.next_frame(1, &context).unwrap().is_none());
+    }
+
+    #[test]
     fn exact_cap_eof_and_quote_aware_overflow_drain_preserve_next_record() {
         for fragment in 1..=5 {
             let context = BatchOpenContext::new(options(4096, 1));
