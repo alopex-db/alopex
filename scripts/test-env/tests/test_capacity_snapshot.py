@@ -175,6 +175,32 @@ class ReadonlyDockerRoot(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(run.call_args.kwargs["timeout"], 2)
 
+    def test_opted_in_sudo_scan_uses_sixty_seconds_without_changing_poll_or_budget(self):
+        self.config["readonly_sudo_du_timeout_seconds"] = 60
+        with patch("capacity.subprocess.run", return_value=self.result(f"2\t{self.docker}\n")) as run:
+            budget = Budget(self.config)
+            budget.before("build")
+            budget.check()
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertEqual(budget.config["poll_seconds"], 2)
+        self.assertEqual(budget.config["stop_bytes"], 40_000_000_000)
+        self.assertEqual(budget.config["reserve_bytes"], 1_000_000_000)
+
+    def test_opted_in_sudo_scan_timeout_is_bounded_and_fails_closed(self):
+        for value in (0, 61, True, "60"):
+            with self.subTest(value=value):
+                self.config["readonly_sudo_du_timeout_seconds"] = value
+                with self.assertRaises(Failure) as caught:
+                    Budget(self.config)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+        self.config["readonly_sudo_du_timeout_seconds"] = 60
+        with patch("capacity.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("du", 60)) as run:
+            with self.assertRaises(Failure) as caught:
+                Budget(self.config).used()
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+
     def test_bad_du_output_exit_and_timeout_fail_closed(self):
         results = [self.result(""), self.result(f"2\t{self.docker}\nextra\n"),
                    self.result(f"2\t{self.other}\n"), self.result(f"-1\t{self.docker}\n"),
@@ -283,6 +309,16 @@ class ReadonlyDockerRoot(unittest.TestCase):
         path.write_text(json.dumps(profile))
         path.chmod(0o600)
         self.assertEqual(load_profile(path)["storage"]["readonly_sudo_du_root"], str(self.docker))
+        profile["storage"]["readonly_sudo_du_timeout_seconds"] = 60
+        path.write_text(json.dumps(profile))
+        self.assertEqual(load_profile(path)["storage"]["readonly_sudo_du_timeout_seconds"], 60)
+        for invalid in (0, 61, True, "60"):
+            profile["storage"]["readonly_sudo_du_timeout_seconds"] = invalid
+            path.write_text(json.dumps(profile))
+            with self.assertRaises(Failure) as caught:
+                load_profile(path)
+            self.assertEqual(caught.exception.code, "MEASUREMENT")
+        profile["storage"]["readonly_sudo_du_timeout_seconds"] = 60
         profile["storage"]["runtime_storage_roots"] = [str(self.other)]
         path.write_text(json.dumps(profile))
         with self.assertRaises(Failure) as caught:

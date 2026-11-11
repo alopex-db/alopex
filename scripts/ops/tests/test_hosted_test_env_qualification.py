@@ -44,6 +44,7 @@ class Inputs(unittest.TestCase):
         self.assertLess(precheckout.index("'GITHUB_ENV'"),
                         precheckout.index("pathlib.Path(tempfile.gettempdir())"))
         self.assertIn("with os.scandir(area) as entries:", precheckout)
+        self.assertIn("timeout=60 if privileged else 10", precheckout)
         self.assertIn("if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():",
                       precheckout)
         self.assertNotIn("('TMP', pathlib.Path('/tmp'))", precheckout)
@@ -388,8 +389,11 @@ class Sequence(unittest.TestCase):
                  patch.object(qualification, "trusted_executable"), \
                  patch.object(qualification, "verify_temp_snapshot"), \
                  patch.object(qualification.subprocess, "run",
-                              side_effect=allocation(100)):
+                              side_effect=allocation(100)) as run:
                 qualification.checkout_growth(private)
+            self.assertEqual([(call.args[0][-1], call.kwargs["timeout"])
+                              for call in run.call_args_list],
+                             [(str(root), 10), (str(root), 10), (str(docker), 60)])
             with patch.dict("os.environ", {"GITHUB_WORKSPACE": str(workspace),
                                         "EXPECTED_CONTROLLER_SHA": "a" * 40}), \
                  patch.object(qualification, "trusted_executable"), \

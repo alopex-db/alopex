@@ -148,7 +148,8 @@ jobs:
                   error_code = du_code(category, 'EXIT')
                   try:
                       result = subprocess.run(args, stdin=subprocess.DEVNULL,
-                                              capture_output=True, text=True, timeout=10)
+                                              capture_output=True, text=True,
+                                              timeout=60 if privileged else 10)
                   except subprocess.TimeoutExpired:
                       error_code = du_code(category, 'TIMEOUT')
                       raise

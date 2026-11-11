@@ -114,6 +114,11 @@ class Budget:
         self.initial = None
         self.planned = None
         self.sudo_root = config.get("readonly_sudo_du_root")
+        self.sudo_timeout = config.get("readonly_sudo_du_timeout_seconds",
+                                       config.get("poll_seconds"))
+        if "readonly_sudo_du_timeout_seconds" in config:
+            require(self.sudo_root is not None and type(self.sudo_timeout) is int and
+                    0 < self.sudo_timeout <= 60, "MEASUREMENT")
         self.sudo_root_identity = None
         if self.sudo_root is not None:
             try:
@@ -145,7 +150,7 @@ class Budget:
                     value = self.measure(direct_roots, forbidden_root=root)
                 else:
                     value = self.measure(direct_roots)
-                value += readonly_sudo_du_bytes(root, timeout=self.config["poll_seconds"])
+                value += readonly_sudo_du_bytes(root, timeout=self.sudo_timeout)
                 info = root.stat()
                 require((info.st_dev, info.st_ino) == self.sudo_root_identity, "MEASUREMENT")
             require(type(value) is int and value >= 0, "MEASUREMENT")

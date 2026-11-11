@@ -205,6 +205,10 @@ def load_profile(path):
         require(any(resolved.is_relative_to(Path(parent).resolve(strict=True)) for parent in budget["roots"]), "MEASUREMENT")
     for key in ("stop_bytes", "reserve_bytes", "poll_seconds"):
         require(type(budget[key]) is int and budget[key] > 0)
+    if "readonly_sudo_du_timeout_seconds" in budget:
+        timeout = budget["readonly_sudo_du_timeout_seconds"]
+        require(sudo_root is not None and type(timeout) is int and 0 < timeout <= 60,
+                "MEASUREMENT")
     require(budget["stop_bytes"] <= 40_000_000_000)
     require(isinstance(budget["planned_bytes"], dict))
     for operation in ("fetch", "build", "runtime", "accept", "collect"):

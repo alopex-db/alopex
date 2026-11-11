@@ -39,7 +39,7 @@ HARNESS = "5c3d068b9ce4d60fbc1608924882df13b0a27568"
 ASSETS_DIGEST = "36e16e155e96982f094482ae53615789ae7eab4fcf7ef0d0c77cf282d464cb6e"
 LOCK_DIGEST = "701265c8e64f2bbb6fad61db0a65e5980189379a1c4f1f666a39dc6c31b63978"
 POLICY_DIGEST = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
-CONTROLLER_DIGEST = "9be50d6718e592a86ea31833309e1a4ebde20f233847310790f99a2e45bc7c55"
+CONTROLLER_DIGEST = "624a29073d242fcc07b5c899f9a7bb8d3903c834a88b9bbd158145df0d8457ec"
 EXPECTED_DOCKER_VERSION = "28.0.4"
 DOCKER_BINARY = Path("/usr/bin/docker")
 PLANNED = {"fetch": 1_000_000_000, "build": 3_000_000_000,
@@ -170,7 +170,8 @@ def checkout_growth(private):
         args = ([str(SUDO_BINARY), "-n"] if path == docker_root else []) + [
             str(DU_BINARY), "-sk" if path == docker_root else "-skL", "--", str(path)]
         result = subprocess.run(args, stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=10, check=False)
+                                capture_output=True, text=True,
+                                timeout=60 if path == docker_root else 10, check=False)
         fields = result.stdout.strip().split("\t")
         require(result.returncode == 0 and not result.stderr and len(fields) == 2 and
                 fields[0].isascii() and fields[0].isdecimal() and fields[1] == str(path),
@@ -347,6 +348,7 @@ def admission_facts():
     storage = {"roots": roots, "runtime_storage_roots": [str(docker_root)],
                "readonly_sudo_du_root": str(docker_root), "stop_bytes": 40_000_000_000,
                "reserve_bytes": 1_000_000_000, "poll_seconds": 10,
+               "readonly_sudo_du_timeout_seconds": 60,
                "planned_bytes": PLANNED}
     baseline = Budget(storage).used()
     # Evidence encryption adds a final bounded copy after envctl collection.
