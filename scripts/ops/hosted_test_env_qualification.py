@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -598,7 +599,9 @@ def main(argv=None):
         public["error_code"] = code
         atomic_json(private / "failure.private.json", {"error_code": code,
                                                         "detail": repr(error),
-                                                        "stage": PRIVATE_STAGE})
+                                                        "stage": PRIVATE_STAGE,
+                                                        "traceback": "".join(
+                                                            traceback.format_exception(error))[:8192]})
         return_code = 1
     try:
         encrypt_evidence(private, public,

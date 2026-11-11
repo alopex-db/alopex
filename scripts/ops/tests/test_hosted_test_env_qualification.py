@@ -506,6 +506,7 @@ class Sequence(unittest.TestCase):
             failure = json.loads((root / "alopex-804-qualification" /
                                   "failure.private.json").read_text())
             self.assertEqual(failure["stage"], "admission_facts")
+            self.assertIn("admission_facts", failure["traceback"])
             make_profile.assert_not_called()
             execute.assert_not_called()
             encrypt.assert_called_once()
