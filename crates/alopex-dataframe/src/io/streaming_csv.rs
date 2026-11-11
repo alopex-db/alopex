@@ -408,7 +408,10 @@ impl<R: Read> BoundedCsvFramer<R> {
             let mut frame_complete = false;
             // Find quote-free record boundaries in bulk while retaining the
             // byte-wise tracker for quoted spans.
-            if !tracker.in_quotes
+            // Tiny frames are faster through the existing byte-wise path than
+            // through two separate bulk searches.
+            if slice.len() >= 64
+                && !tracker.in_quotes
                 && self
                     .quote_char
                     .is_none_or(|quote| memchr::memchr(quote, slice).is_none())
