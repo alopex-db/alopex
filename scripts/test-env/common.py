@@ -188,6 +188,18 @@ def load_profile(path):
     budget = profile["storage"]
     require(isinstance(budget["roots"], list) and budget["roots"])
     require(isinstance(budget.get("runtime_storage_roots"), list) and budget["runtime_storage_roots"])
+    sudo_root = budget.get("readonly_sudo_du_root")
+    if sudo_root is not None:
+        require(isinstance(sudo_root, str) and Path(sudo_root).is_absolute(), "MEASUREMENT")
+        selected = Path(sudo_root).resolve(strict=True)
+        require(str(selected) == sudo_root and selected.is_dir(), "MEASUREMENT")
+        require(budget["roots"].count(sudo_root) == 1, "MEASUREMENT")
+        roots = [Path(root).resolve(strict=True) for root in budget["roots"]]
+        require(roots.count(selected) == 1, "MEASUREMENT")
+        require(all(not (root.is_relative_to(selected) or selected.is_relative_to(root))
+                    for root in roots if root != selected), "MEASUREMENT")
+        require(any(Path(root).resolve(strict=True) == selected
+                    for root in budget["runtime_storage_roots"]), "MEASUREMENT")
     for root in budget["runtime_storage_roots"]:
         resolved = Path(root).resolve(strict=True)
         require(any(resolved.is_relative_to(Path(parent).resolve(strict=True)) for parent in budget["roots"]), "MEASUREMENT")

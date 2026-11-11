@@ -46,6 +46,32 @@ class ExecutionMode(unittest.TestCase):
         self.check("emulated", "linux/target-a", "linux/target-b")
 
 
+class ReadonlyCapacityEndpoint(Fixture):
+    def test_docker_root_must_match_before_budget_or_construction(self):
+        import contextlib
+        import envctl
+        from unittest.mock import Mock
+        selected = str(self.root / "docker")
+        profile = {"private_output": str(self.root / "out"), "run_id": "test",
+                   "storage": {"readonly_sudo_du_root": selected}}
+        for actual, expected in ((selected, 0), (str(self.root / "wrong"), 78)):
+            with self.subTest(matches=actual == selected):
+                docker, budget = Mock(), Mock()
+                docker.call.return_value = json.dumps({"DockerRootDir": actual, "OSType": "linux"})
+                with patch.object(envctl, "load_profile", return_value=profile), \
+                     patch.object(envctl, "host_lock", return_value=contextlib.nullcontext()), \
+                     patch.object(envctl, "Docker", return_value=docker), \
+                     patch.object(envctl, "Budget", return_value=budget) as budget_factory, \
+                     patch.object(envctl, "image_lock"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(envctl.main(["doctor", "--profile", "private"]), expected)
+                docker.prerequisites.assert_called()
+                if expected:
+                    budget_factory.assert_not_called()
+                else:
+                    budget_factory.assert_called_once()
+
+
 class ImageInventory(unittest.TestCase):
     def verify(self, inventory):
         import runpy

@@ -405,7 +405,14 @@ def main(argv=None):
         p = load_profile(args.profile)
         guard.enter_context(host_lock())
         output = private_dir(p["private_output"])
-        docker, budget = Docker(p), Budget(p["storage"])
+        docker = Docker(p)
+        sudo_root = p["storage"].get("readonly_sudo_du_root")
+        if sudo_root is not None:
+            docker.prerequisites()
+            info = json.loads(docker.call("info", "--format", "{{json .}}"))
+            require(info.get("DockerRootDir") == sudo_root and info.get("OSType") == "linux",
+                    "MEASUREMENT")
+        budget = Budget(p["storage"])
         command = args.command
         require(not args.resolution or command in ("collect", "clean"))
         run_id = p["run_id"] + ("-resolve" if args.resolution else "-probe" if args.probe else "")
