@@ -158,16 +158,19 @@ def checkout_growth(private):
             not root.is_symlink(), "MEASUREMENT")
     PRIVATE_STAGE = "checkout_temp_snapshot"
     verify_temp_snapshot(receipt["temp_snapshot"])
-    PRIVATE_STAGE = "checkout_roots"
+    PRIVATE_STAGE = "checkout_commands"
     trusted_executable(DU_BINARY)
     trusted_executable(SUDO_BINARY)
+    PRIVATE_STAGE = "checkout_root_shape"
     roots = [Path(name) for name in receipt["roots"]]
     docker_root = Path(receipt["docker_root"])
     require(docker_root in roots and all(item.is_absolute() and
             item.resolve(strict=True) == item and (item.is_dir() or item.is_file())
             for item in roots),
             "MEASUREMENT")
+    PRIVATE_STAGE = "checkout_workspace_coverage"
     require(any(root == item or root.is_relative_to(item) for item in roots), "MEASUREMENT")
+    PRIVATE_STAGE = "checkout_root_overlap"
     require(all(not (first.is_relative_to(second) or second.is_relative_to(first))
                 for index, first in enumerate(roots) for second in roots[index + 1:]),
             "MEASUREMENT")
