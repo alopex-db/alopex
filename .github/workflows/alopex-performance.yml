@@ -51,13 +51,17 @@ jobs:
     if: inputs.qualification_mode && inputs.issue_number == '804'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    env:
+      TMPDIR: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
     steps:
       - name: Bound checkout before source acquisition
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, stat, subprocess, sys
+          import json, os, pathlib, re, stat, subprocess, sys, tempfile
           phase, error_code = 'SHA', 'IDENTITY'
           try:
               expected = os.environ['EXPECTED_CONTROLLER_SHA']
@@ -66,6 +70,10 @@ jobs:
               workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
               workspace.mkdir(parents=True, exist_ok=True)
               assert workspace.is_absolute() and not workspace.is_symlink()
+              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+              assert all(pathlib.Path(os.environ[key]).resolve(strict=True) == runner_temp
+                         for key in ('TMPDIR', 'TMP', 'TEMP'))
+              assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp
               phase, error_code = 'BINARY', 'POLICY'
               binaries = [pathlib.Path('/usr/bin/du'), pathlib.Path('/usr/bin/sudo'),
                           pathlib.Path('/usr/bin/docker')]
@@ -92,9 +100,22 @@ jobs:
               home = pathlib.Path.home()
               temp = pathlib.Path(os.environ['RUNNER_TEMP'])
               candidates = [('WORK', workspace), ('HOME', home), ('TEMP', temp),
-                            ('TMP', pathlib.Path('/tmp')), ('DOCKER', docker)]
-              if pathlib.Path('/var/tmp').exists():
-                  candidates.append(('VARTMP', pathlib.Path('/var/tmp')))
+                            ('DOCKER', docker)]
+              temp_snapshot = []
+              for area, label in ((pathlib.Path('/tmp'), 'TMP'),
+                                  (pathlib.Path('/var/tmp'), 'VARTMP')):
+                  if not area.exists():
+                      continue
+                  assert area.is_dir()
+                  with os.scandir(area) as entries:
+                      for entry in entries:
+                          info = entry.stat(follow_symlinks=False)
+                          if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():
+                              actual = pathlib.Path(entry.path).resolve(strict=True)
+                              candidates.append((label, actual))
+                              temp_snapshot.append((str(area), entry.name, info.st_dev,
+                                                    info.st_ino, info.st_uid, str(actual)))
+              temp_snapshot.sort()
               categories = {}
               for label, path in candidates:
                   categories.setdefault(path.resolve(strict=True), label)
@@ -141,6 +162,7 @@ jobs:
                                              'allocated_bytes': workspace_bytes,
                                              'aggregate_allocated_bytes': aggregate,
                                              'roots': list(map(str, selected)),
+                                             'temp_snapshot': temp_snapshot,
                                              'docker_root': str(docker),
                                              'expected_controller_sha': expected}) + '\n')
               receipt.chmod(0o600)

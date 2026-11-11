@@ -17,6 +17,81 @@ SPEC.loader.exec_module(qualification)
 
 
 class Inputs(unittest.TestCase):
+    def test_precheckout_routes_temp_and_scans_entries_instead_of_full_tmp(self):
+        workflow = (SCRIPT.parents[2] / ".github/workflows/alopex-performance.yml").read_text()
+        qualification_job = workflow.split("  qualification:\n", 1)[1]
+        precheckout = qualification_job.split("      - uses: actions/checkout@v4", 1)[0]
+        for variable in ("TMPDIR", "TMP", "TEMP"):
+            self.assertIn(f"      {variable}: ${{{{ runner.temp }}}}", qualification_job)
+        self.assertIn("with os.scandir(area) as entries:", precheckout)
+        self.assertIn("if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():",
+                      precheckout)
+        self.assertNotIn("('TMP', pathlib.Path('/tmp'))", precheckout)
+        self.assertNotIn("('VARTMP', pathlib.Path('/var/tmp'))", precheckout)
+
+    def test_temp_inventory_counts_runner_owned_entries_without_walking_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            area = Path(directory).resolve()
+            owned = area / "opaque-runner-temp"
+            owned.mkdir()
+            (owned / "nested").mkdir()
+            roots, snapshot = qualification.discover_temp_entries((area,))
+            self.assertEqual(roots, [owned])
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(snapshot[0][1], owned.name)
+            self.assertEqual(json.loads(json.dumps(snapshot)), snapshot)
+
+    def test_temp_snapshot_rejects_new_relevant_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            area = Path(directory).resolve()
+            with patch.object(qualification, "temp_scope",
+                              side_effect=lambda: qualification.discover_temp_entries((area,))):
+                qualification.verify_temp_snapshot([])
+                (area / "alopex-new").mkdir()
+                with self.assertRaises(qualification.Failure) as caught:
+                    qualification.verify_temp_snapshot([])
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_temp_inventory_counts_alopex_named_entry_with_different_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            area = Path(directory).resolve()
+            named = area / "Alopex-other-owner"
+            named.mkdir()
+            with patch.object(qualification.os, "getuid", return_value=os.getuid() + 1):
+                roots, snapshot = qualification.discover_temp_entries((area,))
+            self.assertEqual(roots, [named])
+            self.assertEqual(snapshot[0][1], named.name)
+
+    def test_same_runner_requires_stable_temp_snapshot_after_json_receipt(self):
+        original = {"context": "default", "docker_info": {"DockerRootDir": "/docker"},
+                    "dmi": {"status": "read", "value": "private"},
+                    "kernel": {"status": "read", "value": "private"},
+                    "baseline_bytes": 100,
+                    "temp_snapshot": [["/tmp", "alopex-existing", 1, 2, 3, "/tmp/alopex-existing"]]}
+        previous = json.loads(json.dumps(original))
+        qualification.same_runner(previous, original)
+        changed = dict(original, temp_snapshot=[])
+        with self.assertRaises(qualification.Failure) as caught:
+            qualification.same_runner(previous, changed)
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_tmpdir_must_resolve_to_measured_runner_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory).resolve()
+            with patch.dict("os.environ", {"RUNNER_TEMP": str(runner_temp),
+                                        "TMPDIR": str(runner_temp), "TMP": str(runner_temp),
+                                        "TEMP": str(runner_temp)}), \
+                 patch.object(qualification.tempfile, "gettempdir", return_value=str(runner_temp)), \
+                 patch.object(qualification, "discover_temp_entries", return_value=([], [])):
+                self.assertEqual(qualification.temp_scope(), ([], []))
+            with patch.dict("os.environ", {"RUNNER_TEMP": str(runner_temp),
+                                        "TMPDIR": "/tmp", "TMP": str(runner_temp),
+                                        "TEMP": str(runner_temp)}), \
+                 patch.object(qualification.tempfile, "gettempdir", return_value=str(runner_temp)), \
+                 self.assertRaises(qualification.Failure) as caught:
+                qualification.temp_scope()
+            self.assertEqual(caught.exception.code, "MEASUREMENT")
+
     def test_asset_run_head_mismatch_prevents_archive_download(self):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory)
@@ -103,6 +178,7 @@ class Inputs(unittest.TestCase):
                  patch.object(qualification, "read_text", side_effect=observed), \
                  patch.object(qualification, "sibling_observation", return_value={"status": "observed"}), \
                  patch.object(qualification, "checked_command", side_effect=command), \
+                 patch.object(qualification, "temp_scope", return_value=([], [])), \
                  patch.object(qualification.os, "sched_getaffinity", return_value={0, 1}, create=True), \
                  patch.object(qualification.os, "statvfs",
                               return_value=SimpleNamespace(f_bavail=50_000_000_000, f_frsize=1)), \
@@ -245,6 +321,7 @@ class Sequence(unittest.TestCase):
                                            "aggregate_allocated_bytes": 2048,
                                            "roots": [str(root), str(docker)],
                                            "docker_root": str(docker),
+                                           "temp_snapshot": [],
                                            "expected_controller_sha": "a" * 40}))
             receipt.chmod(0o600)
             def allocation(kib):
@@ -257,12 +334,14 @@ class Sequence(unittest.TestCase):
             with patch.dict("os.environ", {"GITHUB_WORKSPACE": str(workspace),
                                         "EXPECTED_CONTROLLER_SHA": "a" * 40}), \
                  patch.object(qualification, "trusted_executable"), \
+                 patch.object(qualification, "verify_temp_snapshot"), \
                  patch.object(qualification.subprocess, "run",
                               side_effect=allocation(100)):
                 qualification.checkout_growth(private)
             with patch.dict("os.environ", {"GITHUB_WORKSPACE": str(workspace),
                                         "EXPECTED_CONTROLLER_SHA": "a" * 40}), \
                  patch.object(qualification, "trusted_executable"), \
+                 patch.object(qualification, "verify_temp_snapshot"), \
                  patch.object(qualification.subprocess, "run",
                               side_effect=allocation(1_000_000)), \
                  self.assertRaises(qualification.Failure) as caught:
@@ -276,6 +355,7 @@ class Sequence(unittest.TestCase):
             with patch.dict("os.environ", {"GITHUB_WORKSPACE": str(workspace),
                                         "EXPECTED_CONTROLLER_SHA": "a" * 40}), \
                  patch.object(qualification, "trusted_executable"), \
+                 patch.object(qualification, "verify_temp_snapshot"), \
                  patch.object(qualification.subprocess, "run", side_effect=docker_growth), \
                  self.assertRaises(qualification.Failure) as caught:
                 qualification.checkout_growth(private)

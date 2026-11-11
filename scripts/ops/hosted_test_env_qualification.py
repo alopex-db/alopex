@@ -47,6 +47,7 @@ PLANNED = {"fetch": 1_000_000_000, "build": 3_000_000_000,
 CERT = REPO / ".github/ops/native-evidence-cert.pem"
 INPUT = REPO / ".github/ops/qualification"
 EXPORT = REPO / "native-qualification-export"
+EXPECTED_TEMP_SNAPSHOT = None
 
 
 def checked_command(args, *, timeout=30):
@@ -110,6 +111,41 @@ def verified_controller():
             digest(INPUT / "seccomp-default.json") == POLICY_DIGEST, "IDENTITY")
 
 
+def discover_temp_entries(areas=(Path("/tmp"), Path("/var/tmp"))):
+    """Inventory only top-level runner-owned or Alopex-named temp entries."""
+    roots, snapshot = [], []
+    try:
+        for area in areas:
+            if not area.exists():
+                continue
+            require(area.is_dir(), "MEASUREMENT")
+            with os.scandir(area) as entries:
+                for entry in entries:
+                    info = entry.stat(follow_symlinks=False)
+                    if info.st_uid == os.getuid() or "alopex" in entry.name.lower():
+                        actual = Path(entry.path).resolve(strict=True)
+                        roots.append(actual)
+                        snapshot.append([str(area), entry.name, info.st_dev, info.st_ino,
+                                         info.st_uid, str(actual)])
+    except OSError as error:
+        raise Failure("MEASUREMENT", str(error)) from error
+    return roots, sorted(snapshot)
+
+
+def temp_scope():
+    runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    require(all(Path(os.environ[key]).resolve(strict=True) == runner_temp
+                for key in ("TMPDIR", "TMP", "TEMP")) and
+            Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp,
+            "MEASUREMENT")
+    return discover_temp_entries()
+
+
+def verify_temp_snapshot(expected):
+    _, observed = temp_scope()
+    require(observed == expected, "MEASUREMENT")
+
+
 def checkout_growth(private):
     receipt = read_json(private / "checkout-preflight.private.json", private=True)
     require(receipt.get("expected_controller_sha") == os.environ.get("EXPECTED_CONTROLLER_SHA"),
@@ -117,12 +153,14 @@ def checkout_growth(private):
     root = Path(receipt["workspace_root"])
     require(root == Path(os.environ["GITHUB_WORKSPACE"]).parent and root.is_absolute() and
             not root.is_symlink(), "MEASUREMENT")
+    verify_temp_snapshot(receipt["temp_snapshot"])
     trusted_executable(DU_BINARY)
     trusted_executable(SUDO_BINARY)
     roots = [Path(name) for name in receipt["roots"]]
     docker_root = Path(receipt["docker_root"])
     require(docker_root in roots and all(item.is_absolute() and
-            item.resolve(strict=True) == item and item.is_dir() for item in roots),
+            item.resolve(strict=True) == item and (item.is_dir() or item.is_file())
+            for item in roots),
             "MEASUREMENT")
     require(any(root == item or root.is_relative_to(item) for item in roots), "MEASUREMENT")
     require(all(not (first.is_relative_to(second) or second.is_relative_to(first))
@@ -290,17 +328,17 @@ def admission_facts():
     require(len(cpu_set) >= 2, "PREREQUISITE")
     memory_limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
     require(memory_limit == "max" or int(memory_limit) >= 1_610_612_736, "PREREQUISITE")
+    temp_roots, temp_snapshot = temp_scope()
     roots = [Path(os.environ["GITHUB_WORKSPACE"]).parent, Path.home(),
-             Path(os.environ["RUNNER_TEMP"]), Path("/tmp"), docker_root]
-    if Path("/var/tmp").exists():
-        roots.append(Path("/var/tmp"))
+             Path(os.environ["RUNNER_TEMP"]), docker_root, *temp_roots]
     roots = list(dict.fromkeys(str(root.resolve(strict=True)) for root in roots))
     require(roots.count(str(docker_root)) == 1, "MEASUREMENT")
     root_metadata = []
     for root in roots:
         entry = Path(root)
         metadata = entry.lstat()
-        require(stat.S_ISDIR(metadata.st_mode) and not entry.is_symlink(), "MEASUREMENT")
+        require((stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)) and
+                not entry.is_symlink(), "MEASUREMENT")
         root_metadata.append({"path": root, "uid": metadata.st_uid, "gid": metadata.st_gid,
                               "mode": stat.S_IMODE(metadata.st_mode), "dev": metadata.st_dev,
                               "ino": metadata.st_ino})
@@ -322,7 +360,8 @@ def admission_facts():
     return {"context": context, "docker_info": docker_info, "storage": storage,
             "baseline_bytes": baseline, "cpus": cpu_set[:2], "sibling": sibling,
             "kernel": kernel, "lsm": lsm, "apparmor": apparmor,
-            "dmi": dmi, "mountinfo": mountinfo, "root_metadata": root_metadata}
+            "dmi": dmi, "mountinfo": mountinfo, "root_metadata": root_metadata,
+            "temp_snapshot": temp_snapshot}
 
 
 def create_profile(private, manifest, facts):
@@ -361,9 +400,12 @@ def same_runner(previous, current):
             current["kernel"] == previous["kernel"] and
             current["baseline_bytes"] <= previous["baseline_bytes"] + 1_000_000_000,
             "IDENTITY")
+    require(current["temp_snapshot"] == previous["temp_snapshot"], "MEASUREMENT")
 
 
 def envctl(profile, *args):
+    if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
+        verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
     command = [sys.executable, "-B", str(REPO / "scripts/test-env/envctl.py"),
                *args, "--profile", str(profile)]
     timeout = 2000 if args and args[0] == "accept" else 960
@@ -377,6 +419,8 @@ def envctl(profile, *args):
             output.get("error_code") if output.get("error_code") in
             ("CAPACITY", "MEASUREMENT", "POLICY", "IDENTITY", "PREREQUISITE", "TIMEOUT")
             else "COMMAND")
+    if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
+        verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
 
 
 def try_collect_clean(profile, *, probe=False):
@@ -449,12 +493,15 @@ def encrypt_evidence(private, public, budget=None):
                              str(CERT)], capture_output=True, timeout=60, check=False)
     require(result.returncode == 0 and encrypted.is_file(), "COMMAND")
     archive.unlink()
+    if EXPECTED_TEMP_SNAPSHOT is not None:
+        verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
     if budget is not None:
         budget.check()
     (EXPORT / "public.json").write_text(json.dumps(public, sort_keys=True) + "\n")
 
 
 def main(argv=None):
+    global EXPECTED_TEMP_SNAPSHOT
     argv = sys.argv[1:] if argv is None else argv
     if argv not in (["--admission-only"], ["--acquire-assets"], ["--execute"]):
         print('{"case":"HOST_QUALIFICATION","outcome":"invalid_phase"}')
@@ -469,6 +516,7 @@ def main(argv=None):
         if admission_only:
             checkout_growth(private)
             facts = admission_facts()
+            EXPECTED_TEMP_SNAPSHOT = facts["temp_snapshot"]
             atomic_json(private / "admission.private.json", facts)
             create_profile(private, assets_root / "assets/assets.json", facts)
             public = {"schema": "alopex.hosted-test-env-qualification/v1",
@@ -479,7 +527,9 @@ def main(argv=None):
             require((private / "profile.json").is_file(), "PREREQUISITE")
             facts = admission_facts()
             same_runner(previous, facts)
+            EXPECTED_TEMP_SNAPSHOT = previous["temp_snapshot"]
             acquire_assets(private, assets_root)
+            verify_temp_snapshot(previous["temp_snapshot"])
             public = {"schema": "alopex.hosted-test-env-qualification/v1",
                       "case": "HOST_QUALIFICATION", "outcome": "assets_verified_not_qualified",
                       "error_code": None, "asset_digest": ASSETS_DIGEST}
@@ -498,11 +548,13 @@ def main(argv=None):
             current = admission_facts()
             facts = current
             same_runner(previous, current)
+            EXPECTED_TEMP_SNAPSHOT = previous["temp_snapshot"]
             configured = load_profile(profile)
             require(configured["assets"] == str(manifest) and
                     configured["storage"] == previous["storage"], "IDENTITY")
             accepted = execute(profile)
             final_bytes = Budget(current["storage"]).used()
+            verify_temp_snapshot(previous["temp_snapshot"])
             atomic_json(private / "storage-after.private.json", {"allocated_bytes": final_bytes})
             require(final_bytes < 40_000_000_000, "CAPACITY")
             public = {"schema": "alopex.hosted-test-env-qualification/v1",
