@@ -1,0 +1,197 @@
+"""Private same-job 1951 #712 diagnostic glue. Never a 48-cell acceptance run."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+sys.path.insert(0, str(REPO / "scripts/test-env"))
+
+from common import atomic_json, contained, digest, load_profile, private_dir, require, verify_assets  # noqa: E402
+from capacity import Budget  # noqa: E402
+from lifecycle import Run  # noqa: E402
+import envctl  # noqa: E402
+from native_sql_matrix import compose_harness  # noqa: E402
+from attestor_1951 import attest_current_job, frozen_operations  # noqa: E402
+from diagnostic_container import MeasurementDocker, execute_cell  # noqa: E402
+from live_wrapper import run_prepared  # noqa: E402
+from orchestrate import SOURCE_COMMIT, SOURCE_TREE, validate_dispatch  # noqa: E402
+from same_job_1951 import derive_receipt, prepare_diagnostic_cell, validate_pins, OPERATORS  # noqa: E402
+
+PIN_FILE = HERE / "sql-diagnostic-lock.json"
+CERT = REPO / ".github/ops/native-evidence-cert.pem"
+JOB_LIMIT_SECONDS = 10_800  # Separate 12-cell operational safety bound.
+OPERATOR_NAMES = {"diagnostic_worker.py", "diagnostic_measure.py", "diagnostic.py",
+                  "diagnostic_supervisor.py", "same_job_1951.py", "attestor_1951.py",
+                  "live_wrapper.py", "audit.py", "orchestrate.py", "evidence.py",
+                  "diagnostic_container.py", "diagnostic_entrypoint.py",
+                  "hosted_test_env_qualification_1951.py"}
+HOST_ONLY_OPERATORS = {"diagnostic_container.py", "diagnostic_entrypoint.py",
+                       "hosted_test_env_qualification_1951.py"}
+
+
+def load_pins(path, *, controller_sha, operator_dir):
+    path = Path(path)
+    require(path.is_file() and not path.is_symlink() and
+            path.stat().st_size <= 16_384, "MISSING_PIN")
+    value = json.loads(path.read_text())
+    require(value.get("schema") == "alopex.sql-diagnostic-pins/v1" and
+            set(value) == {"schema", "pin"} and
+            set(value["pin"]["operator_sha256"]) == OPERATOR_NAMES and
+            controller_sha == os.environ.get("GITHUB_SHA"), "MISSING_PIN")
+    pin = dict(value["pin"], controller_commit=controller_sha)
+    validate_pins(pin)
+    require(pin["source_commit"] == SOURCE_COMMIT and pin["source_tree"] == SOURCE_TREE and
+            all(digest(Path(operator_dir) / name) == expected
+                for name, expected in pin["operator_sha256"].items()), "OPERATOR_IDENTITY")
+    return pin
+
+
+def cleanup_owned_runs(known, *, owned_root, budget, run_factory=Run,
+                       docker_factory=MeasurementDocker, collect=envctl.collect):
+    """Reconcile only cell IDs journaled by this invocation; retain unresolved input."""
+    errors = []
+    owned_root = Path(owned_root)
+    for selected, input_path in known:
+        try:
+            require(selected["private_output"] == str(owned_root / "runs") and
+                    selected["run_id"].startswith("diag-") and
+                    input_path == owned_root / "cells" / selected["run_id"].removeprefix("diag-") and
+                    not input_path.is_symlink(), "CLEANUP")
+            run = run_factory(selected["private_output"], selected["run_id"])
+            if run.path.exists():
+                run.load()
+                docker = docker_factory(selected)
+                if run.record["phase"] not in ("collected", "deleted"):
+                    collect(selected, docker, budget, selected["run_id"])
+                    run.load()
+                if run.record["phase"] != "deleted":
+                    run.clean(docker.inspect, docker.remove)
+                    run.load()
+                require(run.record["phase"] == "deleted" and
+                        not (run.root / "cleanup-errors.json").exists(), "CLEANUP")
+                run.verify_collection()
+            if input_path.exists():
+                require(input_path.is_dir(), "CLEANUP")
+                shutil.rmtree(input_path)
+        except BaseException as error:
+            errors.append(error)
+    if errors:
+        raise ValueError("CLEANUP") from errors[0]
+    return True
+
+
+def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
+    environment = os.environ if environment is None else environment
+    repo = Path(repo)
+    runner_temp = Path(environment["RUNNER_TEMP"] if runner_temp is None else runner_temp)
+    controller_sha = environment["EXPECTED_CONTROLLER_SHA"]
+    job_id = environment["GITHUB_RUN_ID"]
+    pin = load_pins(repo / "scripts/ops/sql-diagnostic-lock.json",
+                    controller_sha=controller_sha, operator_dir=repo / "scripts/ops")
+    require(environment.get("RUNNER_ENVIRONMENT") == "github-hosted" and
+            environment.get("GITHUB_ACTIONS") == "true", "POLICY")
+    root = runner_temp / "alopex-712-diagnostic"
+    require(not root.exists(), "EVIDENCE_STATE")
+    root = private_dir(root)
+    private = runner_temp / "alopex-804-qualification"
+    candidate = runner_temp / "alopex-804-candidate"
+    operations = frozen_operations(repo)
+    proof = attest_current_job(pin, job_id, repo=repo, runner_temp=runner_temp,
+                               environment=environment, operations=operations)
+    receipt = derive_receipt(pin, job_id=job_id, attestor=lambda _pin, _job: proof)
+    receipt_path = root / "same-job-receipt.private.json"
+    atomic_json(receipt_path, receipt)
+    receipt_path.chmod(0o600)
+    narrow = {key: pin[key] for key in ("source_commit", "source_tree", "artifact_id",
+                                        "artifact_sha256", "assets_digest", "server_sha256",
+                                        "wheel_sha256", "controller_commit")}
+    narrow["operator_sha256"] = {name: value for name, value in
+                                 pin["operator_sha256"].items()
+                                 if name not in HOST_ONLY_OPERATORS}
+    validate_dispatch(narrow, receipt, job_id=job_id, operator_dir=repo / "scripts/ops")
+    profile_path = private / "profile.json"
+    profile = load_profile(profile_path)
+    budget = Budget(profile["storage"])
+    require(profile["storage"]["poll_seconds"] == 10 and
+            budget.used() + 4_000_000_000 + 1_000_000_000 < 40_000_000_000,
+            "CAPACITY")
+    manifest_path = candidate / "assets/assets.json"
+    manifest = verify_assets(manifest_path, "linux/amd64")
+    entries = {item["role"]: item for item in manifest["files"]}
+    server = contained(manifest_path.parent, entries["server"]["path"])
+    wheel = contained(manifest_path.parent, entries["wheel"]["path"])
+    archive = contained(manifest_path.parent, entries["harness"]["path"])
+    require(digest(archive) == "9012c7ead25e606fbe945298b435cdae2a02a6d293a946c44fd07dbc69c60b37",
+            "IDENTITY")
+    old_config = json.loads((repo / "scripts/ops/same-job-four-case-config.private.json").read_text())
+    require(old_config["product_harness"]["commit"] ==
+            "4b88e0844b0a6cc1dab93a69a9e7bffbd8a1f39c", "IDENTITY")
+    harness = root / "measurement-harness.tar"
+    harness_record = compose_harness(archive, repo / "scripts/performance",
+                                     old_config["product_harness"]["files"], harness)
+    operators = {role: {"path": repo / "scripts/ops" / source_name,
+                        "sha256": pin["operator_sha256"][source_name]}
+                 for role, (source_name, _) in OPERATORS.items()}
+    cells_root = private_dir(root / "cells")
+    results_root = private_dir(root / "runs")
+    known = []
+
+    def run_cell(cell, binding):
+        require(binding["assets_digest"] == pin["assets_digest"], "IDENTITY")
+        inputs = cells_root / cell["cell_id"]
+        selected = dict(profile, run_id="diag-" + cell["cell_id"],
+                        assets=str(inputs / "assets.json"),
+                        private_output=str(results_root),
+                        limits=dict(profile["limits"], case_seconds=300, run_seconds=420))
+        known.append((selected, inputs))
+        path, worker = prepare_diagnostic_cell(
+            manifest_path, inputs, harness, harness_record, cell, pin, operators,
+            verify_assets=verify_assets)
+        require(str(path) == selected["assets"], "IDENTITY")
+        return execute_cell(selected, budget, worker)
+
+    def cleanup():
+        return cleanup_owned_runs(known, owned_root=root, budget=budget)
+
+    return run_prepared(narrow, job_id=job_id, operator_dir=repo / "scripts/ops",
+                        work=root / "work", export=root / "export",
+                        receipt_path=receipt_path, expected_receipt_sha256=digest(receipt_path),
+                        assets_manifest=manifest_path, server=server, wheel=wheel,
+                        certificate=repo / ".github/ops/native-evidence-cert.pem",
+                        used_bytes=budget.used, run_cell=run_cell, cleanup=cleanup,
+                        job_limit_seconds=JOB_LIMIT_SECONDS)
+
+
+def main():
+    os.umask(0o077)
+    try:
+        result = execute_diagnostic()
+        print(json.dumps({"schema": "alopex.sql-diagnostic-public/v1", "status": "passed",
+                          "measurement_cells": result["measurement_cells"],
+                          "performance_qualification": False}, sort_keys=True))
+        return 0
+    except BaseException as error:
+        # Never print the raw exception, path, SQL, machine profile or trace.
+        try:
+            root = Path(os.environ["RUNNER_TEMP"]) / "alopex-712-diagnostic"
+            if root.is_dir() and not root.is_symlink() and root.stat().st_mode & 0o077 == 0:
+                allowed = {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
+                           "IDENTITY", "OPERATOR_IDENTITY", "CAPACITY", "CLEANUP",
+                           "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION"}
+                code = str(error) if type(error) is ValueError and str(error) in allowed else "INTERNAL"
+                atomic_json(root / "diagnostic-failure.private.json",
+                            {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
+                             "error_code": code, "performance_qualification": False})
+        except BaseException:
+            pass
+        print('{"schema":"alopex.sql-diagnostic-public/v1","status":"failed","error_code":"DIAGNOSTIC_FAILED","performance_qualification":false}')
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

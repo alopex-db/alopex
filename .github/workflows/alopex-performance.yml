@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      sql_diagnostic_mode:
+        description: Run separate paired #712 SQL stage diagnostic after same-job 1951 qualification
+        required: false
+        type: boolean
+        default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
@@ -32,7 +37,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -53,7 +58,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
+    if: inputs.qualification_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.issue_number == '712' && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -205,12 +210,14 @@ jobs:
         with:
           fetch-depth: 1
       - name: Admit this runner before candidate acquisition
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -218,11 +225,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --execute
+      - name: Admit runner for exact 1951 diagnostic qualification
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --admission-only
+      - name: Retrieve exact 1951 diagnostic assets
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --acquire-assets
+      - name: Qualify 1951 on this runner
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
       - name: Preserve encrypted qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -246,6 +276,22 @@ jobs:
         with:
           name: native-sql-four-case-matrix
           path: native-sql-four-case-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Run paired 12-cell SQL stage diagnostic
+        if: inputs.sql_diagnostic_mode
+        id: diagnostic
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B scripts/ops/diagnostic_entrypoint.py
+      - name: Preserve encrypted diagnostic evidence
+        if: inputs.sql_diagnostic_mode && steps.diagnostic.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-sql-stage-diagnostic
+          path: ${{ runner.temp }}/alopex-712-diagnostic/export/evidence.cms
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

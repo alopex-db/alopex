@@ -1,0 +1,34 @@
+{
+  "pin": {
+    "artifact_id": 13916314157,
+    "artifact_sha256": "c854d24d73b2f0367d59001b6af9c527903db527fcbc5d74d10bf9b258a5e2d4",
+    "asset_run_head": "39657522a2712f8019880826d28e82567d040b70",
+    "asset_run_id": 43156778998,
+    "assets_digest": "dfd0ec3bd3a5079dcd0be0296891f7a6f624e103de3b23ee6b6a61db39729fc6",
+    "controller_digest": "51bd5396d5448a53c53fec282856ac6a2e6492180e484dbe9eae0361e6bd2fa3",
+    "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
+    "image_lock_sha256": "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7",
+    "operator_sha256": {
+      "attestor_1951.py": "4c948a4542b1fbaeb18c0c6ed76b71fe4d609e55c799e35c53b70d86fa81ada2",
+      "audit.py": "8552261f57eb21c4188a8b8dfaf998d1e387602f12a647828944db472535aace",
+      "diagnostic.py": "157e9232f161dea711d900aa424361473e6e940e5aac00e62d8d59a9e5441a04",
+      "diagnostic_container.py": "d46fa853c65c601a1adb811513972dd02d7f0263583543979fa133db4a3b8681",
+      "diagnostic_entrypoint.py": "ff24dddd00a18e25963d44346df734d400e2cab4a7c4b12614c775dd08cd4098",
+      "diagnostic_measure.py": "7308b839d9e4c0f3391557f1438cacc7910567b193c7771ead962fc4f1d153d8",
+      "diagnostic_supervisor.py": "53e5db978f6da2aa70ea70aab172b3504268184f166649c2a1698dfd91cae7ac",
+      "diagnostic_worker.py": "b7f1006c5cccd0df9e7a250ba2d7b95a71e688511593679f59760d10f0748f08",
+      "evidence.py": "86d5e1bc4679a38313ee3b79de5a9a57d8ab6d7f524168ecd91e04734b006938",
+      "hosted_test_env_qualification_1951.py": "ce1994124c012db4bd3c813d16b1af7817e64ebbdce0f91ceebb67d3d446d85b",
+      "live_wrapper.py": "634ed20304f9c949098799e05ffaaec4325d6ca1ea87b2fc6664f65e395e1919",
+      "orchestrate.py": "45d7864e7d14cbd4d61b7fbdc1dbc747915cfd5d0a268d2aaf8ea02cf23f88ed",
+      "same_job_1951.py": "ec973740b72fbb95a4cc08fa3689581a2fddd770cc2840d03fe5e992f52c3095"
+    },
+    "seccomp_sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+    "server_sha256": "bba07f935fb1c0d564cf7956d60eda0bd1ff577e131905590c252523c8ffd4f5",
+    "source_commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
+    "source_tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68",
+    "wheel_sha256": "dd9f5787d87542a5698c2de39d1227f4e179700cd206297a68cf88ae4957f012",
+    "zip_sha256": "c854d24d73b2f0367d59001b6af9c527903db527fcbc5d74d10bf9b258a5e2d4"
+  },
+  "schema": "alopex.sql-diagnostic-pins/v1"
+}
