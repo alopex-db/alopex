@@ -56,7 +56,7 @@ class StorageTest(unittest.TestCase):
                 info = original_lstat(path, *args, **kwargs)
                 if path in measured:
                     return SimpleNamespace(st_dev=info.st_dev, st_ino=0,
-                                           st_mode=info.st_mode, st_blocks=info.st_blocks)
+                                           st_mode=info.st_mode)
                 return info
 
             with patch.object(storage, "WINDOWS", True), patch.object(
