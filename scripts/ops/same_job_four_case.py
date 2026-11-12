@@ -191,6 +191,10 @@ def reference_archive(role, expected, destination):
             "assets_digest": expected["assets_digest"]}
 
 
+def evidence_archive_bytes(config):
+    return 2 * config["matrix_evidence_bound_bytes"] + 32_000_000
+
+
 def preserve_evidence(work, public, config, storage):
     private_dir(EXPORT)
     files = [path for path in sorted(work.rglob("*")) if path.is_file()]
@@ -200,7 +204,7 @@ def preserve_evidence(work, public, config, storage):
     # The work tree remains allocated while both the tar and CMS outputs exist.
     # Reserve both copies, framing overhead, and the host's separate 1 GB reserve
     # before writing either one; the archive budget scans all admitted roots.
-    archive_bytes = 2 * config["matrix_evidence_bound_bytes"] + 32_000_000
+    archive_bytes = evidence_archive_bytes(config)
     archive_storage = dict(storage, planned_bytes=dict(storage["planned_bytes"],
                                                   evidence_archive=archive_bytes))
     archive_budget = Budget(archive_storage)
@@ -256,6 +260,7 @@ def main():
         profile, image_id = qualified_same_job(config, private)
         before = Budget(profile["storage"]).used()
         require(before + config["matrix_additional_bound_bytes"] +
+                evidence_archive_bytes(config) +
                 config["matrix_storage_reserve_bytes"] < 40_000_000_000, "CAPACITY")
         atomic_json(work / "same-job-acceptance.json", {
             "qualification_run": os.environ["GITHUB_RUN_ID"],
@@ -295,7 +300,8 @@ def main():
             read_json(private / "admission.private.json", private=True)["temp_snapshot"])
         after = budget.used()
         require(after - before <= config["matrix_additional_bound_bytes"] and
-                after + config["matrix_storage_reserve_bytes"] < 40_000_000_000,
+                after + evidence_archive_bytes(config) +
+                config["matrix_storage_reserve_bytes"] < 40_000_000_000,
                 "CAPACITY")
         public.update(status="passed", owned_resources_cleaned=True)
     except BaseException as error:
