@@ -1,5 +1,5 @@
-use crate::vector::hnsw::HnswGraph;
 use crate::vector::hnsw::MAX_HNSW_EF_SEARCH;
+use crate::vector::hnsw::{HnswGraph, PairScoreCache};
 use crate::vector::Metric;
 use std::collections::HashSet;
 
@@ -47,6 +47,70 @@ fn tracked_bulk_pruning_matches_full_scan_at_each_chunk() {
         }
     }
     assert!(saw_overfull, "fixture must exercise deferred pruning");
+}
+
+#[test]
+fn cached_bulk_pruning_matches_full_scan_with_duplicate_vectors() {
+    for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+        let config = base_config().with_dimension(16).with_metric(metric);
+        let mut full = HnswGraph::new(config.clone()).unwrap();
+        let mut uncached = HnswGraph::new(config.clone()).unwrap();
+        let mut cached = HnswGraph::new(config).unwrap();
+        let mut full_hint = None;
+        let mut uncached_hint = None;
+        let mut cached_hint = None;
+        let mut uncached_overfull = HashSet::new();
+        let mut cached_overfull = HashSet::new();
+        let mut cache = PairScoreCache::default();
+
+        for id in 0_u64..320 {
+            let key = id.to_be_bytes();
+            let pattern = id % 37;
+            let vector: Vec<f32> = (0..16)
+                .map(|dimension| ((pattern * (dimension + 11) + dimension * 7) % 97) as f32)
+                .collect();
+            full_hint = Some(full.insert_unpruned(&key, &vector, &[], full_hint).unwrap());
+            uncached_hint = Some(
+                uncached
+                    .insert_unpruned_tracked(
+                        &key,
+                        &vector,
+                        &[],
+                        uncached_hint,
+                        &mut uncached_overfull,
+                    )
+                    .unwrap(),
+            );
+            cached_hint = Some(
+                cached
+                    .insert_unpruned_tracked(&key, &vector, &[], cached_hint, &mut cached_overfull)
+                    .unwrap(),
+            );
+            assert_eq!(full_hint, uncached_hint);
+            assert_eq!(full_hint, cached_hint);
+
+            if (id + 1) % 256 == 0 || id == 319 {
+                full.prune_overfull_neighbors();
+                uncached.prune_tracked_overfull_neighbors(&mut uncached_overfull);
+                cached.prune_tracked_overfull_neighbors_cached(&mut cached_overfull, &mut cache);
+                assert!(uncached_overfull.is_empty());
+                assert!(cached_overfull.is_empty());
+                for node_id in 0..full.nodes.len() {
+                    let expected = &full.nodes[node_id].as_ref().unwrap().neighbors;
+                    assert_eq!(
+                        &uncached.nodes[node_id].as_ref().unwrap().neighbors,
+                        expected,
+                        "uncached metric={metric:?}, node={node_id}"
+                    );
+                    assert_eq!(
+                        &cached.nodes[node_id].as_ref().unwrap().neighbors,
+                        expected,
+                        "cached metric={metric:?}, node={node_id}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
