@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      s04_inspect_mode:
+        description: Read-only selected Docker inspector for #684; no #804 assets or create
+        required: false
+        type: boolean
+        default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
@@ -32,7 +37,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_inspect_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -53,7 +58,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
+    if: inputs.qualification_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -246,6 +251,62 @@ jobs:
         with:
           name: native-sql-four-case-matrix
           path: native-sql-four-case-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  s04_inspect:
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Gate exact source before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          expected = os.environ.get('EXPECTED_CONTROLLER_SHA', '')
+          passed = (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
+                    os.environ.get('ISSUE_NUMBER') == '684' and
+                    re.fullmatch(r'[a-f0-9]{40}', expected) is not None and
+                    expected == os.environ.get('GITHUB_SHA'))
+          print('{"case":"S04_INSPECT_SHA","outcome":"passed"}' if passed else
+                '{"case":"S04_INSPECT_SHA","outcome":"failed"}')
+          sys.exit(0 if passed else 1)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_controller_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Inspect selected Docker context read-only
+        id: inspect
+        run: |
+          set -euo pipefail
+          private="$RUNNER_TEMP/alopex-s04-inspect"
+          mkdir -m 700 "$private"
+          context=$(/usr/bin/docker context show)
+          python3 -B scripts/ops/s04_wire_preflight.py \
+            --output "$private/inspector.private.json" --cli /usr/bin/docker \
+            inspect --context "$context"
+      - name: Seal bounded private inspector evidence
+        if: always() && steps.inspect.outcome != 'skipped'
+        env:
+          INSPECT_OUTCOME: ${{ steps.inspect.outcome }}
+        run: |
+          python3 -B scripts/ops/s04_inspect_seal.py \
+            --private "$RUNNER_TEMP/alopex-s04-inspect" \
+            --export native-s04-inspect-export \
+            --inspect-outcome "$INSPECT_OUTCOME"
+      - name: Upload only encrypted inspector and public status
+        if: always() && steps.inspect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: s04-readonly-inspect
+          path: |
+            native-s04-inspect-export/private-evidence.cms
+            native-s04-inspect-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
