@@ -1,6 +1,7 @@
 """Small deterministic directory-change regressions for capacity monitoring."""
 import errno
 import json
+import os
 from pathlib import Path
 import stat
 import sys
@@ -284,6 +285,10 @@ class ReadonlyDockerRoot(unittest.TestCase):
         self.assertEqual(caught.exception.code, "MEASUREMENT")
         self.config["roots"].pop()
         budget = Budget(self.config)
+        # Keep the removed inode alive so the filesystem cannot reuse it for
+        # the replacement before the identity check.
+        old_root = os.open(self.docker, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, old_root)
         self.docker.rmdir()
         self.docker.mkdir()
         with self.assertRaises(Failure) as caught:
