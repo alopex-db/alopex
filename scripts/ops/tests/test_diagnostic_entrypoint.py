@@ -41,6 +41,18 @@ class FakeRun:
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_wrapped_primary_failure_uses_fixed_code_and_source_site(self):
+        source = str(HERE / "diagnostic_container.py")
+        scope = {"Failure": lane.Failure}
+        exec(compile("def fail():\n    raise Failure('MEASUREMENT', 'private detail')\n", source, "exec"), scope)
+        try:
+            scope["fail"]()
+        except lane.Failure as primary:
+            wrapped = lane.DiagnosticFailure(primary)
+        self.assertEqual(lane.fixed_error_code(wrapped), "MEASUREMENT")
+        self.assertEqual(lane.fixed_error_site(wrapped),
+                         {"module": "diagnostic_container.py", "function": "fail", "line": 2})
+
     def test_failure_seal_includes_only_fixed_inner_stage_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "alopex-712-diagnostic"

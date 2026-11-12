@@ -14,6 +14,7 @@ from orchestrate import (DiagnosticFailure, FILES, MAX_CLIENT, ORACLE, SOURCE_CO
                          plan, sha256, validate_dispatch)
 from test_diagnostic import fixture
 from diagnostic import CLIENT_RECORDS_PER_CELL
+from common import Failure
 
 
 HERE = Path(__file__).resolve().parents[1]
@@ -56,6 +57,13 @@ def inputs():
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_fixed_failure_identity_preserves_known_common_code(self):
+        from orchestrate import _error_identity
+        self.assertEqual(_error_identity(Failure("MEASUREMENT", "private detail")),
+                         {"type": "Failure", "code": "MEASUREMENT"})
+        self.assertEqual(_error_identity(RuntimeError("private detail")),
+                         {"type": "RuntimeError", "code": "INTERNAL"})
+
     def test_client_bound_covers_frozen_34250_row_setup(self):
         setup = 2 + (34_250 + 99) // 100
         self.assertEqual(setup, 345)

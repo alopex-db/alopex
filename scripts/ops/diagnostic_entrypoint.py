@@ -22,7 +22,7 @@ from native_sql_matrix import compose_harness  # noqa: E402
 from attestor_1951 import attest_current_job, frozen_operations  # noqa: E402
 from diagnostic_container import MeasurementDocker, execute_cell  # noqa: E402
 from live_wrapper import run_prepared  # noqa: E402
-from orchestrate import SOURCE_COMMIT, SOURCE_TREE, validate_dispatch  # noqa: E402
+from orchestrate import DiagnosticFailure, SOURCE_COMMIT, SOURCE_TREE, validate_dispatch  # noqa: E402
 from same_job_1951 import derive_receipt, prepare_diagnostic_cell, validate_pins, OPERATORS  # noqa: E402
 
 PIN_FILE = HERE / "sql-diagnostic-lock.json"
@@ -231,11 +231,25 @@ def seal_failure(root):
 
 def fixed_error_site(error):
     """Return only source basename/function/line; never a path or exception text."""
+    if isinstance(error, DiagnosticFailure) and error.primary_error is not None:
+        error = error.primary_error
     for frame in reversed(traceback.extract_tb(error.__traceback__)):
         source = Path(frame.filename)
         if source.is_relative_to(REPO / "scripts") and source.name not in ("common.py", "orchestrate.py"):
             return {"module": source.name, "function": frame.name, "line": frame.lineno}
     return None
+
+
+def fixed_error_code(error):
+    """Allow only fixed failure codes, including the orchestrator's primary error."""
+    if isinstance(error, DiagnosticFailure) and error.primary_error is not None:
+        error = error.primary_error
+    allowed = set(ERRORS) | {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
+                           "IDENTITY", "OPERATOR_IDENTITY", "CAPACITY", "CLEANUP",
+                           "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION",
+                           "QUALIFICATION_BINDING", "SOURCE_IDENTITY"}
+    code = error.code if isinstance(error, Failure) else str(error)
+    return code if type(error) in (ValueError, Failure) and code in allowed else "INTERNAL"
 
 
 def main():
@@ -251,14 +265,9 @@ def main():
         try:
             root = Path(os.environ["RUNNER_TEMP"]) / "alopex-712-diagnostic"
             if root.is_dir() and not root.is_symlink() and root.stat().st_mode & 0o077 == 0:
-                allowed = set(ERRORS) | {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
-                           "IDENTITY", "OPERATOR_IDENTITY", "CAPACITY", "CLEANUP",
-                           "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION",
-                           "QUALIFICATION_BINDING", "SOURCE_IDENTITY"}
-                code = str(error) if type(error) in (ValueError, Failure) and str(error) in allowed else "INTERNAL"
                 atomic_json(root / "diagnostic-failure.private.json",
                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
-                             "error_code": code, "error_site": fixed_error_site(error),
+                             "error_code": fixed_error_code(error), "error_site": fixed_error_site(error),
                              "performance_qualification": False})
                 seal_failure(root)
         except BaseException:

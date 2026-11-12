@@ -12,6 +12,7 @@ from pathlib import Path
 import time
 
 from audit import audit
+from common import ERRORS, Failure
 from diagnostic import CASES, CLIENT_RECORDS_PER_CELL, cell_order
 
 SOURCE_COMMIT = "1951a3fdfe086ea6e8bc537c16766f91f619396f"
@@ -154,7 +155,9 @@ def _error_identity(error):
     if error is None:
         return None
     value = str(error)
-    code = value if type(error) is ValueError and value.isupper() and value.replace("_", "").isalpha() else "INTERNAL"
+    code = (error.code if isinstance(error, Failure) and error.code in ERRORS else
+            value if type(error) is ValueError and value.isupper() and
+            value.replace("_", "").isalpha() else "INTERNAL")
     return {"type": type(error).__name__, "code": code}
 
 
