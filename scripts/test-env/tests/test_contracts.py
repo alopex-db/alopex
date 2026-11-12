@@ -318,6 +318,39 @@ class Collection(Fixture):
         self.assertEqual(run.record["phase"], "stopped")
         docker.stop.assert_called_once_with("original")
 
+    def test_absent_unbound_create_remains_unresolved_until_late_publication(self):
+        from envctl import recover
+        from unittest.mock import Mock
+        run = Run(self.root, "test").create({})
+        self.token = run.record["ownership_token"]
+        run.intent("container", "owned")
+        docker = Mock()
+        docker.inspect.return_value = None
+        with self.assertRaises(Failure) as caught:
+            recover(run, docker)
+        self.assertEqual(caught.exception.code, "CLEANUP")
+        self.assertEqual(run.load().record["phase"], "preparing")
+        self.assertIsNone(run.record["resources"][0]["id"])
+        docker.stop.assert_not_called()
+
+        docker.inspect.side_effect = self.inspect
+        recover(run, docker)
+        self.assertEqual(run.record["resources"][0]["id"], "original")
+        self.assertEqual(run.record["phase"], "stopped")
+        docker.stop.assert_called_once_with("original")
+
+    def test_absent_unbound_create_cannot_be_marked_deleted(self):
+        run = Run(self.root, "test").create({})
+        run.intent("container", "owned")
+        run.transition("stopped")
+        run.collect(self.copier)
+        removed = []
+        with self.assertRaises(Failure) as caught:
+            run.clean(lambda item: None, removed.append)
+        self.assertEqual(caught.exception.code, "CLEANUP")
+        self.assertEqual(run.load().record["phase"], "collected")
+        self.assertEqual(removed, [])
+
     def test_interrupted_create_does_not_adopt_a_foreign_token(self):
         from envctl import recover
         from unittest.mock import Mock

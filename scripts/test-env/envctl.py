@@ -295,6 +295,9 @@ def recover(run, docker):
     for item in run.record["resources"]:
         live = docker.inspect(item)
         if live is None:
+            # A timed-out create can publish after inspect. Keep the intent
+            # unresolved until an owned identity can be bound and stopped.
+            require(item["id"] is not None, "CLEANUP")
             continue
         require(live["labels"].get("org.alopex.test-env.run") == run.run_id and
                 live["labels"].get("org.alopex.test-env.owner") == "envctl" and
