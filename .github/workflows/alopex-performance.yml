@@ -48,6 +48,11 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -B scripts/ops/hosted_test_env_inventory.py
+      - name: Probe schedstat capability for issue 682
+        if: inputs.issue_number == '682'
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/ops/schedstat_capability_probe.py
       - name: Preserve encrypted inventory
         if: always()
         uses: actions/upload-artifact@v4
