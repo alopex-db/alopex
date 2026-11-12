@@ -20,6 +20,10 @@ SPEC.loader.exec_module(qualification)
 
 
 class Inputs(unittest.TestCase):
+    def test_controller_digest_matches_checked_out_test_env_sources(self):
+        identity = qualification.source_identity()
+        self.assertEqual(identity["controller_digest"], qualification.CONTROLLER_DIGEST)
+
     @staticmethod
     def precheckout_temp_code():
         workflow = (SCRIPT.parents[2] / ".github/workflows/alopex-performance.yml").read_text()
@@ -501,8 +505,10 @@ class Sequence(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
         source = workflow.read_text()
-        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode }}", source)
+        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode }}", source)
         self.assertIn("qualification:\n    if: inputs.qualification_mode", source)
+        self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode", source)
+        self.assertIn("inputs.issue_number == '712' && inputs.sql_four_case_mode", source)
         source = source.split("  qualification:\n", 1)[1]
         positions = [source.index(token) for token in (
             "Bound checkout before source acquisition", "uses: actions/checkout@v4",

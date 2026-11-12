@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      sql_four_case_mode:
+        description: Continue same-job #804 qualification into the pinned #712 SQL matrix
+        required: false
+        type: boolean
+        default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
@@ -27,7 +32,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -48,9 +53,9 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && inputs.issue_number == '804'
+    if: inputs.qualification_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     steps:
       - name: Bound checkout before source acquisition
         env:
@@ -224,6 +229,23 @@ jobs:
         with:
           name: hosted-test-env-qualification
           path: native-qualification-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Compare four independent server/client SQL cases
+        if: inputs.sql_four_case_mode
+        id: matrix
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/same_job_four_case.py
+      - name: Preserve encrypted four-case evidence
+        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-sql-four-case-matrix
+          path: native-sql-four-case-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

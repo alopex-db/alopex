@@ -99,6 +99,9 @@ class Run:
         for item in self.record["resources"]:
             live = inspect(item)
             if live is None:  # Supports retry after a partially completed cleanup.
+                # An unbound create may still publish later; absence alone is
+                # not proof that this ownership intent has been settled.
+                require(item["id"] is not None, "CLEANUP")
                 continue
             require(live["id"] == item["id"] and
                     live["labels"].get("org.alopex.test-env.run") == self.run_id and

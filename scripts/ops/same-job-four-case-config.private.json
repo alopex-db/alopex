@@ -1,0 +1,94 @@
+{
+  "candidate_commit": "a4158b873963dd79c7844953d64a8b511ee75fde",
+  "candidate_tree": "99de240db970a91057ea60852bd2688c1d879fc8",
+  "docs_harness_digest": "9012c7ead25e606fbe945298b435cdae2a02a6d293a946c44fd07dbc69c60b37",
+  "image_lock_sha256": "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7",
+  "limits": {
+    "case_seconds": 300,
+    "run_seconds": 420
+  },
+  "matrix_additional_bound_bytes": 4000000000,
+  "matrix_evidence_bound_bytes": 512000000,
+  "matrix_seconds": 7200,
+  "matrix_storage_reserve_bytes": 1000000000,
+  "native_acceptance": {
+    "candidate_assets_digest": "36e16e155e96982f094482ae53615789ae7eab4fcf7ef0d0c77cf282d464cb6e",
+    "mode": "same-job-804",
+    "required_cases": 14
+  },
+  "operators": {
+    "measurement_controller": {
+      "filename": "native_sql_measure_supervisor.py",
+      "sha256": "c0c80a8668277bf30550d24fd65d4f1cb691e938b327bcd6f0688bfe5a3cd4e4"
+    },
+    "measurement_worker": {
+      "filename": "native_sql_measure_worker.py",
+      "sha256": "b91596ba46a75fc82d19f9c90c07f5c09e71df720fa44581a46ba7cb0eb472f3"
+    }
+  },
+  "platform": "linux/amd64",
+  "product_harness": {
+    "commit": "4b88e0844b0a6cc1dab93a69a9e7bffbd8a1f39c",
+    "files": {
+      "fixtures/sql-v0.8.11-curated.json": {
+        "git_blob": "b026e01f350ea8454a888461c03b18ff6403670b",
+        "sha256": "23147656b2336db08e37cb876d26490bac40ef5b3d84077f8a76397e3232b3f3",
+        "size": 515
+      },
+      "parity_v0811_gate.py": {
+        "git_blob": "3edbdd0927b4bfe8d219b1d8454dffec7c3cbcd3",
+        "sha256": "2165e030159f66ef2e7203d6e8500d84e6e062f2ef26fa8fc6a195341b0c1b8c",
+        "size": 7977
+      },
+      "parity_v0811_measure.py": {
+        "git_blob": "d2d81d853604fad1a4f739cfde40a5d1b82437f7",
+        "sha256": "e6b9f9544763f482ff4236f11d044a63cd058a6fdd51fb07cca37ff959c7bab3",
+        "size": 30611
+      }
+    }
+  },
+  "schema": "alopex.same-job-four-case-config/v1",
+  "seccomp_sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+  "subjects": {
+    "before": {
+      "artifact_digest": "sha256:6a02fa70c6f37f96b501c35f563ac955593795540dc6d06ee553ea854a2b10a8",
+      "artifact_id": 13585234163,
+      "artifact_name": "native-product-assets",
+      "assets_digest": "f46c5dd1656b51b2f9bfb741ee7844f7db3b51289a54ce46b865643394233396",
+      "controller": "39657522a2712f8019880826d28e82567d040b70",
+      "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
+      "platform": "linux/amd64",
+      "run": 42399964667,
+      "source_commit": "34ce28d5c15377837cb78b15a261cfa2c05757a8",
+      "source_tree": "8ed9c3277def8201e16d41e826bd1ed35b70590a",
+      "version": "0.8.17"
+    },
+    "candidate": {
+      "artifact_digest": "sha256:2f8c652140ec7f7ae75f7e7553d1227e1dbe0fef3e007e4310f7e83fe658e720",
+      "artifact_id": 13895989882,
+      "artifact_name": "native-product-assets",
+      "assets_digest": "36e16e155e96982f094482ae53615789ae7eab4fcf7ef0d0c77cf282d464cb6e",
+      "controller": "39657522a2712f8019880826d28e82567d040b70",
+      "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
+      "platform": "linux/amd64",
+      "run": 43110932395,
+      "source_commit": "a4158b873963dd79c7844953d64a8b511ee75fde",
+      "source_tree": "99de240db970a91057ea60852bd2688c1d879fc8",
+      "version": "0.8.17"
+    },
+    "published": {
+      "artifact_digest": "sha256:c7998a1f94da6c03ede541f9be5c93a8ea202d936bccb8b2cbf26246f8205e47",
+      "artifact_id": 13585845849,
+      "artifact_name": "native-product-assets",
+      "assets_digest": "59394688e04eb02de8e6ef2354b268c8c89199c70887ef71bce95347da6192b9",
+      "controller": "30d0871dc1d8cd9c7e9a2325efc8741182e4a0be",
+      "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
+      "platform": "linux/amd64",
+      "published_wheel_sha256": "ac9f4b1fd2fa0e78d634334242de4290ae4b34bf700515b59937ea2c718a98c3",
+      "run": 42400479270,
+      "source_commit": "d9ff8783b8d18a63d167204e55902ea6cd90dcd1",
+      "source_tree": "cef47de8408e760bd6da108b92dcb917753c5a4f",
+      "version": "0.8.16"
+    }
+  }
+}
