@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -22,7 +23,7 @@ from native_sql_matrix import compose_harness  # noqa: E402
 from attestor_1951 import attest_current_job, frozen_operations  # noqa: E402
 from diagnostic_container import MeasurementDocker, execute_cell  # noqa: E402
 from live_wrapper import run_prepared  # noqa: E402
-from orchestrate import DiagnosticFailure, SOURCE_COMMIT, SOURCE_TREE, validate_dispatch  # noqa: E402
+from orchestrate import DiagnosticFailure, SOURCE_COMMIT, SOURCE_TREE, plan, validate_dispatch  # noqa: E402
 from same_job_1951 import derive_receipt, prepare_diagnostic_cell, validate_pins, OPERATORS  # noqa: E402
 
 PIN_FILE = HERE / "sql-diagnostic-lock.json"
@@ -206,21 +207,53 @@ def seal_failure(root):
                 type(item["code"]) is str and len(item["code"]) <= 64 and
                 item["code"].replace("_", "").isalpha() and item["code"].isupper())
                 for item in (value["primary"], value["cleanup"])), "EVIDENCE_ALLOWLIST")
+    cell_evidence = []
+    runs = root / "runs"
+    if runs.is_dir() and not runs.is_symlink():
+        for cell in plan():
+            run_id = "diag-" + cell["cell_id"]
+            run = Run(runs, run_id)
+            if not run.path.exists():
+                continue
+            require(run.root.is_dir() and not run.root.is_symlink() and
+                    run.path.is_file() and not run.path.is_symlink(), "EVIDENCE_BOUND")
+            run.load()
+            if run.record["phase"] != "deleted":
+                continue  # The outer cleanup receipt retains any unresolved run.
+            run.verify_collection()
+            collected = run.root / "collected"
+            report = collected / "result.json"
+            require(report.is_file() and not report.is_symlink() and
+                    report.stat().st_size <= 4096, "EVIDENCE_BOUND")
+            if json.loads(report.read_text()).get("status") != "failed":
+                continue
+            require(not cell_evidence, "EVIDENCE_BOUND")
+            for name, limit in (("result.json", 4096), ("cell/status.json", 4096),
+                                ("cell/worker.log", 32768)):
+                path = collected / name
+                if not path.exists() and name == "cell/worker.log":
+                    continue
+                info = path.lstat()
+                require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0 and
+                        info.st_size <= limit, "EVIDENCE_BOUND")
+                cell_evidence.append((path, "diagnostic/failed-cell/" + name))
     with tarfile.open(archive, "x:gz") as bundle:
         bundle.add(record, arcname="diagnostic/diagnostic-failure.private.json",
                    recursive=False)
         if inner.exists():
             bundle.add(inner, arcname="diagnostic/orchestrate-failure.private.json",
                        recursive=False)
+        for path, name in cell_evidence:
+            bundle.add(path, arcname=name, recursive=False)
     archive.chmod(0o600)
-    require(archive.stat().st_size <= 8192, "EVIDENCE_BOUND")
+    require(archive.stat().st_size <= 65536, "EVIDENCE_BOUND")
     try:
         subprocess.run(["openssl", "cms", "-encrypt", "-binary", "-aes-256-cbc",
                         "-outform", "DER", "-in", str(archive), "-out", str(pending),
                         str(CERT)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=True, timeout=120)
         require(pending.is_file() and not pending.is_symlink() and
-                0 < pending.stat().st_size <= 16_384, "ENCRYPTION")
+                0 < pending.stat().st_size <= 80_000, "ENCRYPTION")
         pending.chmod(0o600)
         pending.replace(ciphertext)
         archive.unlink()

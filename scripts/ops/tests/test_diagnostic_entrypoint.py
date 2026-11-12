@@ -89,6 +89,55 @@ class EntrypointTests(unittest.TestCase):
                 lane.seal_failure(root)
             self.assertFalse((root / "export/evidence.cms").exists())
 
+    def test_failure_seal_retains_hash_verified_failed_cell_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "alopex-712-diagnostic"
+            root.mkdir(mode=0o700)
+            lane.atomic_json(root / "diagnostic-failure.private.json",
+                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
+                              "error_code": "CASE"})
+            run = lane.Run(root / "runs", "diag-aggregate-0-off")
+            run.create({})
+            run.record["phase"] = "deleted"
+            run.save()
+            collected = run.root / "collected"
+            cell = collected / "cell"
+            cell.mkdir(parents=True, mode=0o700)
+            lane.atomic_json(collected / "result.json", {"status": "failed"})
+            lane.atomic_json(cell / "status.json", {"status": "failed",
+                                                   "worker_error": "TRACE_FORMAT",
+                                                   "stop_error": None})
+            worker_log = cell / "worker.log"
+            worker_log.write_text("bounded private worker failure\n")
+            worker_log.chmod(0o600)
+            lane.atomic_json(run.root / "collection.json", {
+                "result.json": lane.digest(collected / "result.json"),
+                "cell/status.json": lane.digest(cell / "status.json"),
+                "cell/worker.log": lane.digest(worker_log)})
+            original_status = (cell / "status.json").read_bytes()
+            (cell / "status.json").write_bytes(original_status.replace(b"TRACE_FORMAT", b"TRACE_CHANGED"))
+            with self.assertRaises(lane.Failure):
+                lane.seal_failure(root)
+            self.assertFalse((root / "export/evidence.cms").exists())
+            (cell / "status.json").write_bytes(original_status)
+            captured = {}
+            def encrypt(command, **_):
+                with tarfile.open(root / "diagnostic-failure.tar.gz") as archive:
+                    captured.update({name: archive.extractfile(name).read()
+                                     for name in archive.getnames()})
+                Path(command[command.index("-out") + 1]).write_bytes(b"encrypted")
+            with patch.object(lane.subprocess, "run", side_effect=encrypt):
+                lane.seal_failure(root)
+            self.assertEqual(set(captured), {
+                "diagnostic/diagnostic-failure.private.json",
+                "diagnostic/failed-cell/result.json",
+                "diagnostic/failed-cell/cell/status.json",
+                "diagnostic/failed-cell/cell/worker.log"})
+            self.assertEqual(json.loads(captured["diagnostic/failed-cell/cell/status.json"])
+                             ["worker_error"], "TRACE_FORMAT")
+            self.assertEqual({path.name for path in (root / "export").iterdir()},
+                             {"evidence.cms"})
+
     def test_explicit_pins_and_operator_bytes(self):
         source = HERE / "sql-diagnostic-lock.json"
         with tempfile.TemporaryDirectory() as directory:
