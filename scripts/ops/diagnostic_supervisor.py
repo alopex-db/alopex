@@ -7,7 +7,7 @@ import re
 import signal
 from pathlib import Path
 import sys
-from diagnostic import CLIENT_RECORDS_PER_CELL
+from diagnostic import expected_client_records
 
 SOURCE = {"commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
           "tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68", "profile": "release"}
@@ -42,8 +42,8 @@ def worker_config(config, output, state, docs, product):
                 docs_harness_root=str(docs), product_harness_root=str(product))
 
 
-def require_client_inventory(clients):
-    if type(clients) is not list or len(clients) != CLIENT_RECORDS_PER_CELL:
+def require_client_inventory(clients, mode):
+    if type(clients) is not list or len(clients) != expected_client_records(mode):
         raise ValueError("EVIDENCE_BOUND")
     return clients
 
@@ -179,7 +179,8 @@ def main():
                 value["subject_identity"]["source"] == config["source"] and
                 value["raw_sha256"] == digest(output / "raw.ndjson"), "IDENTITY")
         clients = require_client_inventory(
-            [json.loads(line) for line in (output / "client.ndjson").read_text().splitlines()])
+            [json.loads(line) for line in (output / "client.ndjson").read_text().splitlines()],
+            config["mode"])
         require(all(digest(contained(INPUT, item["path"])) == item["sha256"] for item in assets["files"]), "IDENTITY")
         return {"result_sha256": digest(output / "measurement.json"),
                 "raw_sha256": value["raw_sha256"],

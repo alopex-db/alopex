@@ -12,16 +12,21 @@ import unittest
 
 from diagnostic_supervisor import (SOURCE, parse_server_timing, require_client_inventory,
                                    server_environment, worker_config)
-from diagnostic import CLIENT_RECORDS_PER_CELL
+from diagnostic import CLIENT_RECORDS_PER_CELL, CLIENT_RECORDS_OFF_CELL
 
 
 class DiagnosticSupervisorTests(unittest.TestCase):
-    def test_exact_frozen_client_inventory_370_accepts_one_extra_rejects(self):
+    def test_exact_frozen_client_inventory_matches_mode(self):
         self.assertEqual(CLIENT_RECORDS_PER_CELL, 370)
-        rows = [{} for _ in range(CLIENT_RECORDS_PER_CELL)]
-        self.assertIs(require_client_inventory(rows), rows)
-        with self.assertRaisesRegex(ValueError, "EVIDENCE_BOUND"):
-            require_client_inventory(rows + [{}])
+        self.assertEqual(CLIENT_RECORDS_OFF_CELL, 25)
+        for mode, count in (("on", 370), ("off", 25)):
+            with self.subTest(mode=mode):
+                rows = [{} for _ in range(count)]
+                self.assertIs(require_client_inventory(rows, mode), rows)
+                with self.assertRaisesRegex(ValueError, "EVIDENCE_BOUND"):
+                    require_client_inventory(rows + [{}], mode)
+                with self.assertRaisesRegex(ValueError, "EVIDENCE_BOUND"):
+                    require_client_inventory(rows[:-1], mode)
 
     def test_on_off_server_environment_isolated(self):
         base = {"ALOPEX_SQL_TIMING": "1", "RUST_LOG": "debug", "OTHER": "kept"}

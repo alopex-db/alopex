@@ -15,6 +15,17 @@ CASES = ("aggregate", "ordered")
 # Frozen 34,250-row fixture: one DROP, one CREATE, ceil(rows/100) INSERTs,
 # one precheck, three warmups, and 21 measured operations. No postcheck call.
 CLIENT_RECORDS_PER_CELL = 2 + (34_250 + 99) // 100 + 1 + 3 + 21
+CLIENT_RECORDS_OFF_CELL = 1 + 3 + 21
+
+
+def expected_client_records(mode):
+    if mode == "on":
+        return CLIENT_RECORDS_PER_CELL
+    if mode == "off":
+        return CLIENT_RECORDS_OFF_CELL
+    raise ValueError("invalid diagnostic mode")
+
+
 PHASES = ("setup", "precheck", "warmup", "measured", "postcheck")
 CLIENT_FIELDS = ("bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns", "total_ns",
                  "response_chars", "result_rows")

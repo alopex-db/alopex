@@ -8,7 +8,7 @@ from lifecycle import Run
 import envctl
 
 from diagnostic_worker import verify_cell
-from diagnostic import CLIENT_RECORDS_PER_CELL
+from diagnostic import expected_client_records
 
 SOURCE = {"commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
           "tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68", "profile": "release"}
@@ -74,7 +74,7 @@ def verify_collected(run, config, assets_digest):
             (cell / "server-timing.json").stat().st_size <= 5_000_000, "EVIDENCE_BOUND")
     clients = [json.loads(line) for line in (cell / "client.ndjson").read_text().splitlines()]
     servers = read_json(cell / "server-timing.json")
-    require(type(servers) is list and len(clients) == CLIENT_RECORDS_PER_CELL and
+    require(type(servers) is list and len(clients) == expected_client_records(config["mode"]) and
             len(servers) <= 4_000 and
             all(type(row) is dict and set(row) == {"trace_id", "stage", "duration_ns"}
                 for row in servers), "EVIDENCE_BOUND")

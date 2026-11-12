@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO / "scripts/test-env"))
 import diagnostic_container as lane
 from common import digest
 from orchestrate import ORACLE
-from diagnostic import CLIENT_RECORDS_PER_CELL
+from diagnostic import CLIENT_RECORDS_OFF_CELL
 
 SOURCE = lane.SOURCE
 
@@ -127,7 +127,7 @@ class ContainerTests(unittest.TestCase):
                                 if ndjson else json.dumps(value))
                 return digest(path)
             raw_hash = write("raw.ndjson", raw, True)
-            client_rows = [{} for _ in range(CLIENT_RECORDS_PER_CELL)]
+            client_rows = [{} for _ in range(CLIENT_RECORDS_OFF_CELL)]
             client_hash = write("client.ndjson", client_rows, True)
             server_hash = write("server-timing.json", [])
             write("resources.json", {})
@@ -150,7 +150,7 @@ class ContainerTests(unittest.TestCase):
                 summary, clients, servers = lane.verify_collected(run, config(),
                                                                     report["assets_digest"])
                 self.assertEqual(len(summary["raw_seconds"]), 21)
-                self.assertEqual((len(clients), servers), (370, []))
+                self.assertEqual((len(clients), servers), (25, []))
                 report["server_timing_sha256"] = "0" * 64
                 (run.root / "collected/result.json").write_text(json.dumps(report))
                 with self.assertRaises(Exception):
