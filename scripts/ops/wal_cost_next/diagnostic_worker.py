@@ -13,8 +13,12 @@ import resource
 import subprocess
 import sys
 
-from diagnostic_commit_observer import observe as diagnostic_observe
-from schedstat_observer import observe as scheduler_observe
+if __package__:
+    from .diagnostic_commit_observer import observe as diagnostic_observe
+    from .schedstat_observer import observe as scheduler_observe
+else:
+    from diagnostic_commit_observer import observe as diagnostic_observe
+    from schedstat_observer import observe as scheduler_observe
 
 FROZEN = "490f002dfb2c7f509a2444891808d9704fe6b001"
 
