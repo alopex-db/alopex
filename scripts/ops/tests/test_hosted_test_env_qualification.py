@@ -307,6 +307,10 @@ class Sequence(unittest.TestCase):
                     membership=membership, meminfo=meminfo)
             membership.write_text("0::/\n")
             self.assertEqual(observed(), 3_000_000_000)
+            root_limit = root / "memory.max"
+            root_limit.write_text("1000000000\n")
+            self.assertEqual(observed(), 1_000_000_000)
+            root_limit.unlink()
             parent = root / "parent"
             child = parent / "child"
             child.mkdir(parents=True)

@@ -40,7 +40,7 @@ HARNESS = "5c3d068b9ce4d60fbc1608924882df13b0a27568"
 ASSETS_DIGEST = "36e16e155e96982f094482ae53615789ae7eab4fcf7ef0d0c77cf282d464cb6e"
 LOCK_DIGEST = "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7"
 POLICY_DIGEST = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
-CONTROLLER_DIGEST = "c5c2facf4bca64068bf970d6ba3d713ccb4fb4de99b9b5c077b41189021fb9f3"
+CONTROLLER_DIGEST = "9b5c83b9e420fa7ee731684c38fb1714d8c6626e45e53808026d595c1fd242ee"
 EXPECTED_DOCKER_VERSION = "28.0.4"
 DOCKER_BINARY = Path("/usr/bin/docker")
 PLANNED = {"fetch": 1_000_000_000, "build": 3_000_000_000,
@@ -190,14 +190,21 @@ def effective_memory_bytes(docker_total, mountinfo_value, *,
                 physical[0][1].isascii() and physical[0][1].isdecimal() and
                 physical[0][2] == "kB", "PREREQUISITE")
         totals.append(int(physical[0][1]) * 1024)
-        while current != root:
+        while True:
             limit = current / "memory.max"
+            if current == root:
+                try:
+                    limit.lstat()
+                except FileNotFoundError:
+                    break  # The cgroup v2 root normally has no resource-control files.
             require(not limit.is_symlink(), "PREREQUISITE")
             value = limit.read_text().strip()
             require(value == "max" or (value.isascii() and value.isdecimal()),
                     "PREREQUISITE")
             if value != "max":
                 totals.append(int(value))
+            if current == root:
+                break
             current = current.parent
         require(all(total > 0 for total in totals), "PREREQUISITE")
         return min(totals)
