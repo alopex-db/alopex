@@ -11,7 +11,7 @@ import time
 
 PUBLIC_CODES = {"SCHEDSTAT_ADVANCING", "SCHEDSTAT_ZERO", "SCHEDSTAT_MISSING",
                 "SCHEDSTAT_STATIC", "SCHEDSTAT_UNREADABLE", "SCHEDSTAT_DISABLED",
-                "PROBE_FAILED"}
+                "SCHEDSTAT_WAIT_UNPROVEN", "PROBE_FAILED"}
 
 
 def read_schedstat(path: Path) -> dict:
@@ -43,6 +43,16 @@ def classify(before: dict, after: dict) -> str:
     return "static"
 
 
+def counter_deltas(before: dict, after: dict) -> dict | None:
+    if before["status"] != "read" or after["status"] != "read":
+        return None
+    differences = [new - old for old, new in zip(before["values"], after["values"])]
+    if any(value < 0 for value in differences):
+        return None
+    return {"runtime_ns": differences[0], "runqueue_wait_ns": differences[1],
+            "timeslices": differences[2]}
+
+
 def sample(proc: Path, sibling_pid: int, advance) -> dict:
     paths = {"self": proc / "self/schedstat",
              "sibling": proc / str(sibling_pid) / "schedstat"}
@@ -50,7 +60,8 @@ def sample(proc: Path, sibling_pid: int, advance) -> dict:
     advance()
     after = {name: read_schedstat(path) for name, path in paths.items()}
     return {name: {"before": before[name], "after": after[name],
-                   "classification": classify(before[name], after[name])}
+                   "classification": classify(before[name], after[name]),
+                   "deltas": counter_deltas(before[name], after[name])}
             for name in paths}
 
 
@@ -65,7 +76,10 @@ def capability_code(setting: dict, samples: dict) -> str:
     if "zero" in states:
         return "SCHEDSTAT_ZERO"
     if states == {"advancing"}:
-        return "SCHEDSTAT_ADVANCING"
+        if all(item.get("deltas") is not None and
+               item["deltas"]["runqueue_wait_ns"] > 0 for item in samples.values()):
+            return "SCHEDSTAT_ADVANCING"
+        return "SCHEDSTAT_WAIT_UNPROVEN"
     return "SCHEDSTAT_STATIC"
 
 

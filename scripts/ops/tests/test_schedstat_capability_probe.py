@@ -40,6 +40,20 @@ class FakeProc(unittest.TestCase):
             moved = probe.sample(proc, 123, advance)
             self.assertEqual({row["classification"] for row in moved.values()},
                              {"advancing"})
+            self.assertEqual(moved["self"]["deltas"],
+                             {"runtime_ns": 10, "runqueue_wait_ns": 0, "timeslices": 1})
+            self.assertEqual(probe.capability_code({"status": "read", "value": "1"}, moved),
+                             "SCHEDSTAT_WAIT_UNPROVEN")
+
+            def wait_advances():
+                self_path.write_text("11 5 2\n")
+                sibling_path.write_text("21 7 3\n")
+
+            waited = probe.sample(proc, 123, wait_advances)
+            self.assertEqual(waited["self"]["deltas"]["runqueue_wait_ns"], 5)
+            self.assertEqual(waited["sibling"]["deltas"]["runqueue_wait_ns"], 7)
+            self.assertEqual(probe.capability_code({"status": "read", "value": "1"}, waited),
+                             "SCHEDSTAT_ADVANCING")
             still = probe.sample(proc, 123, lambda: None)
             self.assertEqual({row["classification"] for row in still.values()}, {"static"})
             self_path.write_text("bad counter\n")
@@ -53,19 +67,38 @@ class FakeProc(unittest.TestCase):
             setting.parent.mkdir(parents=True)
             setting.write_text("0\n")
             self.assertEqual(probe.kernel_setting(proc)["value"], "0")
-            samples = {"self": {"classification": "advancing"},
-                       "sibling": {"classification": "advancing"}}
+            samples = {"self": {"classification": "advancing",
+                                "deltas": {"runtime_ns": 1, "runqueue_wait_ns": 2,
+                                           "timeslices": 1}},
+                       "sibling": {"classification": "advancing",
+                                   "deltas": {"runtime_ns": 1, "runqueue_wait_ns": 3,
+                                              "timeslices": 1}}}
             self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
                              "SCHEDSTAT_DISABLED")
             setting.write_text("1\n")
             self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
                              "SCHEDSTAT_ADVANCING")
+            samples["sibling"]["deltas"]["runqueue_wait_ns"] = 0
+            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
+                             "SCHEDSTAT_WAIT_UNPROVEN")
+            samples["sibling"]["deltas"]["runqueue_wait_ns"] = 3
             samples["sibling"]["classification"] = "zero"
             self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
                              "SCHEDSTAT_ZERO")
             samples["sibling"]["classification"] = "missing"
             self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
                              "SCHEDSTAT_MISSING")
+
+    def test_timeslice_only_movement_does_not_prove_wait_counter(self):
+        before = {"status": "read", "values": [0, 0, 1]}
+        after = {"status": "read", "values": [0, 0, 2]}
+        row = {"classification": probe.classify(before, after),
+               "deltas": probe.counter_deltas(before, after)}
+        self.assertEqual(row["classification"], "advancing")
+        self.assertEqual(row["deltas"]["runqueue_wait_ns"], 0)
+        self.assertEqual(probe.capability_code({"status": "read", "value": "1"},
+                                               {"self": row, "sibling": row}),
+                         "SCHEDSTAT_WAIT_UNPROVEN")
 
     def test_workflow_is_682_only_with_existing_inventory_upload(self):
         workflow = (REPO / ".github/workflows/alopex-performance.yml").read_text()
@@ -83,8 +116,10 @@ class FakeProc(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             facts = {"setting": {"status": "read", "value": "1"},
-                     "samples": {"self": {"classification": "advancing"},
-                                 "sibling": {"classification": "advancing"}},
+                     "samples": {"self": {"classification": "advancing",
+                                          "deltas": {"runqueue_wait_ns": 0}},
+                                 "sibling": {"classification": "advancing",
+                                             "deltas": {"runqueue_wait_ns": 0}}},
                      "private_identity": "secret-host-id"}
 
             def encrypt(args, **_kwargs):
@@ -101,7 +136,7 @@ class FakeProc(unittest.TestCase):
                     self.assertEqual(probe.main(), 0)
                 public = (root / "native-inventory-export/schedstat-public.json").read_text()
                 self.assertNotIn("secret-host-id", public + output.getvalue())
-                self.assertEqual(json.loads(public)["code"], "SCHEDSTAT_ADVANCING")
+                self.assertEqual(json.loads(public)["code"], "SCHEDSTAT_WAIT_UNPROVEN")
                 self.assertFalse((root / "alopex-682-schedstat.private.json").exists())
                 self.assertTrue((root / "native-inventory-export/schedstat-private-evidence.cms").is_file())
             finally:
