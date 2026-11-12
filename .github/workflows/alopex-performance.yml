@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: false
+      s04_capture_mode:
+        description: Run #804 qualification then capture selected CLI against an offline fake socket
+        required: false
+        type: boolean
+        default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
@@ -37,7 +42,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_inspect_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -58,7 +63,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
+    if: inputs.qualification_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -237,6 +242,34 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Capture selected CLI wire against offline fake socket
+        if: inputs.s04_capture_mode
+        id: s04_capture
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        run: |
+          python3 -B scripts/ops/s04_same_job_capture.py \
+            --private "$RUNNER_TEMP/alopex-804-qualification" --cli /usr/bin/docker
+      - name: Seal offline S04 wire evidence
+        if: always() && inputs.s04_capture_mode && steps.s04_capture.outcome != 'skipped'
+        env:
+          CAPTURE_OUTCOME: ${{ steps.s04_capture.outcome }}
+        run: |
+          python3 -B scripts/ops/s04_capture_seal.py \
+            --private "$RUNNER_TEMP/alopex-804-qualification" \
+            --export native-s04-wire-export --capture-outcome "$CAPTURE_OUTCOME"
+      - name: Upload only encrypted S04 wire and public status
+        if: always() && inputs.s04_capture_mode && steps.s04_capture.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: s04-offline-wire-capture
+          path: |
+            native-s04-wire-export/private-evidence.cms
+            native-s04-wire-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Compare four independent server/client SQL cases
         if: inputs.sql_four_case_mode
         id: matrix
@@ -255,7 +288,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

@@ -99,7 +99,7 @@ def read_request(conn: socket.socket) -> tuple[bytes, list[tuple[str, str]], byt
     return lines[0], headers, body
 
 
-def response(line: bytes) -> tuple[int, bytes]:
+def response(line: bytes, api_version: str = "1.51", server_version: str = "28.0.4") -> tuple[int, bytes]:
     method, raw_path, _ = line.split(b" ", 2)
     path = raw_path.split(b"?", 1)[0]
     if path.startswith(b"/v") and b"/" in path[2:]:
@@ -109,13 +109,16 @@ def response(line: bytes) -> tuple[int, bytes]:
     if method == b"GET" and path == b"/_ping":
         return 200, b"OK"
     if method == b"GET" and path == b"/version":
-        return 200, b'{"ApiVersion":"1.51","MinAPIVersion":"1.41","Version":"28.0.4","Os":"linux","Arch":"amd64"}'
+        return 200, json.dumps({"ApiVersion": api_version, "MinAPIVersion": "1.41",
+                                "Version": server_version, "Os": "linux", "Arch": "amd64"}).encode()
     if method == b"POST" and path == b"/containers/create":
         return 201, b'{"Id":"offline-only-id","Warnings":[]}'
     return 404, b'{"message":"offline fixture: unsupported"}'
 
 
-def serve(sock: Path, records: list, errors: list, ready: threading.Event, stop: threading.Event) -> None:
+def serve(sock: Path, records: list, errors: list, ready: threading.Event,
+          stop: threading.Event, api_version: str = "1.51",
+          server_version: str = "28.0.4") -> None:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             server.bind(str(sock))
@@ -132,11 +135,11 @@ def serve(sock: Path, records: list, errors: list, ready: threading.Event, stop:
                 with client:
                     try:
                         line, headers, body = read_request(client)
-                        code, payload = response(line)
+                        code, payload = response(line, api_version, server_version)
                         records.append({"request_line": line.decode("latin1"), "headers": headers,
                                         "body_hex": body.hex(), "body_bytes": len(body),
                                         "body_sha256": sha256(body), "response_status": code})
-                        client.sendall((f"HTTP/1.1 {code} Offline\r\nContent-Type: application/json\r\n"
+                        client.sendall((f"HTTP/1.1 {code} Offline\r\nAPI-Version: {api_version}\r\nContent-Type: application/json\r\n"
                                         f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n").encode() + payload)
                     except (OSError, PreflightError) as exc:
                         errors.append(exc.args[0] if isinstance(exc, PreflightError) else "SOCKET_ERROR")
@@ -154,7 +157,8 @@ def docker_arguments(profile: dict, run_id: str, token: str, image: str,
 
 def source_contract() -> dict[str, str]:
     root = Path(__file__).resolve().parents[2]
-    paths = ("scripts/test-env/docker_backend.py", "scripts/ops/hosted_test_env_qualification.py")
+    paths = ("scripts/test-env/common.py", "scripts/test-env/docker_backend.py",
+             "scripts/ops/hosted_test_env_qualification.py")
     result = {}
     for relative in paths:
         pinned = subprocess.run(["git", "show", SOURCE_HEAD + ":" + relative],
@@ -175,6 +179,11 @@ def capture(args: argparse.Namespace) -> dict:
     if not cli.is_file():
         raise PreflightError("CLI_IDENTITY")
     profile_hash = sha256(args.profile.read_bytes())
+    api_version = getattr(args, "server_api_version", "1.51")
+    server_version = getattr(args, "server_version", "28.0.4")
+    if not all(part.isdecimal() for part in api_version.split(".")) or \
+            len(api_version.split(".")) != 2 or server_version != "28.0.4":
+        raise PreflightError("SERVER_VERSION")
     records: list = []
     errors: list = []
     old_umask = os.umask(0o077)
@@ -188,7 +197,8 @@ def capture(args: argparse.Namespace) -> dict:
             if len(os.fsencode(sock)) >= 104:
                 raise PreflightError("SOCKET_PATH_LIMIT")
             ready, stop = threading.Event(), threading.Event()
-            thread = threading.Thread(target=serve, args=(sock, records, errors, ready, stop), daemon=True)
+            thread = threading.Thread(target=serve, args=(sock, records, errors, ready, stop,
+                                                         api_version, server_version), daemon=True)
             thread.start()
             if not ready.wait(3) or errors:
                 raise PreflightError("FAKE_SOCKET")
@@ -210,6 +220,8 @@ def capture(args: argparse.Namespace) -> dict:
                 len(creates) == 1 and creates[0]["response_status"] == 201 and \
                 all(r["response_status"] != 404 for r in records) else "CAPTURE_INCOMPLETE"
             return {"source_head": args.source_head, "profile_sha256": profile_hash,
+                    "selected_server_api_version": api_version,
+                    "selected_server_version": server_version,
                     "source_hashes": source_hashes,
                     "cli_path": str(cli), "cli_sha256": sha256(cli.read_bytes()),
                     "command": command, "exit_code": result.returncode,

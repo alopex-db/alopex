@@ -53,7 +53,8 @@ class Parser(unittest.TestCase):
 class PrivacyAndCleanup(unittest.TestCase):
     def test_controller_sources_match_exact_835_head(self):
         hashes = preflight.source_contract()
-        self.assertEqual(set(hashes), {"scripts/test-env/docker_backend.py",
+        self.assertEqual(set(hashes), {"scripts/test-env/common.py",
+                                       "scripts/test-env/docker_backend.py",
                                        "scripts/ops/hosted_test_env_qualification.py"})
 
     def test_private_output_requires_owner_only_directory_and_no_overwrite(self):
