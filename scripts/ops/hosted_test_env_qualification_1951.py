@@ -49,7 +49,7 @@ POLICY_DIGEST = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c7
 CONTROLLER_DIGEST = "51bd5396d5448a53c53fec282856ac6a2e6492180e484dbe9eae0361e6bd2fa3"
 EXPECTED_DOCKER_VERSION = "28.0.4"
 DOCKER_BINARY = Path("/usr/bin/docker")
-PLANNED = {"fetch": 1_000_000_000, "build": 3_000_000_000,
+PLANNED = {"fetch": 1_000_000_000, "build": 5_000_000_000,
            "runtime": 500_000_000, "accept": 1_000_000_000, "collect": 500_000_000}
 CERT = REPO / ".github/ops/native-evidence-cert.pem"
 INPUT = REPO / ".github/ops/qualification"
