@@ -5,7 +5,8 @@
       "allowed_hosts": [
         "apt-archive.postgresql.org",
         "archive.ubuntu.com",
-        "files.pythonhosted.org"
+        "files.pythonhosted.org",
+        "snapshot.ubuntu.com"
       ],
       "files": [
         {
@@ -126,7 +127,7 @@
           "path": "deps/perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb",
           "sha256": "9c4c90145209d4f85be9255417008e8decb9cd5d189f446fd39ad096e31199cf",
           "size": 3110182,
-          "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/perl/perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb"
+          "url": "https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/pool/main/p/perl/perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb"
         },
         {
           "path": "deps/libgdbm6t64_1.23-5.1build1_amd64.deb",
@@ -144,13 +145,13 @@
           "path": "deps/libperl5.38t64_5.38.2-3.2ubuntu0.6_amd64.deb",
           "sha256": "e9e5ac9a657e0cacf5f0de977c1573c696ee74515d5136c4e9a0ce9467d32ae7",
           "size": 4863614,
-          "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.6_amd64.deb"
+          "url": "https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.6_amd64.deb"
         },
         {
           "path": "deps/perl_5.38.2-3.2ubuntu0.6_amd64.deb",
           "sha256": "1a2341674a1c69e3247537ab243dc3d5878b74a39a696964232e1a4f5a27502d",
           "size": 231438,
-          "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/perl/perl_5.38.2-3.2ubuntu0.6_amd64.deb"
+          "url": "https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/pool/main/p/perl/perl_5.38.2-3.2ubuntu0.6_amd64.deb"
         },
         {
           "path": "deps/adduser_3.137ubuntu1_all.deb",
@@ -186,7 +187,7 @@
           "path": "deps/ca-certificates_20260816ubuntu0.24.04.1_all.deb",
           "sha256": "8a0a754aaafed72cc8efb8c1731808133284a84fbfc76a4fcc73fce9e01b4187",
           "size": 138884,
-          "url": "https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.24.04.1_all.deb"
+          "url": "https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.24.04.1_all.deb"
         },
         {
           "path": "deps/libelf1t64_0.190-1.1ubuntu0.1_amd64.deb",
