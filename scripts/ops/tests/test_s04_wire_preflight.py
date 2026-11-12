@@ -51,7 +51,7 @@ class Parser(unittest.TestCase):
 
 
 class PrivacyAndCleanup(unittest.TestCase):
-    def test_controller_sources_match_exact_835_head(self):
+    def test_controller_sources_match_pinned_head(self):
         hashes = preflight.source_contract()
         self.assertEqual(set(hashes), {"scripts/test-env/common.py",
                                        "scripts/test-env/docker_backend.py",
