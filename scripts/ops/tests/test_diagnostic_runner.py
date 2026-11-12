@@ -131,13 +131,19 @@ class DiagnosticRunnerTests(unittest.TestCase):
             library = root / 'libalopex_sql_parser.so'
             library.write_bytes(b'different parser library')
             manifest = root / 'assets.json'
-            manifest.write_bytes(b'{}')
+            manifest.write_text(json.dumps({'files': [
+                {'role': 'wheel', 'size': wheel.stat().st_size, 'sha256': digest(wheel)},
+                {'role': 'library', 'size': library.stat().st_size, 'sha256': digest(library)}]}))
             product = dict(manifest=manifest, files={'wheel': wheel, 'library': library})
             producer = dict(manifest_sha256=digest(manifest), wheel_sha256=digest(wheel),
                             native_sha256=hashlib.sha256(b'native extension').hexdigest())
             helper = types.SimpleNamespace(sha=digest)
             runner.verify_product(product, producer, helper)
             producer['native_sha256'] = hashlib.sha256(b'wrong extension').hexdigest()
+            with self.assertRaisesRegex(RuntimeError, 'product asset changed'):
+                runner.verify_product(product, producer, helper)
+            producer['native_sha256'] = hashlib.sha256(b'native extension').hexdigest()
+            library.write_bytes(b'changed parser library')
             with self.assertRaisesRegex(RuntimeError, 'product asset changed'):
                 runner.verify_product(product, producer, helper)
 

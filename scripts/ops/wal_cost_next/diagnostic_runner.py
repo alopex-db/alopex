@@ -153,8 +153,16 @@ def wheel_native_sha(wheel):
 
 def verify_product(product, producer, helper):
     require(helper.sha(product['manifest']) == producer['manifest_sha256'], 'asset manifest changed')
-    require(all(p.is_file() and not p.is_symlink() for p in product['files'].values()),
-            'asset disappeared')
+    manifest = json.loads(product['manifest'].read_bytes())
+    entries = manifest['files']
+    require(len(entries) == len(product['files']) and
+            {entry['role'] for entry in entries} == set(product['files']),
+            'asset inventory changed')
+    for entry in entries:
+        path = product['files'][entry['role']]
+        require(path.is_file() and not path.is_symlink() and
+                path.stat().st_size == entry['size'] and
+                helper.sha(path) == entry['sha256'], 'product asset changed')
     require(helper.sha(product['files']['wheel']) == producer['wheel_sha256'] and
             wheel_native_sha(product['files']['wheel']) == producer['native_sha256'],
             'product asset changed')
