@@ -79,11 +79,12 @@ impl HnswGraph {
 
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, true, None)
+        self.insert_with_pruning(key, vector, metadata, true, None, None)
     }
 
     /// Inserts a vector while deferring reverse-edge pruning to the bulk owner.
     /// An optional batch-local hint supplements the existing entry without changing ef.
+    #[cfg(test)]
     pub(crate) fn insert_unpruned(
         &mut self,
         key: &[u8],
@@ -91,7 +92,19 @@ impl HnswGraph {
         metadata: &[u8],
         entry_hint: Option<u32>,
     ) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, false, entry_hint)
+        self.insert_with_pruning(key, vector, metadata, false, entry_hint, None)
+    }
+
+    /// Defers pruning and records only reverse edges that exceeded their degree limit.
+    pub(crate) fn insert_unpruned_tracked(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+        entry_hint: Option<u32>,
+        overfull: &mut HashSet<(u32, usize)>,
+    ) -> Result<u32> {
+        self.insert_with_pruning(key, vector, metadata, false, entry_hint, Some(overfull))
     }
 
     fn insert_with_pruning(
@@ -101,6 +114,7 @@ impl HnswGraph {
         metadata: &[u8],
         prune_reverse_edges: bool,
         entry_hint: Option<u32>,
+        mut overfull: Option<&mut HashSet<(u32, usize)>>,
     ) -> Result<u32> {
         self.validate_vector(vector)?;
 
@@ -187,6 +201,17 @@ impl HnswGraph {
             };
             let selected = self.select_neighbors_heuristic(&candidates, max_conn);
             self.connect_new_node(node_id, &selected, l);
+
+            if let Some(overfull) = overfull.as_deref_mut() {
+                for &neighbor_id in &selected {
+                    if self
+                        .node(neighbor_id)
+                        .is_some_and(|neighbor| neighbor.neighbors[l].len() > max_conn)
+                    {
+                        overfull.insert((neighbor_id, l));
+                    }
+                }
+            }
 
             if prune_reverse_edges {
                 // Prune neighbor lists to maintain degree constraints.
@@ -908,6 +933,7 @@ impl HnswGraph {
     }
 
     /// Restores degree limits after a bulk construction chunk.
+    #[cfg(test)]
     pub(crate) fn prune_overfull_neighbors(&mut self) {
         for node_id in 0..self.nodes.len() as u32 {
             let level_count = self
@@ -922,6 +948,23 @@ impl HnswGraph {
                 };
                 self.prune_neighbors(node_id, level, max_degree);
             }
+        }
+    }
+
+    /// Prunes only reverse-edge lists that grew beyond the limit in this chunk.
+    pub(crate) fn prune_tracked_overfull_neighbors(
+        &mut self,
+        overfull: &mut HashSet<(u32, usize)>,
+    ) {
+        let mut pending: Vec<_> = overfull.drain().collect();
+        pending.sort_unstable();
+        for (node_id, level) in pending {
+            let max_degree = if level == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
+            self.prune_neighbors(node_id, level, max_degree);
         }
     }
 

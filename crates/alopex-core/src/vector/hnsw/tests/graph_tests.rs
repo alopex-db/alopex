@@ -1,6 +1,7 @@
 use crate::vector::hnsw::HnswGraph;
 use crate::vector::hnsw::MAX_HNSW_EF_SEARCH;
 use crate::vector::Metric;
+use std::collections::HashSet;
 
 fn base_config() -> crate::vector::hnsw::HnswConfig {
     crate::vector::hnsw::HnswConfig::default()
@@ -12,6 +13,64 @@ fn base_config() -> crate::vector::hnsw::HnswConfig {
 
 fn make_graph() -> HnswGraph {
     HnswGraph::new(base_config()).expect("設定が正しいので初期化に失敗しない")
+}
+
+#[test]
+fn tracked_bulk_pruning_matches_full_scan_at_each_chunk() {
+    let mut full = make_graph();
+    let mut tracked = make_graph();
+    let mut full_hint = None;
+    let mut tracked_hint = None;
+    let mut overfull = HashSet::new();
+    let mut saw_overfull = false;
+
+    for id in 0_u64..128 {
+        let key = id.to_be_bytes();
+        let vector = [((id * 17) % 97) as f32, ((id * 43) % 101) as f32];
+        full_hint = Some(full.insert_unpruned(&key, &vector, &[], full_hint).unwrap());
+        tracked_hint = Some(
+            tracked
+                .insert_unpruned_tracked(&key, &vector, &[], tracked_hint, &mut overfull)
+                .unwrap(),
+        );
+        assert_eq!(full_hint, tracked_hint);
+        saw_overfull |= !overfull.is_empty();
+        if (id + 1) % 16 == 0 {
+            full.prune_overfull_neighbors();
+            tracked.prune_tracked_overfull_neighbors(&mut overfull);
+            assert!(overfull.is_empty());
+            for node_id in 0..full.nodes.len() {
+                let expected = full.nodes[node_id].as_ref().unwrap();
+                let actual = tracked.nodes[node_id].as_ref().unwrap();
+                assert_eq!(actual.neighbors, expected.neighbors, "node {node_id}");
+            }
+        }
+    }
+    assert!(saw_overfull, "fixture must exercise deferred pruning");
+}
+
+#[test]
+fn tracked_bulk_pruning_keeps_base_layer_degree_limit() {
+    let mut graph = HnswGraph::new(base_config().with_dimension(32)).unwrap();
+    let center = graph.insert(b"center", &[0.0; 32], &[]).unwrap();
+    let mut neighbors = Vec::new();
+    for axis in 0_u8..17 {
+        let mut vector = [0.0; 32];
+        vector[axis as usize] = 1.0;
+        neighbors.push(graph.insert(&[axis], &vector, &[]).unwrap());
+    }
+    graph.nodes[center as usize].as_mut().unwrap().neighbors[0] = neighbors;
+    let mut reference = graph.clone();
+    reference.prune_overfull_neighbors();
+
+    let mut overfull = HashSet::from([(center, 0)]);
+    graph.prune_tracked_overfull_neighbors(&mut overfull);
+
+    let actual = &graph.nodes[center as usize].as_ref().unwrap().neighbors[0];
+    let expected = &reference.nodes[center as usize].as_ref().unwrap().neighbors[0];
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), graph.config.m * 2);
+    assert!(overfull.is_empty());
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
