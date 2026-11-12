@@ -179,7 +179,8 @@ class Collection(Fixture):
         atomic_json(destination / "result.json", {"status": "failed", "cases": []})
 
     def inspect(self, item):
-        return {"id": "original", "labels": {"org.alopex.test-env.run": "test",
+        return {"kind": item["kind"], "name": item["name"], "id": "original",
+                "labels": {"org.alopex.test-env.run": "test",
                  "org.alopex.test-env.owner": "envctl",
                  "org.alopex.test-env.token": self.token}, "running": False}
 
@@ -280,7 +281,7 @@ class Collection(Fixture):
         run = self.run_record()
         run.collect(self.copier)
         with self.assertRaises(Failure):
-            run.clean(lambda item: {"id": "original", "labels": {}, "running": False}, self.fail)
+            run.clean(lambda item: dict(self.inspect(item), labels={}), self.fail)
 
     def test_running_container_is_not_deleted(self):
         run = self.run_record()
@@ -293,7 +294,7 @@ class Collection(Fixture):
         run.collect(self.copier)
         run.collect(lambda path: self.fail("must not recopy"))
         calls = []
-        run.clean(self.inspect, calls.append)
+        run.clean(lambda item: None if calls else self.inspect(item), calls.append)
         run.clean(lambda item: self.fail("already cleaned"), calls.append)
         self.assertEqual(len(calls), 1)
 

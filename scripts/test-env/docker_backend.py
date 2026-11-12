@@ -17,7 +17,11 @@ class Docker:
         self.prefix = ["docker", "--context", profile["docker_context"]]
 
     def call(self, *args, missing=False):
-        result = subprocess.run([*self.prefix, *args], capture_output=True, text=True, timeout=30)
+        try:
+            # Reaping the CLI does not establish settlement in the daemon.
+            result = subprocess.run([*self.prefix, *args], capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired as error:
+            raise Failure("TIMEOUT", "docker CLI timed out") from error
         if result.returncode:
             if missing and ("No such container:" in result.stderr or
                             "no such volume" in result.stderr.lower()):
@@ -32,9 +36,11 @@ class Docker:
         live = json.loads(raw)[0]
         if item["kind"] == "volume":
             # Volume API has no immutable ID; CreatedAt prevents name reuse.
-            return {"id": live["Name"] + "@" + live["CreatedAt"],
+            return {"kind": "volume", "name": live["Name"],
+                    "id": live["Name"] + "@" + live["CreatedAt"],
                     "labels": live.get("Labels") or {}, "running": False}
-        return {"id": live["Id"], "labels": live["Config"].get("Labels") or {},
+        return {"kind": "container", "name": live["Name"].lstrip("/"),
+                "id": live["Id"], "labels": live["Config"].get("Labels") or {},
                 "running": live["State"]["Running"]}
 
     def remove(self, item):
