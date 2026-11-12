@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "schedstat_capability_probe.py"
@@ -100,6 +100,74 @@ class FakeProc(unittest.TestCase):
                                                {"self": row, "sibling": row}),
                          "SCHEDSTAT_WAIT_UNPROVEN")
 
+    def test_affinity_is_pinned_before_child_and_restored_after_sample(self):
+        child = Mock(pid=123)
+        samples = {"self": {"classification": "advancing",
+                            "deltas": {"runqueue_wait_ns": 1}},
+                   "sibling": {"classification": "advancing",
+                               "deltas": {"runqueue_wait_ns": 2}}}
+        events = []
+
+        def set_affinity(pid, cpus):
+            events.append(("affinity", pid, set(cpus)))
+
+        def launch(*_args, **_kwargs):
+            events.append(("child",))
+            return child
+
+        with patch.object(probe.os, "sched_getaffinity", return_value={3, 4}, create=True), \
+             patch.object(probe.os, "sched_setaffinity", side_effect=set_affinity,
+                          create=True), \
+             patch.object(probe.subprocess, "Popen", side_effect=launch), \
+             patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}), \
+             patch.object(probe, "sample", return_value=samples):
+            facts = probe.collect(Path("/unused"))
+        self.assertEqual(facts["affinity"], "pinned")
+        self.assertEqual(events, [("affinity", 0, {3}), ("child",),
+                                  ("affinity", 0, {3, 4})])
+        child.terminate.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=0.5)
+
+    def test_affinity_restored_and_child_reaped_when_sample_fails(self):
+        child = Mock(pid=123)
+        with patch.object(probe.os, "sched_getaffinity", return_value={2, 5}, create=True), \
+             patch.object(probe.os, "sched_setaffinity", create=True) as setter, \
+             patch.object(probe.subprocess, "Popen", return_value=child), \
+             patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}), \
+             patch.object(probe, "sample", side_effect=RuntimeError("fake sample failure")):
+            with self.assertRaisesRegex(RuntimeError, "fake sample failure"):
+                probe.collect(Path("/unused"))
+        self.assertEqual(setter.call_args_list, [call(0, {2}), call(0, {2, 5})])
+        child.terminate.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=0.5)
+
+    def test_unavailable_affinity_is_inconclusive_without_child(self):
+        with patch.object(probe.os, "sched_getaffinity", side_effect=OSError(1, "denied"),
+                          create=True), \
+             patch.object(probe.os, "sched_setaffinity", create=True) as setter, \
+             patch.object(probe.subprocess, "Popen") as launch, \
+             patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}):
+            facts = probe.collect(Path("/unused"))
+        self.assertEqual(facts["affinity"], "unavailable")
+        self.assertEqual(probe.capability_code(facts["setting"], facts["samples"],
+                                               facts["affinity"]),
+                         "SCHEDSTAT_AFFINITY_UNAVAILABLE")
+        setter.assert_not_called()
+        launch.assert_not_called()
+
+        with patch.object(probe.os, "sched_getaffinity", return_value={2, 5}, create=True), \
+             patch.object(probe.os, "sched_setaffinity", side_effect=OSError(1, "denied"),
+                          create=True) as setter, \
+             patch.object(probe.subprocess, "Popen") as launch, \
+             patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}):
+            facts = probe.collect(Path("/unused"))
+        self.assertEqual(facts["affinity"], "unavailable")
+        self.assertEqual(probe.capability_code(facts["setting"], facts["samples"],
+                                               facts["affinity"]),
+                         "SCHEDSTAT_AFFINITY_UNAVAILABLE")
+        setter.assert_called_once_with(0, {2})
+        launch.assert_not_called()
+
     def test_workflow_is_682_only_with_existing_inventory_upload(self):
         workflow = (REPO / ".github/workflows/alopex-performance.yml").read_text()
         inventory = workflow.split("  inventory:\n", 1)[1].split("  qualification:\n", 1)[0]
@@ -116,6 +184,7 @@ class FakeProc(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             facts = {"setting": {"status": "read", "value": "1"},
+                     "affinity": "pinned",
                      "samples": {"self": {"classification": "advancing",
                                           "deltas": {"runqueue_wait_ns": 0}},
                                  "sibling": {"classification": "advancing",

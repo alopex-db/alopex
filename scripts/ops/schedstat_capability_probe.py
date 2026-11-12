@@ -11,7 +11,8 @@ import time
 
 PUBLIC_CODES = {"SCHEDSTAT_ADVANCING", "SCHEDSTAT_ZERO", "SCHEDSTAT_MISSING",
                 "SCHEDSTAT_STATIC", "SCHEDSTAT_UNREADABLE", "SCHEDSTAT_DISABLED",
-                "SCHEDSTAT_WAIT_UNPROVEN", "PROBE_FAILED"}
+                "SCHEDSTAT_WAIT_UNPROVEN", "SCHEDSTAT_AFFINITY_UNAVAILABLE",
+                "PROBE_FAILED"}
 
 
 def read_schedstat(path: Path) -> dict:
@@ -65,7 +66,9 @@ def sample(proc: Path, sibling_pid: int, advance) -> dict:
             for name in paths}
 
 
-def capability_code(setting: dict, samples: dict) -> str:
+def capability_code(setting: dict, samples: dict, affinity: str = "pinned") -> str:
+    if affinity != "pinned":
+        return "SCHEDSTAT_AFFINITY_UNAVAILABLE"
     states = {item["classification"] for item in samples.values()}
     if "missing" in states or setting["status"] == "missing":
         return "SCHEDSTAT_MISSING"
@@ -98,25 +101,49 @@ def kernel_setting(proc: Path) -> dict:
 
 
 def collect(proc: Path = Path("/proc")) -> dict:
-    child = subprocess.Popen(
-        [sys.executable, "-B", "-c",
-         "import time; end=time.monotonic()+1.0\nwhile time.monotonic()<end: pass"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    facts = {"schema": "alopex.schedstat-capability/v1", "qualification": "not_assessed",
+             "setting": kernel_setting(proc), "samples": {}, "affinity": "unavailable"}
+    getter = getattr(os, "sched_getaffinity", None)
+    setter = getattr(os, "sched_setaffinity", None)
+    if not callable(getter) or not callable(setter):
+        return facts
     try:
+        previous = getter(0)
+        if not previous:
+            return facts
+    except OSError:
+        return facts
+    selected = min(previous)
+    try:
+        setter(0, {selected})
+    except OSError:
+        return facts
+    child = None
+    try:
+        child = subprocess.Popen(
+            [sys.executable, "-B", "-c",
+             "import time; end=time.monotonic()+0.8\nwhile time.monotonic()<end: pass"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         def advance():
             end = time.monotonic() + 0.2
             while time.monotonic() < end:
                 pass
 
-        return {"schema": "alopex.schedstat-capability/v1", "qualification": "not_assessed",
-                "setting": kernel_setting(proc), "samples": sample(proc, child.pid, advance)}
+        facts["affinity"] = "pinned"
+        facts["samples"] = sample(proc, child.pid, advance)
+        return facts
     finally:
-        child.terminate()
         try:
-            child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait(timeout=2)
+            if child is not None:
+                child.terminate()
+                try:
+                    child.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=0.5)
+        finally:
+            setter(0, previous)
 
 
 def main() -> int:
@@ -128,7 +155,7 @@ def main() -> int:
             raise ValueError("wrong issue")
         private = Path(os.environ["RUNNER_TEMP"]) / "alopex-682-schedstat.private.json"
         facts = collect()
-        code = capability_code(facts["setting"], facts["samples"])
+        code = capability_code(facts["setting"], facts["samples"], facts["affinity"])
         private.write_text(json.dumps(facts, sort_keys=True) + "\n")
         private.chmod(0o600)
         export.mkdir(mode=0o700, exist_ok=True)
