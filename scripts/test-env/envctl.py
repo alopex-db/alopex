@@ -16,6 +16,7 @@ import urllib.request
 import contextlib
 import hashlib
 import time
+import traceback
 
 from capacity import Budget
 from common import (ERRORS, Failure, atomic_json, contained, digest, load_profile,
@@ -25,6 +26,15 @@ from docker_backend import Docker, OWNER
 from lifecycle import Run
 
 HERE = Path(__file__).resolve().parent
+
+
+def fixed_error_site(error):
+    """Private source location without exception text or runner paths."""
+    for frame in reversed(traceback.extract_tb(error.__traceback__)):
+        source = Path(frame.filename)
+        if source.is_relative_to(HERE) and source.name != "common.py":
+            return {"module": source.name, "function": frame.name, "line": frame.lineno}
+    return None
 
 
 class PrivateParser(argparse.ArgumentParser):
@@ -490,6 +500,7 @@ def main(argv=None):
                 atomic_json(output / "last-error.json", {
                     "error_code": code,
                     "detail": error.detail if isinstance(error, Failure) else repr(error),
+                    "error_site": fixed_error_site(error),
                     "cleanup_errors": getattr(error, "cleanup_errors", []),
                 })
             except BaseException:
