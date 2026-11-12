@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 
@@ -85,6 +86,42 @@ class DiagnosticSealTests(unittest.TestCase):
                 public = sealer.seal(*args)
             self.assertEqual(public['error_code'], 'EVIDENCE_FAILURE')
             self.assertFalse((args[4] / 'private-evidence.cms').exists())
+
+    def test_early_runner_failure_is_sealed_and_raw_receipt_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.fixture(Path(directory))
+            (args[3] / 'result.json').unlink()
+            (args[3] / 'private-evidence.cms').unlink()
+            failure = args[2] / 'diagnostic-failure.private.json'
+            failure.write_text(json.dumps({'phase': 'preflight', 'original_error':
+                                           {'error': 'private preflight detail'}}))
+            archived = []
+            def encrypt(command, **kwargs):
+                with tarfile.open(command[command.index('-in') + 1]) as bundle:
+                    archived.extend((member.name, bundle.extractfile(member).read())
+                                    for member in bundle.getmembers())
+                Path(command[command.index('-out') + 1]).write_bytes(b'encrypted wrapper')
+            with mock.patch.object(sealer.subprocess, 'run', side_effect=encrypt):
+                public = sealer.seal(*args)
+            self.assertEqual(public['error_code'], 'DIAGNOSTIC_FAILURE')
+            self.assertTrue(any(name.endswith('diagnostic-failure.private.json') and
+                                b'private preflight detail' in data for name, data in archived))
+            self.assertFalse(failure.exists())
+            self.assertNotIn('private preflight detail', (args[4] / 'public.json').read_text())
+
+    def test_runner_evidence_failure_is_sealed_without_raw_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.fixture(Path(directory))
+            (args[3] / 'result.json').unlink()
+            (args[3] / 'private-evidence.cms').unlink()
+            failure = args[2] / 'diagnostic-failure.private.json'
+            failure.write_text(json.dumps({'phase': 'diagnostic_evidence_seal',
+                                           'cleanup_error': {'error': 'private seal detail'}}))
+            public = self.seal(args)
+            self.assertEqual(public['error_code'], 'DIAGNOSTIC_FAILURE')
+            self.assertTrue((args[4] / 'private-evidence.cms').is_file())
+            self.assertFalse(failure.exists())
+            self.assertFalse((args[4] / 'diagnostic-wrapper-evidence.tar.gz').exists())
 
 
 if __name__ == '__main__':

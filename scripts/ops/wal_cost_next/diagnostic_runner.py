@@ -28,6 +28,7 @@ PEAK_ADDITIONAL_BYTES = 1_000_000_000
 EVIDENCE_LIMIT = 16_000_000
 DIAGNOSTIC_FILES = ('diagnostic_runner.py', 'diagnostic_worker.py',
                     'diagnostic_commit_observer.py', 'schedstat_observer.py')
+FAILURE_RECEIPT = 'diagnostic-failure.private.json'
 
 
 def require(condition, message):
@@ -62,6 +63,35 @@ def discard_unsealed(work, export):
     encrypted = export / 'private-evidence.cms'
     if encrypted.exists() or encrypted.is_symlink():
         encrypted.unlink()
+
+
+def failure_detail(error):
+    return dict(type=type(error).__name__[:128], error=repr(error)[:4096])
+
+
+def write_failure_receipt(args, state):
+    """Keep a bounded private failure record outside deletable diagnostic work."""
+    root = args.private_root
+    if not root.is_dir() or root.is_symlink() or root.stat().st_mode & 0o077:
+        return
+    path = root / FAILURE_RECEIPT
+    if path.exists() or path.is_symlink():
+        return
+    payload = dict(schema='alopex.wal-diagnostic-failure/v1',
+                   phase=state['failure_phase'] or state['phase'],
+                   original_error=state['original_error'],
+                   cleanup_error=state['cleanup_error'])
+    temporary = root / (FAILURE_RECEIPT + '.tmp')
+    if temporary.exists() or temporary.is_symlink():
+        return
+    try:
+        with temporary.open('x', encoding='utf-8') as output:
+            temporary.chmod(0o600)
+            json.dump(payload, output, sort_keys=True)
+            output.write('\n')
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def verify_inputs(args):
@@ -217,9 +247,14 @@ def seal_evidence(work, export, certificate, helper):
     return helper.sha(archive), helper.sha(encrypted)
 
 
-def run(args):
+def run(args, state=None):
+    if state is None:
+        state = dict(phase='preflight', failure_phase=None,
+                     original_error=None, cleanup_error=None)
     config, early_storage = verify_inputs(args)
+    state['phase'] = 'same_job_qualification'
     storage = verify_same_job(args, early_storage)
+    state['phase'] = 'runtime_preparation'
     helper = load_frozen(args.frozen_checkout)
     os.umask(0o077)
     allowed = sorted(os.sched_getaffinity(0))
@@ -253,7 +288,9 @@ def run(args):
     status = 'inconclusive'
     error_code = None
     try:
+        state['phase'] = 'schedstat_capability'
         verify_schedstat_capability(work, helper)
+        state['phase'] = 'product_preparation'
         budget.before('prepare')
         products = {name: helper.install_product(name, config['products'][name], work, budget, env)
                     for name in ('before', 'candidate')}
@@ -273,6 +310,7 @@ def run(args):
             path = work / 'identities' / name / 'subject.json'
             helper.atomic_json(path, subject)
             product['subject'] = path
+        state['phase'] = 'measurement'
         budget.before('measure')
         for name in ('before', 'candidate'):
             product = products[name]
@@ -314,22 +352,30 @@ def run(args):
         status = 'observed'
     except BaseException as error:
         error_code = 'DIAGNOSTIC_FAILED'
+        state['failure_phase'] = state['phase']
+        state['original_error'] = failure_detail(error)
         helper.atomic_json(work / 'failure.private.json',
-                           dict(error=repr(error)[:4096], type=type(error).__name__))
+                           state['original_error'])
     finally:
         try:
+            state['phase'] = 'owned_cleanup'
             cleanup_owned(work)
             require(budget.check() < MAX_BYTES, 'host storage ceiling exceeded')
+            state['phase'] = 'diagnostic_evidence_seal'
             evidence_sha, encrypted_sha = seal_evidence(work, args.export_root,
                 args.frozen_checkout / '.github/ops/native-evidence-cert.pem', helper)
             shutil.rmtree(work)
             budget.check()
+            state['phase'] = 'result_receipt'
             helper.atomic_json(args.export_root / 'result.json',
                 dict(schema='alopex.wal-diagnostic/v1', case='WAL_COST_682',
                      outcome=status, error_code=error_code, shape=f'{args.surface}-{args.value_bytes}',
                      complete_subjects=complete, evidence_sha256=evidence_sha,
                      encrypted_sha256=encrypted_sha, performance_acceptance=False))
-        except BaseException:
+        except BaseException as error:
+            if state['failure_phase'] is None:
+                state['failure_phase'] = state['phase']
+            state['cleanup_error'] = failure_detail(error)
             # The workflow uploads only export_root. Remove any raw or partial
             # encrypted output before returning its fixed failure code.
             try:
@@ -354,9 +400,22 @@ def main():
     parser.add_argument('--private-root', type=Path, required=True)
     parser.add_argument('--export-root', type=Path, required=True)
     args = parser.parse_args()
+    state = dict(phase='preflight', failure_phase=None,
+                 original_error=None, cleanup_error=None)
     try:
-        return run(args)
-    except BaseException:
+        result = run(args, state)
+        if result:
+            write_failure_receipt(args, state)
+        return result
+    except BaseException as error:
+        if state['original_error'] is None and state['cleanup_error'] is None:
+            state['original_error'] = failure_detail(error)
+        if state['failure_phase'] is None:
+            state['failure_phase'] = state['phase']
+        try:
+            write_failure_receipt(args, state)
+        except BaseException:
+            pass
         print(json.dumps(dict(case='WAL_COST_682', outcome='failed',
                               error_code='DIAGNOSTIC_FAILURE', performance_acceptance=False)))
         return 1

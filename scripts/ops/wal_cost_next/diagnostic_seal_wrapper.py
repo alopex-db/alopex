@@ -23,7 +23,9 @@ def seal(qualification, private, diagnostic_private, diagnostic_export, output):
     log = private / 'diagnostic.stdout.private.log'
     result = diagnostic_export / 'result.json'
     encrypted_result = diagnostic_export / 'private-evidence.cms'
-    evidence = [path for path in (receipt, log, result, encrypted_result) if path.is_file()]
+    failure = diagnostic_private / 'diagnostic-failure.private.json'
+    evidence = [path for path in (receipt, log, result, encrypted_result, failure)
+                if path.is_file() or path.is_symlink()]
     try:
         if any(path.is_symlink() for path in evidence):
             raise ValueError('linked evidence')
@@ -44,6 +46,7 @@ def seal(qualification, private, diagnostic_private, diagnostic_export, output):
                            diagnostic.get('complete_subjects') == 2 and
                            diagnostic.get('performance_acceptance') is False and
                            diagnostic.get('encrypted_sha256') == digest(encrypted_result) and
+                           not failure.exists() and not failure.is_symlink() and
                            not (diagnostic_private / 'diagnostic').exists() and
                            not (diagnostic_private / 'diagnostic').is_symlink())
                 public['outcome'] = 'observed' if success else 'failed'
@@ -85,6 +88,7 @@ def seal(qualification, private, diagnostic_private, diagnostic_export, output):
             archive.unlink(missing_ok=True)
             receipt.unlink(missing_ok=True)
             log.unlink(missing_ok=True)
+            failure.unlink(missing_ok=True)
     (output / 'public.json').write_text(json.dumps(public, sort_keys=True) + '\n')
     return public
 

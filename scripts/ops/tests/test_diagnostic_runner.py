@@ -252,6 +252,66 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertFalse(work.exists())
             self.assertFalse((export / 'private-evidence.cms').exists())
 
+    def test_preflight_failure_writes_private_phase_without_public_detail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.fixture(Path(directory))
+            argv = ['diagnostic_runner.py']
+            for name, value in vars(args).items():
+                if name == 'qualification_checkout':
+                    continue
+                argv.extend(('--' + name.replace('_', '-'), str(value)))
+            argv.extend(('--qualification-checkout', str(args.qualification_checkout)))
+            with mock.patch.object(sys, 'argv', argv), \
+                 mock.patch.object(runner, 'verify_inputs',
+                                   side_effect=RuntimeError('private preflight detail')):
+                from io import StringIO
+                with mock.patch('sys.stdout', new_callable=StringIO) as output:
+                    self.assertEqual(runner.main(), 1)
+            public = json.loads(output.getvalue())
+            self.assertEqual(public['error_code'], 'DIAGNOSTIC_FAILURE')
+            self.assertNotIn('private preflight detail', output.getvalue())
+            receipt = json.loads((args.private_root / runner.FAILURE_RECEIPT).read_text())
+            self.assertEqual(receipt['phase'], 'preflight')
+            self.assertIn('private preflight detail', receipt['original_error']['error'])
+
+    def test_evidence_failure_retains_original_and_cleanup_error_outside_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.fixture(Path(directory))
+            state = dict(phase='preflight', failure_phase=None,
+                         original_error=None, cleanup_error=None)
+            class Budget:
+                def __init__(self, *_):
+                    pass
+                def used(self):
+                    return 0
+                def before(self, *_):
+                    pass
+                def check(self):
+                    return 0
+            def atomic_json(path, value):
+                path.write_text(json.dumps(value))
+            helper = types.SimpleNamespace(Budget=Budget, atomic_json=atomic_json)
+            with mock.patch.object(runner, 'verify_inputs',
+                                   return_value=({'products': {}}, {'roots': [directory]})), \
+                 mock.patch.object(runner, 'verify_same_job',
+                                   return_value={'roots': [directory]}), \
+                 mock.patch.object(runner, 'load_frozen', return_value=helper), \
+                 mock.patch.object(runner.os, 'umask'), \
+                 mock.patch.object(runner.os, 'sched_getaffinity', return_value={0, 1},
+                                   create=True), \
+                 mock.patch.object(runner, 'verify_schedstat_capability',
+                                   side_effect=RuntimeError('private capability detail')), \
+                 mock.patch.object(runner, 'seal_evidence',
+                                   side_effect=RuntimeError('private seal detail')):
+                with self.assertRaisesRegex(RuntimeError, 'DIAGNOSTIC_EVIDENCE_FAILURE'):
+                    runner.run(args, state)
+            runner.write_failure_receipt(args, state)
+            receipt = json.loads((args.private_root / runner.FAILURE_RECEIPT).read_text())
+            self.assertEqual(receipt['phase'], 'schedstat_capability')
+            self.assertIn('private capability detail', receipt['original_error']['error'])
+            self.assertIn('private seal detail', receipt['cleanup_error']['error'])
+            self.assertFalse((args.private_root / 'diagnostic').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
