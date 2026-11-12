@@ -24,10 +24,16 @@ def snapshot(root=Path("/proc/self/task"), *, clock=time.monotonic_ns):
                   if entry.name.isascii() and entry.name.isdecimal())
     if not tids or len(set(tids)) != len(tids):
         raise RuntimeError("invalid task inventory")
-    records = {str(tid): parse_schedstat((root / str(tid) / "schedstat").read_text())
-               for tid in tids}
+    records = {}
+    vanished = []
+    for tid in tids:
+        try:
+            records[str(tid)] = parse_schedstat((root / str(tid) / "schedstat").read_text())
+        except FileNotFoundError:
+            vanished.append(str(tid))
     end_ns = clock()
-    return {"start_ns": start_ns, "end_ns": end_ns, "tasks": records}
+    return {"start_ns": start_ns, "end_ns": end_ns,
+            "tasks": records, "vanished_tids": vanished}
 
 
 def observe(action, measure, *, take_snapshot=snapshot):
@@ -39,7 +45,8 @@ def observe(action, measure, *, take_snapshot=snapshot):
     if before["end_ns"] > after["start_ns"]:
         raise RuntimeError("observer brackets overlap")
     before_tasks, after_tasks = before["tasks"], after["tasks"]
-    stable = before_tasks.keys() == after_tasks.keys()
+    stable = (before_tasks.keys() == after_tasks.keys() and
+              not before.get("vanished_tids") and not after.get("vanished_tids"))
     deltas = {}
     for tid in before_tasks.keys() & after_tasks.keys():
         values = tuple(end - start for start, end in zip(before_tasks[tid], after_tasks[tid]))

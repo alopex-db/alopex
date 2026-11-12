@@ -24,6 +24,17 @@ class SchedstatObserverTests(unittest.TestCase):
             self.assertEqual(got["tasks"]["12"], (1, 2, 3))
             self.assertEqual((got["start_ns"], got["end_ns"]), (10, 20))
 
+    def test_vanished_task_is_recorded_without_aborting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = root / "4"
+            live.mkdir()
+            (live / "schedstat").write_text("5 6 7\n")
+            (root / "12").mkdir()  # Its schedstat vanishes after task enumeration.
+            got = snapshot(root, clock=iter((10, 20)).__next__)
+            self.assertEqual(got["tasks"], {"4": (5, 6, 7)})
+            self.assertEqual(got["vanished_tids"], ["12"])
+
     def test_original_measure_is_bracketed_and_stable_threads_sum(self):
         events = []
         states = iter((
@@ -49,6 +60,18 @@ class SchedstatObserverTests(unittest.TestCase):
         states = iter((
             {"start_ns": 1, "end_ns": 2, "tasks": {"1": (1, 2, 3)}},
             {"start_ns": 4, "end_ns": 5, "tasks": {"1": (2, 3, 4), "2": (1, 1, 1)}},
+        ))
+        _, record = observe(lambda: None, lambda action: (action(), 1),
+                            take_snapshot=lambda: next(states))
+        self.assertFalse(record["task_set_stable"])
+        self.assertIsNone(record["matched_task_totals"])
+
+    def test_vanished_task_suppresses_matched_total(self):
+        states = iter((
+            {"start_ns": 1, "end_ns": 2, "tasks": {"1": (1, 2, 3)},
+             "vanished_tids": ["2"]},
+            {"start_ns": 4, "end_ns": 5, "tasks": {"1": (2, 3, 4)},
+             "vanished_tids": []},
         ))
         _, record = observe(lambda: None, lambda action: (action(), 1),
                             take_snapshot=lambda: next(states))
