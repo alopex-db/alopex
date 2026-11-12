@@ -26,6 +26,11 @@ MAX_CONNECTIONS = 8
 MAX_SECONDS = 45
 MAX_OUTPUT = 1_048_576
 SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
+SOURCE_HASHES = {
+    "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
+    "scripts/test-env/docker_backend.py": "4f16cc16e8e4d620f568b53dbb8ced965cdee2ea7476978a464d4fe4579c712e",
+    "scripts/ops/hosted_test_env_qualification.py": "8862f67b4a0f94743eadd6bbe103eb468b85bc935d2a3d7b38f38d8686767817",
+}
 
 
 class PreflightError(Exception):
@@ -157,16 +162,12 @@ def docker_arguments(profile: dict, run_id: str, token: str, image: str,
 
 def source_contract() -> dict[str, str]:
     root = Path(__file__).resolve().parents[2]
-    paths = ("scripts/test-env/common.py", "scripts/test-env/docker_backend.py",
-             "scripts/ops/hosted_test_env_qualification.py")
     result = {}
-    for relative in paths:
-        pinned = subprocess.run(["git", "show", SOURCE_HEAD + ":" + relative],
-                                cwd=root, capture_output=True, check=False, timeout=10)
-        current = (root / relative).read_bytes()
-        if pinned.returncode or pinned.stdout != current:
+    for relative, expected in SOURCE_HASHES.items():
+        current = sha256((root / relative).read_bytes())
+        if current != expected:
             raise PreflightError("SOURCE_MISMATCH")
-        result[relative] = sha256(current)
+        result[relative] = current
     return result
 
 

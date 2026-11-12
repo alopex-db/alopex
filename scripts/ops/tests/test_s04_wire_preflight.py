@@ -53,9 +53,17 @@ class Parser(unittest.TestCase):
 class PrivacyAndCleanup(unittest.TestCase):
     def test_controller_sources_match_pinned_head(self):
         hashes = preflight.source_contract()
-        self.assertEqual(set(hashes), {"scripts/test-env/common.py",
-                                       "scripts/test-env/docker_backend.py",
-                                       "scripts/ops/hosted_test_env_qualification.py"})
+        self.assertEqual(hashes, preflight.SOURCE_HASHES)
+
+    def test_controller_source_mismatch_fails_closed(self):
+        path = "scripts/test-env/common.py"
+        original = preflight.SOURCE_HASHES[path]
+        try:
+            preflight.SOURCE_HASHES[path] = "0" * 64
+            with self.assertRaisesRegex(preflight.PreflightError, "SOURCE_MISMATCH"):
+                preflight.source_contract()
+        finally:
+            preflight.SOURCE_HASHES[path] = original
 
     def test_private_output_requires_owner_only_directory_and_no_overwrite(self):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
