@@ -138,6 +138,21 @@ def load_frozen(frozen):
     return module
 
 
+def verify_schedstat_capability(work, helper, probe=None):
+    if probe is None:
+        source = Path(__file__).resolve().parents[1] / 'schedstat_capability_probe.py'
+        require(source.is_file() and not source.is_symlink(),
+                'same-job schedstat probe missing')
+        spec = importlib.util.spec_from_file_location('same_job_schedstat_probe', source)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+    facts = probe.collect()
+    code = probe.capability_code(facts['samples'], facts['affinity'])
+    helper.atomic_json(work / 'schedstat-capability.private.json',
+                       dict(schema='alopex.682-schedstat-same-job/v1', code=code, facts=facts))
+    require(code == 'SCHEDSTAT_ADVANCING', 'same-job schedstat wait unproven')
+
+
 def wheel_native_sha(wheel):
     with zipfile.ZipFile(wheel) as archive:
         matches = [entry for entry in archive.infolist()
@@ -238,6 +253,7 @@ def run(args):
     status = 'inconclusive'
     error_code = None
     try:
+        verify_schedstat_capability(work, helper)
         budget.before('prepare')
         products = {name: helper.install_product(name, config['products'][name], work, budget, env)
                     for name in ('before', 'candidate')}

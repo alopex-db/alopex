@@ -122,6 +122,21 @@ class DiagnosticRunnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'qualification failed'):
                     runner.verify_same_job(args, storage)
 
+    def test_same_job_schedstat_wait_must_advance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def atomic_json(path, value):
+                path.write_text(json.dumps(value))
+            helper = types.SimpleNamespace(atomic_json=atomic_json)
+            advancing = types.SimpleNamespace(collect=lambda: {'samples': {}, 'affinity': 'pinned'},
+                                              capability_code=lambda *_: 'SCHEDSTAT_ADVANCING')
+            runner.verify_schedstat_capability(root, helper, advancing)
+            saved = json.loads((root / 'schedstat-capability.private.json').read_text())
+            self.assertEqual(saved['code'], 'SCHEDSTAT_ADVANCING')
+            advancing.capability_code = lambda *_: 'SCHEDSTAT_WAIT_UNPROVEN'
+            with self.assertRaisesRegex(RuntimeError, 'same-job schedstat wait unproven'):
+                runner.verify_schedstat_capability(root, helper, advancing)
+
     def test_product_checks_native_extension_in_wheel(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
