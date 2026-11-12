@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import traceback
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "scripts/test-env"))
 
-from common import Failure, atomic_json, contained, digest, load_profile, private_dir, require, verify_assets  # noqa: E402
+from common import ERRORS, Failure, atomic_json, contained, digest, load_profile, private_dir, require, verify_assets  # noqa: E402
 from capacity import Budget  # noqa: E402
 from lifecycle import Run  # noqa: E402
 import envctl  # noqa: E402
@@ -207,6 +208,15 @@ def seal_failure(root):
         raise
 
 
+def fixed_error_site(error):
+    """Return only source basename/function/line; never a path or exception text."""
+    for frame in reversed(traceback.extract_tb(error.__traceback__)):
+        source = Path(frame.filename)
+        if source.is_relative_to(REPO / "scripts") and source.name not in ("common.py", "orchestrate.py"):
+            return {"module": source.name, "function": frame.name, "line": frame.lineno}
+    return None
+
+
 def main():
     os.umask(0o077)
     try:
@@ -220,13 +230,15 @@ def main():
         try:
             root = Path(os.environ["RUNNER_TEMP"]) / "alopex-712-diagnostic"
             if root.is_dir() and not root.is_symlink() and root.stat().st_mode & 0o077 == 0:
-                allowed = {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
+                allowed = set(ERRORS) | {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
                            "IDENTITY", "OPERATOR_IDENTITY", "CAPACITY", "CLEANUP",
-                           "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION"}
+                           "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION",
+                           "QUALIFICATION_BINDING", "SOURCE_IDENTITY"}
                 code = str(error) if type(error) in (ValueError, Failure) and str(error) in allowed else "INTERNAL"
                 atomic_json(root / "diagnostic-failure.private.json",
                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
-                             "error_code": code, "performance_qualification": False})
+                             "error_code": code, "error_site": fixed_error_site(error),
+                             "performance_qualification": False})
                 seal_failure(root)
         except BaseException:
             pass

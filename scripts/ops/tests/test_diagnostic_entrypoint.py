@@ -111,6 +111,18 @@ class EntrypointTests(unittest.TestCase):
             self.assertGreater(evidence.stat().st_size, 0)
             self.assertEqual({path.name for path in evidence.parent.iterdir()}, {"evidence.cms"})
 
+    def test_known_measurement_failure_is_sealed_as_fixed_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "alopex-712-diagnostic"
+            root.mkdir(mode=0o700)
+            with patch.dict("os.environ", {"RUNNER_TEMP": directory}), \
+                 patch.object(lane, "execute_diagnostic", side_effect=lane.Failure("MEASUREMENT")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(lane.main(), 1)
+            record = json.loads((root / "diagnostic-failure.private.json").read_text())
+            self.assertEqual(record["error_code"], "MEASUREMENT")
+            self.assertTrue((root / "export/evidence.cms").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
