@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from scripts.ops.wal_cost_next import diagnostic_same_job_wrapper as wrapper
+from scripts.ops.wal_cost_next import diagnostic_runner as runner
 
 
 class FakeBudget:
@@ -45,6 +46,20 @@ class FakeChild:
 
 
 class DiagnosticSameJobWrapperTests(unittest.TestCase):
+    def test_wrapper_command_parses_at_diagnostic_runner_boundary(self):
+        root = Path('/example')
+        args = types.SimpleNamespace(qualification_checkout=root / 'current',
+                                     frozen_checkout=root / 'frozen', config=root / 'config.json',
+                                     diagnostic_sources=root / 'sources.json',
+                                     surface='kv', value_bytes=16)
+        command = wrapper.diagnostic_command(args, root / 'private', root / 'public.json',
+                                             root / 'diagnostic-private', root / 'export')
+        with mock.patch.object(runner.sys, 'argv', command[2:]), \
+             mock.patch.object(runner, 'run', return_value=0) as execute:
+            self.assertEqual(runner.main(), 0)
+        self.assertEqual(execute.call_args.args[0].qualification_checkout,
+                         args.qualification_checkout)
+
     def context(self, root, child, budget=FakeBudget):
         private = root / 'private'
         private.mkdir(mode=0o700)

@@ -128,6 +128,19 @@ def supervise_diagnostic(command, *, cwd, env, module, prior, private, diagnosti
                    'diagnostic execution or cleanup failed')
 
 
+def diagnostic_command(args, private, qualification_public, diagnostic_private, diagnostic_export):
+    return [sys.executable, '-B', str(args.qualification_checkout /
+            'scripts/ops/wal_cost_next/diagnostic_runner.py'),
+            '--frozen-checkout', str(args.frozen_checkout), '--exact-config', str(args.config),
+            '--diagnostic-sources', str(args.diagnostic_sources),
+            '--diagnostic-sources-sha256', DIAGNOSTIC_LOCK_SHA256,
+            '--surface', args.surface, '--value-bytes', str(args.value_bytes),
+            '--qualification-private', str(private),
+            '--qualification-public', str(qualification_public),
+            '--qualification-checkout', str(args.qualification_checkout),
+            '--private-root', str(diagnostic_private), '--export-root', str(diagnostic_export)]
+
+
 def run(args):
     shared.require(os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
                    os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and
@@ -172,15 +185,8 @@ def run(args):
                                         os.environ['GITHUB_RUN_ID'], module.admission_facts())
     diagnostic_private.mkdir(mode=0o700)
     diagnostic_export.mkdir(mode=0o700)
-    command = [sys.executable, '-B', str(args.qualification_checkout /
-               'scripts/ops/wal_cost_next/diagnostic_runner.py'),
-               '--frozen-checkout', str(args.frozen_checkout), '--exact-config', str(args.config),
-               '--diagnostic-sources', str(args.diagnostic_sources),
-               '--diagnostic-sources-sha256', DIAGNOSTIC_LOCK_SHA256,
-               '--surface', args.surface, '--value-bytes', str(args.value_bytes),
-               '--qualification-private', str(private),
-               '--qualification-public', str(qualification_public),
-               '--private-root', str(diagnostic_private), '--export-root', str(diagnostic_export)]
+    command = diagnostic_command(args, private, qualification_public,
+                                 diagnostic_private, diagnostic_export)
     supervise_diagnostic(command, cwd=args.qualification_checkout, env=environment,
                          module=module, prior=prior, private=private,
                          diagnostic_private=diagnostic_private)
