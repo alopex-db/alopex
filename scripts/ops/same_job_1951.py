@@ -197,7 +197,8 @@ def prepare_diagnostic_cell(product_manifest, destination, harness, harness_reco
 
     shutil.copyfile(harness, destination / "measurement-harness.tar")
     add("harness", "measurement-harness.tar")
-    config = {"schema": "alopex.sql-diagnostic-supervisor/v1", **cell,
+    config = {"schema": "alopex.sql-diagnostic-supervisor/v1",
+              "engine": "alopex-server", **cell,
               "source": original_receipt["source"],
               **{key: harness_record[key] for key in
                  ("docs_subdirectory", "product_subdirectory", "docs_files", "product_files")}}

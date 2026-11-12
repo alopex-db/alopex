@@ -131,6 +131,9 @@ class SameJob1951Tests(unittest.TestCase):
                 manifest, root / "cell", harness, harness_record, plan()[0], pins,
                 operators, verify_assets=verify)
             self.assertEqual(config["schema"], "alopex.sql-diagnostic-supervisor/v1")
+            self.assertEqual(config["engine"], "alopex-server")
+            self.assertEqual(json.loads((root / "cell/measurement.json").read_text())["engine"],
+                             "alopex-server")
             self.assertEqual({item["role"] for item in json.loads(output.read_text())["files"]},
                              {"server", "wheel", "library", "receipt", "harness",
                               "measurement_config", *OPERATORS})
