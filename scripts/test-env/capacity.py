@@ -10,8 +10,11 @@ import time
 
 from common import Failure, record_cleanup_error, require
 
+SUDO_BINARY = Path("/usr/bin/sudo")
+DU_BINARY = Path("/usr/bin/du")
 
-def allocated_bytes(roots):
+
+def allocated_bytes(roots, *, forbidden_root=None):
     """Return a complete traversal, retrying descendant disappearance at most twice.
 
     Every retry discards the partial total and revisits all inventory roots.
@@ -21,7 +24,7 @@ def allocated_bytes(roots):
     roots = tuple(Path(root) for root in roots)
     for attempt in range(3):
         try:
-            return _allocated_bytes_once(roots)
+            return _allocated_bytes_once(roots, forbidden_root=forbidden_root)
         except FileNotFoundError:
             if attempt == 2:
                 raise
@@ -29,7 +32,7 @@ def allocated_bytes(roots):
                 require(root.is_absolute() and root.exists(), "MEASUREMENT")
 
 
-def _allocated_bytes_once(roots):
+def _allocated_bytes_once(roots, *, forbidden_root=None):
     seen, total = set(), 0
     for root in roots:
         root = Path(root)
@@ -37,6 +40,8 @@ def _allocated_bytes_once(roots):
         pending = [root]
         while pending:
             path = pending.pop()
+            if forbidden_root is not None:
+                require(not path.resolve(strict=False).is_relative_to(forbidden_root), "MEASUREMENT")
             info = path.lstat()  # Disappearance is an incomplete snapshot, not zero.
             identity = info.st_dev, info.st_ino
             if identity in seen:
@@ -58,15 +63,96 @@ def _allocated_bytes_once(roots):
     return total
 
 
+def trusted_executable(path):
+    """Pin a privileged command to an absolute, root-controlled path."""
+    path = Path(path)
+    require(path.is_absolute(), "MEASUREMENT")
+    try:
+        for parent in (Path("/"), *reversed(path.parents[:-1])):
+            info = parent.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and
+                    not info.st_mode & 0o022, "MEASUREMENT")
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and
+                not info.st_mode & 0o022 and info.st_mode & 0o111, "MEASUREMENT")
+        return info.st_dev, info.st_ino, info.st_mode, info.st_uid
+    except OSError as error:
+        raise Failure("MEASUREMENT", str(error)) from error
+
+
+def readonly_sudo_du_bytes(root, *, timeout):
+    """Measure one daemon backing root with the host's existing read-only sudo."""
+    root = Path(root)
+    require(root.is_absolute() and root.is_dir() and not root.is_symlink(), "MEASUREMENT")
+    root_info = root.stat()
+    root_identity = root_info.st_dev, root_info.st_ino
+    sudo_identity = trusted_executable(SUDO_BINARY)
+    du_identity = trusted_executable(DU_BINARY)
+    try:
+        result = subprocess.run([str(SUDO_BINARY), "-n", str(DU_BINARY), "-sk", "--", str(root)],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=timeout, check=False)
+    except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
+        raise Failure("MEASUREMENT", str(error)) from error
+    require(result.returncode == 0 and not result.stderr and
+            len(result.stdout.encode("utf-8")) <= 4096, "MEASUREMENT")
+    fields = result.stdout.splitlines()
+    require(len(fields) == 1, "MEASUREMENT")
+    parts = fields[0].split("\t")
+    require(len(parts) == 2 and parts[0].isascii() and parts[0].isdecimal() and
+            parts[1] == str(root), "MEASUREMENT")
+    current_root = root.stat()
+    require((current_root.st_dev, current_root.st_ino) == root_identity and
+            trusted_executable(SUDO_BINARY) == sudo_identity and
+            trusted_executable(DU_BINARY) == du_identity, "MEASUREMENT")
+    return int(parts[0]) * 1024
+
+
 class Budget:
     def __init__(self, config, measure=allocated_bytes):
         self.config, self.measure = config, measure
         self.initial = None
         self.planned = None
+        self.sudo_root = config.get("readonly_sudo_du_root")
+        self.sudo_timeout = config.get("readonly_sudo_du_timeout_seconds",
+                                       config.get("poll_seconds"))
+        if "readonly_sudo_du_timeout_seconds" in config:
+            require(self.sudo_root is not None and type(self.sudo_timeout) is int and
+                    0 < self.sudo_timeout <= 60, "MEASUREMENT")
+        self.sudo_root_identity = None
+        if self.sudo_root is not None:
+            try:
+                root = Path(self.sudo_root)
+                require(root.is_absolute() and root.is_dir() and not root.is_symlink(), "MEASUREMENT")
+                selected = root.resolve(strict=True)
+                require(str(selected) == str(root), "MEASUREMENT")
+                require(config["roots"].count(self.sudo_root) == 1, "MEASUREMENT")
+                roots = [Path(item).resolve(strict=True) for item in config["roots"]]
+                require(roots.count(selected) == 1 and
+                        all(not (item.is_relative_to(selected) or selected.is_relative_to(item))
+                            for item in roots if item != selected), "MEASUREMENT")
+                info = root.stat()
+                self.sudo_root_identity = (info.st_dev, info.st_ino)
+            except (OSError, ValueError, TypeError) as error:
+                raise Failure("MEASUREMENT", str(error)) from error
 
     def used(self):
         try:
-            value = self.measure(self.config["roots"])
+            if self.sudo_root is None:
+                value = self.measure(self.config["roots"])
+            else:
+                root = Path(self.sudo_root)
+                info = root.stat()
+                require((info.st_dev, info.st_ino) == self.sudo_root_identity and
+                        not root.is_symlink(), "MEASUREMENT")
+                direct_roots = [item for item in self.config["roots"] if item != self.sudo_root]
+                if self.measure is allocated_bytes:
+                    value = self.measure(direct_roots, forbidden_root=root)
+                else:
+                    value = self.measure(direct_roots)
+                value += readonly_sudo_du_bytes(root, timeout=self.sudo_timeout)
+                info = root.stat()
+                require((info.st_dev, info.st_ino) == self.sudo_root_identity, "MEASUREMENT")
             require(type(value) is int and value >= 0, "MEASUREMENT")
             return value
         except (OSError, ValueError) as error:

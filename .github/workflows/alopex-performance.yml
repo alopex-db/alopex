@@ -4,427 +4,226 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: Owning issue with input, CPU/memory/storage budget and cleanup plan
+        description: Owning issue for read-only host inventory or qualification
         required: true
+        type: string
+      qualification_mode:
+        description: Run the bounded #804 qualification job
+        required: false
+        type: boolean
+        default: false
+      expected_controller_sha:
+        description: Exact controller commit for qualification mode
+        required: false
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: alopex-performance-history
-  queue: max
+  group: alopex-v0817-host-preflight
   cancel-in-progress: false
 
-defaults:
-  run:
-    shell: bash
-
-env:
-  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
-  ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-  NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
-  OPENBLAS_NUM_THREADS: "1"
-  OMP_NUM_THREADS: "1"
-  MKL_NUM_THREADS: "1"
-  POLARS_MAX_THREADS: "1"
-  RAYON_NUM_THREADS: "1"
-
 jobs:
-  measure:
-    name: measure in read-only job
+  inventory:
+    if: ${{ !inputs.qualification_mode }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Setup Python
-        id: setup_python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11.11"
-
-      - name: Setup Rust
-        id: setup_rust
-        uses: dtolnay/rust-toolchain@1.96.0
-
-      - name: Prepare isolated Python environment
-        id: prepare_python
-        run: |
-          python -m venv .venv-performance
-          echo "VIRTUAL_ENV=$PWD/.venv-performance" >> "$GITHUB_ENV"
-          echo "$PWD/.venv-performance/bin" >> "$GITHUB_PATH"
-
-      - name: Install pinned measurement dependencies
-        id: install_dependencies
-        run: |
-          .venv-performance/bin/python -m pip install --upgrade pip==26.2
-          .venv-performance/bin/python -m pip install \
-            maturin==1.14.1 \
-            pytest==9.1.1 \
-            pytest-benchmark==5.2.3 \
-            numpy==2.4.6 \
-            polars==1.43.2
-          sudo apt-get update
-          sudo apt-get install -y patchelf
-
-      - name: Build pinned Nim SQL parser
-        id: build_nim
-        run: bash scripts/build-nim-parser.sh --backend docker
-
-      - name: Build release-mode Python extension
-        id: build_extension
-        run: maturin develop --release -m crates/alopex-py/Cargo.toml
-
-      - name: Read canonical comparison history
-        id: history
+      - name: Collect encrypted read-only host inventory
         env:
-          HISTORY_DIR: ${{ runner.temp }}/alopex-performance-history-read
-        run: |
-          mkdir -p "$HISTORY_DIR"
-          set +e
-          git ls-remote --exit-code --heads origin performance-history > /dev/null
-          branch_status=$?
-          set -e
-          case "$branch_status" in
-            0)
-              git fetch origin "+refs/heads/performance-history:refs/remotes/origin/performance-history"
-              if git cat-file -e refs/remotes/origin/performance-history:history.json; then
-                git show refs/remotes/origin/performance-history:history.json > "$HISTORY_DIR/history.json"
-              else
-                echo '{"schema_version": 1, "records": []}' > "$HISTORY_DIR/history.json"
-              fi
-              ;;
-            2)
-              echo '{"schema_version": 1, "records": []}' > "$HISTORY_DIR/history.json"
-              ;;
-            *)
-              echo "Could not determine whether performance-history exists." >&2
-              exit "$branch_status"
-              ;;
-          esac
-          echo "dir=$HISTORY_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Run issue 76 measurement workload
-        id: benchmark
-        continue-on-error: true
-        run: |
-          mkdir -p performance-artifacts
-          taskset -c 0 python -m pytest \
-            crates/alopex-py/tests/benchmarks/test_performance.py \
-            -v -s \
-            --benchmark-only \
-            --benchmark-json=performance-artifacts/benchmark.json \
-            --junitxml=performance-artifacts/performance-junit.xml \
-            -o junit_family=xunit1
-
-      - name: Normalize and cross-check machine-readable metrics
-        id: normalize
-        if: steps.benchmark.outcome == 'success'
-        run: |
-          python scripts/performance/alopex_py_metrics.py collect \
-            --benchmark-json performance-artifacts/benchmark.json \
-            --junit-xml performance-artifacts/performance-junit.xml \
-            --output performance-artifacts/current.json \
-            --commit "$GITHUB_SHA" \
-            --ref "$GITHUB_REF" \
-            --profile gha-ubuntu-24.04-x64-single-core-v1 \
-            --lock-file Cargo.lock \
-            --workload-file crates/alopex-py/tests/benchmarks/test_performance.py \
-            --workload-file scripts/performance/profile-v1.json \
-            --workload-file scripts/build-nim-parser.sh \
-            --workload-file crates/alopex-sql/nim-sql-parser/nim_sql_parser.nimble
-
-      - name: Compare with matching historical distribution
-        id: compare
-        if: steps.normalize.outcome == 'success'
-        env:
-          HISTORY_DIR: ${{ steps.history.outputs.dir }}
-        run: |
-          python scripts/performance/alopex_py_metrics.py evaluate \
-            --current performance-artifacts/current.json \
-            --history "$HISTORY_DIR/history.json" \
-            --output-json performance-artifacts/comparison.json \
-            --output-markdown performance-artifacts/report.md
-          cat performance-artifacts/report.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Record measurement pipeline status
-        if: always()
-        env:
-          SETUP_PYTHON_OUTCOME: ${{ steps.setup_python.outcome }}
-          SETUP_RUST_OUTCOME: ${{ steps.setup_rust.outcome }}
-          PREPARE_PYTHON_OUTCOME: ${{ steps.prepare_python.outcome }}
-          INSTALL_DEPENDENCIES_OUTCOME: ${{ steps.install_dependencies.outcome }}
-          BUILD_NIM_OUTCOME: ${{ steps.build_nim.outcome }}
-          BUILD_EXTENSION_OUTCOME: ${{ steps.build_extension.outcome }}
-          HISTORY_OUTCOME: ${{ steps.history.outcome }}
-          BENCHMARK_OUTCOME: ${{ steps.benchmark.outcome }}
-          NORMALIZE_OUTCOME: ${{ steps.normalize.outcome }}
-          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
-        run: |
-          mkdir -p performance-artifacts
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          stages = {
-              "setup_python": os.environ.get("SETUP_PYTHON_OUTCOME", "skipped"),
-              "setup_rust": os.environ.get("SETUP_RUST_OUTCOME", "skipped"),
-              "prepare_python": os.environ.get("PREPARE_PYTHON_OUTCOME", "skipped"),
-              "install_dependencies": os.environ.get("INSTALL_DEPENDENCIES_OUTCOME", "skipped"),
-              "build_nim": os.environ.get("BUILD_NIM_OUTCOME", "skipped"),
-              "build_extension": os.environ.get("BUILD_EXTENSION_OUTCOME", "skipped"),
-              "history": os.environ.get("HISTORY_OUTCOME", "skipped"),
-              "benchmark": os.environ.get("BENCHMARK_OUTCOME", "skipped"),
-              "normalize": os.environ.get("NORMALIZE_OUTCOME", "skipped"),
-              "compare": os.environ.get("COMPARE_OUTCOME", "skipped"),
-          }
-          failed = next((name for name, value in stages.items() if value != "success"), None)
-          payload = {
-              "status": "measured" if failed is None else "not_measured",
-              "reason": "ok" if failed is None else f"{failed}_{stages[failed]}",
-              "stages": stages,
-          }
-          Path("performance-artifacts/measurement-status.json").write_text(
-              json.dumps(payload, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-      - name: Explain missing measurement
-        if: always() && steps.compare.outcome != 'success'
-        run: |
-          echo "## Alopex Python Performance Advisory" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The measurement pipeline did not produce a comparable record." >> "$GITHUB_STEP_SUMMARY"
-          echo "This workflow is advisory and does not gate normal CI or a release." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload read-only measurement evidence
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B scripts/ops/hosted_test_env_inventory.py
+      - name: Preserve encrypted inventory
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: alopex-py-performance-measurement-${{ github.run_id }}-${{ github.run_attempt }}
-          path: performance-artifacts
-          if-no-files-found: warn
-          retention-days: 30
-
-  persist:
-    name: persist trusted history and notify
-    needs: measure
-    if: >-
-      always() &&
-      (github.ref == 'refs/heads/main' ||
-       startsWith(github.ref, 'refs/tags/v') ||
-       startsWith(github.ref, 'refs/tags/alopex-py-v'))
+          name: host-preflight-inventory
+          path: native-inventory-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  qualification:
+    if: inputs.qualification_mode && inputs.issue_number == '804'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      issues: write
-      actions: read
+    timeout-minutes: 180
     steps:
-      - name: Checkout trusted source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Download read-only measurement evidence
-        id: download
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: alopex-py-performance-measurement-${{ github.run_id }}-${{ github.run_attempt }}
-          path: performance-artifacts
-
-      - name: Inspect measurement evidence
-        id: evidence
-        if: always()
+      - name: Bound checkout before source acquisition
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
         run: |
           python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          root = Path("performance-artifacts")
-          status_path = root / "measurement-status.json"
-          measured = False
-          reason = "artifact_unavailable"
-          notification_ready = False
-          if status_path.is_file():
+          import json, os, pathlib, re, stat, subprocess, sys, tempfile
+          phase, error_code = 'SHA', 'IDENTITY'
+          try:
+              expected = os.environ['EXPECTED_CONTROLLER_SHA']
+              assert re.fullmatch(r'[a-f0-9]{40}', expected) and expected == os.environ['GITHUB_SHA']
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
+              workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
+              workspace.mkdir(parents=True, exist_ok=True)
+              assert workspace.is_absolute() and not workspace.is_symlink()
+              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+              assert runner_temp.is_absolute() and runner_temp.is_dir()
+              assert not any(character in str(runner_temp) for character in ('\r', '\n', '\0'))
+              env_file = pathlib.Path(os.environ['GITHUB_ENV'])
+              assert env_file.is_absolute()
+              for key in ('TMPDIR', 'TMP', 'TEMP'):
+                  os.environ[key] = str(runner_temp)
+              lines = ''.join(f'{key}={runner_temp}\n' for key in ('TMPDIR', 'TMP', 'TEMP'))
+              fd = os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
               try:
-                  status = json.loads(status_path.read_text(encoding="utf-8"))
-                  reason = str(status.get("reason") or "measurement_pipeline_failed")
-                  measured = (
-                      status.get("status") == "measured"
-                      and (root / "current.json").is_file()
-                      and (root / "comparison.json").is_file()
-                  )
-              except (OSError, json.JSONDecodeError):
-                  reason = "measurement_status_invalid"
-          comparison_path = root / "comparison.json"
-          if measured and comparison_path.is_file():
+                  info = os.fstat(fd)
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                  payload = lines.encode('utf-8')
+                  assert os.write(fd, payload) == len(payload)
+              finally:
+                  os.close(fd)
+              assert all(pathlib.Path(os.environ[key]).resolve(strict=True) == runner_temp
+                         for key in ('TMPDIR', 'TMP', 'TEMP'))
+              assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp
+              phase, error_code = 'BINARY', 'POLICY'
+              binaries = [pathlib.Path('/usr/bin/du'), pathlib.Path('/usr/bin/sudo'),
+                          pathlib.Path('/usr/bin/docker')]
+              for path in (pathlib.Path('/'), pathlib.Path('/usr'), pathlib.Path('/usr/bin')):
+                  info = path.lstat()
+                  assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+              for binary in binaries:
+                  info = binary.lstat()
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                  assert not info.st_mode & 0o022 and info.st_mode & 0o111
+              phase, error_code = 'DOCKER', 'PREREQUISITE'
+              def run(args):
+                  result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                          capture_output=True, text=True, timeout=10)
+                  assert result.returncode == 0 and not result.stderr
+                  return result.stdout.strip()
+              phase = 'DOCKER_CONTEXT'
+              context = run(['/usr/bin/docker', 'context', 'show'])
+              phase = 'DOCKER_INSPECT'
+              inspection = json.loads(run(['/usr/bin/docker', 'context', 'inspect', context]))[0]
+              assert inspection['Endpoints']['docker']['Host'].startswith('unix://')
+              phase = 'DOCKER_INFO'
+              docker = pathlib.Path(json.loads(run(['/usr/bin/docker', 'info', '--format',
+                                                    '{{json .}}']))['DockerRootDir'])
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
+              assert docker.is_absolute() and docker.resolve(strict=True) == docker
+              home = pathlib.Path.home()
+              temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+              candidates = [('WORK', workspace), ('HOME', home), ('TEMP', temp),
+                            ('DOCKER', docker)]
+              temp_snapshot = []
+              for area, label in ((pathlib.Path('/tmp'), 'TMP'),
+                                  (pathlib.Path('/var/tmp'), 'VARTMP')):
+                  if not area.exists():
+                      continue
+                  assert area.is_dir()
+                  with os.scandir(area) as entries:
+                      for entry in entries:
+                          info = entry.stat(follow_symlinks=False)
+                          if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():
+                              actual = pathlib.Path(entry.path).resolve(strict=True)
+                              candidates.append((label, actual))
+                              temp_snapshot.append((str(area), entry.name, info.st_dev,
+                                                    info.st_ino, info.st_uid, str(actual)))
+              temp_snapshot.sort()
+              categories = {}
+              for label, path in candidates:
+                  categories.setdefault(path.resolve(strict=True), label)
+              roots = list(categories)
+              assert docker in roots and all(not docker.is_relative_to(root) and
+                                             not root.is_relative_to(docker)
+                                             for root in roots if root != docker)
+              selected = [root for root in roots if not any(root != other and
+                          root.is_relative_to(other) for other in roots)]
+              phase, error_code = 'DU', 'MEASUREMENT'
+              def du_code(category, failure):
+                  assert category in {'WORK', 'HOME', 'TEMP', 'TMP', 'VARTMP', 'DOCKER'}
+                  assert failure in {'TIMEOUT', 'EXIT', 'PARSE'}
+                  return 'DU_' + category + '_' + failure
+              def allocation(root, category, privileged=False):
+                  global error_code
+                  args = (['/usr/bin/sudo', '-n'] if privileged else []) + [
+                      '/usr/bin/du', '-skL' if not privileged else '-sk', '--', str(root)]
+                  error_code = du_code(category, 'EXIT')
+                  try:
+                      result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                              capture_output=True, text=True,
+                                              timeout=60 if privileged else 10)
+                  except subprocess.TimeoutExpired:
+                      error_code = du_code(category, 'TIMEOUT')
+                      raise
+                  assert result.returncode == 0 and not result.stderr
+                  error_code = du_code(category, 'PARSE')
+                  fields = result.stdout.strip().split('\t')
+                  assert len(fields) == 2 and fields[0].isascii()
+                  assert fields[0].isdecimal() and fields[1] == str(root)
+                  return int(fields[0]) * 1024
+              aggregate = sum(allocation(root, categories[root], root == docker) for root in selected)
+              workspace_bytes = allocation(workspace, 'WORK')
+              phase, error_code = 'CAPACITY', 'CAPACITY'
+              assert aggregate + 1_000_000_000 + 7_500_000_000 < 40_000_000_000
+              assert os.statvfs(workspace).f_bavail * os.statvfs(workspace).f_frsize > 1_000_000_000
+              assert os.statvfs(docker).f_bavail * os.statvfs(docker).f_frsize > 7_500_000_000
+              phase, error_code = 'RECEIPT', 'COMMAND'
+              private = pathlib.Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
+              private.mkdir(mode=0o700, exist_ok=True)
+              private.chmod(0o700)
+              receipt = private / 'checkout-preflight.private.json'
+              receipt.write_text(json.dumps({'workspace_root': str(workspace),
+                                             'allocated_bytes': workspace_bytes,
+                                             'aggregate_allocated_bytes': aggregate,
+                                             'roots': list(map(str, selected)),
+                                             'temp_snapshot': temp_snapshot,
+                                             'docker_root': str(docker),
+                                             'expected_controller_sha': expected}) + '\n')
+              receipt.chmod(0o600)
+              print('{"case":"CHECKOUT_PREFLIGHT","outcome":"passed"}')
+          except BaseException:
+              public = {'schema': 'alopex.checkout-preflight-public/v1',
+                        'case': 'CHECKOUT_PREFLIGHT', 'outcome': 'failed',
+                        'phase': phase, 'error_code': error_code}
               try:
-                  comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
-                  notification_ready = bool(comparison.get("notification_ready"))
-              except (OSError, json.JSONDecodeError):
-                  measured = False
-                  reason = "comparison_invalid"
-          reason = re.sub(r"[^0-9A-Za-z_.-]+", "_", reason)[:80]
-          output = Path(os.environ["GITHUB_OUTPUT"])
-          with output.open("a", encoding="utf-8") as handle:
-              handle.write(f"measured={str(measured).lower()}\n")
-              handle.write(f"reason={reason}\n")
-              handle.write(f"notification_ready={str(notification_ready).lower()}\n")
+                  export = pathlib.Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'native-qualification-export'
+                  export.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  (export / 'public.json').write_text(json.dumps(public, sort_keys=True) + '\n')
+              except BaseException:
+                  print('{"case":"CHECKOUT_PREFLIGHT","outcome":"evidence_failed"}')
+                  sys.exit(1)
+              print(json.dumps(public, sort_keys=True))
+              sys.exit(1)
           PY
-
-      - name: Prepare canonical history worktree
-        id: history
-        if: always()
-        env:
-          HISTORY_DIR: ${{ runner.temp }}/alopex-performance-history
-        run: |
-          git fetch origin "+refs/heads/performance-history:refs/remotes/origin/performance-history" || true
-          if git show-ref --verify --quiet refs/remotes/origin/performance-history; then
-            git worktree add --detach "$HISTORY_DIR" refs/remotes/origin/performance-history
-          else
-            git worktree add --detach "$HISTORY_DIR" HEAD
-            git -C "$HISTORY_DIR" switch --orphan performance-history-local
-            git -C "$HISTORY_DIR" clean -fdx
-          fi
-          echo "dir=$HISTORY_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Record trusted measurement
-        id: record
-        if: steps.evidence.outputs.measured == 'true'
-        env:
-          HISTORY_DIR: ${{ steps.history.outputs.dir }}
-        run: |
-          args=(
-            record
-            --current performance-artifacts/current.json
-            --history "$HISTORY_DIR/history.json"
-            --index "$HISTORY_DIR/index.md"
-            --comparison performance-artifacts/comparison.json
-          )
-          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/alopex-py-v* ]]; then
-            args+=(
-              --release-tag "$GITHUB_REF_NAME"
-              --release-dir "$HISTORY_DIR/releases"
-            )
-          fi
-          python3 scripts/performance/alopex_py_metrics.py "${args[@]}"
-          cp "$HISTORY_DIR/index.md" performance-artifacts/history.md
-          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/alopex-py-v* ]]; then
-            cp "$HISTORY_DIR/releases/$GITHUB_REF_NAME.md" performance-artifacts/release-report.md
-            cp "$HISTORY_DIR/releases/$GITHUB_REF_NAME.json" performance-artifacts/release-report.json
-          fi
-
-      - name: Create non-blocking missing release artifact
-        id: missing_release_artifact
-        if: >-
-          always() &&
-          steps.record.outcome != 'success' &&
-          (startsWith(github.ref, 'refs/tags/v') ||
-           startsWith(github.ref, 'refs/tags/alopex-py-v'))
-        env:
-          FAILURE_REASON: ${{ steps.evidence.outputs.reason }}
-          MEASURED: ${{ steps.evidence.outputs.measured }}
-        run: |
-          reason="$FAILURE_REASON"
-          if [[ "$MEASURED" == "true" ]]; then
-            reason="record_failed"
-          fi
-          python3 scripts/performance/alopex_py_metrics.py missing-release \
-            --release-tag "$GITHUB_REF_NAME" \
-            --commit "$GITHUB_SHA" \
-            --reason "$reason" \
-            --output-markdown performance-artifacts/release-report.md \
-            --output-json performance-artifacts/release-report.json
-
-      - name: Add missing release report to canonical history
-        id: missing_release
-        if: >-
-          always() &&
-          steps.missing_release_artifact.outcome == 'success' &&
-          steps.history.outcome == 'success'
-        env:
-          HISTORY_DIR: ${{ steps.history.outputs.dir }}
-        run: |
-          mkdir -p "$HISTORY_DIR/releases"
-          cp performance-artifacts/release-report.md "$HISTORY_DIR/releases/$GITHUB_REF_NAME.md"
-          cp performance-artifacts/release-report.json "$HISTORY_DIR/releases/$GITHUB_REF_NAME.json"
-
-      - name: Persist canonical history
-        id: persist_history
-        if: >-
-          always() &&
-          (steps.record.outcome == 'success' ||
-           steps.missing_release.outcome == 'success')
-        env:
-          HISTORY_DIR: ${{ steps.history.outputs.dir }}
-        run: |
-          git -C "$HISTORY_DIR" config user.name "github-actions[bot]"
-          git -C "$HISTORY_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$HISTORY_DIR" add --all
-          if git -C "$HISTORY_DIR" diff --cached --quiet; then
-            echo "History already contains this commit and environment."
-            exit 0
-          fi
-          git -C "$HISTORY_DIR" commit -m "perf: record ${GITHUB_SHA::12}"
-          git -C "$HISTORY_DIR" push origin HEAD:performance-history
-
-      - name: Create or update advisory regression issue
-        if: >-
-          steps.persist_history.outcome == 'success' &&
-          steps.evidence.outputs.notification_ready == 'true'
-        continue-on-error: true
-        uses: actions/github-script@v7
-        env:
-          REPORT_PATH: performance-artifacts/report.md
-          COMPARISON_PATH: performance-artifacts/comparison.json
+      - uses: actions/checkout@v4
         with:
-          script: |
-            const fs = require('fs');
-            const comparison = JSON.parse(fs.readFileSync(process.env.COMPARISON_PATH, 'utf8'));
-            const report = fs.readFileSync(process.env.REPORT_PATH, 'utf8');
-            const key = `${comparison.environment_fingerprint}:${comparison.workload_signature}`;
-            const marker = `<!-- alopex-performance-regression:${key} -->`;
-            const body = `${marker}\n${report}\nMeasured commit: ${context.sha}`;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
-            const existing = issues.find(issue => !issue.pull_request && issue.body?.includes(marker));
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existing.number,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `perf: alopex-py advisory regression (${comparison.notification_metrics.join(', ')})`,
-                body,
-              });
-            }
-
-      - name: Upload persisted report evidence
+          fetch-depth: 1
+      - name: Admit this runner before candidate acquisition
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
+      - name: Retrieve exact candidate assets
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
+      - name: Qualify on this runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification.py --execute
+      - name: Preserve encrypted qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: alopex-py-performance-report-${{ github.run_id }}-${{ github.run_attempt }}
-          path: performance-artifacts
-          if-no-files-found: warn
-          retention-days: 30
+          name: hosted-test-env-qualification
+          path: native-qualification-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

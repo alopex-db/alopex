@@ -11,9 +11,11 @@ import subprocess
 import sys
 import tarfile
 import urllib.parse
+import urllib.error
 import urllib.request
 import contextlib
 import hashlib
+import time
 
 from capacity import Budget
 from common import (ERRORS, Failure, atomic_json, contained, digest, load_profile,
@@ -84,19 +86,28 @@ def fetch(profile, docker, budget):
         parsed = urllib.parse.urlsplit(item["url"])
         require(parsed.hostname in variant["allowed_hosts"], "POLICY")
         temporary = destination.with_name(destination.name + ".pending")
-        received = 0
-        try:
-            with opener.open(item["url"], timeout=30) as response, temporary.open("wb") as stream:
-                temporary.chmod(0o600)
-                while block := response.read(1024 * 1024):
-                    received += len(block)
-                    require(received <= item["size"], "IDENTITY")
-                    budget.check()
-                    stream.write(block)
-            require(received == item["size"] and digest(temporary) == item["sha256"], "IDENTITY")
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        for attempt in range(3):
+            received = 0
+            try:
+                with opener.open(item["url"], timeout=30) as response, temporary.open("wb") as stream:
+                    temporary.chmod(0o600)
+                    while block := response.read(1024 * 1024):
+                        received += len(block)
+                        require(received <= item["size"], "IDENTITY")
+                        budget.check()
+                        stream.write(block)
+                require(received == item["size"] and digest(temporary) == item["sha256"], "IDENTITY")
+                temporary.replace(destination)
+                break
+            except (TimeoutError, urllib.error.URLError) as error:
+                timed_out = isinstance(error, TimeoutError) or isinstance(
+                    getattr(error, "reason", None), TimeoutError)
+                if not timed_out or attempt == 2:
+                    raise
+                budget.check()
+                time.sleep(1 << attempt)
+            finally:
+                temporary.unlink(missing_ok=True)
     budget.run([*docker.prefix, "pull", "--platform", profile["platform"], lock["base"]],
                timeout=profile["limits"]["run_seconds"], log=cache / "fetch.log")
 
@@ -405,7 +416,14 @@ def main(argv=None):
         p = load_profile(args.profile)
         guard.enter_context(host_lock())
         output = private_dir(p["private_output"])
-        docker, budget = Docker(p), Budget(p["storage"])
+        docker = Docker(p)
+        sudo_root = p["storage"].get("readonly_sudo_du_root")
+        if sudo_root is not None:
+            docker.prerequisites()
+            info = json.loads(docker.call("info", "--format", "{{json .}}"))
+            require(info.get("DockerRootDir") == sudo_root and info.get("OSType") == "linux",
+                    "MEASUREMENT")
+        budget = Budget(p["storage"])
         command = args.command
         require(not args.resolution or command in ("collect", "clean"))
         run_id = p["run_id"] + ("-resolve" if args.resolution else "-probe" if args.probe else "")

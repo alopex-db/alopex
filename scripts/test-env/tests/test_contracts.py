@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import os
@@ -7,7 +8,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+import urllib.error
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +26,51 @@ class Fixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="alopex-test-env-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+
+class LockedFetch(Fixture):
+    def test_only_transport_timeout_retries_pinned_bytes(self):
+        import envctl
+        body = b"verified package"
+        item = {"path": "deps/package.deb", "url": "https://archive.ubuntu.com/package.deb",
+                "size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+        profile = {"cache": str(self.root / "cache"), "image_lock": str(self.root / "lock"),
+                   "platform": "linux/amd64", "limits": {"run_seconds": 30}}
+        docker, budget, opener = Mock(), Mock(), Mock()
+        docker.prefix = ["docker"]
+        lock = {"base": "pinned"}
+        variant = {"files": [item], "allowed_hosts": ["archive.ubuntu.com"]}
+        with patch.object(envctl, "image_lock", return_value=(lock, variant)), \
+             patch.object(envctl.urllib.request, "build_opener", return_value=opener), \
+             patch.object(envctl.time, "sleep") as sleep:
+            opener.open.side_effect = [urllib.error.URLError(TimeoutError("handshake")),
+                                       io.BytesIO(body)]
+            envctl.fetch(profile, docker, budget)
+            self.assertEqual(opener.open.call_count, 2)
+            sleep.assert_called_once_with(1)
+            self.assertEqual((self.root / "cache/deps/package.deb").read_bytes(), body)
+            self.assertFalse((self.root / "cache/deps/package.deb.pending").exists())
+            (self.root / "cache/deps/package.deb").unlink()
+            opener.reset_mock()
+            opener.open.side_effect = urllib.error.HTTPError(item["url"], 404,
+                                                             "missing", None, None)
+            with self.assertRaises(urllib.error.HTTPError):
+                envctl.fetch(profile, docker, budget)
+            self.assertEqual(opener.open.call_count, 1)
+            opener.reset_mock()
+            opener.open.side_effect = [io.BytesIO(b"wrong package")]
+            with self.assertRaises(Failure) as caught:
+                envctl.fetch(profile, docker, budget)
+            self.assertEqual(caught.exception.code, "IDENTITY")
+            self.assertEqual(opener.open.call_count, 1)
+            self.assertFalse((self.root / "cache/deps/package.deb.pending").exists())
+            opener.reset_mock()
+            sleep.reset_mock()
+            opener.open.side_effect = [urllib.error.URLError(TimeoutError("handshake"))] * 3
+            with self.assertRaises(urllib.error.URLError):
+                envctl.fetch(profile, docker, budget)
+            self.assertEqual(opener.open.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
 
 
 class ExecutionMode(unittest.TestCase):
@@ -44,6 +91,32 @@ class ExecutionMode(unittest.TestCase):
 
     def test_container_emulation_can_differ_from_daemon(self):
         self.check("emulated", "linux/target-a", "linux/target-b")
+
+
+class ReadonlyCapacityEndpoint(Fixture):
+    def test_docker_root_must_match_before_budget_or_construction(self):
+        import contextlib
+        import envctl
+        from unittest.mock import Mock
+        selected = str(self.root / "docker")
+        profile = {"private_output": str(self.root / "out"), "run_id": "test",
+                   "storage": {"readonly_sudo_du_root": selected}}
+        for actual, expected in ((selected, 0), (str(self.root / "wrong"), 78)):
+            with self.subTest(matches=actual == selected):
+                docker, budget = Mock(), Mock()
+                docker.call.return_value = json.dumps({"DockerRootDir": actual, "OSType": "linux"})
+                with patch.object(envctl, "load_profile", return_value=profile), \
+                     patch.object(envctl, "host_lock", return_value=contextlib.nullcontext()), \
+                     patch.object(envctl, "Docker", return_value=docker), \
+                     patch.object(envctl, "Budget", return_value=budget) as budget_factory, \
+                     patch.object(envctl, "image_lock"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(envctl.main(["doctor", "--profile", "private"]), expected)
+                docker.prerequisites.assert_called()
+                if expected:
+                    budget_factory.assert_not_called()
+                else:
+                    budget_factory.assert_called_once()
 
 
 class ImageInventory(unittest.TestCase):

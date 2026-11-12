@@ -1,14 +1,19 @@
 """Small deterministic directory-change regressions for capacity monitoring."""
 import errno
+import json
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from capacity import Budget, allocated_bytes
-from common import Failure
+from capacity import Budget, DU_BINARY, SUDO_BINARY, allocated_bytes, readonly_sudo_du_bytes
+from common import Failure, load_profile
 
 
 class CompleteTraversal(unittest.TestCase):
@@ -141,6 +146,201 @@ class CompleteTraversal(unittest.TestCase):
         with patch.object(Path, 'lstat', observed):
             measured = allocated_bytes(root for root in (first, second))
         self.assertEqual(measured, self.expected(first, second, target, payload))
+
+
+class ReadonlyDockerRoot(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.parent = Path(self.temporary.name).resolve()
+        self.docker = self.parent / "docker"
+        self.other = self.parent / "other"
+        self.docker.mkdir()
+        self.other.mkdir()
+        self.config = {"roots": [str(self.docker), str(self.other)],
+                       "readonly_sudo_du_root": str(self.docker),
+                       "stop_bytes": 40_000_000_000, "reserve_bytes": 1_000_000_000,
+                       "poll_seconds": 2, "planned_bytes": {"build": 3_000_000_000}}
+        # The unit contract concerns command validation, not the CI image's
+        # current sudo/du packaging; model trusted command metadata explicitly.
+        original_lstat = Path.lstat
+        def executable_metadata(path, *args, **kwargs):
+            if path in (SUDO_BINARY, DU_BINARY):
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0,
+                                       st_dev=1, st_ino=1 if path == SUDO_BINARY else 2)
+            return original_lstat(path, *args, **kwargs)
+        self.executable_patch = patch.object(Path, "lstat", executable_metadata)
+        self.executable_patch.start()
+        self.addCleanup(self.executable_patch.stop)
+
+    def result(self, stdout, *, returncode=0, stderr=""):
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def test_one_root_is_counted_with_exact_readonly_command_and_budget(self):
+        expected = self.other.stat().st_blocks * 512 + 2048
+        with patch("capacity.subprocess.run", return_value=self.result(f"2\t{self.docker}\n")) as run:
+            budget = Budget(self.config)
+            self.assertEqual(budget.used(), expected)
+            self.assertEqual(budget.before("build"), expected)
+            self.assertEqual(budget.check(), expected)
+        self.assertEqual(run.call_args.args[0],
+                         [str(SUDO_BINARY), "-n", str(DU_BINARY), "-sk", "--", str(self.docker)])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_opted_in_sudo_scan_uses_sixty_seconds_without_changing_poll_or_budget(self):
+        self.config["readonly_sudo_du_timeout_seconds"] = 60
+        with patch("capacity.subprocess.run", return_value=self.result(f"2\t{self.docker}\n")) as run:
+            budget = Budget(self.config)
+            budget.before("build")
+            budget.check()
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertEqual(budget.config["poll_seconds"], 2)
+        self.assertEqual(budget.config["stop_bytes"], 40_000_000_000)
+        self.assertEqual(budget.config["reserve_bytes"], 1_000_000_000)
+
+    def test_opted_in_sudo_scan_timeout_is_bounded_and_fails_closed(self):
+        for value in (0, 61, True, "60"):
+            with self.subTest(value=value):
+                self.config["readonly_sudo_du_timeout_seconds"] = value
+                with self.assertRaises(Failure) as caught:
+                    Budget(self.config)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+        self.config["readonly_sudo_du_timeout_seconds"] = 60
+        with patch("capacity.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("du", 60)) as run:
+            with self.assertRaises(Failure) as caught:
+                Budget(self.config).used()
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+
+    def test_bad_du_output_exit_and_timeout_fail_closed(self):
+        results = [self.result(""), self.result(f"2\t{self.docker}\nextra\n"),
+                   self.result(f"2\t{self.other}\n"), self.result(f"-1\t{self.docker}\n"),
+                   self.result(f"2\t{self.docker}\n", stderr="warning"),
+                   self.result(f"2\t{self.docker}\n", returncode=1)]
+        for result in results:
+            with self.subTest(result=result), patch("capacity.subprocess.run", return_value=result):
+                with self.assertRaises(Failure) as caught:
+                    readonly_sudo_du_bytes(self.docker, timeout=2)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+        with patch("capacity.subprocess.run", side_effect=subprocess.TimeoutExpired("du", 2)):
+            with self.assertRaises(Failure) as caught:
+                Budget(self.config).used()
+            self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_zero_is_a_complete_observation_and_malformed_values_fail(self):
+        with patch("capacity.subprocess.run", return_value=self.result(f"0\t{self.docker}\n")):
+            self.assertEqual(readonly_sudo_du_bytes(self.docker, timeout=2), 0)
+        for value in ("", " 0", "+0", "0.0", "zero", "0\twrong"):
+            with self.subTest(value=value), patch("capacity.subprocess.run",
+                                                 return_value=self.result(f"{value}\t{self.docker}\n")):
+                with self.assertRaises(Failure):
+                    readonly_sudo_du_bytes(self.docker, timeout=2)
+
+    def test_untrusted_or_missing_absolute_executable_fails_before_sudo(self):
+        untrusted = self.parent / "sudo"
+        untrusted.write_bytes(b"fixture")
+        untrusted.chmod(0o755)
+        for executable in (untrusted, self.parent / "missing"):
+            with self.subTest(executable=executable), patch("capacity.SUDO_BINARY", executable), \
+                 patch("capacity.subprocess.run") as run:
+                with self.assertRaises(Failure) as caught:
+                    readonly_sudo_du_bytes(self.docker, timeout=2)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+                run.assert_not_called()
+
+        original = Path.lstat
+        for binary in (SUDO_BINARY, DU_BINARY):
+            def unsafe(path, *args, **kwargs):
+                info = original(path, *args, **kwargs)
+                if path == binary:
+                    return SimpleNamespace(st_mode=info.st_mode | 0o022,
+                                           st_uid=info.st_uid, st_dev=info.st_dev,
+                                           st_ino=info.st_ino)
+                return info
+
+            with self.subTest(binary=binary), patch.object(Path, "lstat", unsafe), \
+                 patch("capacity.subprocess.run") as run:
+                with self.assertRaises(Failure) as caught:
+                    readonly_sudo_du_bytes(self.docker, timeout=2)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+                run.assert_not_called()
+
+    def test_root_replacement_during_du_fails(self):
+        def replaced(*args, **kwargs):
+            old = self.parent / "old-docker"
+            self.docker.rename(old)
+            self.docker.mkdir()
+            return self.result(f"2\t{self.docker}\n")
+
+        with patch("capacity.subprocess.run", side_effect=replaced), self.assertRaises(Failure) as caught:
+            readonly_sudo_du_bytes(self.docker, timeout=2)
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_overlap_and_replaced_root_are_rejected(self):
+        self.config["roots"].append(str(self.parent))
+        with self.assertRaises(Failure) as caught:
+            Budget(self.config)
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+        self.config["roots"].pop()
+        budget = Budget(self.config)
+        # Keep the removed inode alive so the filesystem cannot reuse it for
+        # the replacement before the identity check.
+        old_root = os.open(self.docker, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, old_root)
+        self.docker.rmdir()
+        self.docker.mkdir()
+        with self.assertRaises(Failure) as caught:
+            budget.used()
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_symlink_from_other_root_into_docker_root_is_rejected(self):
+        (self.other / "alias").symlink_to(self.docker)
+        with self.assertRaises(Failure) as caught:
+            Budget(self.config).used()
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
+
+    def test_stop_and_reserve_still_gate_sudo_measurement(self):
+        self.config["stop_bytes"] = 4_000_000_000
+        with patch("capacity.subprocess.run", return_value=self.result(f"1\t{self.docker}\n")):
+            with self.assertRaises(Failure) as caught:
+                Budget(self.config).before("build")
+        self.assertEqual(caught.exception.code, "CAPACITY")
+
+    def test_private_profile_requires_exact_nonoverlapping_runtime_root(self):
+        profile = {"schema": "alopex.test-env-profile/v1", "run_id": "test",
+                   "docker_context": "local", "platform": "linux/amd64",
+                   "execution_mode": "native", "image_lock": "lock", "assets": "assets",
+                   "private_output": "output", "cache": "cache",
+                   "cpu": {"server": [0], "client": [1]},
+                   "limits": {"memory_bytes": 1, "swap_bytes": 0, "pids": 1,
+                              "case_seconds": 1, "run_seconds": 1, "stop_seconds": 1},
+                   "storage": {**self.config,
+                               "runtime_storage_roots": [str(self.docker)],
+                               "planned_bytes": {key: 1 for key in
+                                                 ("fetch", "build", "runtime", "accept", "collect")}},
+                   "security": {"lsm_kind": "apparmor", "lsm_profile": "test",
+                                "seccomp_profile": "test", "seccomp_sha256": "a" * 64}}
+        path = self.parent / "profile.json"
+        path.write_text(json.dumps(profile))
+        path.chmod(0o600)
+        self.assertEqual(load_profile(path)["storage"]["readonly_sudo_du_root"], str(self.docker))
+        profile["storage"]["readonly_sudo_du_timeout_seconds"] = 60
+        path.write_text(json.dumps(profile))
+        self.assertEqual(load_profile(path)["storage"]["readonly_sudo_du_timeout_seconds"], 60)
+        for invalid in (0, 61, True, "60"):
+            profile["storage"]["readonly_sudo_du_timeout_seconds"] = invalid
+            path.write_text(json.dumps(profile))
+            with self.assertRaises(Failure) as caught:
+                load_profile(path)
+            self.assertEqual(caught.exception.code, "MEASUREMENT")
+        profile["storage"]["readonly_sudo_du_timeout_seconds"] = 60
+        profile["storage"]["runtime_storage_roots"] = [str(self.other)]
+        path.write_text(json.dumps(profile))
+        with self.assertRaises(Failure) as caught:
+            load_profile(path)
+        self.assertEqual(caught.exception.code, "MEASUREMENT")
 
 
 if __name__ == '__main__':
