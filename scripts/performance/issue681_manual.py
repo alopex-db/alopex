@@ -3,6 +3,10 @@
 
 Run a prebuilt issue681_hnsw_first_write example on macOS/Linux. Phase handshakes
 capture boundary RSS before work resumes; intermediate peaks are sampled.
+For 100k runs with an external storage supervisor, pass
+--external-storage-supervision and ALOPEX_681_EXTERNAL_STORAGE_SUPERVISION=1.
+That mode keeps boundary inventories and relies on the supervisor for ongoing
+host storage checks.
 """
 import argparse
 import hashlib
@@ -26,6 +30,8 @@ import storage
 PHASES = ("seed", "index_build", "cold_transaction_1", "cold_transaction_2",
           "warm", "writer_begin", "first_insert", "second_insert", "rollback")
 EXPECTED_EVENTS = tuple((phase, kind) for phase in PHASES for kind in ("start", "end")) + (("complete", None),)
+INVENTORY_INTERVAL_SECONDS = 30
+EXTERNAL_STORAGE_SUPERVISION_ENV = "ALOPEX_681_EXTERNAL_STORAGE_SUPERVISION"
 
 
 def main():
@@ -40,6 +46,8 @@ def main():
                         help="measure completion and require new-reader result verification")
     parser.add_argument("--phase-kernel-rss", action="store_true",
                         help="record Linux process RSS high-water marks between phase handshakes")
+    parser.add_argument("--external-storage-supervision", action="store_true",
+                        help="100k only: require an external storage supervisor; omit periodic full inventories")
     args = parser.parse_args()
     phases_expected = (*PHASES[:-1], args.finish or "rollback")
     events_expected = tuple((phase, kind) for phase in phases_expected
@@ -52,6 +60,14 @@ def main():
         parser.error("this process monitor supports macOS/Linux only")
     if args.phase_kernel_rss and sys.platform != "linux":
         parser.error("phase kernel RSS requires Linux proc counters")
+    supervision_gate = os.environ.get(EXTERNAL_STORAGE_SUPERVISION_ENV)
+    if args.external_storage_supervision:
+        if args.rows != 100_000 or supervision_gate != "1":
+            parser.error("external storage supervision requires rows=100000 and "
+                         f"{EXTERNAL_STORAGE_SUPERVISION_ENV}=1")
+    elif supervision_gate is not None:
+        parser.error(f"{EXTERNAL_STORAGE_SUPERVISION_ENV} requires --external-storage-supervision")
+    storage_monitor_mode = "external_supervised_100k" if args.external_storage_supervision else "standalone"
     args.output.mkdir(parents=True, exist_ok=False)
     inventory = storage.inventory([args.output])
     if inventory["allocated_bytes"] + 1_000_000_000 >= storage.STOP_BYTES:
@@ -65,6 +81,7 @@ def main():
                 "rows":args.rows,"dimensions":args.dimensions,"rss_limit":args.rss_limit,
                 "finish":args.finish,
                 "phase_kernel_rss":args.phase_kernel_rss,
+                "storage_monitor_mode":storage_monitor_mode,
                 "timeout_seconds":args.timeout,"initial_inventory":inventory}
     (args.output / "identity.json").write_text(json.dumps(identity,indent=2))
     events = queue.Queue()
@@ -154,7 +171,8 @@ def main():
                     rss_log.flush()
                     if current >= args.rss_limit:
                         raise RuntimeError("manual workload RSS limit exceeded")
-                if time.monotonic()-last_inventory >= 30:
+                if (not args.external_storage_supervision and
+                        time.monotonic()-last_inventory >= INVENTORY_INTERVAL_SECONDS):
                     inventory = storage.inventory([args.output])
                     with (args.output / "storage.jsonl").open("a") as log:
                         log.write(json.dumps(inventory)+"\n")
@@ -195,6 +213,7 @@ def main():
               "phase_kernel_rss":kernel_phases,
               "incomplete_kernel_phase":kernel_observer.pending_observation if kernel_observer is not None else None,
               "kernel_rss_reset":args.phase_kernel_rss,
+              "storage_monitor_mode":storage_monitor_mode,
               "peak_scope":"RUSAGE_CHILDREN includes workload and monitor utilities; when kernel reset is enabled its reported value is not a lifetime peak. Sampled phase values remain lower bounds. Kernel phase values cover the handshake window and have kernel RSS accounting accuracy.",
               "final_inventory":storage.inventory([args.output])}
     (args.output / "summary.json").write_text(json.dumps(report,indent=2))
