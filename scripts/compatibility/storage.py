@@ -19,9 +19,10 @@ import time
 
 REPO = Path(__file__).resolve().parents[2]
 STOP_BYTES = 40_000_000_000
+WINDOWS = os.name == "nt"
 
-if os.name == "nt":
-    from storage_windows import allocation_size
+if WINDOWS:
+    from storage_windows import allocation_size, native_file_info
 
 
 def allocated_bytes(roots):
@@ -43,16 +44,17 @@ def allocated_bytes(roots):
                 info = path.lstat()
             except FileNotFoundError:
                 continue  # Another process removed this pathname; it no longer consumes space here.
-            if os.name == "nt" and not info.st_ino:
-                raise RuntimeError(f"missing native file identity: {path}")
-            key = (info.st_dev, info.st_ino)
+            try:
+                if WINDOWS:
+                    key, allocated = native_file_info(path)
+                else:
+                    key, allocated = (info.st_dev, info.st_ino), info.st_blocks * 512
+            except FileNotFoundError:
+                continue  # Removed between lstat and native handle open.
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                total += allocation_size(path) if os.name == "nt" else info.st_blocks * 512
-            except FileNotFoundError:
-                continue
+            total += allocated
             reparse = getattr(info, "st_file_attributes", 0) & 0x400
             if stat.S_ISDIR(info.st_mode) and not reparse:
                 try:
