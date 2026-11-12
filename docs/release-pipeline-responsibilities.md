@@ -42,8 +42,8 @@ job's owner.
 | `alopex-cli.yml:signal-handling-test` | Development CI | exact-SHA process-lifecycle result |
 | `alopex-cli.yml:s3-compatibility-test` | Development CI | exact-SHA S3 behavior result |
 | `alopex-cli.yml:cli-success` | Development CI | status-only owner join |
-| `alopex-performance.yml:measure` | Extended Verification | exact-SHA metrics JSON |
-| `alopex-performance.yml:persist` | Extended Verification | immutable metrics history view |
+| `alopex-performance.yml:inventory` | Extended Verification | encrypted read-only host inventory, without qualification |
+| `alopex-performance.yml:qualification` | Extended Verification | exact-SHA same-runner native environment acceptance and encrypted evidence |
 | `alopex-py-release.yml:linux` | RC Qualification | qualified Linux wheels |
 | `alopex-py-release.yml:macos` | RC Qualification | qualified macOS wheels |
 | `alopex-py-release.yml:windows` | RC Qualification | qualified Windows wheels |

@@ -2,6 +2,7 @@
 import errno
 import json
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -159,6 +160,17 @@ class ReadonlyDockerRoot(unittest.TestCase):
                        "readonly_sudo_du_root": str(self.docker),
                        "stop_bytes": 40_000_000_000, "reserve_bytes": 1_000_000_000,
                        "poll_seconds": 2, "planned_bytes": {"build": 3_000_000_000}}
+        # The unit contract concerns command validation, not the CI image's
+        # current sudo/du packaging; model trusted command metadata explicitly.
+        original_lstat = Path.lstat
+        def executable_metadata(path, *args, **kwargs):
+            if path in (SUDO_BINARY, DU_BINARY):
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0,
+                                       st_dev=1, st_ino=1 if path == SUDO_BINARY else 2)
+            return original_lstat(path, *args, **kwargs)
+        self.executable_patch = patch.object(Path, "lstat", executable_metadata)
+        self.executable_patch.start()
+        self.addCleanup(self.executable_patch.stop)
 
     def result(self, stdout, *, returncode=0, stderr=""):
         return subprocess.CompletedProcess([], returncode, stdout, stderr)
