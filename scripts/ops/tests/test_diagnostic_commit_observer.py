@@ -26,17 +26,17 @@ class CompositionTests(unittest.TestCase):
             return result, {"timer_nanoseconds": 17}
         result, record = observe(action, measure, baseline_observe=baseline,
                                  scheduler_observe=scheduler)
-        self.assertEqual(events, ["cpu-before", "sched-before", "timer-start", "commit",
-                                  "timer-end", "sched-after", "cpu-after"])
+        self.assertEqual(events, ["sched-before", "cpu-before", "timer-start", "commit",
+                                  "timer-end", "cpu-after", "sched-after"])
         self.assertEqual(result, ("done", 17))
         self.assertEqual(record["timer_nanoseconds"], record["schedstat"]["original_timer_ns"])
         self.assertFalse(record["schedstat"]["acceptance_sample"])
 
     def test_duplicate_timer_call_is_rejected(self):
         def baseline(action, timer):
-            timer(action)
             return timer(action), {}
         def scheduler(action, timer):
+            timer(action)
             return timer(action), {"original_timer_ns": 1}
         with self.assertRaisesRegex(RuntimeError, "timer calls"):
             observe(lambda: None, lambda action: (action(), 1),
