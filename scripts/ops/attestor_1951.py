@@ -88,8 +88,8 @@ def attest_current_job(pins, job_id, *, repo, runner_temp, environment, operatio
     require(profile["run_id"] == "hosted-804-" + job_id and
             profile["assets"] == str(manifest_path) and
             profile["private_output"] == str(private / "runs") and
-            profile["image_lock"] == str(private / "abi-image.lock.json") and
-            profile["security"]["seccomp_profile"] == str(private / "seccomp-default.json") and
+            profile["image_lock"] == str(private / "image.lock.json") and
+            profile["security"]["seccomp_profile"] == str(private / "seccomp.json") and
             profile["security"]["lsm_kind"] == "apparmor" and
             profile["security"]["lsm_profile"] == "docker-default" and
             profile["security"]["seccomp_sha256"] == SECCOMP_SHA256 and

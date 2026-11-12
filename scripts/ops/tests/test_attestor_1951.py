@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import attestor_1951 as lane
+import hosted_test_env_qualification_1951 as qualifier
 import same_job_1951
 from orchestrate import QUALIFICATION_CASES, SOURCE_COMMIT, SOURCE_TREE
 from test_same_job_1951 import fixture
@@ -39,6 +40,24 @@ class FakeDocker:
 
 
 class AttestorTests(unittest.TestCase):
+    def test_qualifier_profile_paths_match_attestor_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory)
+            manifest = private / "assets.json"
+            facts = {"context": "selected", "cpus": [0, 1],
+                     "storage": {"stop_bytes": 40_000_000_000,
+                                 "reserve_bytes": 1_000_000_000, "poll_seconds": 10}}
+            with patch.dict("os.environ", {"GITHUB_RUN_ID": "12345"}), \
+                 patch.object(qualifier, "load_profile"), \
+                 patch.object(qualifier, "image_lock"), \
+                 patch.object(qualifier, "Docker", FakeDocker):
+                generated = json.loads(qualifier.create_profile(private, manifest, facts).read_text())
+            self.assertEqual(generated["image_lock"], str(private / "image.lock.json"))
+            self.assertEqual(generated["security"]["seccomp_profile"],
+                             str(private / "seccomp.json"))
+            self.assertTrue(Path(generated["image_lock"]).is_file())
+            self.assertTrue(Path(generated["security"]["seccomp_profile"]).is_file())
+
     def setup_fixture(self, root):
         pins, _ = fixture()
         repo, runner = root / "repo", root / "runner"
@@ -48,8 +67,8 @@ class AttestorTests(unittest.TestCase):
         candidate = runner / "alopex-804-candidate"
         private.mkdir()
         (candidate / "assets").mkdir(parents=True)
-        (private / "abi-image.lock.json").write_text("lock")
-        (private / "seccomp-default.json").write_text("policy")
+        (private / "image.lock.json").write_text("lock")
+        (private / "seccomp.json").write_text("policy")
         (private / "candidate.original.zip").write_text("zip")
         pins.update(asset_run_id=654, asset_run_head=hashlib.sha1(b"asset-run").hexdigest(),
                     artifact_id=321, zip_sha256=h("zip"), artifact_sha256=h("zip"),
@@ -78,9 +97,9 @@ class AttestorTests(unittest.TestCase):
                    "poll_seconds": 10}
         profile = {"run_id": "hosted-804-12345", "assets": str(manifest_path),
                    "private_output": str(private / "runs"), "platform": "linux/amd64",
-                   "image_lock": str(private / "abi-image.lock.json"),
+                   "image_lock": str(private / "image.lock.json"),
                    "security": {"lsm_kind": "apparmor", "lsm_profile": "docker-default",
-                                "seccomp_profile": str(private / "seccomp-default.json"),
+                                "seccomp_profile": str(private / "seccomp.json"),
                                 "seccomp_sha256": pins["seccomp_sha256"]},
                    "storage": storage}
         profile_path = write(private / "profile.json", profile)

@@ -287,7 +287,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -B scripts/ops/diagnostic_entrypoint.py
       - name: Preserve encrypted diagnostic evidence
-        if: inputs.sql_diagnostic_mode && steps.diagnostic.outcome == 'success'
+        if: always() && !cancelled() && inputs.sql_diagnostic_mode && steps.diagnostic.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: private-sql-stage-diagnostic

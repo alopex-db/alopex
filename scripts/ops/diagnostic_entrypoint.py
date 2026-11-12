@@ -5,13 +5,15 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
+import tarfile
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "scripts/test-env"))
 
-from common import atomic_json, contained, digest, load_profile, private_dir, require, verify_assets  # noqa: E402
+from common import Failure, atomic_json, contained, digest, load_profile, private_dir, require, verify_assets  # noqa: E402
 from capacity import Budget  # noqa: E402
 from lifecycle import Run  # noqa: E402
 import envctl  # noqa: E402
@@ -167,6 +169,44 @@ def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
                         job_limit_seconds=JOB_LIMIT_SECONDS)
 
 
+def seal_failure(root):
+    """Export only the fixed failure record as bounded encrypted evidence."""
+    record = root / "diagnostic-failure.private.json"
+    require(record.is_file() and not record.is_symlink() and
+            record.stat().st_mode & 0o077 == 0 and
+            record.stat().st_size <= 4096 and CERT.is_file(), "ENCRYPTION")
+    export = root / "export"
+    require(not export.is_symlink(), "ENCRYPTION")
+    if export.exists():
+        require(export.is_dir() and export.stat().st_mode & 0o077 == 0 and
+                not any(export.iterdir()), "ENCRYPTION")
+    else:
+        export.mkdir(mode=0o700)
+    archive = root / "diagnostic-failure.tar.gz"
+    pending = export / ".evidence.pending.cms"
+    ciphertext = export / "evidence.cms"
+    require(not archive.exists() and not pending.exists() and
+            not ciphertext.exists(), "EVIDENCE_STATE")
+    with tarfile.open(archive, "x:gz") as bundle:
+        bundle.add(record, arcname="diagnostic/diagnostic-failure.private.json",
+                   recursive=False)
+    archive.chmod(0o600)
+    require(archive.stat().st_size <= 8192, "EVIDENCE_BOUND")
+    try:
+        subprocess.run(["openssl", "cms", "-encrypt", "-binary", "-aes-256-cbc",
+                        "-outform", "DER", "-in", str(archive), "-out", str(pending),
+                        str(CERT)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True, timeout=120)
+        require(pending.is_file() and not pending.is_symlink() and
+                0 < pending.stat().st_size <= 16_384, "ENCRYPTION")
+        pending.chmod(0o600)
+        pending.replace(ciphertext)
+        archive.unlink()
+    except BaseException:
+        pending.unlink(missing_ok=True)
+        raise
+
+
 def main():
     os.umask(0o077)
     try:
@@ -183,10 +223,11 @@ def main():
                 allowed = {"MISSING_PIN", "MISSING_ASSET", "QUALIFICATION", "POLICY",
                            "IDENTITY", "OPERATOR_IDENTITY", "CAPACITY", "CLEANUP",
                            "EVIDENCE_STATE", "EVIDENCE_BOUND", "ENCRYPTION"}
-                code = str(error) if type(error) is ValueError and str(error) in allowed else "INTERNAL"
+                code = str(error) if type(error) in (ValueError, Failure) and str(error) in allowed else "INTERNAL"
                 atomic_json(root / "diagnostic-failure.private.json",
                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
                              "error_code": code, "performance_qualification": False})
+                seal_failure(root)
         except BaseException:
             pass
         print('{"schema":"alopex.sql-diagnostic-public/v1","status":"failed","error_code":"DIAGNOSTIC_FAILED","performance_qualification":false}')

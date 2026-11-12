@@ -36,7 +36,7 @@ class WorkflowDiagnosticTests(unittest.TestCase):
         self.assertEqual(upload["with"]["path"],
                          "${{ runner.temp }}/alopex-712-diagnostic/export/evidence.cms")
         self.assertEqual(upload["if"],
-                         "inputs.sql_diagnostic_mode && steps.diagnostic.outcome == 'success'")
+                         "always() && !cancelled() && inputs.sql_diagnostic_mode && steps.diagnostic.outcome != 'skipped'")
         self.assertNotIn("plain", upload["with"]["path"])
         self.assertIn("sql_diagnostic_mode", doc.get("on", doc.get("true"))["workflow_dispatch"]["inputs"])
 

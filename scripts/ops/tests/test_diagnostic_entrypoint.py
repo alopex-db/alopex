@@ -106,6 +106,10 @@ class EntrypointTests(unittest.TestCase):
             self.assertNotIn("secret path", output.getvalue())
             record = json.loads((root / "diagnostic-failure.private.json").read_text())
             self.assertEqual(record["error_code"], "INTERNAL")
+            evidence = root / "export/evidence.cms"
+            self.assertTrue(evidence.is_file())
+            self.assertGreater(evidence.stat().st_size, 0)
+            self.assertEqual({path.name for path in evidence.parent.iterdir()}, {"evidence.cms"})
 
 
 if __name__ == "__main__":

@@ -9,11 +9,11 @@
     "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
     "image_lock_sha256": "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7",
     "operator_sha256": {
-      "attestor_1951.py": "4c948a4542b1fbaeb18c0c6ed76b71fe4d609e55c799e35c53b70d86fa81ada2",
+      "attestor_1951.py": "5f7f3a70c11c7f0b4cd54223449949f94b14e9ad51b704e47a2215c736d17b8d",
       "audit.py": "8552261f57eb21c4188a8b8dfaf998d1e387602f12a647828944db472535aace",
       "diagnostic.py": "0b07aa11944fc29d72baa306179c77b6a0dae4c88813aab2bcad79cd2c2952ba",
       "diagnostic_container.py": "18195650d7afbf67c2effd5343ed83ff5e4395420af4e86b846b38998a950284",
-      "diagnostic_entrypoint.py": "ff24dddd00a18e25963d44346df734d400e2cab4a7c4b12614c775dd08cd4098",
+      "diagnostic_entrypoint.py": "e976a24bd503aab90ed400958f2d800dbd2916e7242bf5d4b2e4bd1a03a38d23",
       "diagnostic_measure.py": "7308b839d9e4c0f3391557f1438cacc7910567b193c7771ead962fc4f1d153d8",
       "diagnostic_supervisor.py": "2f3776058e4899cc2a796dd46b3c695edadffdeac301ca18be37115ac2d137d2",
       "diagnostic_worker.py": "b7f1006c5cccd0df9e7a250ba2d7b95a71e688511593679f59760d10f0748f08",
