@@ -42,7 +42,7 @@ class FakeProc(unittest.TestCase):
                              {"advancing"})
             self.assertEqual(moved["self"]["deltas"],
                              {"runtime_ns": 10, "runqueue_wait_ns": 0, "timeslices": 1})
-            self.assertEqual(probe.capability_code({"status": "read", "value": "1"}, moved),
+            self.assertEqual(probe.capability_code(moved),
                              "SCHEDSTAT_WAIT_UNPROVEN")
 
             def wait_advances():
@@ -52,14 +52,14 @@ class FakeProc(unittest.TestCase):
             waited = probe.sample(proc, 123, wait_advances)
             self.assertEqual(waited["self"]["deltas"]["runqueue_wait_ns"], 5)
             self.assertEqual(waited["sibling"]["deltas"]["runqueue_wait_ns"], 7)
-            self.assertEqual(probe.capability_code({"status": "read", "value": "1"}, waited),
+            self.assertEqual(probe.capability_code(waited),
                              "SCHEDSTAT_ADVANCING")
             still = probe.sample(proc, 123, lambda: None)
             self.assertEqual({row["classification"] for row in still.values()}, {"static"})
             self_path.write_text("bad counter\n")
             self.assertEqual(probe.read_schedstat(self_path)["status"], "unreadable")
 
-    def test_kernel_setting_and_fixed_code(self):
+    def test_setting_zero_does_not_override_observed_wait_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             proc = Path(directory)
             setting = proc / "sys/kernel/sched_schedstats"
@@ -73,20 +73,20 @@ class FakeProc(unittest.TestCase):
                        "sibling": {"classification": "advancing",
                                    "deltas": {"runtime_ns": 1, "runqueue_wait_ns": 3,
                                               "timeslices": 1}}}
-            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
-                             "SCHEDSTAT_DISABLED")
+            self.assertEqual(probe.capability_code(samples),
+                             "SCHEDSTAT_ADVANCING")
             setting.write_text("1\n")
-            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
+            self.assertEqual(probe.capability_code(samples),
                              "SCHEDSTAT_ADVANCING")
             samples["sibling"]["deltas"]["runqueue_wait_ns"] = 0
-            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
+            self.assertEqual(probe.capability_code(samples),
                              "SCHEDSTAT_WAIT_UNPROVEN")
             samples["sibling"]["deltas"]["runqueue_wait_ns"] = 3
             samples["sibling"]["classification"] = "zero"
-            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
+            self.assertEqual(probe.capability_code(samples),
                              "SCHEDSTAT_ZERO")
             samples["sibling"]["classification"] = "missing"
-            self.assertEqual(probe.capability_code(probe.kernel_setting(proc), samples),
+            self.assertEqual(probe.capability_code(samples),
                              "SCHEDSTAT_MISSING")
 
     def test_timeslice_only_movement_does_not_prove_wait_counter(self):
@@ -96,8 +96,7 @@ class FakeProc(unittest.TestCase):
                "deltas": probe.counter_deltas(before, after)}
         self.assertEqual(row["classification"], "advancing")
         self.assertEqual(row["deltas"]["runqueue_wait_ns"], 0)
-        self.assertEqual(probe.capability_code({"status": "read", "value": "1"},
-                                               {"self": row, "sibling": row}),
+        self.assertEqual(probe.capability_code({"self": row, "sibling": row}),
                          "SCHEDSTAT_WAIT_UNPROVEN")
 
     def test_affinity_is_pinned_before_child_and_restored_after_sample(self):
@@ -149,8 +148,7 @@ class FakeProc(unittest.TestCase):
              patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}):
             facts = probe.collect(Path("/unused"))
         self.assertEqual(facts["affinity"], "unavailable")
-        self.assertEqual(probe.capability_code(facts["setting"], facts["samples"],
-                                               facts["affinity"]),
+        self.assertEqual(probe.capability_code(facts["samples"], facts["affinity"]),
                          "SCHEDSTAT_AFFINITY_UNAVAILABLE")
         setter.assert_not_called()
         launch.assert_not_called()
@@ -162,8 +160,7 @@ class FakeProc(unittest.TestCase):
              patch.object(probe, "kernel_setting", return_value={"status": "read", "value": "1"}):
             facts = probe.collect(Path("/unused"))
         self.assertEqual(facts["affinity"], "unavailable")
-        self.assertEqual(probe.capability_code(facts["setting"], facts["samples"],
-                                               facts["affinity"]),
+        self.assertEqual(probe.capability_code(facts["samples"], facts["affinity"]),
                          "SCHEDSTAT_AFFINITY_UNAVAILABLE")
         setter.assert_called_once_with(0, {2})
         launch.assert_not_called()

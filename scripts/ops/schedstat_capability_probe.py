@@ -10,7 +10,7 @@ import sys
 import time
 
 PUBLIC_CODES = {"SCHEDSTAT_ADVANCING", "SCHEDSTAT_ZERO", "SCHEDSTAT_MISSING",
-                "SCHEDSTAT_STATIC", "SCHEDSTAT_UNREADABLE", "SCHEDSTAT_DISABLED",
+                "SCHEDSTAT_STATIC", "SCHEDSTAT_UNREADABLE",
                 "SCHEDSTAT_WAIT_UNPROVEN", "SCHEDSTAT_AFFINITY_UNAVAILABLE",
                 "PROBE_FAILED"}
 
@@ -66,16 +66,14 @@ def sample(proc: Path, sibling_pid: int, advance) -> dict:
             for name in paths}
 
 
-def capability_code(setting: dict, samples: dict, affinity: str = "pinned") -> str:
+def capability_code(samples: dict, affinity: str = "pinned") -> str:
     if affinity != "pinned":
         return "SCHEDSTAT_AFFINITY_UNAVAILABLE"
     states = {item["classification"] for item in samples.values()}
-    if "missing" in states or setting["status"] == "missing":
+    if "missing" in states:
         return "SCHEDSTAT_MISSING"
-    if "unreadable" in states or setting["status"] != "read":
+    if "unreadable" in states:
         return "SCHEDSTAT_UNREADABLE"
-    if setting["value"] != "1":
-        return "SCHEDSTAT_DISABLED"
     if "zero" in states:
         return "SCHEDSTAT_ZERO"
     if states == {"advancing"}:
@@ -155,7 +153,7 @@ def main() -> int:
             raise ValueError("wrong issue")
         private = Path(os.environ["RUNNER_TEMP"]) / "alopex-682-schedstat.private.json"
         facts = collect()
-        code = capability_code(facts["setting"], facts["samples"], facts["affinity"])
+        code = capability_code(facts["samples"], facts["affinity"])
         private.write_text(json.dumps(facts, sort_keys=True) + "\n")
         private.chmod(0o600)
         export.mkdir(mode=0o700, exist_ok=True)
