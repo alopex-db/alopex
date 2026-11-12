@@ -188,9 +188,30 @@ def seal_failure(root):
     ciphertext = export / "evidence.cms"
     require(not archive.exists() and not pending.exists() and
             not ciphertext.exists(), "EVIDENCE_STATE")
+    inner = root / "work/plain/failure.private.json"
+    if inner.exists() or inner.is_symlink():
+        require(inner.is_file() and not inner.is_symlink() and
+                inner.stat().st_mode & 0o077 == 0 and inner.stat().st_size <= 4096,
+                "EVIDENCE_BOUND")
+        value = json.loads(inner.read_text())
+        require(type(value) is dict and set(value) == {
+            "schema", "status", "phase", "primary", "cleanup",
+            "performance_qualification"} and
+            value["schema"] == "alopex.sql-diagnostic-failure/v1" and
+            value["status"] == "failed" and value["performance_qualification"] is False and
+            value["phase"] in {"qualification", "capacity", "cells", "audit",
+                               "final_capacity", "evidence", "encryption"} and
+            all(item is None or (type(item) is dict and set(item) == {"type", "code"} and
+                type(item["type"]) is str and len(item["type"]) <= 64 and
+                type(item["code"]) is str and len(item["code"]) <= 64 and
+                item["code"].replace("_", "").isalpha() and item["code"].isupper())
+                for item in (value["primary"], value["cleanup"])), "EVIDENCE_ALLOWLIST")
     with tarfile.open(archive, "x:gz") as bundle:
         bundle.add(record, arcname="diagnostic/diagnostic-failure.private.json",
                    recursive=False)
+        if inner.exists():
+            bundle.add(inner, arcname="diagnostic/orchestrate-failure.private.json",
+                       recursive=False)
     archive.chmod(0o600)
     require(archive.stat().st_size <= 8192, "EVIDENCE_BOUND")
     try:

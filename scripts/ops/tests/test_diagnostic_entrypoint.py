@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -40,6 +41,42 @@ class FakeRun:
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_failure_seal_includes_only_fixed_inner_stage_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "alopex-712-diagnostic"
+            root.mkdir(mode=0o700)
+            lane.atomic_json(root / "diagnostic-failure.private.json",
+                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
+                              "error_code": "INTERNAL"})
+            inner = root / "work/plain/failure.private.json"
+            value = {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
+                     "phase": "qualification", "primary": {"type": "ValueError", "code": "IDENTITY"},
+                     "cleanup": None, "performance_qualification": False}
+            lane.atomic_json(inner, value)
+            names = []
+            def encrypt(command, **_):
+                with tarfile.open(root / "diagnostic-failure.tar.gz") as archive:
+                    names.extend(archive.getnames())
+                Path(command[command.index("-out") + 1]).write_bytes(b"encrypted")
+            with patch.object(lane.subprocess, "run", side_effect=encrypt):
+                lane.seal_failure(root)
+            self.assertEqual(names, ["diagnostic/diagnostic-failure.private.json",
+                                     "diagnostic/orchestrate-failure.private.json"])
+            self.assertEqual({path.name for path in (root / "export").iterdir()}, {"evidence.cms"})
+
+    def test_failure_seal_rejects_inner_record_with_raw_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "alopex-712-diagnostic"
+            root.mkdir(mode=0o700)
+            lane.atomic_json(root / "diagnostic-failure.private.json", {"status": "failed"})
+            lane.atomic_json(root / "work/plain/failure.private.json",
+                             {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
+                              "phase": "cells", "primary": None, "cleanup": None,
+                              "performance_qualification": False, "raw_exception": "secret"})
+            with self.assertRaises(lane.Failure):
+                lane.seal_failure(root)
+            self.assertFalse((root / "export/evidence.cms").exists())
+
     def test_explicit_pins_and_operator_bytes(self):
         source = HERE / "sql-diagnostic-lock.json"
         with tempfile.TemporaryDirectory() as directory:
