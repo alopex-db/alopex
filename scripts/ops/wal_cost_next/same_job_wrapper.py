@@ -39,7 +39,8 @@ def read(path):
 
 
 def head(path):
-    return subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True, timeout=10).strip()
+    return subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'],
+                                   stderr=subprocess.PIPE, text=True, timeout=10).strip()
 
 
 def load_qualification_module(repo):
@@ -153,13 +154,7 @@ def monitor_comparator(repo, config_path, module, prior, private, env):
         require(original_error is None and cleanup_error is None, 'comparator or collection failed')
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--qualification-checkout', type=Path, required=True)
-    parser.add_argument('--frozen-checkout', type=Path, required=True)
-    parser.add_argument('--config', type=Path, required=True)
-    parser.add_argument('--config-sha256', required=True)
-    args = parser.parse_args()
+def run(args):
     require(os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
             os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and
             os.environ.get('RUNNER_KIND') == 'github-hosted', 'unexpected job boundary')
@@ -193,5 +188,44 @@ def main():
     monitor_comparator(args.frozen_checkout, config, module, prior, private, environment)
 
 
+def seal_wrapper_failure(error):
+    """Keep wrapper failures private even when no comparator was started."""
+    private = Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
+    require(private.is_dir() and not private.is_symlink() and
+            private.stat().st_mode & 0o077 == 0, 'private evidence directory differs')
+    receipt = private / 'wrapper-result.private.json'
+    if receipt.exists():
+        return  # Preserve the comparator's original error and cleanup result.
+    payload = {'run_id': os.environ.get('GITHUB_RUN_ID'),
+               'pre_comparator_error': True, 'original_error': repr(error)[:4096],
+               'cleanup_error': None, 'comparator_exit': None,
+               'all_owned_children_waited': False}
+    with receipt.open('x', encoding='utf-8') as output:
+        json.dump(payload, output, sort_keys=True)
+        output.write('\n')
+    receipt.chmod(0o600)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--qualification-checkout', type=Path, required=True)
+    parser.add_argument('--frozen-checkout', type=Path, required=True)
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--config-sha256', required=True)
+    args = parser.parse_args()
+    try:
+        run(args)
+        return 0
+    except BaseException as error:
+        try:
+            seal_wrapper_failure(error)
+            code = 'WRAPPER_FAILURE'
+        except BaseException:
+            code = 'EVIDENCE_FAILURE'
+        print(json.dumps({'case': 'WAL_COST_682', 'outcome': 'failed',
+                          'error_code': code}, sort_keys=True))
+        return 1
+
+
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

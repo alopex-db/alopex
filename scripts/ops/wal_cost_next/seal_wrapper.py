@@ -22,9 +22,15 @@ def seal(qualification, frozen, private, output):
     encrypted_cost = frozen / 'wal-cost-export/private-evidence.cms'
     if wrapper.is_file():
         evidence.append(wrapper)
+        try:
+            if json.loads(wrapper.read_bytes()).get('pre_comparator_error') is True:
+                public['error_code'] = 'WRAPPER_FAILURE'
+        except (OSError, ValueError, TypeError, AttributeError):
+            public['error_code'] = 'WRAPPER_FAILURE'
     if log.is_file():
         evidence.append(log)
-    if cost.is_file() and encrypted_cost.is_file() and wrapper.is_file():
+    if (cost.is_file() and encrypted_cost.is_file() and wrapper.is_file() and
+            public['error_code'] != 'WRAPPER_FAILURE'):
         evidence.extend((cost, encrypted_cost))
         try:
             result = json.loads(wrapper.read_bytes())

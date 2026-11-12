@@ -117,6 +117,34 @@ class WorkflowContract(unittest.TestCase):
             self.assertFalse(log.exists())
             self.assertFalse((private / 'wrapper-evidence.tar.gz').exists())
 
+    def test_pre_comparator_failure_uses_fixed_public_code_and_encrypted_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qualification, frozen, private, output = [root / name for name in
+                                                      ('qualification', 'frozen', 'private', 'output')]
+            private.mkdir()
+            detail = 'private identity path /hidden/host'
+            (private / 'wrapper-result.private.json').write_text(json.dumps({
+                'pre_comparator_error': True, 'original_error': detail,
+                'cleanup_error': None, 'comparator_exit': None,
+                'all_owned_children_waited': False}))
+
+            def fake_encrypt(command, **_):
+                with tarfile.open(command[command.index('-in') + 1], 'r:gz') as archive:
+                    preserved = b' '.join(archive.extractfile(member).read()
+                                          for member in archive.getmembers())
+                self.assertIn(detail.encode(), preserved)
+                Path(command[command.index('-out') + 1]).write_bytes(b'encrypted wrapper')
+                return types.SimpleNamespace(returncode=0)
+
+            with patch.object(sealer.subprocess, 'run', side_effect=fake_encrypt):
+                public = sealer.seal(qualification, frozen, private, output)
+            self.assertEqual(public['outcome'], 'failed')
+            self.assertEqual(public['error_code'], 'WRAPPER_FAILURE')
+            self.assertNotIn(detail, (output / 'public.json').read_text())
+            self.assertTrue((output / 'private-evidence.cms').is_file())
+            self.assertFalse((private / 'wrapper-result.private.json').exists())
+
     def test_encryption_failure_cleans_plaintext_and_reports_fixed_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

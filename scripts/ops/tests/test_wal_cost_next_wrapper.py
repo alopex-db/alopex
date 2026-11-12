@@ -1,9 +1,13 @@
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parents[1] / 'wal_cost_next'
@@ -13,6 +17,69 @@ spec.loader.exec_module(wrapper)
 
 
 class AdmissionContract(unittest.TestCase):
+    def test_early_identity_and_capacity_failures_create_private_receipts(self):
+        for failure in ('identity', 'capacity'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                private = root / 'alopex-804-qualification'
+                private.mkdir(mode=0o700)
+                workspace = root / 'workspace'
+                workspace.mkdir()
+                controller, frozen = root / 'qualification', root / 'frozen'
+                controller.mkdir()
+                frozen.mkdir()
+                config = root / 'config.json'
+                config.write_text(json.dumps({'sources': {
+                    'scripts/ops/wal_cost_contract.py': '0' * 64}}))
+                sha = 'a' * 40
+                (private / 'checkout-preflight.private.json').write_text(json.dumps({
+                    'expected_controller_sha': sha, 'workspace_root': str(root)}))
+                arguments = ['wrapper', '--qualification-checkout', str(controller),
+                             '--frozen-checkout', str(frozen), '--config', str(config),
+                             '--config-sha256', wrapper.sha(config)]
+                module = types.SimpleNamespace(
+                    verified_controller=lambda: None,
+                    admission_facts=lambda: {'storage': {}},
+                    Budget=lambda _: types.SimpleNamespace(used=lambda: 39_000_000_000),
+                    PLANNED={'fetch': 1_000_000_000})
+                reason = ('frozen comparator checkout differs' if failure == 'identity'
+                          else 'combined peak exceeds host budget')
+                stdout = io.StringIO()
+                with patch.object(sys, 'argv', arguments), \
+                        patch.dict(os.environ, {'RUNNER_TEMP': directory,
+                                                'GITHUB_WORKSPACE': str(workspace),
+                                                'GITHUB_RUN_ID': '123',
+                                                'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                                'RUNNER_ENVIRONMENT': 'github-hosted',
+                                                'RUNNER_KIND': 'github-hosted',
+                                                'GITHUB_SHA': sha,
+                                                'EXPECTED_CONTROLLER_SHA': sha}), \
+                        patch.object(wrapper, 'verify_frozen_checkout',
+                                     side_effect=RuntimeError(reason) if failure == 'identity'
+                                     else None), \
+                        patch.object(wrapper, 'head', return_value=sha), \
+                        patch.object(wrapper, 'load_qualification_module', return_value=module), \
+                        redirect_stdout(stdout):
+                    self.assertEqual(wrapper.main(), 1)
+                receipt = json.loads((private / 'wrapper-result.private.json').read_text())
+                self.assertEqual(receipt['original_error'], repr(RuntimeError(reason)))
+                self.assertTrue(receipt['pre_comparator_error'])
+                self.assertEqual(json.loads(stdout.getvalue()), {
+                    'case': 'WAL_COST_682', 'outcome': 'failed',
+                    'error_code': 'WRAPPER_FAILURE'})
+                self.assertNotIn(reason, stdout.getvalue())
+
+    def test_comparator_receipt_is_not_replaced_by_wrapper_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / 'alopex-804-qualification'
+            private.mkdir(mode=0o700)
+            receipt = private / 'wrapper-result.private.json'
+            original = '{"original_error":"comparator failed","cleanup_error":"cleanup failed"}\n'
+            receipt.write_text(original)
+            with patch.dict(os.environ, {'RUNNER_TEMP': directory}):
+                wrapper.seal_wrapper_failure(RuntimeError('later wrapper error'))
+            self.assertEqual(receipt.read_text(), original)
+
     def facts(self):
         return {'context': 'local', 'dmi': 'machine', 'kernel': 'kernel', 'lsm': 'lsm',
                 'apparmor': 'enabled', 'root_metadata': [{'dev': 1, 'ino': 2}],
