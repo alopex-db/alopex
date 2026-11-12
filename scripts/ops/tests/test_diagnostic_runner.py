@@ -17,6 +17,14 @@ def digest(path):
 
 
 class DiagnosticRunnerTests(unittest.TestCase):
+    def test_versioned_source_lock_matches_diagnostic_modules(self):
+        directory = Path(runner.__file__).parent
+        locked = json.loads((directory / 'diagnostic_sources.lock.json').read_bytes())
+        self.assertEqual(set(locked), set(runner.DIAGNOSTIC_FILES))
+        for name, expected in locked.items():
+            with self.subTest(name=name):
+                self.assertEqual(digest(directory / name), expected)
+
     def fixture(self, root):
         frozen = root / 'frozen'
         frozen.mkdir()

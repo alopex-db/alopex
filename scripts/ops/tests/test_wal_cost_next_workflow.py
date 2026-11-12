@@ -40,7 +40,7 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('scripts/ops/same_job_four_case.py', qualification)
         self.assertIn('wal_cost_mode:', workflow)
         self.assertIn("inputs.issue_number == '682'", workflow)
-        self.assertIn('!inputs.sql_four_case_mode && !inputs.wal_cost_mode', workflow)
+        self.assertIn('!inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.wal_diagnostic_mode', workflow)
         order = ['Bound checkout before source acquisition',
                  'Stage current #804 controller', 'Stage frozen #682 comparator',
                  'Qualify and measure on the same runner', 'Seal wrapper evidence',
@@ -54,6 +54,22 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('path: frozen-wal-controller', workflow)
         self.assertIn('if-no-files-found: error', workflow)
         self.assertNotIn('*.log\n', workflow.split('path: |')[-1])
+
+    def test_diagnostic_mode_is_separate_and_never_uploads_raw_logs(self):
+        workflow = WORKFLOW.read_text()
+        job = workflow.split('  wal_cost_682:\n', 1)[1]
+        self.assertIn('!(inputs.wal_cost_mode && inputs.wal_diagnostic_mode)', job)
+        self.assertIn('if: inputs.wal_cost_mode\n', job)
+        self.assertIn('if: inputs.wal_diagnostic_mode\n', job)
+        self.assertIn('if: always() && inputs.wal_cost_mode\n', job)
+        self.assertIn('if: always() && inputs.wal_diagnostic_mode\n', job)
+        self.assertIn('diagnostic_same_job_wrapper.py', job)
+        self.assertIn('diagnostic_seal_wrapper.py', job)
+        self.assertIn('wal-diagnostic-export/private-evidence.cms', job)
+        self.assertIn('wal-diagnostic-wrapper-export/private-evidence.cms', job)
+        self.assertNotIn('diagnostic.stdout.private.log\n', job.split('path: |')[-1])
+        self.assertLess(job.index('Qualify and observe one diagnostic pair'),
+                        job.index('Seal diagnostic wrapper evidence'))
 
     def test_sealer_exports_only_allowlisted_fields_and_encrypts_private(self):
         with tempfile.TemporaryDirectory() as directory:
