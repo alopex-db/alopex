@@ -161,6 +161,50 @@ def admissible_root(path, temporary_roots):
         return False
 
 
+def effective_memory_bytes(docker_total, mountinfo_value, *,
+                           cgroup_root=Path("/sys/fs/cgroup"),
+                           membership=Path("/proc/self/cgroup"),
+                           meminfo=Path("/proc/meminfo")):
+    """Bound memory by physical size and every finite ancestor cgroup limit."""
+    require(type(docker_total) is int and docker_total > 0, "PREREQUISITE")
+    try:
+        root = cgroup_root.resolve(strict=True)
+        require(root == cgroup_root and root.is_dir(), "PREREQUISITE")
+        mounts = [line.split(" - ", 1) for line in mountinfo_value.splitlines()]
+        unified = [parts[0].split() for parts in mounts
+                   if len(parts) == 2 and parts[1].split()[0] == "cgroup2"]
+        require(len(unified) == 1 and unified[0][3:5] == ["/", str(root)],
+                "PREREQUISITE")
+        rows = membership.read_text().splitlines()
+        require(len(rows) == 1 and rows[0].startswith("0::/"), "PREREQUISITE")
+        relative = PurePosixPath(rows[0][3:])
+        require(relative.is_absolute() and ".." not in relative.parts,
+                "PREREQUISITE")
+        current = root.joinpath(*relative.parts[1:])
+        require(current.resolve(strict=True) == current and current.is_dir(),
+                "PREREQUISITE")
+        totals = [docker_total]
+        physical = [line.split() for line in meminfo.read_text().splitlines()
+                    if line.startswith("MemTotal:")]
+        require(len(physical) == 1 and len(physical[0]) == 3 and
+                physical[0][1].isascii() and physical[0][1].isdecimal() and
+                physical[0][2] == "kB", "PREREQUISITE")
+        totals.append(int(physical[0][1]) * 1024)
+        while current != root:
+            limit = current / "memory.max"
+            require(not limit.is_symlink(), "PREREQUISITE")
+            value = limit.read_text().strip()
+            require(value == "max" or (value.isascii() and value.isdecimal()),
+                    "PREREQUISITE")
+            if value != "max":
+                totals.append(int(value))
+            current = current.parent
+        require(all(total > 0 for total in totals), "PREREQUISITE")
+        return min(totals)
+    except (OSError, RuntimeError, IndexError, ValueError) as error:
+        raise Failure("PREREQUISITE", str(error)) from error
+
+
 def checkout_growth(private):
     global PRIVATE_STAGE
     PRIVATE_STAGE = "checkout_receipt"
@@ -352,8 +396,9 @@ def admission_facts():
             str(docker_root.resolve(strict=True)) == str(docker_root), "MEASUREMENT")
     cpu_set = sorted(os.sched_getaffinity(0))
     require(len(cpu_set) >= 2, "PREREQUISITE")
-    memory_limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
-    require(memory_limit == "max" or int(memory_limit) >= 1_610_612_736, "PREREQUISITE")
+    memory_limit = effective_memory_bytes(docker_info.get("MemTotal"),
+                                          mountinfo["value"])
+    require(memory_limit >= 1_610_612_736, "PREREQUISITE")
     temp_roots, temp_snapshot = temp_scope()
     temporary_roots = {str(root) for root in temp_roots}
     roots = [Path(os.environ["GITHUB_WORKSPACE"]).parent, Path.home(),

@@ -193,7 +193,8 @@ class Inputs(unittest.TestCase):
                            "OSType": "linux", "Architecture": "x86_64",
                            "CgroupVersion": "2", "SecurityOptions":
                            ["name=apparmor", "name=seccomp,profile=builtin"],
-                           "NCPU": 2, "DockerRootDir": str(docker_root)}
+                           "NCPU": 2, "DockerRootDir": str(docker_root),
+                           "MemTotal": 3_000_000_000}
             def observed(path):
                 name = str(path)
                 if "config-" in name:
@@ -212,7 +213,6 @@ class Inputs(unittest.TestCase):
                     return json.dumps([{"Endpoints": {"docker": {"Host": "unix:///socket"}}}])
                 return json.dumps(docker_info)
             original_lstat = Path.lstat
-            original_read_text = Path.read_text
             def metadata(path, *args, **kwargs):
                 info = original_lstat(path, *args, **kwargs)
                 if path == docker_root:
@@ -220,10 +220,6 @@ class Inputs(unittest.TestCase):
                                            st_uid=0, st_gid=0, st_dev=info.st_dev,
                                            st_ino=info.st_ino)
                 return info
-            def memory(path, *args, **kwargs):
-                if str(path) == "/sys/fs/cgroup/memory.max":
-                    return "max"
-                return original_read_text(path, *args, **kwargs)
             with patch.dict("os.environ", {"RUNNER_ENVIRONMENT": "github-hosted",
                                          "GITHUB_WORKSPACE": str(workspace),
                                          "RUNNER_TEMP": str(runner_temp)}), \
@@ -238,7 +234,8 @@ class Inputs(unittest.TestCase):
                               return_value=SimpleNamespace(f_bavail=50_000_000_000, f_frsize=1)), \
                  patch.object(Path, "home", return_value=base), \
                  patch.object(Path, "lstat", metadata), \
-                 patch.object(Path, "read_text", memory), \
+                 patch.object(qualification, "effective_memory_bytes",
+                              return_value=3_000_000_000), \
                  patch.object(qualification, "Budget") as budget:
                 budget.return_value.used.return_value = 100
                 facts = qualification.admission_facts()
@@ -295,6 +292,48 @@ class Inputs(unittest.TestCase):
 
 
 class Sequence(unittest.TestCase):
+    def test_memory_admission_uses_cgroup_membership_and_ancestor_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "cgroup"
+            root.mkdir()
+            membership = base / "self.cgroup"
+            meminfo = base / "meminfo"
+            meminfo.write_text("MemTotal: 4194304 kB\n")
+            mountinfo = f"29 23 0:26 / {root} rw - cgroup2 cgroup rw\n"
+            def observed():
+                return qualification.effective_memory_bytes(
+                    3_000_000_000, mountinfo, cgroup_root=root,
+                    membership=membership, meminfo=meminfo)
+            membership.write_text("0::/\n")
+            self.assertEqual(observed(), 3_000_000_000)
+            parent = root / "parent"
+            child = parent / "child"
+            child.mkdir(parents=True)
+            membership.write_text("0::/parent/child\n")
+            (parent / "memory.max").write_text("2000000000\n")
+            (child / "memory.max").write_text("max\n")
+            self.assertEqual(observed(), 2_000_000_000)
+            (child / "memory.max").write_text("1000000000\n")
+            self.assertEqual(observed(), 1_000_000_000)
+            (child / "memory.max").write_text("invalid\n")
+            with self.assertRaises(qualification.Failure):
+                observed()
+            (child / "memory.max").unlink()
+            with self.assertRaises(qualification.Failure):
+                observed()
+            membership.write_text("0::/missing\n")
+            with self.assertRaises(qualification.Failure):
+                observed()
+            membership.write_text("0::/../parent/child\n")
+            with self.assertRaises(qualification.Failure):
+                observed()
+            membership.write_text("0::/\n")
+            with self.assertRaises(qualification.Failure):
+                qualification.effective_memory_bytes(
+                    3_000_000_000, mountinfo.replace(" / ", " /other ", 1),
+                    cgroup_root=root, membership=membership, meminfo=meminfo)
+
     def test_storage_roots_include_only_snapshotted_temporary_special_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
