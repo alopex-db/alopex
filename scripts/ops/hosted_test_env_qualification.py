@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO / "scripts/test-env"))
 sys.path.insert(0, str(HERE))
 
 from capacity import Budget, DU_BINARY, SUDO_BINARY, trusted_executable  # noqa: E402
-from common import (CASES, Failure, atomic_json, digest, elf_signature, load_profile,  # noqa: E402
+from common import (CASES, ERRORS, Failure, atomic_json, digest, elf_signature, load_profile,  # noqa: E402
                     private_dir, read_json, require, verify_assets)
 from docker_backend import Docker  # noqa: E402
 from envctl import image_lock, source_identity  # noqa: E402
@@ -483,6 +483,10 @@ def same_runner(previous, current):
 
 
 def envctl(profile, *args):
+    global PRIVATE_STAGE
+    PRIVATE_STAGE = ("envctl_doctor_preflight" if args[:3] == ("doctor", "--phase", "preflight")
+                     else "envctl_doctor_runtime" if args[:3] == ("doctor", "--phase", "runtime")
+                     else "envctl_" + args[0])
     if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
         verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
     command = [sys.executable, "-B", str(REPO / "scripts/test-env/envctl.py"),
@@ -494,10 +498,10 @@ def envctl(profile, *args):
         output = json.loads(result.stdout)
     except ValueError as error:
         raise Failure("COMMAND") from error
+    if not isinstance(output, dict):
+        raise Failure("COMMAND")
     require(result.returncode == 0 and output == {"status": "passed", "error_code": None},
-            output.get("error_code") if output.get("error_code") in
-            ("CAPACITY", "MEASUREMENT", "POLICY", "IDENTITY", "PREREQUISITE", "TIMEOUT")
-            else "COMMAND")
+            output.get("error_code") if output.get("error_code") in ERRORS else "COMMAND")
     if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
         verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
 

@@ -20,6 +20,16 @@ SPEC.loader.exec_module(qualification)
 
 
 class Inputs(unittest.TestCase):
+    def test_envctl_failure_preserves_fixed_inner_code_and_phase(self):
+        response = SimpleNamespace(returncode=1,
+                                   stdout='{"status":"failed","error_code":"ARCHIVE"}')
+        with patch.object(qualification.subprocess, "run", return_value=response), \
+             patch.object(qualification, "EXPECTED_TEMP_SNAPSHOT", None):
+            with self.assertRaises(qualification.Failure) as caught:
+                qualification.envctl(Path("unused"), "doctor", "--phase", "preflight")
+        self.assertEqual(caught.exception.code, "ARCHIVE")
+        self.assertEqual(qualification.PRIVATE_STAGE, "envctl_doctor_preflight")
+
     def test_controller_digest_matches_checked_out_test_env_sources(self):
         identity = qualification.source_identity()
         self.assertEqual(identity["controller_digest"], qualification.CONTROLLER_DIGEST)
