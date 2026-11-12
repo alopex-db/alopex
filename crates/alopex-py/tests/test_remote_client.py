@@ -11,6 +11,7 @@ import json
 import socket
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import alopex
@@ -276,6 +277,38 @@ def test_request_payload_and_api_key_header(stub):
         "streaming": False,
     }
     assert request["headers"]["x-api-key"] == "s3cret"
+
+
+def test_opt_in_sql_timing_preserves_rows_and_correlates_each_request(stub):
+    stub.body = _query_body(["n"], [[{"BigInt": 17125}]])
+    timings = []
+    with RemoteDatabase(stub.url, sql_timing_sink=timings.append) as db:
+        assert db.execute_sql("SELECT COUNT(*) FROM private_table") == [{"n": 17125}]
+        assert db.execute_sql("SELECT COUNT(*) FROM private_table") == [{"n": 17125}]
+    assert len(timings) == 2
+    trace_ids = [row["trace_id"] for row in timings]
+    assert len(set(trace_ids)) == 2
+    for request, timing in zip(stub.requests, timings):
+        headers = {key.lower(): value for key, value in request["headers"].items()}
+        assert headers["x-correlation-id"] == "diag-" + timing["trace_id"]
+        assert str(uuid.UUID(timing["trace_id"])) == timing["trace_id"]
+        assert timing["result_rows"] == 1
+        assert timing["total_ns"] == sum(
+            timing[key]
+            for key in ("bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns")
+        )
+        assert all(timing[key] >= 0 for key in (
+            "bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns"
+        ))
+        encoded = json.dumps(timing)
+        assert "private_table" not in encoded
+        assert "17125" not in encoded
+
+
+def test_default_sql_calls_do_not_add_diagnostic_correlation(stub):
+    with RemoteDatabase(stub.url) as db:
+        db.execute_sql("SELECT 1")
+    assert all(key.lower() != "x-correlation-id" for key in stub.requests[0]["headers"])
 
 
 def test_api_prefix_from_url_path_applies_to_every_endpoint(stub):
