@@ -274,6 +274,22 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(receipt['phase'], 'preflight')
             self.assertIn('private preflight detail', receipt['original_error']['error'])
 
+    def test_measurement_failure_keeps_bounded_cause_and_source_site_private(self):
+        try:
+            try:
+                raise FileNotFoundError(2, 'missing during scan', '/private/task-item')
+            except FileNotFoundError as cause:
+                raise RuntimeError('MEASUREMENT') from cause
+        except RuntimeError as error:
+            detail = runner.failure_detail(error)
+        self.assertEqual(detail['error'], "RuntimeError('MEASUREMENT')")
+        self.assertEqual(detail['cause']['type'], 'FileNotFoundError')
+        self.assertEqual(detail['cause']['errno'], 2)
+        self.assertIn('missing during scan', detail['cause']['error'])
+        self.assertEqual(detail['frames'][-1]['file'], 'test_diagnostic_runner.py')
+        self.assertTrue(all(len(frame['file']) <= 128 and
+                            len(frame['function']) <= 128 for frame in detail['frames']))
+
     def test_evidence_failure_retains_original_and_cleanup_error_outside_work(self):
         with tempfile.TemporaryDirectory() as directory:
             args = self.fixture(Path(directory))

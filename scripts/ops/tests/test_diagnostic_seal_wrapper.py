@@ -94,7 +94,10 @@ class DiagnosticSealTests(unittest.TestCase):
             (args[3] / 'private-evidence.cms').unlink()
             failure = args[2] / 'diagnostic-failure.private.json'
             failure.write_text(json.dumps({'phase': 'preflight', 'original_error':
-                                           {'error': 'private preflight detail'}}))
+                                           {'error': 'private preflight detail',
+                                            'cause': {'type': 'FileNotFoundError',
+                                                      'errno': 2,
+                                                      'error': 'private scan path'}}}))
             archived = []
             def encrypt(command, **kwargs):
                 with tarfile.open(command[command.index('-in') + 1]) as bundle:
@@ -106,8 +109,11 @@ class DiagnosticSealTests(unittest.TestCase):
             self.assertEqual(public['error_code'], 'DIAGNOSTIC_FAILURE')
             self.assertTrue(any(name.endswith('diagnostic-failure.private.json') and
                                 b'private preflight detail' in data for name, data in archived))
+            self.assertTrue(any(name.endswith('diagnostic-failure.private.json') and
+                                b'private scan path' in data for name, data in archived))
             self.assertFalse(failure.exists())
             self.assertNotIn('private preflight detail', (args[4] / 'public.json').read_text())
+            self.assertNotIn('private scan path', (args[4] / 'public.json').read_text())
 
     def test_runner_evidence_failure_is_sealed_without_raw_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

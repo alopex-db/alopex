@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import traceback
 import zipfile
 
 if __package__:
@@ -66,7 +67,16 @@ def discard_unsealed(work, export):
 
 
 def failure_detail(error):
-    return dict(type=type(error).__name__[:128], error=repr(error)[:4096])
+    cause = error.__cause__ or error.__context__
+    frames = traceback.extract_tb(error.__traceback__, limit=8)
+    detail = dict(type=type(error).__name__[:128], error=repr(error)[:4096],
+                  frames=[dict(file=Path(frame.filename).name[:128], line=frame.lineno,
+                               function=frame.name[:128]) for frame in frames])
+    if cause is not None:
+        detail['cause'] = dict(type=type(cause).__name__[:128],
+                               error=repr(cause)[:4096],
+                               errno=cause.errno if isinstance(cause, OSError) else None)
+    return detail
 
 
 def write_failure_receipt(args, state):
