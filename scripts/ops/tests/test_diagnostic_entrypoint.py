@@ -196,7 +196,7 @@ class EntrypointTests(unittest.TestCase):
             sha = "30d118f71ddc489a6457ed3b09c610049f2d79aa"
             with patch.dict("os.environ", {"GITHUB_SHA": sha}):
                 pin = lane.load_pins(source, controller_sha=sha, operator_dir=operators)
-                self.assertEqual(pin["artifact_id"], 13916314157)
+                self.assertEqual(pin["artifact_id"], 14028929577)
                 (operators / "diagnostic_worker.py").write_text("changed")
                 with self.assertRaises(Exception):
                     lane.load_pins(source, controller_sha=sha, operator_dir=operators)

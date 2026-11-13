@@ -15,8 +15,8 @@ from audit import audit
 from common import ERRORS, Failure
 from diagnostic import CASES, CLIENT_RECORDS_PER_CELL, cell_order
 
-SOURCE_COMMIT = "1951a3fdfe086ea6e8bc537c16766f91f619396f"
-SOURCE_TREE = "b55feda6be535a3e2168835a5ad9c88c0b669c68"
+SOURCE_COMMIT = "894843360824e324c80b7a078bb3a1e63240e9bc"
+SOURCE_TREE = "c3e79b91f584d6549f84eb99aefb89ddf4b6b5ab"
 QUALIFICATION_CASES = ("E01", "E02", "E03", "E04", "E05", "E06", "E07",
                        "S01", "S02", "S03", "F01", "F02", "R01", "P01")
 ORACLE = {"aggregate": "9526c7a7b4705e368f15fcc97fe25199d4cb2472b331236b560383d20c9807de",

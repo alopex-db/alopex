@@ -10,8 +10,8 @@ import envctl
 from diagnostic_worker import verify_cell
 from diagnostic import expected_client_records
 
-SOURCE = {"commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
-          "tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68", "profile": "release"}
+SOURCE = {"commit": "894843360824e324c80b7a078bb3a1e63240e9bc",
+          "tree": "c3e79b91f584d6549f84eb99aefb89ddf4b6b5ab", "profile": "release"}
 STOP_BYTES = 40_000_000_000
 ADDITIONAL_BYTES = 4_000_000_000
 RESERVE_BYTES = 1_000_000_000

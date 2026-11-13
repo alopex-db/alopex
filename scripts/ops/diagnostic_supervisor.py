@@ -9,8 +9,8 @@ from pathlib import Path
 import sys
 from diagnostic import audit_inner_events, expected_client_records
 
-SOURCE = {"commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
-          "tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68", "profile": "release"}
+SOURCE = {"commit": "894843360824e324c80b7a078bb3a1e63240e9bc",
+          "tree": "c3e79b91f584d6549f84eb99aefb89ddf4b6b5ab", "profile": "release"}
 TARGET = "alopex_sql_private_timing"
 STAGES = {"transaction_setup", "route_plan", "execute_multi",
           "completion_and_commit", "result_map", "execute_and_map", "response_build"}

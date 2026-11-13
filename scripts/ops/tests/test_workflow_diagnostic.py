@@ -64,7 +64,7 @@ class WorkflowDiagnosticTests(unittest.TestCase):
         self.assertEqual(pin["controller_digest"],
                          "5e38f02759669b26ffb6216765d1398930c9d8a733dae3ff259d19a404f309e3")
         self.assertEqual(pin["source_commit"],
-                         "1951a3fdfe086ea6e8bc537c16766f91f619396f")
+                         "894843360824e324c80b7a078bb3a1e63240e9bc")
 
 
 if __name__ == "__main__":
