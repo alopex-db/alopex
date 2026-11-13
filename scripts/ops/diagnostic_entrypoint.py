@@ -157,7 +157,14 @@ def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
             manifest_path, inputs, harness, harness_record, cell, pin, operators,
             verify_assets=verify_assets)
         require(str(path) == selected["assets"], "IDENTITY")
-        return execute_cell(selected, budget, worker)
+        try:
+            return execute_cell(selected, budget, worker)
+        except BaseException as error:
+            if getattr(error, "code", None) == "CASE":
+                atomic_json(root / "failed-cell.private.json", {
+                    "schema": "alopex.sql-diagnostic-failed-cell/v1",
+                    "cell_id": cell["cell_id"], "error_code": "CASE"})
+            raise
 
     def cleanup():
         return cleanup_owned_runs(known, owned_root=root, budget=budget)
@@ -208,24 +215,43 @@ def seal_failure(root):
                 item["code"].replace("_", "").isalpha() and item["code"].isupper())
                 for item in (value["primary"], value["cleanup"])), "EVIDENCE_ALLOWLIST")
     cell_evidence = []
+    marker = root / "failed-cell.private.json"
+    selected_cell = None
+    if marker.exists() or marker.is_symlink():
+        require(marker.is_file() and not marker.is_symlink() and
+                marker.stat().st_mode & 0o077 == 0 and marker.stat().st_size <= 512,
+                "EVIDENCE_BOUND")
+        selected_cell = json.loads(marker.read_text())
+        require(type(selected_cell) is dict and selected_cell.get("schema") ==
+                "alopex.sql-diagnostic-failed-cell/v1" and
+                set(selected_cell) == {"schema", "cell_id", "error_code"} and
+                selected_cell["error_code"] == "CASE" and
+                selected_cell["cell_id"] in {cell["cell_id"] for cell in plan()},
+                "EVIDENCE_ALLOWLIST")
     runs = root / "runs"
+    require(selected_cell is None or (runs.is_dir() and not runs.is_symlink()),
+            "EVIDENCE_STATE")
     if runs.is_dir() and not runs.is_symlink():
         for cell in plan():
+            if selected_cell is not None and cell["cell_id"] != selected_cell["cell_id"]:
+                continue
             run_id = "diag-" + cell["cell_id"]
             run = Run(runs, run_id)
             if not run.path.exists():
+                require(selected_cell is None, "EVIDENCE_STATE")
                 continue
             require(run.root.is_dir() and not run.root.is_symlink() and
                     run.path.is_file() and not run.path.is_symlink(), "EVIDENCE_BOUND")
             run.load()
             if run.record["phase"] != "deleted":
+                require(selected_cell is None, "EVIDENCE_STATE")
                 continue  # The outer cleanup receipt retains any unresolved run.
             run.verify_collection()
             collected = run.root / "collected"
             report = collected / "result.json"
             require(report.is_file() and not report.is_symlink() and
                     report.stat().st_size <= 4096, "EVIDENCE_BOUND")
-            if json.loads(report.read_text()).get("status") != "failed":
+            if selected_cell is None and json.loads(report.read_text()).get("status") != "failed":
                 continue
             require(not cell_evidence, "EVIDENCE_BOUND")
             for name, limit in (("result.json", 4096), ("cell/status.json", 4096),
@@ -242,6 +268,9 @@ def seal_failure(root):
                    recursive=False)
         if inner.exists():
             bundle.add(inner, arcname="diagnostic/orchestrate-failure.private.json",
+                       recursive=False)
+        if selected_cell is not None:
+            bundle.add(marker, arcname="diagnostic/failed-cell.private.json",
                        recursive=False)
         for path, name in cell_evidence:
             bundle.add(path, arcname=name, recursive=False)
