@@ -1,5 +1,6 @@
 """Offline bounds and cleanup checks. Never calls a Docker daemon."""
 import errno
+from contextlib import ExitStack
 import hashlib
 import importlib.util
 import json
@@ -406,18 +407,19 @@ class DaemonPeer(unittest.TestCase):
                 with self.assertRaises(ChildProcessError):
                     os.waitpid(reaped_pid, os.WNOHANG)
             finally:
-                if child is not None:
-                    try:
-                        os.write(write_end, b"x")
-                    except BrokenPipeError:
-                        pass
-                    reap_child_bounded(child)
-                if peer_fd is not None:
-                    os.close(peer_fd)
-                if accepted is not None:
-                    accepted.close()
-                os.close(write_end)
-                listener.close()
+                with ExitStack() as cleanup:
+                    cleanup.callback(listener.close)
+                    cleanup.callback(os.close, write_end)
+                    if accepted is not None:
+                        cleanup.callback(accepted.close)
+                    if peer_fd is not None:
+                        cleanup.callback(os.close, peer_fd)
+                    if child is not None:
+                        try:
+                            os.write(write_end, b"x")
+                        except OSError:
+                            pass
+                        reap_child_bounded(child)
 
 
 if __name__ == "__main__":
