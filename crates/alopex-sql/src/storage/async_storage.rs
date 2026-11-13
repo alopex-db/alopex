@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+use uuid::Uuid;
 
 use alopex_core::async_runtime::{BoxFuture, BoxStream, MaybeSend};
 use alopex_core::kv::async_kv::AsyncKVTransaction;
@@ -32,6 +33,71 @@ use futures::{Stream, stream::StreamExt};
 
 mod worker;
 use worker::{WorkerStore, WorkerTransaction};
+
+thread_local! {
+    static SQL_DIAGNOSTIC_TRACE: std::cell::Cell<Option<Uuid>> = const { std::cell::Cell::new(None) };
+    static SQL_DIAGNOSTIC_EVENTS_LEFT: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+struct DiagnosticTraceGuard(Option<Uuid>, u16);
+
+impl DiagnosticTraceGuard {
+    fn enter(trace_id: Option<Uuid>) -> Self {
+        let previous = SQL_DIAGNOSTIC_TRACE.with(|cell| cell.replace(trace_id));
+        let previous_budget = SQL_DIAGNOSTIC_EVENTS_LEFT
+            .with(|cell| cell.replace(if trace_id.is_some() { 64 } else { 0 }));
+        Self(previous, previous_budget)
+    }
+}
+
+impl Drop for DiagnosticTraceGuard {
+    fn drop(&mut self) {
+        SQL_DIAGNOSTIC_TRACE.with(|cell| cell.set(self.0));
+        SQL_DIAGNOSTIC_EVENTS_LEFT.with(|cell| cell.set(self.1));
+    }
+}
+
+pub(crate) fn diagnostic_start() -> Option<Instant> {
+    SQL_DIAGNOSTIC_TRACE.with(|cell| cell.get().map(|_| Instant::now()))
+}
+
+pub(crate) fn log_diagnostic_stage(stage: &'static str, started: Option<Instant>) {
+    let Some(started) = started else { return };
+    SQL_DIAGNOSTIC_TRACE.with(|cell| {
+        if let Some(trace_id) = cell.get().filter(|_| diagnostic_event_available()) {
+            tracing::info!(target: "alopex_sql_private_inner", %trace_id, stage,
+                duration_ns = started.elapsed().as_nanos(), "sql diagnostic stage");
+        }
+    });
+}
+
+pub(crate) fn log_diagnostic_choice(branch: &'static str) {
+    SQL_DIAGNOSTIC_TRACE.with(|cell| {
+        if let Some(trace_id) = cell.get().filter(|_| diagnostic_event_available()) {
+            tracing::info!(target: "alopex_sql_private_inner", %trace_id, branch,
+                "sql diagnostic branch");
+        }
+    });
+}
+
+fn diagnostic_event_available() -> bool {
+    SQL_DIAGNOSTIC_EVENTS_LEFT.with(|cell| {
+        let remaining = cell.get();
+        if remaining == 0 {
+            false
+        } else {
+            cell.set(remaining - 1);
+            true
+        }
+    })
+}
+
+fn log_diagnostic_stage_for(trace_id: Option<Uuid>, stage: &'static str, started: Option<Instant>) {
+    if let (Some(trace_id), Some(started)) = (trace_id, started) {
+        tracing::info!(target: "alopex_sql_private_inner", %trace_id, stage,
+            duration_ns = started.elapsed().as_nanos(), "sql diagnostic stage");
+    }
+}
 
 struct AsyncTxnState<T> {
     txn: Option<T>,
@@ -391,6 +457,14 @@ pub trait AsyncSqlTransaction<'txn>: MaybeSend {
         &'a mut self,
         sql: &'a str,
     ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>>;
+    /// Executes SQL while attaching an optional private diagnostic trace ID.
+    fn async_execute_multi_with_trace<'a>(
+        &'a mut self,
+        sql: &'a str,
+        _trace_id: Option<Uuid>,
+    ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>> {
+        self.async_execute_multi(sql)
+    }
     fn async_query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, ExecResult<Row>>;
     fn async_plan_for_routing<'a>(
         &'a self,
@@ -422,6 +496,14 @@ where
         &'a mut self,
         sql: &'a str,
     ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>> {
+        self.async_execute_multi_with_trace(sql, None)
+    }
+
+    fn async_execute_multi_with_trace<'a>(
+        &'a mut self,
+        sql: &'a str,
+        trace_id: Option<Uuid>,
+    ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>> {
         let catalog = match self.catalog.clone() {
             Some(catalog) => catalog,
             None => {
@@ -441,10 +523,15 @@ where
         let read_security = self.copy_security.clone();
         let copy_security = read_security.clone().unwrap_or_default();
         Box::pin(async move {
+            let operation_started = trace_id.map(|_| Instant::now());
             let permit = operation_gate
                 .acquire_owned()
                 .await
                 .map_err(|_| ExecutorError::Storage(StorageError::TransactionClosed))?;
+            if operation_started.is_some() {
+                log_diagnostic_stage_for(trace_id, "bridge_operation_wait", operation_started);
+            }
+            let state_started = trace_id.map(|_| Instant::now());
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
                 let txn = guard
@@ -454,13 +541,22 @@ where
                 let hnsw = std::mem::take(&mut guard.hnsw_indices);
                 (txn, hnsw)
             };
+            if state_started.is_some() {
+                log_diagnostic_stage_for(trace_id, "bridge_state_wait", state_started);
+            }
 
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let result = if txn.supports_worker_tasks() {
+                    let dispatch_started = trace_id.map(|_| Instant::now());
                     let mut txn = txn;
                     let response = txn
                         .async_worker_task(Box::new(move |raw| {
+                            let _diagnostic_guard =
+                                trace_id.map(|id| DiagnosticTraceGuard::enter(Some(id)));
+                            if trace_id.is_some() {
+                                log_diagnostic_stage("worker_dispatch", dispatch_started);
+                            }
                             let mut worker = WorkerSqlTransaction::<WorkerStore<'_>>::from_inner(
                                 WorkerTransaction { raw },
                                 mode,
@@ -498,8 +594,14 @@ where
                         Err(error) => Err(ExecutorError::Storage(StorageError::from(error))),
                     }
                 } else {
+                    let dispatch_started = trace_id.map(|_| Instant::now());
                     let handle = tokio::runtime::Handle::current();
                     let join = tokio::task::spawn_blocking(move || {
+                        let _diagnostic_guard =
+                            trace_id.map(|id| DiagnosticTraceGuard::enter(Some(id)));
+                        if trace_id.is_some() {
+                            log_diagnostic_stage("blocking_dispatch", dispatch_started);
+                        }
                         let mut blocking_txn = BlockingSqlTransaction::new(
                             txn,
                             mode,
@@ -694,7 +796,11 @@ fn execute_sql_blocking_multi<'ctx, S: KVStore + 'ctx>(
     read_security: Option<&bulk::CopySecurityConfig>,
 ) -> ExecResult<Vec<ExecutionResult>> {
     txn.read_security = read_security.cloned();
+    let parse_started = diagnostic_start();
     let statements = parse_sql(sql)?;
+    if parse_started.is_some() {
+        log_diagnostic_stage("worker_parse", parse_started);
+    }
     if statements.is_empty() {
         return Err(ExecutorError::InvalidOperation {
             operation: "execute_sql".into(),
@@ -704,6 +810,7 @@ fn execute_sql_blocking_multi<'ctx, S: KVStore + 'ctx>(
 
     let mut results = Vec::with_capacity(statements.len());
     for stmt in statements {
+        let plan_started = diagnostic_start();
         let plan = {
             let guard = catalog.read().expect("catalog lock poisoned");
             let planner = match read_security {
@@ -713,7 +820,12 @@ fn execute_sql_blocking_multi<'ctx, S: KVStore + 'ctx>(
             .with_memory_policy(txn.memory_policy());
             planner.plan(&stmt)?
         };
+        if plan_started.is_some() {
+            log_diagnostic_stage("worker_plan", plan_started);
+            log_diagnostic_plan(&plan);
+        }
 
+        let execute_started = diagnostic_start();
         results.push(execute_plan_blocking(
             txn,
             catalog,
@@ -722,9 +834,31 @@ fn execute_sql_blocking_multi<'ctx, S: KVStore + 'ctx>(
             copy_security,
             read_security,
         )?);
+        if execute_started.is_some() {
+            log_diagnostic_stage("worker_execute_plan", execute_started);
+        }
     }
 
     Ok(results)
+}
+
+fn log_diagnostic_plan(plan: &LogicalPlan) {
+    SQL_DIAGNOSTIC_TRACE.with(|cell| {
+        if let Some(trace_id) = cell.get().filter(|_| diagnostic_event_available()) {
+            let branch = match plan {
+                LogicalPlan::Aggregate { .. } => "aggregate",
+                LogicalPlan::Sort { .. } => "sort",
+                LogicalPlan::Filter { .. } => "filter",
+                LogicalPlan::Scan { .. } => "scan",
+                LogicalPlan::Limit { .. } => "limit",
+                LogicalPlan::Project { .. } => "project",
+                LogicalPlan::Explain { .. } => "explain",
+                _ => "other",
+            };
+            tracing::info!(target: "alopex_sql_private_inner", %trace_id, branch,
+                "sql diagnostic plan");
+        }
+    });
 }
 
 fn execute_plan_blocking<'ctx, S: KVStore + 'ctx>(
@@ -1659,6 +1793,81 @@ where
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::catalog::MemoryCatalog;
+    use crate::storage::erased::ErasedAsyncSqlTransaction;
+    use alopex_core::kv::AsyncKVStore;
+    use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
+    use alopex_core::kv::memory::MemoryKV;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct CountEvents(Arc<AtomicUsize>);
+
+    impl<S: Subscriber> Layer<S> for CountEvents {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target() == "alopex_sql_private_inner" {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_scope_restores_trace_after_panic_and_caps_events() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountEvents(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            log_diagnostic_stage("worker_parse", Some(Instant::now()));
+            assert_eq!(events.load(Ordering::SeqCst), 0);
+            let trace_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+            let _ = std::panic::catch_unwind(|| {
+                let _guard = DiagnosticTraceGuard::enter(Some(trace_id));
+                for _ in 0..70 {
+                    log_diagnostic_stage("worker_parse", Some(Instant::now()));
+                }
+                panic!("test panic");
+            });
+            assert_eq!(events.load(Ordering::SeqCst), 64);
+            log_diagnostic_stage("worker_parse", Some(Instant::now()));
+            assert_eq!(events.load(Ordering::SeqCst), 64);
+        });
+    }
+
+    #[tokio::test]
+    async fn erased_transaction_emits_only_for_diagnostic_execution() {
+        let events = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(CountEvents(events.clone())),
+        )
+        .expect("diagnostic test owns the process subscriber");
+        let store = AsyncKVStoreAdapter::from_arc(Arc::new(MemoryKV::new()), TxnMode::ReadWrite);
+        let transaction = store.begin_async().await.unwrap();
+        let catalog: Arc<RwLock<dyn Catalog + Send + Sync>> =
+            Arc::new(RwLock::new(MemoryCatalog::new()));
+        let mut txn: Box<dyn ErasedAsyncSqlTransaction> = Box::new(AsyncTxnBridge::with_catalog(
+            transaction,
+            TxnMode::ReadWrite,
+            catalog,
+        ));
+        let trace_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let result = txn
+            .execute_multi_with_trace("SELECT 1", Some(trace_id))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let traced_events = events.load(Ordering::SeqCst);
+        assert!(traced_events > 0, "trace must reach the blocking worker");
+        let ordinary_result = txn.execute_multi("SELECT 2").await.unwrap();
+        assert_eq!(ordinary_result.len(), 1);
+        assert_eq!(events.load(Ordering::SeqCst), traced_events);
+        txn.rollback_boxed().await.unwrap();
     }
 }
 

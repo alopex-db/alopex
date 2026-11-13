@@ -21,6 +21,33 @@ type Pipeline = (
     Vec<crate::catalog::ColumnMetadata>,
 );
 
+#[inline]
+fn diagnostic_start() -> Option<std::time::Instant> {
+    #[cfg(feature = "tokio")]
+    return crate::storage::async_storage::diagnostic_start();
+    #[cfg(not(feature = "tokio"))]
+    None
+}
+
+#[inline]
+fn diagnostic_stage(stage: &'static str, started: Option<std::time::Instant>) {
+    if started.is_none() {
+        return;
+    }
+    #[cfg(feature = "tokio")]
+    crate::storage::async_storage::log_diagnostic_stage(stage, started);
+    #[cfg(not(feature = "tokio"))]
+    let _ = (stage, started);
+}
+
+#[inline]
+fn diagnostic_choice(branch: &'static str) {
+    #[cfg(feature = "tokio")]
+    crate::storage::async_storage::log_diagnostic_choice(branch);
+    #[cfg(not(feature = "tokio"))]
+    let _ = branch;
+}
+
 pub mod aggregate;
 mod btree;
 pub(crate) use btree::{BtreeAccessStats, BtreeChoice, BtreeTrace};
@@ -516,14 +543,22 @@ fn execute_query_result_with_context<
         }
         plan => plan,
     };
+    let pipeline_started = diagnostic_start();
     let (mut iter, projection, schema) =
         build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer, context)?;
+    diagnostic_stage("query_pipeline_build", pipeline_started);
     let mut rows = Vec::new();
+    let iteration_started = diagnostic_start();
     while let Some(result) = iter.next_row() {
         rows.push(result?);
     }
+    diagnostic_stage("query_row_iteration", iteration_started);
     drop(iter);
-    execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer, context)
+    let projection_started = diagnostic_start();
+    let result =
+        execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer, context);
+    diagnostic_stage("query_projection", projection_started);
+    result
 }
 
 /// Execute a SELECT logical plan and return a streaming query result.
@@ -943,6 +978,7 @@ fn build_iterator_pipeline_with_outer<
         && (context.statement_subqueries.is_none() || !subquery::plan_contains_subquery(&plan))
         && let Some(result) = build_primary_key_ordered_limit(txn, catalog, &plan)?
     {
+        diagnostic_choice("ordered_limit_primary_key");
         return Ok(result);
     }
     match plan {
@@ -1026,7 +1062,9 @@ fn build_iterator_pipeline_with_outer<
             // TODO: 現状は Scan で一度全件をメモリに載せてから iterator に渡しています。
             // 将来ストリーミングを徹底する場合は、ScanIterator を活用できるよう
             // トランザクションのライフタイム設計を見直すとよいです。
+            let scan_started = diagnostic_start();
             let rows = scan::execute_scan(txn, &table_meta)?;
+            diagnostic_stage("query_row_scan", scan_started);
             let schema = table_meta.columns.clone();
 
             // Wrap in VecIterator for consistent iterator-based processing
@@ -1108,10 +1146,12 @@ fn build_iterator_pipeline_with_outer<
                     .copied();
                 btree::record(table, &index.name, &predicate, &outcome, probe_id);
                 if let btree::IndexScanOutcome::Rows { rows, .. } = outcome {
+                    diagnostic_choice("filter_btree_index");
                     let input_iter = iterator::VecIterator::new(rows, schema.clone());
                     let filter_iter = FilterIterator::new(input_iter, predicate);
                     return Ok((Box::new(filter_iter), projection.clone(), schema));
                 }
+                diagnostic_choice("filter_btree_fallback");
             }
             if outer.is_none()
                 && !subquery::contains_subquery(&predicate)
@@ -1312,6 +1352,7 @@ fn build_iterator_pipeline_with_outer<
                 && policy.spill_directory().is_some()
             {
                 if group_keys.is_empty() {
+                    diagnostic_choice("aggregate_streaming_global");
                     let iter = aggregate::StreamingAggregateIterator::new(
                         input_iter,
                         group_keys,
@@ -1321,6 +1362,7 @@ fn build_iterator_pipeline_with_outer<
                     );
                     return Ok((Box::new(iter), projection, schema));
                 }
+                diagnostic_choice("aggregate_streaming_grouped");
                 let order_by = group_keys
                     .iter()
                     .cloned()
@@ -1348,6 +1390,8 @@ fn build_iterator_pipeline_with_outer<
             if grouping_sets.is_none()
                 && !aggregate::should_use_single_for_parallel(parallelism, &aggregates)
             {
+                diagnostic_choice("aggregate_parallel");
+                let aggregate_started = diagnostic_start();
                 let rows = aggregate::execute_parallel_aggregate_rows_with_policy(
                     input_iter,
                     group_keys,
@@ -1358,9 +1402,12 @@ fn build_iterator_pipeline_with_outer<
                     memory.cloned(),
                     1_000_000,
                 )?;
+                diagnostic_stage("aggregate_parallel_build", aggregate_started);
                 let iter = iterator::VecIterator::new(rows, schema.clone());
                 return Ok((Box::new(iter), projection, schema));
             }
+
+            diagnostic_choice("aggregate_iterator");
 
             let mut iter = aggregate::AggregateIterator::new(
                 input_iter,
