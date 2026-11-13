@@ -526,6 +526,36 @@ class Sequence(unittest.TestCase):
         self.assertIn("workflow_dispatch:", result.stdout)
         self.assertTrue((repo / ".github/workflows/alopex-performance.yml").is_file())
 
+    def test_admission_read_failure_identifies_only_fixed_source_and_status(self):
+        def read(path):
+            name = str(path)
+            if name.startswith("/boot/config-"):
+                return {"status": "read", "value": "CONFIG_TASK_IO_ACCOUNTING=y"}
+            if name == "/sys/kernel/security/lsm":
+                return {"status": "read", "value": "apparmor"}
+            if name == "/sys/module/apparmor/parameters/enabled":
+                return {"status": "read", "value": "Y"}
+            return statuses[name]
+
+        for statuses, expected in (
+            ({"/sys/class/dmi/id/product_uuid": {"status": "unreadable"},
+              "/proc/self/mountinfo": {"status": "read", "value": "fixture"}},
+             "DMI:unreadable"),
+            ({"/sys/class/dmi/id/product_uuid": {"status": "read", "value": "fixture"},
+              "/proc/self/mountinfo": {"status": "missing_or_oversize"}},
+             "MOUNTINFO:missing_or_oversize"),
+        ):
+            with self.subTest(expected=expected), \
+                 patch.object(qualification.sys, "platform", "linux"), \
+                 patch.object(qualification.platform, "machine", return_value="x86_64"), \
+                 patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted"}), \
+                 patch.object(qualification, "read_text", side_effect=read), \
+                 patch.object(qualification, "sibling_observation", return_value={}):
+                with self.assertRaises(qualification.Failure) as caught:
+                    qualification.admission_facts()
+            self.assertEqual((caught.exception.code, caught.exception.detail),
+                             ("PREREQUISITE", expected))
+
     def test_admission_precedes_profile_and_every_envctl_operation(self):
         events = []
         with tempfile.TemporaryDirectory() as directory:
@@ -540,7 +570,7 @@ class Sequence(unittest.TestCase):
                 return manifest
             def facts():
                 events.append("admission")
-                raise qualification.Failure("MEASUREMENT")
+                raise qualification.Failure("PREREQUISITE", "DMI:unreadable")
             with patch.dict("os.environ", {"RUNNER_TEMP": str(root),
                                          "ALOPEX_804_ASSETS": str(root)}), \
                  patch.object(qualification, "verified_controller", side_effect=lambda: events.append("controller")), \
@@ -555,6 +585,7 @@ class Sequence(unittest.TestCase):
             failure = json.loads((root / "alopex-804-qualification" /
                                   "failure.private.json").read_text())
             self.assertEqual(failure["stage"], "admission_facts")
+            self.assertEqual(failure["read_status"], "DMI:unreadable")
             self.assertIn("admission_facts", failure["traceback"])
             make_profile.assert_not_called()
             execute.assert_not_called()

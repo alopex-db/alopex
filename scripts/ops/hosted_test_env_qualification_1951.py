@@ -394,8 +394,11 @@ def admission_facts():
     sibling = sibling_observation()
     dmi = read_text(Path("/sys/class/dmi/id/product_uuid"))
     mountinfo = read_text(Path("/proc/self/mountinfo"))
-    require(dmi.get("status") == "read" and mountinfo.get("status") == "read",
-            "PREREQUISITE")
+    for source, result in (("DMI", dmi), ("MOUNTINFO", mountinfo)):
+        status = result.get("status")
+        if status != "read":
+            safe_status = status if status in ("unreadable", "missing_or_oversize") else "unexpected"
+            raise Failure("PREREQUISITE", f"{source}:{safe_status}")
     context = checked_command(["docker", "context", "show"])
     inspection = json.loads(checked_command(["docker", "context", "inspect", context]))[0]
     endpoint = inspection["Endpoints"]["docker"]["Host"]
@@ -658,8 +661,13 @@ def main(argv=None):
     except BaseException as error:
         code = error.code if isinstance(error, Failure) else "INTERNAL"
         public["error_code"] = code
+        read_status = error.detail if isinstance(error, Failure) and error.detail in {
+            "DMI:unreadable", "DMI:missing_or_oversize", "DMI:unexpected",
+            "MOUNTINFO:unreadable", "MOUNTINFO:missing_or_oversize", "MOUNTINFO:unexpected"
+        } else None
         atomic_json(private / "failure.private.json", {"error_code": code,
                                                         "detail": repr(error),
+                                                        "read_status": read_status,
                                                         "stage": PRIVATE_STAGE,
                                                         "traceback": "".join(
                                                             traceback.format_exception(error))[:8192]})
